@@ -1,0 +1,386 @@
+{% extends "base.html" %}
+{% block title %}OpenClaw 详情 - OpenClaw 管理系统{% endblock %}
+{% block nav_openclaws %}active{% endblock %}
+{% block page_title %}<span id="page-claw-name">OpenClaw 详情</span>{% endblock %}
+
+{% block top_actions %}
+<button class="btn btn-ghost btn-sm" onclick="location.href='/openclaws'">← 返回列表</button>
+<button class="btn btn-danger btn-sm" onclick="deleteClaw()">删除</button>
+{% endblock %}
+
+{% block content %}
+<div class="tab-bar">
+    <div class="tab-item active" data-tab="info" onclick="switchTab('info')">基本信息</div>
+    <div class="tab-item" data-tab="skills" onclick="switchTab('skills')">Skills 配置</div>
+    <div class="tab-item" data-tab="reports" onclick="switchTab('reports')">工作日报</div>
+    <div class="tab-item" data-tab="config" onclick="switchTab('config')">工作规范</div>
+    <div class="tab-item" data-tab="ai-spec" onclick="switchTab('ai-spec')">AI 生成规范</div>
+</div>
+
+<!-- 基本信息 -->
+<div class="tab-content" id="tab-info">
+    <div class="card">
+        <form id="info-form">
+            <div class="two-col">
+                <div>
+                    <div class="form-group">
+                        <label class="form-label">名称</label>
+                        <input class="form-input" name="name" id="f-name">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">所属用户</label>
+                        <input class="form-input" name="owner" id="f-owner" disabled>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">角色</label>
+                        <select class="form-input" name="role" id="f-role">
+                            <option value="test_member">测试成员</option>
+                            <option value="test_manager">测试经理</option>
+                            <option value="test_executor">测试执行</option>
+                            <option value="admin">管理员</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">职位头衔</label>
+                        <input class="form-input" name="role_title" id="f-role-title">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Memos 标签</label>
+                        <input class="form-input" id="f-tag" disabled>
+                    </div>
+                </div>
+                <div>
+                    <div class="form-group">
+                        <label class="form-label">所属项目</label>
+                        <input class="form-input" name="project_name" id="f-project">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">所属模块</label>
+                        <input class="form-input" name="module_name" id="f-module">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">上报时间</label>
+                        <input class="form-input" name="report_schedule" id="f-schedule">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">状态</label>
+                        <input class="form-input" id="f-status" disabled>
+                    </div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">负责内容</label>
+                <textarea class="form-textarea" name="responsibilities" id="f-resp"></textarea>
+            </div>
+            <button type="submit" class="btn btn-primary">保存修改</button>
+        </form>
+    </div>
+</div>
+
+<!-- Skills 配置 -->
+<div class="tab-content" id="tab-skills" style="display:none">
+    <div class="skill-grid" id="skills-grid">
+        <div class="loading"><span class="spinner"></span></div>
+    </div>
+</div>
+
+<!-- 工作日报 -->
+<div class="tab-content" id="tab-reports" style="display:none">
+    <div class="timeline" id="reports-timeline">
+        <div class="loading"><span class="spinner"></span></div>
+    </div>
+</div>
+
+<!-- 工作规范 -->
+<div class="tab-content" id="tab-config" style="display:none">
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">SOUL 配置</h3>
+        </div>
+        <div class="form-group">
+            <textarea class="form-textarea" id="f-soul" style="min-height:200px;font-family:monospace;font-size:0.85rem;"></textarea>
+        </div>
+        <div class="card-header" style="margin-top:20px">
+            <h3 class="card-title">工作流规范</h3>
+        </div>
+        <div class="form-group">
+            <textarea class="form-textarea" id="f-workflow" style="min-height:200px;font-family:monospace;font-size:0.85rem;"></textarea>
+        </div>
+        <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
+    </div>
+</div>
+
+<!-- AI 生成规范 -->
+<div class="tab-content" id="tab-ai-spec" style="display:none">
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">🤖 AI 生成工作规范</h3>
+        </div>
+        <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:16px">
+            输入功能描述，AI 将基于 OpenClaw 规范格式生成对应的工作流 Markdown 文件。
+        </p>
+        <div class="form-group">
+            <label class="form-label">OpenClaw 角色</label>
+            <select class="form-input" id="ai-claw-role">
+                <option value="test_member" selected>测试成员</option>
+                <option value="test_manager">测试经理</option>
+                <option value="test_executor">测试执行</option>
+                <option value="admin">管理员</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">功能描述 *</label>
+            <textarea class="form-textarea" id="ai-desc"
+                placeholder="描述这个 OpenClaw 需要负责的功能或测试范围，例如：负责游戏内赛车物理引擎的功能测试，包括碰撞检测、漂移手感、赛车调校等..."
+                style="min-height:120px"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
+            <button class="btn btn-primary" id="ai-gen-btn" onclick="generateSpec()">
+                ✨ 生成规范
+            </button>
+            <span id="ai-gen-status" style="font-size:0.85rem;color:var(--text-muted)"></span>
+        </div>
+
+        <div id="ai-preview-area" style="display:none">
+            <div class="card-header" style="margin-top:16px">
+                <h3 class="card-title">生成预览</h3>
+                <div style="display:flex;gap:6px">
+                    <button class="btn btn-ghost btn-sm" onclick="copySpec()">复制内容</button>
+                    <button class="btn btn-primary btn-sm" onclick="applySpec()">应用到工作规范</button>
+                </div>
+            </div>
+            <textarea class="form-textarea" id="ai-spec-output"
+                style="min-height:400px;font-family:monospace;font-size:0.85rem;background:var(--bg-primary)"
+                readonly></textarea>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CLAW_ID = {{ claw_id }};
+let clawData = null;
+
+function switchTab(tab) {
+    $$('.tab-item').forEach(t => t.classList.remove('active'));
+    $(`.tab-item[data-tab="${tab}"]`).classList.add('active');
+    $$('.tab-content').forEach(c => c.style.display = 'none');
+    $(`#tab-${tab}`).style.display = 'block';
+
+    if (tab === 'skills') loadSkills();
+    if (tab === 'reports') loadReports();
+}
+
+async function loadClaw() {
+    try {
+        clawData = await API.getClaw(CLAW_ID);
+        $('#page-claw-name').textContent = clawData.name;
+        $('#f-name').value = clawData.name || '';
+        $('#f-owner').value = clawData.owner || '';
+        $('#f-role').value = clawData.role || 'test_member';
+        $('#f-role-title').value = clawData.role_title || '';
+        $('#f-tag').value = clawData.claw_tag || '';
+        $('#f-project').value = clawData.project_name || '';
+        $('#f-module').value = clawData.module_name || '';
+        $('#f-schedule').value = clawData.report_schedule || '15:00,21:00';
+        $('#f-status').value = clawData.status || 'offline';
+        $('#f-resp').value = clawData.responsibilities || '';
+        $('#f-soul').value = clawData.soul_config || '';
+        $('#f-workflow').value = clawData.workflow_config || '';
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+$('#info-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const data = Object.fromEntries(form);
+    try {
+        await API.updateClaw(CLAW_ID, data);
+        showToast('保存成功', 'success');
+        loadClaw();
+    } catch (err) {
+        showToast('保存失败: ' + err.message, 'error');
+    }
+});
+
+async function saveConfig() {
+    try {
+        await API.updateClaw(CLAW_ID, {
+            soul_config: $('#f-soul').value,
+            workflow_config: $('#f-workflow').value,
+        });
+        showToast('配置已保存', 'success');
+    } catch (err) {
+        showToast('保存失败: ' + err.message, 'error');
+    }
+}
+
+async function loadSkills() {
+    try {
+        const allSkills = await API.listSkills();
+        const clawSkillIds = (clawData.skills || []).map(s => s.id);
+        const grid = $('#skills-grid');
+
+        grid.innerHTML = allSkills.map(s => {
+            const installed = clawSkillIds.includes(s.id);
+            return `
+                <div class="skill-card">
+                    <div class="skill-card-header">
+                        <span class="skill-name">${s.display_name}</span>
+                        <span class="tag ${s.category === 'standard' ? 'tag-accent' : 'tag-green'}">${s.category}</span>
+                    </div>
+                    <div class="skill-desc">${s.description || ''}</div>
+                    <div style="display:flex;justify-content:space-between;align-items:center">
+                        <div class="skill-users">
+                            ${(s.used_by || []).map(u => `<span class="tag tag-blue">${u}</span>`).join('')}
+                        </div>
+                        <button class="btn btn-sm ${installed ? 'btn-danger' : 'btn-primary'}"
+                                onclick="${installed
+                                    ? `uninstallSkill(${s.id})`
+                                    : `installSkill(${s.id})`}">
+                            ${installed ? '卸载' : '安装'}
+                        </button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    } catch (err) {
+        showToast('Skills 加载失败: ' + err.message, 'error');
+    }
+}
+
+async function installSkill(skillId) {
+    try {
+        await API.installSkill(CLAW_ID, skillId);
+        showToast('安装成功', 'success');
+        clawData = await API.getClaw(CLAW_ID);
+        loadSkills();
+    } catch (err) {
+        showToast('安装失败: ' + err.message, 'error');
+    }
+}
+
+async function uninstallSkill(skillId) {
+    try {
+        await API.uninstallSkill(CLAW_ID, skillId);
+        showToast('已卸载', 'success');
+        clawData = await API.getClaw(CLAW_ID);
+        loadSkills();
+    } catch (err) {
+        showToast('卸载失败: ' + err.message, 'error');
+    }
+}
+
+async function loadReports() {
+    try {
+        const reports = await API.getClawReports(CLAW_ID);
+        const timeline = $('#reports-timeline');
+
+        if (reports.length === 0) {
+            timeline.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">📋</div>
+                    <div class="empty-state-text">暂无工作日报</div>
+                </div>`;
+            return;
+        }
+
+        timeline.innerHTML = reports.map(r => `
+            <div class="timeline-item">
+                <div class="timeline-time">${r.report_date} ${r.report_time}</div>
+                ${r.ai_summary ? `<p style="margin-bottom:10px">${r.ai_summary}</p>` : ''}
+                ${r.tasks_completed && r.tasks_completed.length > 0 ? `
+                    <div style="margin-bottom:8px">
+                        <strong style="font-size:0.85rem">完成任务：</strong>
+                        <ul style="margin-top:4px;padding-left:18px;font-size:0.85rem;color:var(--text-secondary)">
+                            ${r.tasks_completed.map(t => `<li>${t.task}${t.duration ? ` (${t.duration})` : ''}</li>`).join('')}
+                        </ul>
+                    </div>
+                ` : ''}
+                ${r.knowledge_recorded && r.knowledge_recorded.length > 0 ? `
+                    <div>
+                        <strong style="font-size:0.85rem">新增知识：</strong>
+                        <div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:6px">
+                            ${r.knowledge_recorded.map(k => `<span class="tag tag-accent">${k.title || k.category}</span>`).join('')}
+                        </div>
+                    </div>
+                ` : ''}
+            </div>
+        `).join('');
+    } catch (err) {
+        showToast('日报加载失败: ' + err.message, 'error');
+    }
+}
+
+async function deleteClaw() {
+    if (!confirm(`确定要删除 ${clawData?.name || 'OpenClaw'} 吗？此操作不可撤销。`)) return;
+    try {
+        await API.deleteClaw(CLAW_ID);
+        showToast('已删除', 'success');
+        setTimeout(() => location.href = '/openclaws', 1000);
+    } catch (err) {
+        showToast('删除失败: ' + err.message, 'error');
+    }
+}
+
+// --- AI 规范生成 ---
+let generatedSpecContent = '';
+
+async function generateSpec() {
+    const desc = $('#ai-desc').value.trim();
+    if (!desc) {
+        showToast('请输入功能描述', 'error');
+        return;
+    }
+
+    const btn = $('#ai-gen-btn');
+    const status = $('#ai-gen-status');
+    btn.disabled = true;
+    status.textContent = 'AI 生成中...';
+    status.style.color = 'var(--accent)';
+
+    try {
+        const result = await API.generateSpec({
+            description: desc,
+            project_name: clawData?.project_name || '',
+            module_name: clawData?.module_name || '',
+            claw_role: $('#ai-claw-role').value,
+        });
+
+        generatedSpecContent = result.spec || '';
+        $('#ai-spec-output').value = generatedSpecContent;
+        $('#ai-preview-area').style.display = 'block';
+        status.textContent = '✅ 生成完成';
+        status.style.color = 'var(--success)';
+        showToast('规范生成成功，可预览或直接应用', 'success');
+    } catch (err) {
+        status.textContent = '❌ 生成失败: ' + err.message;
+        status.style.color = 'var(--danger)';
+        showToast('生成失败: ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+function copySpec() {
+    const text = $('#ai-spec-output').value;
+    navigator.clipboard.writeText(text).then(() => {
+        showToast('已复制到剪贴板', 'success');
+    }).catch(() => showToast('复制失败', 'error'));
+}
+
+function applySpec() {
+    if (!generatedSpecContent) return;
+    // 应用到工作规范 textarea
+    $('#f-workflow').value = generatedSpecContent;
+    // 切换到工作规范 tab
+    switchTab('config');
+    showToast('已应用到工作规范，请检查后保存', 'success');
+}
+
+loadClaw();
+</script>
+{% endblock %}

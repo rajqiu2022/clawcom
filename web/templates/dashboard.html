@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - OpenClaw 管理系统{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+
+{% block content %}
+<!-- 统计卡片 -->
+<div class="stats-grid" id="stats-grid">
+    <div class="stat-card green">
+        <div class="stat-value" id="stat-online">-</div>
+        <div class="stat-label">在线 OpenClaw</div>
+    </div>
+    <div class="stat-card blue">
+        <div class="stat-value" id="stat-tasks">-</div>
+        <div class="stat-label">今日完成任务</div>
+    </div>
+    <div class="stat-card accent">
+        <div class="stat-value" id="stat-knowledge">-</div>
+        <div class="stat-label">知识库条目</div>
+    </div>
+    <div class="stat-card yellow">
+        <div class="stat-value" id="stat-pending">-</div>
+        <div class="stat-label">待审核知识</div>
+    </div>
+</div>
+
+<!-- 团队 OpenClaw -->
+<div class="section">
+    <div class="card-header">
+        <h2 class="section-title">团队 OpenClaw</h2>
+        <a href="/openclaws" class="btn btn-ghost btn-sm">查看全部 →</a>
+    </div>
+    <div class="claw-grid" id="claw-grid">
+        <div class="loading"><span class="spinner"></span> 加载中...</div>
+    </div>
+</div>
+
+<!-- 双栏：知识趋势 + 今日知识 -->
+<div class="two-col">
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">知识库增长（近30天）</h3>
+        </div>
+        <div id="trend-chart" style="height:200px;display:flex;align-items:flex-end;gap:3px;padding-top:10px;">
+            <div class="loading"><span class="spinner"></span></div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">今日知识新增</h3>
+        </div>
+        <div id="category-stats">
+            <div class="loading"><span class="spinner"></span></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadDashboard() {
+    try {
+        const data = await API.dashboardStats();
+
+        // 统计数字
+        $('#stat-online').textContent = `${data.online_count}/${data.total_claws}`;
+        $('#stat-tasks').textContent = data.today_tasks;
+        $('#stat-knowledge').textContent = data.total_knowledge;
+        $('#stat-pending').textContent = data.pending_review;
+
+        // OpenClaw 卡片
+        const grid = $('#claw-grid');
+        if (data.claws.length === 0) {
+            grid.innerHTML = `
+                <div class="empty-state" style="grid-column:1/-1">
+                    <div class="empty-state-icon">🤖</div>
+                    <div class="empty-state-text">还没有 OpenClaw，去添加一个吧</div>
+                    <a href="/openclaws" class="btn btn-primary">添加 OpenClaw</a>
+                </div>`;
+        } else {
+            grid.innerHTML = data.claws.map(c => `
+                <div class="claw-card" onclick="location.href='/openclaws/${c.id}'">
+                    <div class="claw-card-header">
+                        <div class="claw-avatar">${c.avatar || '🤖'}</div>
+                        <div class="claw-info">
+                            <div class="claw-name">
+                                ${statusDot(c.status)}
+                                ${c.name}
+                            </div>
+                            <div class="claw-role">${c.role_title || '未设置职位'}</div>
+                        </div>
+                    </div>
+                    <div class="claw-meta">
+                        <span class="tag tag-blue">今日 ${c.today_tasks} 个任务</span>
+                        ${c.last_heartbeat
+                            ? `<span class="tag tag-accent">${timeAgo(c.last_heartbeat)}</span>`
+                            : '<span class="tag tag-yellow">从未上线</span>'}
+                    </div>
+                    ${c.today_summary
+                        ? `<div class="claw-summary">${c.today_summary}</div>`
+                        : '<div class="claw-summary" style="color:var(--text-muted)">今日暂无汇报</div>'}
+                </div>
+            `).join('');
+        }
+
+        // 趋势图（简易 bar chart）
+        const trendEl = $('#trend-chart');
+        if (data.knowledge_trend.length === 0) {
+            trendEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无数据</div></div>';
+        } else {
+            const maxVal = Math.max(...data.knowledge_trend.map(t => t.count), 1);
+            trendEl.innerHTML = data.knowledge_trend.map(t => {
+                const h = Math.max((t.count / maxVal) * 180, 4);
+                return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;">
+                    <span style="font-size:0.7rem;color:var(--text-muted)">${t.count}</span>
+                    <div style="width:100%;max-width:24px;height:${h}px;background:var(--accent);border-radius:3px 3px 0 0;"></div>
+                    <span style="font-size:0.65rem;color:var(--text-muted);white-space:nowrap">${t.date.slice(5)}</span>
+                </div>`;
+            }).join('');
+        }
+
+        // 今日各标签新增
+        const catEl = $('#category-stats');
+        if (data.category_stats.length === 0) {
+            catEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">今日暂无新增</div></div>';
+        } else {
+            catEl.innerHTML = data.category_stats.map(c => `
+                <div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+                    <span class="tag tag-accent">#${c.category}</span>
+                    <span style="font-weight:600;color:var(--green)">+${c.count}</span>
+                </div>
+            `).join('');
+        }
+
+    } catch (err) {
+        console.error('Dashboard load error:', err);
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+loadDashboard();
+// 每 30 秒刷新一次
+setInterval(loadDashboard, 30000);
+</script>
+{% endblock %}

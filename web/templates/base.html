@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}OpenClaw 管理系统{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <div class="app-layout">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <span class="logo-icon">🦞</span>
+                    <span class="logo-text">OpenClaw</span>
+                </div>
+                <div class="logo-subtitle">团队管理系统</div>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="/" class="nav-item {% block nav_dashboard %}{% endblock %}">
+                    <span class="nav-icon">📊</span>
+                    <span>Dashboard</span>
+                </a>
+                <a href="/openclaws" class="nav-item {% block nav_openclaws %}{% endblock %}">
+                    <span class="nav-icon">🤖</span>
+                    <span>OpenClaw 管理</span>
+                </a>
+                <a href="/skills" class="nav-item {% block nav_skills %}{% endblock %}">
+                    <span class="nav-icon">🧩</span>
+                    <span>Skills 市场</span>
+                </a>
+                <a href="/knowledge" class="nav-item {% block nav_knowledge %}{% endblock %}">
+                    <span class="nav-icon">📚</span>
+                    <span>知识库</span>
+                </a>
+                <a href="/hub" class="nav-item {% block nav_hub %}{% endblock %}">
+                    <span class="nav-icon">📡</span>
+                    <span>通信中心</span>
+                </a>
+                <a href="/settings" class="nav-item {% block nav_settings %}{% endblock %}">
+                    <span class="nav-icon">⚙️</span>
+                    <span>系统设置</span>
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="version">v4.0.0-dev</div>
+            </div>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <header class="top-bar">
+                <h1 class="page-title">{% block page_title %}Dashboard{% endblock %}</h1>
+                <div class="top-bar-actions">
+                    {% block top_actions %}{% endblock %}
+                </div>
+            </header>
+            <div class="content-area">
+                {% block content %}{% endblock %}
+            </div>
+        </main>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/api.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% block title %}知识库 - OpenClaw 管理系统{% endblock %}
+{% block nav_knowledge %}active{% endblock %}
+{% block page_title %}知识库管理{% endblock %}
+
+{% block content %}
+<div class="tab-bar">
+    <div class="tab-item active" data-tab="browse" onclick="switchTab('browse')">浏览</div>
+    <div class="tab-item" data-tab="pending" onclick="switchTab('pending')">
+        待审核 <span id="pending-badge" style="background:var(--yellow);color:#000;border-radius:99px;padding:1px 7px;font-size:0.75rem;margin-left:4px"></span>
+    </div>
+</div>
+
+<!-- 筛选 -->
+<div id="tab-browse">
+    <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+        <select class="form-select" id="filter-scope" style="width:auto" onchange="loadKnowledge()">
+            <option value="">全部作用域</option>
+            <option value="global">通用</option>
+            <option value="project">项目级</option>
+            <option value="module">模块级</option>
+        </select>
+        <select class="form-select" id="filter-category" style="width:auto" onchange="loadKnowledge()">
+            <option value="">全部标签</option>
+            <option value="bug-pattern">bug-pattern</option>
+            <option value="test-checklist">test-checklist</option>
+            <option value="performance-case">performance-case</option>
+            <option value="project-lesson">project-lesson</option>
+            <option value="tool-usage">tool-usage</option>
+            <option value="test-summary">test-summary</option>
+        </select>
+        <select class="form-select" id="filter-status" style="width:auto" onchange="loadKnowledge()">
+            <option value="">全部状态</option>
+            <option value="draft">草稿</option>
+            <option value="pending_review">待审核</option>
+            <option value="approved">已通过</option>
+            <option value="rejected">已拒绝</option>
+        </select>
+    </div>
+
+    <div class="knowledge-list" id="knowledge-list">
+        <div class="loading"><span class="spinner"></span></div>
+    </div>
+</div>
+
+<!-- 待审核 -->
+<div id="tab-pending" style="display:none">
+    <div class="knowledge-list" id="pending-list">
+        <div class="loading"><span class="spinner"></span></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function switchTab(tab) {
+    $$('.tab-item').forEach(t => t.classList.remove('active'));
+    $(`.tab-item[data-tab="${tab}"]`).classList.add('active');
+    $('#tab-browse').style.display = tab === 'browse' ? 'block' : 'none';
+    $('#tab-pending').style.display = tab === 'pending' ? 'block' : 'none';
+
+    if (tab === 'pending') loadPending();
+}
+
+const statusColors = {
+    draft: 'tag-blue', pending_review: 'tag-yellow',
+    approved: 'tag-green', rejected: 'tag-red'
+};
+const statusLabels = {
+    draft: '草稿', pending_review: '待审核',
+    approved: '已通过', rejected: '已拒绝'
+};
+
+function renderEntry(e) {
+    return `
+        <div class="knowledge-item">
+            <div class="knowledge-item-body">
+                <div class="knowledge-title">${e.title}</div>
+                <div class="knowledge-meta">
+                    <span class="tag tag-accent">#${e.category}</span>
+                    <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
+                    <span>${e.scope}${e.project_name ? ' · ' + e.project_name : ''}${e.module_name ? ' · ' + e.module_name : ''}</span>
+                    ${e.source_openclaw_name ? `<span>来源: ${e.source_openclaw_name}</span>` : ''}
+                    <span>${timeAgo(e.created_at)}</span>
+                </div>
+            </div>
+            ${e.status === 'pending_review' ? `
+                <div style="display:flex;gap:6px;flex-shrink:0">
+                    <button class="btn btn-sm btn-primary" onclick="reviewEntry(${e.id}, 'approve')">通过</button>
+                    <button class="btn btn-sm btn-danger" onclick="reviewEntry(${e.id}, 'reject')">拒绝</button>
+                </div>
+            ` : ''}
+        </div>
+    `;
+}
+
+async function loadKnowledge() {
+    const params = new URLSearchParams();
+    const scope = $('#filter-scope').value;
+    const category = $('#filter-category').value;
+    const status = $('#filter-status').value;
+    if (scope) params.set('scope', scope);
+    if (category) params.set('category', category);
+    if (status) params.set('status', status);
+
+    try {
+        const entries = await API.listKnowledge(params.toString());
+        const list = $('#knowledge-list');
+        if (entries.length === 0) {
+            list.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无知识条目</div></div>';
+        } else {
+            list.innerHTML = entries.map(renderEntry).join('');
+        }
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+async function loadPending() {
+    try {
+        const entries = await API.pendingReviews();
+        $('#pending-badge').textContent = entries.length || '';
+        const list = $('#pending-list');
+        if (entries.length === 0) {
+            list.innerHTML = '<div class="empty-state"><div class="empty-state-text">没有待审核的知识</div></div>';
+        } else {
+            list.innerHTML = entries.map(renderEntry).join('');
+        }
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+async function reviewEntry(id, action) {
+    const notes = action === 'reject' ? prompt('拒绝原因（可选）：') : '';
+    try {
+        await API.reviewKnowledge(id, { action, notes });
+        showToast(action === 'approve' ? '已通过' : '已拒绝', 'success');
+        loadKnowledge();
+        loadPending();
+    } catch (err) {
+        showToast('审核失败: ' + err.message, 'error');
+    }
+}
+
+loadKnowledge();
+loadPending();
+</script>
+{% endblock %}
