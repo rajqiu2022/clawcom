@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+{% block title %}OpenClaw 管理 - OpenClaw 管理系统{% endblock %}
+{% block nav_openclaws %}active{% endblock %}
+{% block page_title %}OpenClaw 管理{% endblock %}
+
+{% block top_actions %}
+<button class="btn btn-primary" onclick="openCreateModal()">+ 新增 OpenClaw</button>
+{% endblock %}
+
+{% block content %}
+<div class="claw-grid" id="claw-grid">
+    <div class="loading"><span class="spinner"></span> 加载中...</div>
+</div>
+
+<!-- 新建弹窗 -->
+<div class="modal-overlay" id="create-modal">
+    <div class="modal">
+        <h2 class="modal-title">注册新 OpenClaw</h2>
+        <form id="create-form">
+            <div class="form-group">
+                <label class="form-label">名称 *</label>
+                <input class="form-input" name="name" placeholder="如：小测" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">所属用户 *</label>
+                <input class="form-input" name="owner" placeholder="如：张三">
+            </div>
+            <div class="form-group">
+                <label class="form-label">角色 *</label>
+                <select class="form-input" name="role" id="claw-role-select" required>
+                    <option value="test_member" selected>测试成员</option>
+                    <option value="test_manager">测试经理</option>
+                    <option value="test_executor">测试执行</option>
+                    <option value="admin">管理员</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">职位头衔</label>
+                <input class="form-input" name="role_title" placeholder="如：功能测试工程师">
+            </div>
+            <div class="form-group">
+                <label class="form-label">负责内容</label>
+                <textarea class="form-textarea" name="responsibilities" placeholder="描述这个 OpenClaw 负责什么..."></textarea>
+            </div>
+            <div class="two-col">
+                <div class="form-group">
+                    <label class="form-label">所属项目</label>
+                    <select class="form-input" name="project_id" id="project-select" onchange="onProjectChange(this)">
+                        <option value="">-- 选择项目 --</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">所属模块</label>
+                    <select class="form-input" name="module_name" id="module-select">
+                        <option value="">-- 先选择项目 --</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">上报时间</label>
+                <input class="form-input" name="report_schedule" value="15:00,21:00" placeholder="如：15:00,21:00">
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
+                <button type="submit" class="btn btn-primary">创建</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Token 显示弹窗（创建成功后） -->
+<div class="modal-overlay" id="token-modal">
+    <div class="modal">
+        <h2 class="modal-title">🔑 OpenClaw 创建成功</h2>
+        <p style="color:var(--text-secondary);margin-bottom:16px">
+            以下是该 OpenClaw 的 API Token，<strong style="color:var(--accent)">请立即复制保存，此 Token 只显示一次！</strong>
+        </p>
+        <div style="background:var(--bg-primary);border:1px solid var(--accent);border-radius:8px;padding:16px;margin-bottom:12px;position:relative">
+            <code id="token-display" style="word-break:break-all;font-size:0.95rem;color:var(--accent)"></code>
+            <button class="btn btn-primary btn-sm" onclick="copyToken()" 
+                    style="position:absolute;top:8px;right:8px;font-size:0.78rem">复制</button>
+        </div>
+        <div style="background:rgba(234,179,8,0.1);border:1px solid rgba(234,179,8,0.3);border-radius:8px;padding:12px;margin-bottom:16px">
+            <p style="font-size:0.85rem;color:#eab308;margin:0">
+                ⚠️ 在 OpenClaw 端配置此 Token：<br>
+                <code style="font-size:0.82rem">export OPENCLAW_API_TOKEN="<span id="token-env-hint"></span>"</code>
+            </p>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-primary" onclick="closeTokenModal()">我已保存，关闭</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allProjects = [];
+
+async function loadClaws() {
+    try {
+        const claws = await API.listClaws();
+        const grid = $('#claw-grid');
+
+        if (claws.length === 0) {
+            grid.innerHTML = `
+                <div class="empty-state" style="grid-column:1/-1">
+                    <div class="empty-state-icon">🤖</div>
+                    <div class="empty-state-text">还没有 OpenClaw，点击右上角添加</div>
+                </div>`;
+            return;
+        }
+
+        const ROLE_LABELS = {
+            'admin': { text: '管理员', cls: 'tag-red' },
+            'test_manager': { text: '测试经理', cls: 'tag-purple' },
+            'test_member': { text: '测试成员', cls: 'tag-blue' },
+            'test_executor': { text: '测试执行', cls: 'tag-green' },
+        };
+
+        grid.innerHTML = claws.map(c => {
+            const roleInfo = ROLE_LABELS[c.role] || { text: '测试成员', cls: 'tag-blue' };
+            return `
+            <div class="claw-card" onclick="location.href='/openclaws/${c.id}'">
+                <div class="claw-card-header">
+                    <div class="claw-avatar">${c.avatar || '🤖'}</div>
+                    <div class="claw-info">
+                        <div class="claw-name">
+                            ${statusDot(c.status)}
+                            ${c.name}
+                        </div>
+                        <div class="claw-role">${c.role_title || '未设置职位'}</div>
+                    </div>
+                    <span class="tag ${roleInfo.cls}" style="margin-left:auto;font-size:0.72rem">${roleInfo.text}</span>
+                </div>
+                <div class="claw-meta">
+                    ${c.project_name ? `<span class="tag tag-blue">${c.project_name}</span>` : ''}
+                    ${c.module_name ? `<span class="tag tag-accent">${c.module_name}</span>` : ''}
+                    <span class="tag tag-green">⏰ ${c.report_schedule || '15:00,21:00'}</span>
+                </div>
+                <div class="claw-summary">${c.responsibilities || '暂无描述'}</div>
+            </div>`;
+        }).join('');
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+async function loadProjectsForSelect() {
+    try {
+        allProjects = await API.listProjects();
+        const sel = $('#project-select');
+        sel.innerHTML = '<option value="">-- 选择项目 --</option>' +
+            allProjects.map(p => `<option value="${p.id}">${p.name}${p.tapd_workspace_id ? ' (TAPD:' + p.tapd_workspace_id + ')' : ''}</option>`).join('');
+    } catch (err) {
+        console.error('加载项目失败:', err);
+    }
+}
+
+function onProjectChange(sel) {
+    const moduleSel = $('#module-select');
+    const projectId = parseInt(sel.value);
+    if (!projectId) {
+        moduleSel.innerHTML = '<option value="">-- 先选择项目 --</option>';
+        return;
+    }
+    const project = allProjects.find(p => p.id === projectId);
+    if (project && project.modules && project.modules.length > 0) {
+        moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>' +
+            project.modules.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+    } else {
+        moduleSel.innerHTML = '<option value="">无可用模块</option>';
+    }
+}
+
+function openCreateModal() {
+    loadProjectsForSelect();
+    $('#create-modal').classList.add('active');
+}
+
+function closeCreateModal() {
+    $('#create-modal').classList.remove('active');
+}
+
+function closeTokenModal() {
+    $('#token-modal').classList.remove('active');
+}
+
+function copyToken() {
+    const token = $('#token-display').textContent;
+    navigator.clipboard.writeText(token).then(() => {
+        showToast('Token 已复制到剪贴板', 'success');
+    }).catch(() => {
+        // fallback
+        const el = document.createElement('textarea');
+        el.value = token;
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand('copy');
+        document.body.removeChild(el);
+        showToast('Token 已复制到剪贴板', 'success');
+    });
+}
+
+$('#create-modal').addEventListener('click', e => {
+    if (e.target === $('#create-modal')) closeCreateModal();
+});
+
+$('#create-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const data = Object.fromEntries(form);
+
+    // 清理空值
+    if (!data.project_id) delete data.project_id;
+
+    try {
+        const result = await API.createClaw(data);
+        closeCreateModal();
+        e.target.reset();
+
+        // 显示 Token 弹窗
+        if (result.api_token) {
+            $('#token-display').textContent = result.api_token;
+            $('#token-env-hint').textContent = result.api_token;
+            $('#token-modal').classList.add('active');
+        } else {
+            showToast(`OpenClaw "${data.name}" 创建成功！`, 'success');
+        }
+
+        loadClaws();
+    } catch (err) {
+        showToast('创建失败: ' + err.message, 'error');
+    }
+});
+
+loadClaws();
+</script>
+{% endblock %}

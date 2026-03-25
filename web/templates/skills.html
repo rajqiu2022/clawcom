@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% block title %}Skills 市场 - OpenClaw 管理系统{% endblock %}
+{% block nav_skills %}active{% endblock %}
+{% block page_title %}Skills 市场{% endblock %}
+
+{% block top_actions %}
+<button class="btn btn-primary" onclick="openCreateModal()">+ 新增 Skill</button>
+{% endblock %}
+
+{% block content %}
+<div class="tab-bar">
+    <div class="tab-item active" data-tab="all" onclick="filterSkills('all')">全部</div>
+    <div class="tab-item" data-tab="standard" onclick="filterSkills('standard')">标准 Skills</div>
+    <div class="tab-item" data-tab="custom" onclick="filterSkills('custom')">自定义</div>
+</div>
+
+<div class="skill-grid" id="skills-grid">
+    <div class="loading"><span class="spinner"></span></div>
+</div>
+
+<!-- 新建 Skill 弹窗 -->
+<div class="modal-overlay" id="create-modal">
+    <div class="modal" style="max-width:560px">
+        <h2 class="modal-title">创建新 Skill</h2>
+        <form id="create-form">
+            <div class="form-group">
+                <label class="form-label">标识名 *</label>
+                <input class="form-input" name="name" placeholder="如：crash-log-analyzer" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">显示名称 *</label>
+                <input class="form-input" name="display_name" placeholder="如：崩溃日志分析器" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">描述</label>
+                <textarea class="form-textarea" name="description" placeholder="这个 Skill 做什么..."></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">触发短语</label>
+                <input class="form-input" name="trigger_phrase" placeholder="如：分析崩溃日志">
+            </div>
+            <!-- 作用域选择 -->
+            <div class="form-group">
+                <label class="form-label">适用范围</label>
+                <div style="display:flex;gap:16px;margin-top:6px">
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="global" checked onchange="onScopeChange()">
+                        <span>通用</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="project" onchange="onScopeChange()">
+                        <span>按项目</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="module" onchange="onScopeChange()">
+                        <span>按模块</span>
+                    </label>
+                </div>
+            </div>
+            <!-- 按项目：项目多选 -->
+            <div class="form-group" id="scope-projects-group" style="display:none">
+                <label class="form-label">选择项目（可多选）</label>
+                <div id="project-checkboxes" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;max-height:160px;overflow-y:auto">
+                </div>
+            </div>
+            <!-- 按模块：模块名输入 -->
+            <div class="form-group" id="scope-modules-group" style="display:none">
+                <label class="form-label">适用模块名（多个用逗号分隔）</label>
+                <input class="form-input" name="applicable_modules_input" id="applicable-modules-input" placeholder="如：登录模块,支付模块">
+            </div>
+            <div class="form-group">
+                <label class="form-label">模板内容</label>
+                <textarea class="form-textarea" name="template_content" style="min-height:120px;font-family:monospace" placeholder="Skill 的详细模板..."></textarea>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
+                <button type="submit" class="btn btn-primary">创建</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allSkills = [];
+let allProjects = [];
+let currentFilter = 'all';
+
+async function loadSkills() {
+    try {
+        allSkills = await API.listSkills();
+        renderSkills();
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+async function loadProjectsForScope() {
+    try {
+        allProjects = await API.listProjects();
+        renderProjectCheckboxes();
+    } catch (err) {
+        console.error('加载项目失败', err);
+    }
+}
+
+function renderProjectCheckboxes() {
+    const container = $('#project-checkboxes');
+    container.innerHTML = allProjects.map(p => `
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.9rem">
+            <input type="checkbox" value="${p.id}" name="applicable_projects">
+            <span>${p.name}</span>
+        </label>
+    `).join('');
+}
+
+function onScopeChange() {
+    const scope = document.querySelector('input[name="scope"]:checked').value;
+    $('#scope-projects-group').style.display = scope === 'project' ? '' : 'none';
+    $('#scope-modules-group').style.display = scope === 'module' ? '' : 'none';
+}
+
+function filterSkills(tab) {
+    currentFilter = tab;
+    $$('.tab-item').forEach(t => t.classList.remove('active'));
+    $(`.tab-item[data-tab="${tab}"]`).classList.add('active');
+    renderSkills();
+}
+
+function scopeLabel(s) {
+    if (s.scope === 'global') return '<span class="tag tag-accent">通用</span>';
+    if (s.scope === 'project') {
+        const names = (s.applicable_projects || []).map(pid => {
+            const p = allProjects.find(x => x.id === pid);
+            return p ? p.name : pid;
+        }).join(', ');
+        return `<span class="tag tag-blue">项目</span>${names ? `<span style="font-size:0.82rem;margin-left:4px">${names}</span>` : ''}`;
+    }
+    if (s.scope === 'module') {
+        const names = (s.applicable_modules || []).join(', ');
+        return `<span class="tag" style="background:#6c5ce7;color:#fff">模块</span>${names ? `<span style="font-size:0.82rem;margin-left:4px">${names}</span>` : ''}`;
+    }
+    return '';
+}
+
+function renderSkills() {
+    const filtered = currentFilter === 'all'
+        ? allSkills
+        : allSkills.filter(s => s.category === currentFilter);
+
+    const grid = $('#skills-grid');
+
+    if (filtered.length === 0) {
+        grid.innerHTML = `
+            <div class="empty-state" style="grid-column:1/-1">
+                <div class="empty-state-icon">🧩</div>
+                <div class="empty-state-text">暂无 Skills</div>
+            </div>`;
+        return;
+    }
+
+    grid.innerHTML = filtered.map(s => `
+        <div class="skill-card">
+            <div class="skill-card-header">
+                <span class="skill-name">${s.display_name}</span>
+                <span class="tag ${s.category === 'standard' ? 'tag-accent' : 'tag-green'}">${s.category}</span>
+                ${scopeLabel(s)}
+            </div>
+            <div class="skill-desc">${s.description || ''}</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+                <div class="skill-users">
+                    ${(s.used_by || []).length > 0
+                        ? s.used_by.map(u => `<span class="tag tag-blue">${u}</span>`).join('')
+                        : '<span style="font-size:0.82rem;color:var(--text-muted)">暂无使用者</span>'}
+                </div>
+                <span style="font-size:0.82rem;color:var(--text-muted)">${s.used_by_count} 个 OpenClaw 使用</span>
+            </div>
+        </div>
+    `).join('');
+}
+
+async function openCreateModal() {
+    await loadProjectsForScope();
+    onScopeChange(); // reset visibility
+    $('#create-form').reset();
+    $('#create-modal').classList.add('active');
+}
+function closeCreateModal() { $('#create-modal').classList.remove('active'); }
+
+$('#create-modal').addEventListener('click', e => {
+    if (e.target === $('#create-modal')) closeCreateModal();
+});
+
+$('#create-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const data = Object.fromEntries(form);
+    data.category = 'custom';
+
+    // 处理适用范围
+    if (data.scope === 'project') {
+        const checked = [...document.querySelectorAll('input[name="applicable_projects"]:checked')]
+            .map(el => parseInt(el.value));
+        data.applicable_projects = checked;
+        delete data.applicable_modules_input;
+    } else if (data.scope === 'module') {
+        const modules = data.applicable_modules_input
+            ? data.applicable_modules_input.split(',').map(s => s.trim()).filter(Boolean)
+            : [];
+        data.applicable_modules = modules;
+        delete data.applicable_projects;
+        delete data.applicable_modules_input;
+    } else {
+        delete data.applicable_projects;
+        delete data.applicable_modules;
+        delete data.applicable_modules_input;
+    }
+
+    try {
+        await API.createSkill(data);
+        showToast('Skill 创建成功！', 'success');
+        closeCreateModal();
+        e.target.reset();
+        loadSkills();
+    } catch (err) {
+        showToast('创建失败: ' + err.message, 'error');
+    }
+});
+
+loadSkills();
+</script>
+{% endblock %}

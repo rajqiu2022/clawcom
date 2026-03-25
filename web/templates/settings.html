@@ -1,0 +1,289 @@
+{% extends "base.html" %}
+{% block title %}系统设置 - OpenClaw 管理系统{% endblock %}
+{% block nav_settings %}active{% endblock %}
+{% block page_title %}系统设置{% endblock %}
+
+{% block content %}
+<div class="two-col">
+    <!-- 项目管理 -->
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">项目管理</h3>
+            <button class="btn btn-primary btn-sm" onclick="openProjectModal()">+ 新增</button>
+        </div>
+        <div id="projects-list">
+            <div class="loading"><span class="spinner"></span></div>
+        </div>
+    </div>
+
+    <!-- 大模型配置 -->
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">大模型配置</h3>
+        </div>
+        <div class="form-group">
+            <label class="form-label">模型供应商</label>
+            <select class="form-input" id="llm-provider" onchange="onProviderChange()">
+                <option value="doubao">火山引擎 - 豆包 (Doubao)</option>
+                <option value="ernie">百度 - 文心一言 (ERNIE)</option>
+                <option value="tongyi">阿里 - 通义千问 (Tongyi)</option>
+                <option value="zhipu">智谱 - GLM-4 (ChatGLM)</option>
+                <option value="deepseek">深度求索 - DeepSeek</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">模型名称</label>
+            <input class="form-input" id="llm-model" placeholder="如：doubao-pro-32k 或 ernie-bot-4">
+        </div>
+        <div class="form-group" id="llm-base-group">
+            <label class="form-label">API Base URL</label>
+            <input class="form-input" id="llm-api-base" placeholder="https://ark.cn-beijing.volces.com/api/v3">
+        </div>
+        <div class="form-group">
+            <label class="form-label">API Key</label>
+            <input class="form-input" type="password" id="llm-api-key" placeholder="sk-...">
+        </div>
+        <div style="display:flex;gap:8px;margin-top:4px">
+            <button class="btn btn-primary btn-sm" onclick="saveLLMConfig()">保存配置</button>
+            <button class="btn btn-ghost btn-sm" onclick="testLLM()">测试连接</button>
+        </div>
+        <div id="llm-test-result" style="margin-top:8px;font-size:0.85rem"></div>
+    </div>
+
+    <!-- Memos 配置 -->
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">Memos 连接</h3>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Memos URL</label>
+            <input class="form-input" id="memos-url" value="" placeholder="http://9.134.11.169:5230" disabled>
+        </div>
+        <div class="form-group">
+            <label class="form-label">API Key</label>
+            <input class="form-input" type="password" id="memos-key" value="" placeholder="****" disabled>
+        </div>
+        <p style="font-size:0.82rem;color:var(--text-muted);margin-top:12px">
+            Memos 连接通过环境变量 MEMOS_URL 和 MEMOS_API_KEY 配置，修改后需重启服务。
+        </p>
+    </div>
+</div>
+
+<!-- 新建/编辑项目弹窗 -->
+<div class="modal-overlay" id="project-modal">
+    <div class="modal">
+        <h2 class="modal-title" id="project-modal-title">新增项目</h2>
+        <form id="project-form">
+            <input type="hidden" name="id" id="project-edit-id">
+            <div class="form-group">
+                <label class="form-label">项目名称 *</label>
+                <input class="form-input" name="name" id="project-name" placeholder="如：QQ飞车" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">TAPD Workspace ID</label>
+                <input class="form-input" name="tapd_workspace_id" id="project-tapd-id" placeholder="如：67459320（在 TAPD URL 中可见）">
+            </div>
+            <div class="form-group">
+                <label class="form-label">项目描述</label>
+                <textarea class="form-textarea" name="description" id="project-desc" placeholder="可选..."></textarea>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeProjectModal()">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function loadProjects() {
+    try {
+        const projects = await API.listProjects();
+        const list = $('#projects-list');
+
+        if (projects.length === 0) {
+            list.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无项目</div></div>';
+            return;
+        }
+
+        list.innerHTML = projects.map(p => `
+            <div style="padding:12px 0;border-bottom:1px solid var(--border)">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                    <div style="font-weight:600">${p.name}</div>
+                    <div style="display:flex;gap:6px">
+                        <button class="btn btn-ghost btn-sm" onclick="editProject(${p.id}, '${p.name.replace(/'/g, "\\'")}', '${p.tapd_workspace_id || ''}', '${(p.description || '').replace(/'/g, "\\'")}')">编辑</button>
+                    </div>
+                </div>
+                ${p.tapd_workspace_id ? `<div style="font-size:0.82rem;color:var(--accent);margin-bottom:6px">TAPD: ${p.tapd_workspace_id}</div>` : '<div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:6px">未绑定 TAPD</div>'}
+                ${p.description ? `<div style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:8px">${p.description}</div>` : ''}
+                <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+                    ${(p.modules || []).map(m => `<span class="tag tag-accent">${m.name}</span>`).join('')}
+                    <button class="btn btn-ghost btn-sm" onclick="addModule(${p.id}, '${p.name.replace(/'/g, "\\'")}')">+ 模块</button>
+                </div>
+            </div>
+        `).join('');
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+function openProjectModal(editData) {
+    if (editData) {
+        $('#project-modal-title').textContent = '编辑项目';
+        $('#project-edit-id').value = editData.id;
+        $('#project-name').value = editData.name;
+        $('#project-tapd-id').value = editData.tapd_workspace_id || '';
+        $('#project-desc').value = editData.description || '';
+    } else {
+        $('#project-modal-title').textContent = '新增项目';
+        $('#project-edit-id').value = '';
+        $('#project-form').reset();
+    }
+    $('#project-modal').classList.add('active');
+}
+
+function closeProjectModal() {
+    $('#project-modal').classList.remove('active');
+}
+
+function editProject(id, name, tapdId, desc) {
+    openProjectModal({ id, name, tapd_workspace_id: tapdId, description: desc });
+}
+
+$('#project-modal').addEventListener('click', e => {
+    if (e.target === $('#project-modal')) closeProjectModal();
+});
+
+$('#project-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const data = Object.fromEntries(form);
+    const editId = data.id;
+    delete data.id;
+
+    try {
+        if (editId) {
+            await API.updateProject(editId, data);
+            showToast('项目更新成功', 'success');
+        } else {
+            await API.createProject(data);
+            showToast('项目创建成功', 'success');
+        }
+        closeProjectModal();
+        loadProjects();
+    } catch (err) {
+        showToast('操作失败: ' + err.message, 'error');
+    }
+});
+
+async function addModule(projectId, projectName) {
+    const name = prompt(`为 "${projectName}" 添加模块：`);
+    if (!name) return;
+
+    try {
+        await API.createModule(projectId, { name });
+        showToast('模块添加成功', 'success');
+        loadProjects();
+    } catch (err) {
+        showToast('添加失败: ' + err.message, 'error');
+    }
+}
+
+// --- 大模型配置 ---
+const PROVIDER_BASE_URLS = {
+    'doubao': 'https://ark.cn-beijing.volces.com/api/v3',
+    'ernie': 'https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop',
+    'tongyi': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    'zhipu': 'https://open.bigmodel.cn/api/paas/v4',
+    'deepseek': 'https://api.deepseek.com/v1',
+};
+const PROVIDER_MODELS = {
+    'doubao': 'doubao-pro-32k',
+    'ernie': 'ernie-bot-4',
+    'tongyi': 'qwen-turbo',
+    'zhipu': 'glm-4-flash',
+    'deepseek': 'deepseek-chat',
+};
+
+async function loadLLMConfig() {
+    try {
+        const cfg = await API.getSystemConfig();
+        if (cfg.llm_provider) {
+            $('#llm-provider').value = cfg.llm_provider;
+            onProviderChange();
+        }
+        if (cfg.llm_model) $('#llm-model').value = cfg.llm_model;
+        if (cfg.llm_api_base) $('#llm-api-base').value = cfg.llm_api_base;
+        if (cfg.llm_api_key) $('#llm-api-key').value = cfg.llm_api_key;
+    } catch (err) {
+        console.error('加载 LLM 配置失败:', err);
+    }
+}
+
+function onProviderChange() {
+    const provider = $('#llm-provider').value;
+    const baseUrl = PROVIDER_BASE_URLS[provider] || '';
+    const defaultModel = PROVIDER_MODELS[provider] || '';
+    if (!$('#llm-api-base').value) {
+        $('#llm-api-base').value = baseUrl;
+    }
+    if (!$('#llm-model').value) {
+        $('#llm-model').value = defaultModel;
+    }
+}
+
+async function saveLLMConfig() {
+    const data = {
+        llm_provider: $('#llm-provider').value,
+        llm_model: $('#llm-model').value,
+        llm_api_base: $('#llm-api-base').value,
+        llm_api_key: $('#llm-api-key').value,
+    };
+    try {
+        await API.updateSystemConfig(data);
+        showToast('LLM 配置已保存', 'success');
+    } catch (err) {
+        showToast('保存失败: ' + err.message, 'error');
+    }
+}
+
+async function testLLM() {
+    const resultEl = $('#llm-test-result');
+    resultEl.textContent = '测试中...';
+    resultEl.style.color = 'var(--text-secondary)';
+
+    // 保存当前配置再测试
+    await saveLLMConfig();
+
+    const testPrompt = '请回复"LLM 连接正常"，只需要回复这句话。';
+    try {
+        const resp = await fetch('/api/v1/system/llm/generate-spec', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                description: testPrompt,
+                project_name: '测试项目',
+                module_name: '测试模块',
+                claw_role: 'test_member'
+            })
+        });
+        const json = await resp.json();
+        if (resp.ok) {
+            resultEl.textContent = '✅ LLM 连接成功！响应：' + json.spec.trim().substring(0, 50);
+            resultEl.style.color = 'var(--success)';
+        } else {
+            resultEl.textContent = '❌ ' + (json.error || '未知错误');
+            resultEl.style.color = 'var(--danger)';
+        }
+    } catch (err) {
+        resultEl.textContent = '❌ 网络错误: ' + err.message;
+        resultEl.style.color = 'var(--danger)';
+    }
+}
+
+loadLLMConfig();
+loadProjects();
+</script>
+{% endblock %}

@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent 管理 - Hub</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f0f23;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 { font-size: 20px; color: #fff; }
+        .header a { color: rgba(255,255,255,0.8); text-decoration: none; margin-right: 20px; }
+        .header a:hover { color: #fff; }
+
+        .container { max-width: 1200px; margin: 0 auto; padding: 30px; }
+
+        .toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .search-box {
+            padding: 10px 16px;
+            background: #1a1a2e;
+            border: 1px solid #3a3a5a;
+            border-radius: 8px;
+            color: #fff;
+            width: 300px;
+        }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: #fff;
+        }
+        .btn-secondary { background: #3a3a5a; color: #fff; }
+
+        .agents-table {
+            width: 100%;
+            background: #1a1a2e;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid #2a2a4a;
+        }
+        .agents-table th,
+        .agents-table td {
+            padding: 14px 16px;
+            text-align: left;
+        }
+        .agents-table th {
+            background: #252540;
+            color: #888;
+            font-weight: 500;
+            font-size: 13px;
+            text-transform: uppercase;
+        }
+        .agents-table tr { border-bottom: 1px solid #2a2a4a; }
+        .agents-table tr:last-child { border-bottom: none; }
+        .agents-table tr:hover { background: #252540; }
+
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        .status-online { background: #4ade80; }
+        .status-busy { background: #facc15; }
+        .status-offline { background: #666; }
+
+        .role-tag {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .role-admin { background: rgba(239,68,68,0.2); color: #f87171; }
+        .role-test_manager { background: rgba(168,85,247,0.2); color: #c084fc; }
+        .role-test_member { background: rgba(59,130,246,0.2); color: #60a5fa; }
+        .role-test_executor { background: rgba(34,197,94,0.2); color: #4ade80; }
+
+        .action-btns {
+            display: flex;
+            gap: 8px;
+        }
+        .action-btn {
+            padding: 6px 12px;
+            background: #3a3a5a;
+            border: none;
+            border-radius: 6px;
+            color: #fff;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .action-btn:hover { background: #4a4a6a; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>👥 Agent 管理</h1>
+        <div>
+            <a href="/">← 返回首页</a>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="toolbar">
+            <input type="text" class="search-box" placeholder="🔍 搜索 Agent 名称或 Key..." oninput="filterAgents(this.value)">
+            <button class="btn btn-primary" onclick="refreshAgents()">🔄 刷新</button>
+        </div>
+
+        <table class="agents-table">
+            <thead>
+                <tr>
+                    <th>Agent</th>
+                    <th>Key</th>
+                    <th>角色</th>
+                    <th>项目/模块</th>
+                    <th>状态</th>
+                    <th>最后心跳</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="agents-tbody">
+                <tr><td colspan="7" style="text-align:center;color:#666;padding:40px;">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        const API = '/api';
+        let allAgents = [];
+
+        async function loadAgents() {
+            const res = await fetch(`${API}/agents`);
+            allAgents = await res.json();
+            renderAgents(allAgents);
+        }
+
+        function renderAgents(agents) {
+            const tbody = document.getElementById('agents-tbody');
+            if (agents.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#666;padding:40px;">暂无 Agent</td></tr>';
+                return;
+            }
+            tbody.innerHTML = agents.map(a => `
+                <tr>
+                    <td><strong>${a.name}</strong></td>
+                    <td style="color:#888;font-size:13px;">${a.agent_key}</td>
+                    <td><span class="role-tag role-${a.role}">${getRoleName(a.role)}</span></td>
+                    <td style="font-size:13px;color:#aaa;">
+                        ${a.project_name || '-'}${a.module_name ? ' / ' + a.module_name : ''}
+                    </td>
+                    <td>
+                        <span class="status-dot status-${a.status}"></span>
+                        ${getStatusName(a.status)}
+                    </td>
+                    <td style="font-size:12px;color:#666;">${formatTime(a.last_heartbeat)}</td>
+                    <td>
+                        <div class="action-btns">
+                            <button class="action-btn" onclick="sendTo(${a.id}, '${a.name}')">发消息</button>
+                        </div>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        function getRoleName(role) {
+            const names = {
+                'admin': '管理员',
+                'test_manager': '测试经理',
+                'test_member': '测试成员',
+                'test_executor': '测试执行'
+            };
+            return names[role] || role;
+        }
+
+        function getStatusName(status) {
+            const names = { 'online': '在线', 'busy': '忙碌', 'offline': '离线' };
+            return names[status] || status;
+        }
+
+        function formatTime(iso) {
+            if (!iso) return '-';
+            const d = new Date(iso);
+            const now = new Date();
+            const diff = (now - d) / 1000;
+            if (diff < 60) return '刚刚';
+            if (diff < 3600) return `${Math.floor(diff/60)}分钟前`;
+            if (diff < 86400) return `${Math.floor(diff/3600)}小时前`;
+            return d.toLocaleDateString();
+        }
+
+        function filterAgents(keyword) {
+            const filtered = allAgents.filter(a =>
+                a.name.toLowerCase().includes(keyword.toLowerCase()) ||
+                a.agent_key.toLowerCase().includes(keyword.toLowerCase())
+            );
+            renderAgents(filtered);
+        }
+
+        function refreshAgents() { loadAgents(); }
+
+        function sendTo(agentId, agentName) {
+            alert(`向 ${agentName} (ID: ${agentId}) 发送消息需要使用 Agent API Token`);
+        }
+
+        loadAgents();
+    </script>
+</body>
+</html>

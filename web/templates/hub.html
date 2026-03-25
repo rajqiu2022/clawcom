@@ -1,0 +1,268 @@
+{% extends "base.html" %}
+
+{% block title %}通信中心 - OpenClaw{% endblock %}
+{% block page_title %}通信中心{% endblock %}
+
+{% block nav_hub %}active{% endblock %}
+
+{% block top_actions %}
+<div class="action-buttons">
+    <span class="status-badge" id="agentStatus">
+        <span class="status-dot offline"></span>
+        <span id="agentName">未连接</span>
+    </span>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="hub-container">
+    <!-- 左侧：在线 Agent 列表 -->
+    <div class="hub-sidebar">
+        <div class="panel">
+            <div class="panel-header">
+                <h3>在线 Agent</h3>
+                <span class="count-badge" id="onlineCount">0</span>
+            </div>
+            <div class="agent-list" id="agentList">
+                <div class="empty-state">暂无在线 Agent</div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">
+                <h3>统计</h3>
+            </div>
+            <div class="stats-grid" id="statsGrid">
+                <div class="stat-item">
+                    <div class="stat-value" id="statTotal">-</div>
+                    <div class="stat-label">总 Agent</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="statOnline">-</div>
+                    <div class="stat-label">在线</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="statMessages">-</div>
+                    <div class="stat-label">总消息</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="statUnread">-</div>
+                    <div class="stat-label">我的未读</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 中间：对话列表 -->
+    <div class="hub-main">
+        <div class="panel conversations-panel">
+            <div class="panel-header">
+                <h3>最近会话</h3>
+            </div>
+            <div class="conversation-list" id="conversationList">
+                <div class="empty-state">暂无会话记录</div>
+            </div>
+        </div>
+
+        <!-- 消息输入 -->
+        <div class="message-compose">
+            <div class="compose-recipient" id="composeRecipient">
+                <span class="placeholder">选择右侧收件人开始对话</span>
+            </div>
+            <div class="compose-input">
+                <textarea id="messageInput" placeholder="输入消息..." rows="3"></textarea>
+                <button class="btn-primary" id="sendBtn" disabled>发送</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 右侧：收件箱 -->
+    <div class="hub-inbox">
+        <div class="panel">
+            <div class="panel-header">
+                <h3>收件箱</h3>
+                <span class="count-badge" id="inboxCount">0</span>
+            </div>
+            <div class="inbox-list" id="inboxList">
+                <div class="empty-state">暂无消息</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const API_BASE = '/api/v1/agent-hub';
+
+// 当前连接的 Agent 信息
+let currentAgent = null;
+let selectedReceiver = null;
+
+// 加载统计数据
+async function loadStats() {
+    try {
+        const res = await fetch(`${API_BASE}/stats`);
+        const data = await res.json();
+        document.getElementById('statTotal').textContent = data.total_agents || 0;
+        document.getElementById('statOnline').textContent = data.online_agents || 0;
+        document.getElementById('statMessages').textContent = data.total_messages || 0;
+        document.getElementById('statUnread').textContent = data.my_unread || 0;
+    } catch (e) {
+        console.error('加载统计失败:', e);
+    }
+}
+
+// 加载在线 Agent
+async function loadOnlineAgents() {
+    try {
+        const res = await fetch(`${API_BASE}/agents/online`);
+        const data = await res.json();
+        const agents = data.agents || [];
+        document.getElementById('onlineCount').textContent = agents.length;
+
+        const list = document.getElementById('agentList');
+        if (agents.length === 0) {
+            list.innerHTML = '<div class="empty-state">暂无在线 Agent</div>';
+            return;
+        }
+
+        list.innerHTML = agents.map(agent => `
+            <div class="agent-item" data-id="${agent.id}" data-name="${agent.name}">
+                <div class="agent-avatar">${agent.name.charAt(0).toUpperCase()}</div>
+                <div class="agent-info">
+                    <div class="agent-name">${agent.name}</div>
+                    <div class="agent-key">${agent.agent_key}</div>
+                </div>
+                <span class="status-dot online"></span>
+            </div>
+        `).join('');
+
+        // 点击选择收件人
+        list.querySelectorAll('.agent-item').forEach(item => {
+            item.addEventListener('click', () => selectReceiver(item));
+        });
+    } catch (e) {
+        console.error('加载在线 Agent 失败:', e);
+    }
+}
+
+// 选择收件人
+function selectReceiver(item) {
+    document.querySelectorAll('.agent-item').forEach(i => i.classList.remove('selected'));
+    item.classList.add('selected');
+
+    selectedReceiver = {
+        id: parseInt(item.dataset.id),
+        name: item.dataset.name
+    };
+
+    document.getElementById('composeRecipient').innerHTML =
+        `<span class="recipient-label">发送给:</span> <strong>${selectedReceiver.name}</strong>`;
+    document.getElementById('sendBtn').disabled = false;
+    document.getElementById('messageInput').focus();
+}
+
+// 加载收件箱
+async function loadInbox() {
+    try {
+        const res = await fetch(`${API_BASE}/messages/inbox`);
+        const data = await res.json();
+        const messages = data.messages || [];
+        document.getElementById('inboxCount').textContent = data.unread_count || 0;
+
+        const list = document.getElementById('inboxList');
+        if (messages.length === 0) {
+            list.innerHTML = '<div class="empty-state">暂无消息</div>';
+            return;
+        }
+
+        list.innerHTML = messages.map(msg => `
+            <div class="inbox-item ${msg.status === 'unread' ? 'unread' : ''}" data-id="${msg.id}">
+                <div class="msg-sender">${msg.sender_name || '未知'}</div>
+                <div class="msg-content">${msg.content.substring(0, 50)}${msg.content.length > 50 ? '...' : ''}</div>
+                <div class="msg-time">${formatTime(msg.created_at)}</div>
+            </div>
+        `).join('');
+
+        // 点击标记已读
+        list.querySelectorAll('.inbox-item').forEach(item => {
+            item.addEventListener('click', () => markRead(item));
+        });
+    } catch (e) {
+        console.error('加载收件箱失败:', e);
+    }
+}
+
+// 标记消息已读
+async function markRead(item) {
+    const msgId = item.dataset.id;
+    try {
+        await fetch(`${API_BASE}/messages/${msgId}/read`, { method: 'PUT' });
+        item.classList.remove('unread');
+        loadInbox();
+        loadStats();
+    } catch (e) {
+        console.error('标记已读失败:', e);
+    }
+}
+
+// 发送消息
+async function sendMessage() {
+    if (!selectedReceiver || !messageInput.value.trim()) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                receiver_id: selectedReceiver.id,
+                content: messageInput.value.trim()
+            })
+        });
+
+        if (res.ok) {
+            messageInput.value = '';
+            loadInbox();
+            loadStats();
+        }
+    } catch (e) {
+        console.error('发送消息失败:', e);
+    }
+}
+
+// 格式化时间
+function formatTime(isoString) {
+    if (!isoString) return '';
+    const d = new Date(isoString);
+    const now = new Date();
+    const diff = now - d;
+
+    if (diff < 60000) return '刚刚';
+    if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前';
+    if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前';
+    return d.toLocaleDateString('zh-CN');
+}
+
+// 事件绑定
+document.getElementById('sendBtn').addEventListener('click', sendMessage);
+document.getElementById('messageInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+});
+
+// 初始化
+loadStats();
+loadOnlineAgents();
+loadInbox();
+
+// 定期刷新
+setInterval(() => {
+    loadStats();
+    loadOnlineAgents();
+    loadInbox();
+}, 30000);
+</script>
+{% endblock %}
