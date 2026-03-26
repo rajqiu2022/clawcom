@@ -1,0 +1,387 @@
+{% extends "base.html" %}
+{% block title %}工作规范 Rules - OpenClaw 管理系统{% endblock %}
+{% block nav_skills %}active{% endblock %}
+{% block page_title %}工作规范 Rules{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <button class="btn btn-primary" onclick="openCreateModal()">+ 新建 Rule</button>
+    <button class="btn btn-ghost" onclick="openAIGenerateModal()" style="color:#9b59b6">
+        &#x1F916; AI 生成 Rule
+    </button>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="tab-bar">
+    <div class="tab-item active" data-tab="all" onclick="filterRules('all')">全部</div>
+    <div class="tab-item" data-tab="global" onclick="filterRules('global')">通用</div>
+    <div class="tab-item" data-tab="project" onclick="filterRules('project')">按项目</div>
+    <div class="tab-item" data-tab="module" onclick="filterRules('module')">按模块</div>
+</div>
+
+<div class="skill-grid" id="rules-grid">
+    <div class="loading"><span class="spinner"></span></div>
+</div>
+
+<!-- 新建/编辑 Rule 弹窗 -->
+<div class="modal-overlay" id="create-modal">
+    <div class="modal" style="max-width:600px">
+        <h2 class="modal-title" id="modal-title">新建 Rule</h2>
+        <form id="create-form">
+            <input type="hidden" name="edit_id" id="edit-id">
+            <div class="form-group">
+                <label class="form-label">标识名 *</label>
+                <input class="form-input" name="name" id="rule-name" placeholder="如：test-case-review" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">显示名称 *</label>
+                <input class="form-input" name="display_name" id="rule-display-name" placeholder="如：测试用例评审规范" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">描述</label>
+                <textarea class="form-textarea" name="description" placeholder="这个 Rule 做什么..."></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">适用范围</label>
+                <div style="display:flex;gap:16px;margin-top:6px">
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="global" checked onchange="onScopeChange()">
+                        <span>通用</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="project" onchange="onScopeChange()">
+                        <span>按项目</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="module" onchange="onScopeChange()">
+                        <span>按模块</span>
+                    </label>
+                </div>
+            </div>
+            <!-- 按项目：项目多选 -->
+            <div class="form-group" id="scope-projects-group" style="display:none">
+                <label class="form-label">选择项目（可多选）</label>
+                <div id="project-checkboxes" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;max-height:160px;overflow-y:auto">
+                </div>
+            </div>
+            <!-- 按模块：模块名输入 -->
+            <div class="form-group" id="scope-modules-group" style="display:none">
+                <label class="form-label">适用模块名（多个用逗号分隔）</label>
+                <input class="form-input" name="applicable_modules_input" id="applicable-modules-input" placeholder="如：登录模块,支付模块">
+            </div>
+            <div class="form-group">
+                <label class="form-label">规范内容模板（Markdown）</label>
+                <textarea class="form-textarea" name="content_template" style="min-height:160px;font-family:monospace" placeholder="# 规范标题&#10;&#10;## 角色定义&#10;...&#10;&#10;## 工作准则&#10;..."></textarea>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- AI 生成 Rule 弹窗 -->
+<div class="modal-overlay" id="ai-modal">
+    <div class="modal" style="max-width:600px">
+        <h2 class="modal-title">&#x1F916; AI 生成 Rule</h2>
+        <form id="ai-generate-form">
+            <div class="form-group">
+                <label class="form-label">需求描述 *</label>
+                <textarea class="form-textarea" name="description" id="ai-description" rows="4" placeholder="描述你需要的规则，如：测试用例评审规范，定义评审流程、评审要点、输出要求等"></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">适用范围</label>
+                <div style="display:flex;gap:16px;margin-top:6px">
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="global" checked>
+                        <span>通用</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="project">
+                        <span>按项目</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="module">
+                        <span>按模块</span>
+                    </label>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeAIGenerateModal()">取消</button>
+                <button type="submit" class="btn btn-primary" style="background:#9b59b6">&#x1F916; 生成</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Rule 内容预览弹窗 -->
+<div class="modal-overlay" id="preview-modal">
+    <div class="modal" style="max-width:800px;max-height:80vh;display:flex;flex-direction:column">
+        <h2 class="modal-title">Rule 内容预览</h2>
+        <div style="flex:1;overflow-y:auto;padding:10px 0">
+            <pre id="preview-content" style="white-space:pre-wrap;font-size:0.9rem;line-height:1.6"></pre>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closePreviewModal()">关闭</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allRules = [];
+let allProjects = [];
+let currentFilter = 'all';
+
+async function loadRules() {
+    try {
+        allRules = await API.request('GET', '/rules');
+        renderRules();
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+async function loadProjectsForScope() {
+    try {
+        allProjects = await API.listProjects();
+        renderProjectCheckboxes();
+    } catch (err) {
+        console.error('加载项目失败', err);
+    }
+}
+
+function renderProjectCheckboxes() {
+    const container = $('#project-checkboxes');
+    container.innerHTML = allProjects.map(p => `
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.9rem">
+            <input type="checkbox" value="${p.id}" name="applicable_projects">
+            <span>${p.name}</span>
+        </label>
+    `).join('');
+}
+
+function onScopeChange() {
+    const scope = document.querySelector('input[name="scope"]:checked').value;
+    $('#scope-projects-group').style.display = scope === 'project' ? '' : 'none';
+    $('#scope-modules-group').style.display = scope === 'module' ? '' : 'none';
+}
+
+function filterRules(tab) {
+    currentFilter = tab;
+    $$('.tab-item').forEach(t => t.classList.remove('active'));
+    $(`.tab-item[data-tab="${tab}"]`).classList.add('active');
+    renderRules();
+}
+
+function scopeTag(r) {
+    if (r.scope === 'global') return '<span class="tag tag-accent">通用</span>';
+    if (r.scope === 'project') {
+        const names = (r.applicable_projects || []).map(pid => {
+            const p = allProjects.find(x => x.id === pid);
+            return p ? p.name : pid;
+        }).join(', ');
+        return `<span class="tag tag-blue">项目</span>${names ? `<span style="font-size:0.82rem;margin-left:4px">${names}</span>` : ''}`;
+    }
+    if (r.scope === 'module') {
+        const names = (r.applicable_modules || []).join(', ');
+        return `<span class="tag" style="background:#6c5ce7;color:#fff">模块</span>${names ? `<span style="font-size:0.82rem;margin-left:4px">${names}</span>` : ''}`;
+    }
+    return '';
+}
+
+function categoryTag(r) {
+    const map = {
+        standard: ['tag-accent', '标准'],
+        custom: ['tag-green', '自定义'],
+        ai_generated: ['tag-orange', 'AI生成'],
+    };
+    const [cls, label] = map[r.category] || ['tag-blue', r.category];
+    return `<span class="tag ${cls}">${label}</span>`;
+}
+
+function renderRules() {
+    const filtered = currentFilter === 'all'
+        ? allRules
+        : allRules.filter(r => r.scope === currentFilter);
+
+    const grid = $('#rules-grid');
+
+    if (filtered.length === 0) {
+        grid.innerHTML = `
+            <div class="empty-state" style="grid-column:1/-1">
+                <div class="empty-state-icon">&#x1F4CB;</div>
+                <div class="empty-state-text">暂无 Rules<br><span style="font-size:0.82rem;color:var(--text-muted)">点击"新建"或"AI生成"创建工作规范</span></div>
+            </div>`;
+        return;
+    }
+
+    grid.innerHTML = filtered.map(r => `
+        <div class="skill-card">
+            <div class="skill-card-header">
+                <span class="skill-name">${r.display_name}</span>
+                ${categoryTag(r)}
+                ${scopeTag(r)}
+            </div>
+            <div class="skill-desc">${r.description || ''}</div>
+            <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:0.78rem;color:var(--text-muted)">${r.name}</span>
+                <div style="display:flex;gap:8px">
+                    <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="previewRule(${r.id})">预览</button>
+                    <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="editRule(${r.id})">编辑</button>
+                    <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem;color:var(--red)" onclick="deleteRule(${r.id})">删除</button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+// 新建/编辑
+async function openCreateModal() {
+    await loadProjectsForScope();
+    onScopeChange();
+    $('#create-form').reset();
+    $('#edit-id').value = '';
+    $('#modal-title').textContent = '新建 Rule';
+    $('#rule-name').disabled = false;
+    $('#create-modal').classList.add('active');
+}
+
+function closeCreateModal() { $('#create-modal').classList.remove('active'); }
+
+function editRule(id) {
+    const rule = allRules.find(r => r.id === id);
+    if (!rule) return;
+
+    $('#edit-id').value = id;
+    $('#modal-title').textContent = '编辑 Rule';
+    $('#rule-name').value = rule.name;
+    $('#rule-name').disabled = true;  // 不允许修改标识名
+    $('#rule-display-name').value = rule.display_name;
+    $('#rule-name').closest('.form-group').querySelector('input').value = rule.name;
+    $('#create-form').description && ($('#create-form').description.value = rule.description || '');
+    // 设置 scope
+    document.querySelectorAll('input[name="scope"]').forEach(el => {
+        el.checked = el.value === rule.scope;
+    });
+    onScopeChange();
+
+    $('#create-modal').classList.add('active');
+}
+
+$('#create-modal').addEventListener('click', e => {
+    if (e.target === $('#create-modal')) closeCreateModal();
+});
+
+$('#create-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const data = Object.fromEntries(form);
+    const editId = $('#edit-id').value;
+
+    // 处理适用范围
+    if (data.scope === 'project') {
+        const checked = [...document.querySelectorAll('input[name="applicable_projects"]:checked')]
+            .map(el => parseInt(el.value));
+        data.applicable_projects = checked;
+        delete data.applicable_modules_input;
+    } else if (data.scope === 'module') {
+        const modules = data.applicable_modules_input
+            ? data.applicable_modules_input.split(',').map(s => s.trim()).filter(Boolean)
+            : [];
+        data.applicable_modules = modules;
+        delete data.applicable_projects;
+        delete data.applicable_modules_input;
+    } else {
+        delete data.applicable_projects;
+        delete data.applicable_modules;
+        delete data.applicable_modules_input;
+    }
+
+    try {
+        if (editId) {
+            await API.request('PUT', `/rules/${editId}`, data);
+            showToast('Rule 更新成功！', 'success');
+        } else {
+            await API.request('POST', '/rules', data);
+            showToast('Rule 创建成功！', 'success');
+        }
+        closeCreateModal();
+        loadRules();
+    } catch (err) {
+        showToast((editId ? '更新' : '创建') + '失败: ' + err.message, 'error');
+    }
+});
+
+async function deleteRule(id) {
+    if (!confirm('确定要删除这个 Rule 吗？')) return;
+    try {
+        await API.request('DELETE', `/rules/${id}`);
+        showToast('Rule 已删除', 'success');
+        loadRules();
+    } catch (err) {
+        showToast('删除失败: ' + err.message, 'error');
+    }
+}
+
+function previewRule(id) {
+    const rule = allRules.find(r => r.id === id);
+    if (!rule) return;
+    $('#preview-content').textContent = rule.content_template || '(无内容)';
+    $('#preview-modal').classList.add('active');
+}
+
+function closePreviewModal() { $('#preview-modal').classList.remove('active'); }
+
+$('#preview-modal').addEventListener('click', e => {
+    if (e.target === $('#preview-modal')) closePreviewModal();
+});
+
+// AI 生成
+function openAIGenerateModal() {
+    $('#ai-generate-form').reset();
+    $('#ai-modal').classList.add('active');
+}
+
+function closeAIGenerateModal() { $('#ai-modal').classList.remove('active'); }
+
+$('#ai-modal').addEventListener('click', e => {
+    if (e.target === $('#ai-modal')) closeAIGenerateModal();
+});
+
+$('#ai-generate-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const data = Object.fromEntries(form);
+
+    if (!data.description.trim()) {
+        showToast('请输入需求描述', 'error');
+        return;
+    }
+
+    const btn = e.target.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    btn.textContent = '生成中...';
+
+    try {
+        const result = await API.request('POST', '/ai/generate-rule', data);
+        showToast('Rule 生成成功！', 'success');
+        closeAIGenerateModal();
+        // 预览生成的 Rule
+        $('#preview-content').textContent = result.content || '(无内容)';
+        $('#preview-modal').classList.add('active');
+        loadRules();
+    } catch (err) {
+        showToast('生成失败: ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '🔥 AI 生成';
+    }
+});
+
+loadRules();
+</script>
+{% endblock %}
