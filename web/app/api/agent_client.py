@@ -239,3 +239,71 @@ def get_claw_task(claw_id, task_id):
     task = AgentTask.query.filter_by(claw_id=claw_id, task_id=task_id).first_or_404()
 
     return jsonify(task.to_dict())
+
+
+# ==================== 轮询模式接口 ====================
+
+@agent_bp.route('/<int:claw_id>/pending-tasks', methods=['GET'])
+@require_claw_token
+def get_pending_tasks_poll(claw_id, claw=None):
+    """
+    轮询模式专用接口 - OpenClaw 客户端定期轮询获取待处理任务
+
+    请求方式：GET /api/openclaws/<claw_id>/pending-tasks
+    认证：Authorization: Bearer <token>
+
+    返回：
+    {
+        "has_tasks": true/false,
+        "tasks": [...],  // 最多10条
+        "server_time": "..."
+    }
+    """
+    # 获取待处理任务
+    tasks = AgentTask.query.filter(
+        AgentTask.claw_id == claw_id,
+        AgentTask.status == 'pending'
+    ).order_by(AgentTask.created_at.asc()).limit(10).all()
+
+    # 标记为 running
+    for task in tasks:
+        task.status = 'running'
+        task.assigned_at = datetime.utcnow()
+    db.session.commit()
+
+    return jsonify({
+        'has_tasks': len(tasks) > 0,
+        'tasks': [t.to_dict() for t in tasks],
+        'server_time': datetime.utcnow().isoformat(),
+    })
+
+
+@agent_bp.route('/<int:claw_id>/poll', methods=['POST'])
+@require_claw_token
+def poll_task_result(claw_id, claw=None):
+    """
+    轮询模式 - 上报任务执行结果（兼容 MCP 模式）
+
+    请求体：
+    {
+        "task_id": "xxx",
+        "status": "completed/failed",
+        "result": "执行结果",
+        "error": "错误信息"
+    }
+    """
+    data = request.get_json()
+    if not data or not data.get('task_id'):
+        return jsonify({'error': 'task_id 为必填项'}), 400
+
+    task = AgentTask.query.filter_by(task_id=data['task_id'], claw_id=claw_id).first()
+    if not task:
+        return jsonify({'error': '任务不存在'}), 404
+
+    task.status = data.get('status', 'completed')
+    task.result = data.get('result')
+    task.error = data.get('error')
+    task.completed_at = datetime.utcnow()
+    db.session.commit()
+
+    return jsonify({'status': 'ok', 'task': task.to_dict()})
