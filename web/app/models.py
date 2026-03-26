@@ -91,7 +91,7 @@ class OpenClawInstance(db.Model):
 
 
 class Skill(db.Model):
-    """Skills 库"""
+    """Skills 库（支持 OpenSpace 自动进化技能）"""
     __tablename__ = 'skills'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
@@ -100,8 +100,9 @@ class Skill(db.Model):
     display_name = db.Column(db.String(100), nullable=False,
                              comment='显示名称')
     description = db.Column(db.Text, comment='功能描述')
-    category = db.Column(db.Enum('standard', 'custom', 'community'),
-                         default='standard')
+    category = db.Column(db.Enum('standard', 'custom', 'evolved'),
+                         default='standard',
+                         comment='分类：standard=标准预置，custom=手动创建，evolved=OpenSpace自动进化')
     trigger_phrase = db.Column(db.String(255), comment='触发短语')
     template_content = db.Column(db.Text, comment='Skill 模板内容')
     scope = db.Column(db.Enum('global', 'project', 'module'),
@@ -110,10 +111,25 @@ class Skill(db.Model):
     applicable_modules = db.Column(db.JSON, comment='适用模块名列表（scope=module时）')
     used_by_count = db.Column(db.Integer, default=0,
                               comment='使用中的 OpenClaw 数量')
+
+    # OpenSpace 进化指标（仅 evolved 类型有值）
+    evolve_source = db.Column(db.String(100),
+                              comment='进化来源 OpenClaw 名称')
+    success_rate = db.Column(db.Float, default=0,
+                             comment='成功率（0-100）')
+    total_runs = db.Column(db.Integer, default=0,
+                           comment='总执行次数')
+    error_count = db.Column(db.Integer, default=0,
+                            comment='错误次数')
+    last_evolved_at = db.Column(db.DateTime,
+                                comment='最后进化时间')
+    evolve_history = db.Column(db.JSON,
+                               comment='进化历史 [{action, timestamp, detail}]')
+
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     def to_dict(self):
-        return {
+        data = {
             'id': self.id,
             'name': self.name,
             'display_name': self.display_name,
@@ -127,6 +143,18 @@ class Skill(db.Model):
             'used_by_count': self.used_by_count,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
+        # 进化指标
+        if self.category == 'evolved':
+            data.update({
+                'evolve_source': self.evolve_source,
+                'success_rate': self.success_rate,
+                'total_runs': self.total_runs,
+                'error_count': self.error_count,
+                'last_evolved_at': (self.last_evolved_at.isoformat()
+                                    if self.last_evolved_at else None),
+                'evolve_history': self.evolve_history or [],
+            })
+        return data
 
 
 class OpenClawSkill(db.Model):
@@ -203,6 +231,10 @@ class KnowledgeEntry(db.Model):
     module_name = db.Column(db.String(100), default=None)
     source_openclaw_id = db.Column(
         db.Integer, db.ForeignKey('openclaw_instances.id'))
+    source_type = db.Column(
+        db.Enum('openclaw', 'openspace', 'manual'),
+        default='manual',
+        comment='来源类型：openclaw=Agent记录，openspace=自动进化，manual=手动录入')
     status = db.Column(
         db.Enum('draft', 'pending_review', 'approved', 'rejected'),
         default='draft')
@@ -229,6 +261,7 @@ class KnowledgeEntry(db.Model):
             'source_openclaw_id': self.source_openclaw_id,
             'source_openclaw_name': (self.source_openclaw.name
                                      if self.source_openclaw else None),
+            'source_type': self.source_type,
             'status': self.status,
             'reviewer_notes': self.reviewer_notes,
             'approved_at': (self.approved_at.isoformat()
@@ -423,3 +456,165 @@ class Conversation(db.Model):
             'last_message_at': self.last_message_at.isoformat() if self.last_message_at else None,
         }
         return data
+
+
+# ============== Rules 工作规范模型 ==============
+
+class Rule(db.Model):
+    """Rules 工作规范库"""
+    __tablename__ = 'rules'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(100), nullable=False, unique=True,
+                     comment='Rule 标识名')
+    display_name = db.Column(db.String(100), nullable=False,
+                             comment='显示名称')
+    description = db.Column(db.Text, comment='功能描述')
+    category = db.Column(db.Enum('standard', 'custom', 'ai_generated'),
+                        default='standard',
+                        comment='分类：standard=标准预置，custom=手动创建，ai_generated=AI生成')
+    scope = db.Column(db.Enum('global', 'project', 'module'),
+                      default='global', comment='作用域：global=全局，project=按项目，module=按模块')
+    applicable_projects = db.Column(db.JSON, comment='适用项目ID列表（scope=project时）')
+    applicable_modules = db.Column(db.JSON, comment='适用模块名列表（scope=module时）')
+
+    # 生成的规范内容（Markdown格式，会被写入OpenClaw的配置文件）
+    content_template = db.Column(db.Text, comment='规范内容模板')
+
+    # 关联到哪些 OpenClaw
+    openclaws = db.relationship('OpenClawRule', backref='rule',
+                               lazy='dynamic', cascade='all, delete-orphan')
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow,
+                          onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'display_name': self.display_name,
+            'description': self.description,
+            'category': self.category,
+            'scope': self.scope,
+            'applicable_projects': self.applicable_projects or [],
+            'applicable_modules': self.applicable_modules or [],
+            'content_template': self.content_template,
+            'openclaw_ids': [r.openclaw_id for r in self.openclaws.filter_by(enabled=True)],
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class OpenClawRule(db.Model):
+    """OpenClaw 与 Rule 的关联表"""
+    __tablename__ = 'openclaw_rules'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    openclaw_id = db.Column(db.Integer,
+                            db.ForeignKey('openclaw_instances.id'),
+                            nullable=False)
+    rule_id = db.Column(db.Integer, db.ForeignKey('rules.id'),
+                        nullable=False)
+    enabled = db.Column(db.Boolean, default=True)
+    applied_at = db.Column(db.DateTime, comment='应用到OpenClaw的时间')
+    applied = db.Column(db.Boolean, default=False, comment='是否已应用')
+
+    __table_args__ = (
+        db.UniqueConstraint('openclaw_id', 'rule_id',
+                           name='uq_openclaw_rule'),
+    )
+
+
+# ============== AI 用例库模型 ==============
+
+class TestCaseLibrary(db.Model):
+    """测试用例库"""
+    __tablename__ = 'test_case_libraries'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(100), nullable=False,
+                     comment='用例库名称')
+    description = db.Column(db.Text, comment='用例库描述')
+    project_name = db.Column(db.String(100), comment='所属项目')
+    module_name = db.Column(db.String(100), comment='所属模块')
+    owner = db.Column(db.String(50), comment='负责人')
+    status = db.Column(db.Enum('active', 'archived'),
+                      default='active', comment='状态')
+
+    # 脑图结构（JSON格式）
+    mindmap = db.Column(db.JSON, comment='脑图结构')
+
+    cases = db.relationship('TestCase', backref='library',
+                           lazy='dynamic', cascade='all, delete-orphan')
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow,
+                          onupdate=datetime.utcnow)
+
+    def to_dict(self, with_cases=False):
+        data = {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'project_name': self.project_name,
+            'module_name': self.module_name,
+            'owner': self.owner,
+            'status': self.status,
+            'mindmap': self.mindmap,
+            'case_count': self.cases.count(),
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if with_cases:
+            data['cases'] = [c.to_dict() for c in self.cases]
+        return data
+
+
+class TestCase(db.Model):
+    """测试用例"""
+    __tablename__ = 'test_cases'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    library_id = db.Column(db.Integer,
+                           db.ForeignKey('test_case_libraries.id'),
+                           nullable=False)
+    case_id = db.Column(db.String(100), comment='用例编号')
+    title = db.Column(db.String(255), nullable=False, comment='用例标题')
+    priority = db.Column(db.Enum('P0', 'P1', 'P2', 'P3'),
+                        default='P2', comment='优先级')
+    type = db.Column(db.Enum('functional', 'interface', 'performance', 'security'),
+                    default='functional', comment='用例类型')
+
+    # 用例内容（JSON格式，包含步骤、预期结果等）
+    content = db.Column(db.JSON, comment='用例详细内容')
+
+    # 脑图节点ID（用于脑图定位）
+    mindmap_node_id = db.Column(db.String(50), comment='脑图节点ID')
+
+    # AI 生成标记
+    ai_generated = db.Column(db.Boolean, default=False,
+                            comment='是否AI生成')
+    ai_prompt = db.Column(db.Text, comment='AI生成时的prompt')
+
+    tags = db.Column(db.JSON, comment='标签')
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow,
+                          onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'library_id': self.library_id,
+            'case_id': self.case_id,
+            'title': self.title,
+            'priority': self.priority,
+            'type': self.type,
+            'content': self.content,
+            'mindmap_node_id': self.mindmap_node_id,
+            'ai_generated': self.ai_generated,
+            'tags': self.tags or [],
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }

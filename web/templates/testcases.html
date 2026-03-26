@@ -1,0 +1,654 @@
+{% extends "base.html" %}
+{% block title %}AI 用例库 - OpenClaw 管理系统{% endblock %}
+{% block page_title %}AI 用例库{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <select class="form-select" id="library-select" onchange="switchLibrary()" style="min-width:200px">
+        <option value="">-- 选择用例库 --</option>
+    </select>
+    <button class="btn btn-primary" onclick="openCreateLibraryModal()">+ 新建用例库</button>
+    <button class="btn btn-ghost" onclick="openAIGenerateModal()" style="color:#9b59b6">
+        &#x1F916; AI 生成用例
+    </button>
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="library-container" style="display:none">
+    <!-- 用例库信息 -->
+    <div class="panel" style="margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+                <h3 id="library-name" style="margin:0;font-size:1.1rem"></h3>
+                <p id="library-desc" style="margin:4px 0 0;color:var(--text-muted);font-size:0.9rem"></p>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+                <span class="tag tag-blue" id="case-count">0 个用例</span>
+                <button class="btn btn-ghost" onclick="editLibrary()">编辑</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 标签页切换 -->
+    <div class="tab-bar" style="margin-bottom:16px">
+        <div class="tab-item active" data-tab="mindmap" onclick="switchTab('mindmap')">&#x1F4CB; 脑图</div>
+        <div class="tab-item" data-tab="list" onclick="switchTab('list')">&#x1F4C4; 列表</div>
+        <div class="tab-item" data-tab="chat" onclick="switchTab('chat')">&#x1F916; AI 对话</div>
+    </div>
+
+    <!-- 脑图视图 -->
+    <div id="mindmap-view" class="panel">
+        <div id="mindmap-container" style="min-height:400px;overflow:auto">
+            <div class="loading"><span class="spinner"></span></div>
+        </div>
+    </div>
+
+    <!-- 列表视图 -->
+    <div id="list-view" class="panel" style="display:none">
+        <div style="margin-bottom:12px;display:flex;gap:10px;align-items:center">
+            <input class="form-input" id="case-search" placeholder="搜索用例..." oninput="filterCases()" style="max-width:300px">
+            <select class="form-select" id="priority-filter" onchange="filterCases()" style="width:120px">
+                <option value="">全部优先级</option>
+                <option value="P0">P0</option>
+                <option value="P1">P1</option>
+                <option value="P2">P2</option>
+                <option value="P3">P3</option>
+            </select>
+            <select class="form-select" id="type-filter" onchange="filterCases()" style="width:140px">
+                <option value="">全部类型</option>
+                <option value="functional">功能测试</option>
+                <option value="interface">接口测试</option>
+                <option value="performance">性能测试</option>
+                <option value="security">安全测试</option>
+            </select>
+            <button class="btn btn-primary" onclick="openCreateCaseModal()" style="margin-left:auto">+ 添加用例</button>
+        </div>
+        <div id="cases-table-container">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>用例编号</th>
+                        <th>用例标题</th>
+                        <th>优先级</th>
+                        <th>类型</th>
+                        <th>标签</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="cases-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- AI 对话视图 -->
+    <div id="chat-view" class="panel" style="display:none">
+        <div style="display:flex;gap:16px;height:500px">
+            <!-- 对话区域 -->
+            <div style="flex:1;display:flex;flex-direction:column">
+                <div id="chat-messages" style="flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px;background:#fafafa">
+                    <div style="text-align:center;color:var(--text-muted);padding:40px">
+                        &#x1F916; 输入你的需求，AI 会帮你管理用例库<br>
+                        <span style="font-size:0.85rem">支持：添加用例、修改用例、查询用例、生成脑图结构</span>
+                    </div>
+                </div>
+                <div style="display:flex;gap:8px">
+                    <input class="form-input" id="chat-input" placeholder="输入你的需求..." onkeydown="if(event.key==='Enter')sendChat()">
+                    <button class="btn btn-primary" onclick="sendChat()">发送</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 空状态 -->
+<div id="empty-state" class="empty-state">
+    <div class="empty-state-icon">&#x1F4CB;</div>
+    <div class="empty-state-text">请选择或创建一个用例库</div>
+</div>
+
+<!-- 新建/编辑用例库弹窗 -->
+<div class="modal-overlay" id="library-modal">
+    <div class="modal" style="max-width:500px">
+        <h2 class="modal-title" id="library-modal-title">新建用例库</h2>
+        <form id="library-form">
+            <input type="hidden" id="library-edit-id">
+            <div class="form-group">
+                <label class="form-label">用例库名称 *</label>
+                <input class="form-input" name="name" id="library-name-input" placeholder="如：登录模块用例库" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">描述</label>
+                <textarea class="form-textarea" name="description" id="library-desc-input" placeholder="用例库描述..."></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">项目</label>
+                <input class="form-input" name="project_name" id="library-project-input" placeholder="所属项目">
+            </div>
+            <div class="form-group">
+                <label class="form-label">模块</label>
+                <input class="form-input" name="module_name" id="library-module-input" placeholder="所属模块">
+            </div>
+            <div class="form-group">
+                <label class="form-label">负责人</label>
+                <input class="form-input" name="owner" id="library-owner-input" placeholder="负责人">
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeLibraryModal()">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 添加/编辑用例弹窗 -->
+<div class="modal-overlay" id="case-modal">
+    <div class="modal" style="max-width:700px">
+        <h2 class="modal-title" id="case-modal-title">添加用例</h2>
+        <form id="case-form">
+            <input type="hidden" id="case-edit-id">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                <div class="form-group">
+                    <label class="form-label">用例编号</label>
+                    <input class="form-input" name="case_id" id="case-id-input" placeholder="如：TC_001">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">优先级</label>
+                    <select class="form-select" name="priority" id="case-priority-input">
+                        <option value="P0">P0 - 最高</option>
+                        <option value="P1">P1 - 高</option>
+                        <option value="P2" selected>P2 - 中</option>
+                        <option value="P3">P3 - 低</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">用例标题 *</label>
+                <input class="form-input" name="title" id="case-title-input" placeholder="用例标题" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">用例类型</label>
+                <select class="form-select" name="type" id="case-type-input">
+                    <option value="functional">功能测试</option>
+                    <option value="interface">接口测试</option>
+                    <option value="performance">性能测试</option>
+                    <option value="security">安全测试</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">前置条件</label>
+                <textarea class="form-textarea" name="preconditions" id="case-pre-input" rows="2" placeholder="执行用例的前置条件..."></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">测试步骤</label>
+                <textarea class="form-textarea" name="steps" id="case-steps-input" rows="3" placeholder="每行一个步骤，格式：1. xxx" style="font-family:monospace"></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">预期结果</label>
+                <textarea class="form-textarea" name="expected_results" id="case-results-input" rows="3" placeholder="每行一个预期结果" style="font-family:monospace"></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">标签（多个用逗号分隔）</label>
+                <input class="form-input" name="tags_input" id="case-tags-input" placeholder="如：登录,冒烟测试">
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeCaseModal()">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- AI 生成用例弹窗 -->
+<div class="modal-overlay" id="ai-generate-modal">
+    <div class="modal" style="max-width:600px">
+        <h2 class="modal-title">&#x1F916; AI 批量生成用例</h2>
+        <form id="ai-generate-form">
+            <div class="form-group">
+                <label class="form-label">需求描述 *</label>
+                <textarea class="form-textarea" name="requirement" rows="4" placeholder="描述你的需求，如：用户登录功能，包括正常登录、密码错误、账号锁定等场景"></textarea>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                <div class="form-group">
+                    <label class="form-label">生成数量</label>
+                    <input class="form-input" name="count" type="number" value="10" min="1" max="100">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">用例类型</label>
+                    <select class="form-select" name="type">
+                        <option value="functional">功能测试</option>
+                        <option value="interface">接口测试</option>
+                        <option value="performance">性能测试</option>
+                        <option value="security">安全测试</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeAIGenerateModal()">取消</button>
+                <button type="submit" class="btn btn-primary" style="background:#9b59b6">&#x1F916; 生成</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let libraries = [];
+let currentLibraryId = null;
+let currentLibrary = null;
+let currentTab = 'mindmap';
+let allCases = [];
+
+// 加载用例库列表
+async function loadLibraries() {
+    try {
+        libraries = await API.request('GET', '/testcase-libraries');
+        renderLibrarySelect();
+    } catch (err) {
+        showToast('加载用例库失败: ' + err.message, 'error');
+    }
+}
+
+function renderLibrarySelect() {
+    const select = $('#library-select');
+    select.innerHTML = '<option value="">-- 选择用例库 --</option>' +
+        libraries.map(lib => `<option value="${lib.id}">${lib.name}</option>`).join('');
+}
+
+async function switchLibrary() {
+    const id = parseInt($('#library-select').value);
+    if (!id) {
+        currentLibraryId = null;
+        currentLibrary = null;
+        $('#library-container').style.display = 'none';
+        $('#empty-state').style.display = '';
+        return;
+    }
+
+    try {
+        currentLibrary = await API.request('GET', `/testcase-libraries/${id}`);
+        currentLibraryId = id;
+
+        $('#library-name').textContent = currentLibrary.name;
+        $('#library-desc').textContent = currentLibrary.description || '';
+        $('#case-count').textContent = `${currentLibrary.case_count} 个用例`;
+
+        $('#library-container').style.display = '';
+        $('#empty-state').style.display = 'none';
+
+        loadCases();
+    } catch (err) {
+        showToast('加载用例库详情失败: ' + err.message, 'error');
+    }
+}
+
+async function loadCases() {
+    if (!currentLibraryId) return;
+    try {
+        allCases = await API.request('GET', `/testcase-libraries/${currentLibraryId}/cases`);
+        renderMindmap();
+        renderCasesTable();
+    } catch (err) {
+        showToast('加载用例失败: ' + err.message, 'error');
+    }
+}
+
+// 脑图渲染
+function renderMindmap() {
+    const container = $('#mindmap-container');
+
+    if (allCases.length === 0) {
+        container.innerHTML = `
+            <div style="text-align:center;padding:60px;color:var(--text-muted)">
+                <div style="font-size:3rem;margin-bottom:16px">&#x1F4CB;</div>
+                <div>暂无用例</div>
+                <div style="font-size:0.85rem;margin-top:8px">点击"添加用例"或"AI生成用例"创建</div>
+            </div>`;
+        return;
+    }
+
+    // 构建脑图树
+    const groups = {P0: [], P1: [], P2: [], P3: []};
+    allCases.forEach(c => {
+        const p = c.priority || 'P2';
+        if (!groups[p]) groups[p] = [];
+        groups[p].push(c);
+    });
+
+    let html = `<div style="padding:20px">`;
+
+    for (const [priority, cases] of Object.entries(groups)) {
+        if (cases.length === 0) continue;
+
+        const priorityColors = {
+            'P0': '#e74c3c',
+            'P1': '#e67e22',
+            'P2': '#3498db',
+            'P3': '#95a5a6'
+        };
+
+        html += `
+            <div style="margin-bottom:24px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                    <span style="background:${priorityColors[priority]};color:#fff;padding:2px 10px;border-radius:12px;font-size:0.85rem;font-weight:600">${priority}</span>
+                    <span style="color:var(--text-muted);font-size:0.85rem">${cases.length} 个用例</span>
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:8px;padding-left:20px">
+        `;
+
+        cases.forEach(c => {
+            const typeLabels = {
+                'functional': '功能',
+                'interface': '接口',
+                'performance': '性能',
+                'security': '安全'
+            };
+            html += `
+                <div style="background:#f8f9fa;border:1px solid var(--border);border-radius:8px;padding:10px 14px;min-width:200px;max-width:300px;cursor:pointer"
+                     onclick="viewCase(${c.id})">
+                    <div style="font-weight:500;margin-bottom:4px">${c.title}</div>
+                    <div style="display:flex;gap:6px;align-items:center">
+                        <span class="tag" style="font-size:0.75rem">${typeLabels[c.type] || c.type}</span>
+                        ${(c.tags || []).slice(0, 2).map(t => `<span class="tag tag-blue" style="font-size:0.7rem">${t}</span>`).join('')}
+                    </div>
+                </div>
+            `;
+        });
+
+        html += `</div></div>`;
+    }
+
+    html += `</div>`;
+    container.innerHTML = html;
+}
+
+// 表格渲染
+function renderCasesTable() {
+    const tbody = $('#cases-tbody');
+
+    if (filteredCases().length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted)">暂无用例</td></tr>';
+        return;
+    }
+
+    const priorityColors = {'P0': 'style="color:#e74c3c"', 'P1': 'style="color:#e67e22"', 'P2': 'style="color:#3498db"', 'P3': 'style="color:#95a5a6"'};
+    const typeLabels = {'functional': '功能', 'interface': '接口', 'performance': '性能', 'security': '安全'};
+
+    tbody.innerHTML = filteredCases().map(c => `
+        <tr>
+            <td><code style="font-size:0.85rem">${c.case_id || '-'}</code></td>
+            <td>${c.title}</td>
+            <td ${priorityColors[c.priority] || ''}><strong>${c.priority || '-'}</strong></td>
+            <td>${typeLabels[c.type] || c.type}</td>
+            <td>${(c.tags || []).map(t => `<span class="tag tag-blue" style="margin-right:4px">${t}</span>`).join('')}</td>
+            <td>
+                <button class="btn btn-ghost" style="padding:4px 8px" onclick="viewCase(${c.id})">查看</button>
+                <button class="btn btn-ghost" style="padding:4px 8px" onclick="editCase(${c.id})">编辑</button>
+                <button class="btn btn-ghost" style="padding:4px 8px;color:var(--red)" onclick="deleteCase(${c.id})">删除</button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function filteredCases() {
+    let cases = allCases;
+    const search = $('#case-search').value.toLowerCase();
+    const priority = $('#priority-filter').value;
+    const type = $('#type-filter').value;
+
+    if (search) cases = cases.filter(c => (c.title || '').toLowerCase().includes(search));
+    if (priority) cases = cases.filter(c => c.priority === priority);
+    if (type) cases = cases.filter(c => c.type === type);
+
+    return cases;
+}
+
+function filterCases() {
+    renderCasesTable();
+}
+
+function switchTab(tab) {
+    currentTab = tab;
+    $$('.tab-item').forEach(t => t.classList.remove('active'));
+    $(`.tab-item[data-tab="${tab}"]`).classList.add('active');
+
+    $('#mindmap-view').style.display = tab === 'mindmap' ? '' : 'none';
+    $('#list-view').style.display = tab === 'list' ? '' : 'none';
+    $('#chat-view').style.display = tab === 'chat' ? '' : 'none';
+}
+
+// 用例库弹窗
+function openCreateLibraryModal() {
+    $('#library-edit-id').value = '';
+    $('#library-modal-title').textContent = '新建用例库';
+    $('#library-form').reset();
+    $('#library-modal').classList.add('active');
+}
+
+function closeLibraryModal() { $('#library-modal').classList.remove('active'); }
+
+function editLibrary() {
+    if (!currentLibrary) return;
+    $('#library-edit-id').value = currentLibrary.id;
+    $('#library-modal-title').textContent = '编辑用例库';
+    $('#library-name-input').value = currentLibrary.name;
+    $('#library-desc-input').value = currentLibrary.description || '';
+    $('#library-project-input').value = currentLibrary.project_name || '';
+    $('#library-module-input').value = currentLibrary.module_name || '';
+    $('#library-owner-input').value = currentLibrary.owner || '';
+    $('#library-modal').classList.add('active');
+}
+
+$('#library-modal').addEventListener('click', e => {
+    if (e.target === $('#library-modal')) closeLibraryModal();
+});
+
+$('#library-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const data = Object.fromEntries(form);
+    const editId = $('#library-edit-id').value;
+
+    try {
+        if (editId) {
+            await API.request('PUT', `/testcase-libraries/${editId}`, data);
+            showToast('用例库已更新', 'success');
+        } else {
+            const result = await API.request('POST', '/testcase-libraries', data);
+            showToast('用例库创建成功', 'success');
+        }
+        closeLibraryModal();
+        loadLibraries();
+    } catch (err) {
+        showToast('保存失败: ' + err.message, 'error');
+    }
+});
+
+// 用例弹窗
+function openCreateCaseModal() {
+    $('#case-edit-id').value = '';
+    $('#case-modal-title').textContent = '添加用例';
+    $('#case-form').reset();
+    $('#case-modal').classList.add('active');
+}
+
+function closeCaseModal() { $('#case-modal').classList.remove('active'); }
+
+function editCase(id) {
+    const c = allCases.find(x => x.id === id);
+    if (!c) return;
+
+    $('#case-edit-id').value = c.id;
+    $('#case-modal-title').textContent = '编辑用例';
+    $('#case-id-input').value = c.case_id || '';
+    $('#case-title-input').value = c.title;
+    $('#case-priority-input').value = c.priority || 'P2';
+    $('#case-type-input').value = c.type || 'functional';
+
+    const content = c.content || {};
+    $('#case-pre-input').value = content.preconditions || '';
+    $('#case-steps-input').value = (content.steps || []).join('\n');
+    $('#case-results-input').value = (content.expected_results || []).join('\n');
+    $('#case-tags-input').value = (c.tags || []).join(',');
+
+    $('#case-modal').classList.add('active');
+}
+
+$('#case-modal').addEventListener('click', e => {
+    if (e.target === $('#case-modal')) closeCaseModal();
+});
+
+$('#case-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const data = Object.fromEntries(form);
+
+    // 处理 steps 和 expected_results
+    const steps = (data.steps || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const expected_results = (data.expected_results || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const tags = (data.tags_input || '').split(',').map(t => t.trim()).filter(Boolean);
+
+    const payload = {
+        case_id: data.case_id,
+        title: data.title,
+        priority: data.priority,
+        type: data.type,
+        content: {
+            preconditions: data.preconditions,
+            steps: steps,
+            expected_results: expected_results
+        },
+        tags: tags
+    };
+
+    const editId = $('#case-edit-id').value;
+    try {
+        if (editId) {
+            await API.request('PUT', `/testcase-libraries/${currentLibraryId}/cases/${editId}`, payload);
+            showToast('用例已更新', 'success');
+        } else {
+            await API.request('POST', `/testcase-libraries/${currentLibraryId}/cases`, payload);
+            showToast('用例已添加', 'success');
+        }
+        closeCaseModal();
+        loadCases();
+    } catch (err) {
+        showToast('保存失败: ' + err.message, 'error');
+    }
+});
+
+async function deleteCase(id) {
+    if (!confirm('确定要删除这个用例吗？')) return;
+    try {
+        await API.request('DELETE', `/testcase-libraries/${currentLibraryId}/cases/${id}`);
+        showToast('用例已删除', 'success');
+        loadCases();
+    } catch (err) {
+        showToast('删除失败: ' + err.message, 'error');
+    }
+}
+
+function viewCase(id) {
+    const c = allCases.find(x => x.id === id);
+    if (!c) return;
+
+    const content = c.content || {};
+    const steps = (content.steps || []).map((s, i) => `${i + 1}. ${s}`).join('\n');
+    const results = (content.expected_results || []).map((s, i) => `${i + 1}. ${s}`).join('\n');
+
+    alert(`用例: ${c.title}\n\n优先级: ${c.priority}\n类型: ${c.type}\n\n前置条件: ${content.preconditions || '(无)'}\n\n测试步骤:\n${steps || '(无)'}\n\n预期结果:\n${results || '(无)'}`);
+}
+
+// AI 对话
+async function sendChat() {
+    const input = $('#chat-input');
+    const message = input.value.trim();
+    if (!message) return;
+
+    const messagesEl = $('#chat-messages');
+
+    // 添加用户消息
+    messagesEl.innerHTML += `
+        <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+            <div style="background:#3498db;color:#fff;padding:8px 12px;border-radius:12px 12px 4px 12px;max-width:70%">
+                ${message}
+            </div>
+        </div>`;
+
+    input.value = '';
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    // 调用 AI
+    try {
+        const result = await API.request('POST', '/ai/testcases/chat', {
+            library_id: currentLibraryId,
+            message: message
+        });
+
+        let responseText = result.response || JSON.stringify(result, null, 2);
+        if (result.cases_updated) {
+            responseText += `\n\n(已更新 ${result.cases_updated} 个用例)`;
+            loadCases();
+        }
+
+        messagesEl.innerHTML += `
+            <div style="display:flex;justify-content:flex-start;margin-bottom:12px">
+                <div style="background:#f0f0f0;padding:8px 12px;border-radius:12px 12px 12px 4px;max-width:70%;white-space:pre-wrap">
+                    ${responseText}
+                </div>
+            </div>`;
+    } catch (err) {
+        messagesEl.innerHTML += `
+            <div style="display:flex;justify-content:flex-start;margin-bottom:12px">
+                <div style="background:#fee;color:#c00;padding:8px 12px;border-radius:12px 12px 12px 4px">
+                    错误: ${err.message}
+                </div>
+            </div>`;
+    }
+
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// AI 生成用例
+function openAIGenerateModal() {
+    if (!currentLibraryId) {
+        showToast('请先选择用例库', 'error');
+        return;
+    }
+    $('#ai-generate-form').reset();
+    $('#ai-generate-modal').classList.add('active');
+}
+
+function closeAIGenerateModal() { $('#ai-generate-modal').classList.remove('active'); }
+
+$('#ai-generate-modal').addEventListener('click', e => {
+    if (e.target === $('#ai-generate-modal')) closeAIGenerateModal();
+});
+
+$('#ai-generate-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const data = Object.fromEntries(form);
+    data.library_id = currentLibraryId;
+
+    const btn = e.target.querySelector('button[type="submit"]');
+    btn.disabled = true;
+    btn.textContent = '生成中...';
+
+    try {
+        const result = await API.request('POST', '/ai/testcases/generate', data);
+        showToast(result.message || '用例生成成功', 'success');
+        closeAIGenerateModal();
+        loadCases();
+    } catch (err) {
+        showToast('生成失败: ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '🔥 AI 生成';
+    }
+});
+
+loadLibraries();
+</script>
+{% endblock %}

@@ -39,7 +39,31 @@ def settings():
     return render_template('settings.html')
 
 
+@views_bp.route('/reports')
+def reports():
+    """日报中心"""
+    return render_template('reports.html')
+
+
+@views_bp.route('/tapd')
+def tapd():
+    """TAPD 集成"""
+    return render_template('tapd.html')
+
+
 @views_bp.route('/hub')
 def hub():
     """通信中心"""
     return render_template('hub.html')
+
+
+@views_bp.route('/rules')
+def rules():
+    """工作规范 Rules"""
+    return render_template('rules.html')
+
+
+@views_bp.route('/testcases')
+def testcases():
+    """AI 用例库"""
+    return render_template('testcases.html')
