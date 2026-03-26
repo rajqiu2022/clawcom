@@ -31,4 +31,8 @@ def create_app(config_name=None):
     from app.views import views_bp
     app.register_blueprint(views_bp)
 
+    # 注册 MCP 蓝图
+    from app.api.mcp_protocol import mcp_bp
+    app.register_blueprint(mcp_bp)
+
     return app
