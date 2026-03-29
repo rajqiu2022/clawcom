@@ -1,0 +1,346 @@
+{% extends "base.html" %}
+{% block title %}日报中心 - OpenClaw 管理系统{% endblock %}
+{% block nav_reports %}active{% endblock %}
+{% block page_title %}📋 日报中心{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <input type="date" id="filter-date" class="form-input" style="width:160px">
+    <select id="filter-claw" class="form-select" style="width:180px">
+        <option value="">全部 OpenClaw</option>
+    </select>
+    <button class="btn btn-ghost btn-sm" onclick="loadReports()">🔄 刷新</button>
+</div>
+{% endblock %}
+
+{% block content %}
+<!-- 统计卡片 -->
+<div class="stats-grid report-stats" id="report-stats">
+    <div class="stat-card green">
+        <div class="stat-value" id="stat-reported">-/-</div>
+        <div class="stat-label">今日已汇报</div>
+    </div>
+    <div class="stat-card blue">
+        <div class="stat-value" id="stat-reports">-</div>
+        <div class="stat-label">今日日报数</div>
+    </div>
+    <div class="stat-card accent">
+        <div class="stat-value" id="stat-tasks">-</div>
+        <div class="stat-label">今日任务</div>
+    </div>
+    <div class="stat-card yellow">
+        <div class="stat-value" id="stat-knowledge">-</div>
+        <div class="stat-label">今日知识</div>
+    </div>
+</div>
+
+<!-- 汇报进度 -->
+<div class="section">
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">🎯 今日汇报进度</h3>
+            <span class="tag tag-accent" id="progress-label">加载中...</span>
+        </div>
+        <div class="report-progress-bar">
+            <div class="progress-track">
+                <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+            </div>
+        </div>
+        <div class="claw-report-grid" id="claw-report-grid">
+            <div class="loading"><span class="spinner"></span> 加载中...</div>
+        </div>
+    </div>
+</div>
+
+<!-- 双栏: 趋势图 + 时间线 -->
+<div class="two-col">
+    <!-- 近7天趋势 -->
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">📊 近7天日报趋势</h3>
+        </div>
+        <div id="report-trend" style="height:200px;display:flex;align-items:flex-end;gap:4px;padding-top:10px;">
+            <div class="loading"><span class="spinner"></span></div>
+        </div>
+    </div>
+
+    <!-- 时间线 -->
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">🕐 今日时间线</h3>
+        </div>
+        <div id="report-timeline" style="max-height:260px;overflow-y:auto;">
+            <div class="loading"><span class="spinner"></span></div>
+        </div>
+    </div>
+</div>
+
+<!-- 日报详情列表 -->
+<div class="section" style="margin-top:24px">
+    <div class="card-header">
+        <h2 class="section-title">📝 日报详情</h2>
+    </div>
+    <div id="reports-list">
+        <div class="loading"><span class="spinner"></span> 加载中...</div>
+    </div>
+</div>
+
+<!-- 日报详情弹窗 -->
+<div class="modal-overlay" id="report-detail-modal">
+    <div class="modal" style="max-width:640px">
+        <div class="modal-title" id="modal-report-title">日报详情</div>
+        <div id="modal-report-body"></div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal()">关闭</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allClaws = [];
+
+async function loadStats() {
+    try {
+        const stats = await API.get('/reports/stats');
+        
+        // 统计卡片
+        document.querySelector('#stat-reported').textContent = 
+            `${stats.today_reported_claws}/${stats.total_claws}`;
+        document.querySelector('#stat-reports').textContent = stats.today_count;
+        document.querySelector('#stat-tasks').textContent = stats.today_tasks;
+        document.querySelector('#stat-knowledge').textContent = stats.today_knowledge;
+
+        // 汇报进度
+        const pct = stats.total_claws > 0 
+            ? Math.round((stats.today_reported_claws / stats.total_claws) * 100) : 0;
+        document.querySelector('#progress-fill').style.width = pct + '%';
+        document.querySelector('#progress-label').textContent = pct + '% 已汇报';
+
+        // 汇报进度 - 每个 OpenClaw 的状态
+        const grid = document.querySelector('#claw-report-grid');
+        if (stats.claw_status.length === 0) {
+            grid.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无 OpenClaw</div></div>';
+        } else {
+            grid.innerHTML = stats.claw_status.map(c => `
+                <div class="claw-report-item ${c.reported ? 'reported' : 'not-reported'}">
+                    <div class="claw-report-avatar">${c.avatar || '🤖'}</div>
+                    <div class="claw-report-info">
+                        <div class="claw-report-name">${c.name}</div>
+                        <div class="claw-report-detail">
+                            ${c.reported 
+                                ? `<span class="tag tag-green">✅ ${c.report_time} · ${c.task_count}个任务</span>` 
+                                : '<span class="tag tag-yellow">⏳ 待汇报</span>'}
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+            allClaws = stats.claw_status;
+        }
+
+        // 趋势图
+        const trendEl = document.querySelector('#report-trend');
+        if (stats.trend.length === 0) {
+            trendEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无数据</div></div>';
+        } else {
+            const maxVal = Math.max(...stats.trend.map(t => t.count), 1);
+            trendEl.innerHTML = stats.trend.map(t => {
+                const h = Math.max((t.count / maxVal) * 180, 6);
+                return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;">
+                    <span style="font-size:0.75rem;font-weight:600;color:var(--accent)">${t.count}</span>
+                    <div style="width:100%;max-width:32px;height:${h}px;background:var(--accent);border-radius:4px 4px 0 0;"></div>
+                    <span style="font-size:0.65rem;color:var(--text-muted);white-space:nowrap">${t.date.slice(5)}</span>
+                </div>`;
+            }).join('');
+        }
+
+    } catch (err) {
+        console.error('Stats load error:', err);
+    }
+}
+
+async function loadTimeline() {
+    try {
+        const dateVal = document.querySelector('#filter-date').value || new Date().toISOString().slice(0,10);
+        const data = await API.get(`/reports/timeline?date=${dateVal}`);
+        const el = document.querySelector('#report-timeline');
+
+        if (data.timeline.length === 0) {
+            el.innerHTML = '<div class="empty-state" style="padding:20px"><div class="empty-state-text">该日暂无日报</div></div>';
+            return;
+        }
+
+        el.innerHTML = `<div class="timeline">${data.timeline.map(t => `
+            <div class="timeline-item">
+                <div class="timeline-time">
+                    ${t.openclaw_avatar || '🤖'} ${t.openclaw_name} · ${t.report_time}
+                </div>
+                <div style="font-size:0.85rem;color:var(--text-secondary)">
+                    ${t.ai_summary || `完成 ${(t.tasks_completed || '').split('\n').filter(l=>l.trim()).length} 个任务，记录 ${(t.knowledge_recorded || '').split('\n').filter(l=>l.trim()).length} 条知识`}
+                </div>
+            </div>
+        `).join('')}</div>`;
+
+    } catch (err) {
+        console.error('Timeline load error:', err);
+    }
+}
+
+async function loadReports() {
+    try {
+        const dateVal = document.querySelector('#filter-date').value;
+        const clawId = document.querySelector('#filter-claw').value;
+
+        let params = [];
+        if (dateVal) {
+            params.push(`start_date=${dateVal}`);
+            params.push(`end_date=${dateVal}`);
+        }
+        if (clawId) params.push(`openclaw_id=${clawId}`);
+
+        const qs = params.length > 0 ? '?' + params.join('&') : '';
+        const reports = await API.get(`/reports${qs}`);
+
+        const el = document.querySelector('#reports-list');
+        if (reports.length === 0) {
+            el.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">📋</div>
+                    <div class="empty-state-text">暂无日报数据</div>
+                </div>`;
+            return;
+        }
+
+        // 按日期分组
+        const groups = {};
+        for (const r of reports) {
+            const d = r.report_date;
+            if (!groups[d]) groups[d] = [];
+            groups[d].push(r);
+        }
+
+        el.innerHTML = Object.entries(groups).map(([dateKey, items]) => `
+            <div class="report-date-group">
+                <div class="report-date-header">
+                    <span class="report-date-label">📅 ${dateKey}</span>
+                    <span class="tag tag-accent">${items.length} 条日报</span>
+                </div>
+                ${items.map(r => `
+                    <div class="report-item" onclick="showReportDetail(${r.id}, ${JSON.stringify(r).replace(/"/g, '&quot;')})">
+                        <div class="report-item-header">
+                            <div style="display:flex;align-items:center;gap:10px">
+                                <span class="claw-avatar" style="width:32px;height:32px;font-size:1rem">
+                                    ${r.openclaw_avatar || '🤖'}
+                                </span>
+                                <div>
+                                    <div style="font-weight:600;font-size:0.92rem">${r.openclaw_name}</div>
+                                    <div style="font-size:0.78rem;color:var(--text-muted)">${r.openclaw_role_title || ''} · ${r.report_time}</div>
+                                </div>
+                            </div>
+                            <div style="display:flex;gap:8px">
+                                <span class="tag tag-blue">🎯 ${((r.tasks_completed || '').split('\n').filter(l=>l.trim())).length} 任务</span>
+                                <span class="tag tag-green">📝 ${((r.knowledge_recorded || '').split('\n').filter(l=>l.trim())).length} 知识</span>
+                            </div>
+                        </div>
+                        ${r.ai_summary 
+                            ? `<div class="report-summary">${r.ai_summary}</div>` 
+                            : ''}
+                    </div>
+                `).join('')}
+            </div>
+        `).join('');
+
+    } catch (err) {
+        console.error('Reports load error:', err);
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+function showReportDetail(id, report) {
+    if (typeof report === 'string') {
+        report = JSON.parse(report);
+    }
+    const modal = document.querySelector('#report-detail-modal');
+    document.querySelector('#modal-report-title').textContent = 
+        `${report.openclaw_name} · ${report.report_date} ${report.report_time}`;
+    
+    const body = document.querySelector('#modal-report-body');
+    body.innerHTML = `
+        ${report.ai_summary ? `
+        <div style="margin-bottom:16px;padding:14px;background:var(--accent-dim);border-radius:var(--radius-sm);border-left:3px solid var(--accent)">
+            <div style="font-size:0.82rem;font-weight:600;color:var(--accent);margin-bottom:6px">💡 AI 摘要</div>
+            <div style="font-size:0.88rem;color:var(--text-secondary);line-height:1.6">${report.ai_summary}</div>
+        </div>
+        ` : ''}
+        
+        <div style="margin-bottom:16px">
+            <div style="font-weight:600;margin-bottom:8px;color:var(--text-primary)">🎯 完成任务</div>
+            ${(report.tasks_completed || '').split('\n').filter(l=>l.trim()).length > 0 
+                ? `<ul class="detail-list">${(report.tasks_completed || '').split('\n').filter(l=>l.trim()).map(t => 
+                    `<li>${t}</li>`
+                ).join('')}</ul>`
+                : '<div style="color:var(--text-muted);font-size:0.85rem">无</div>'}
+        </div>
+
+        <div style="margin-bottom:16px">
+            <div style="font-weight:600;margin-bottom:8px;color:var(--text-primary)">📝 新增知识</div>
+            ${(report.knowledge_recorded || '').split('\n').filter(l=>l.trim()).length > 0 
+                ? `<ul class="detail-list">${(report.knowledge_recorded || '').split('\n').filter(l=>l.trim()).map(k => 
+                    `<li>${k}</li>`
+                ).join('')}</ul>`
+                : '<div style="color:var(--text-muted);font-size:0.85rem">无</div>'}
+        </div>
+
+        <div style="margin-bottom:16px">
+            <div style="font-weight:600;margin-bottom:8px;color:var(--text-primary)">💡 经验分享</div>
+            ${(report.experience_shared || []).length > 0 
+                ? `<ul class="detail-list">${(report.experience_shared || []).map(e => 
+                    `<li>${typeof e === 'string' ? e : (e.title || e.name || JSON.stringify(e))}</li>`
+                ).join('')}</ul>`
+                : '<div style="color:var(--text-muted);font-size:0.85rem">无</div>'}
+        </div>
+    `;
+
+    modal.classList.add('active');
+}
+
+function closeModal() {
+    document.querySelector('#report-detail-modal').classList.remove('active');
+}
+
+async function initPage() {
+    // 设置默认日期为今天
+    const today = new Date().toISOString().slice(0, 10);
+    document.querySelector('#filter-date').value = today;
+
+    // 加载 OpenClaw 筛选列表
+    try {
+        const claws = await API.listClaws();
+        const sel = document.querySelector('#filter-claw');
+        claws.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c.id;
+            opt.textContent = c.name;
+            sel.appendChild(opt);
+        });
+    } catch (err) { console.error(err); }
+
+    // 加载数据
+    loadStats();
+    loadTimeline();
+    loadReports();
+}
+
+// 日期变化时重新加载
+document.querySelector('#filter-date').addEventListener('change', () => {
+    loadTimeline();
+    loadReports();
+});
+document.querySelector('#filter-claw').addEventListener('change', loadReports);
+
+initPage();
+// 每 60 秒刷新统计
+setInterval(loadStats, 60000);
+</script>
+{% endblock %}
