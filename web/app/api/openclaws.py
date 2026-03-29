@@ -166,6 +166,7 @@ def regenerate_token(claw_id):
     return jsonify({
         'id': claw.id,
         'name': claw.name,
+        'api_token': raw_token,
         'api_token_preview': claw.get_token_preview(),
         'has_token': True,
         'message': '新 Token 已生成，旧 Token 已失效。',
