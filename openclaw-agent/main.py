@@ -47,7 +47,7 @@ class OpenClawAgent:
         self.sse_client: SSClient = None
         self.executor = TaskExecutor()
         self._running = False
-        self._heartbeat_url = f"{config.manager_url}/api/openclaws/{config.claw_id}/heartbeat"
+        self._heartbeat_url = f"{config.manager_url}/api/v1/openclaws/{config.claw_id}/heartbeat"
         self._session = requests.Session()
         self._session.headers.update({
             "Authorization": f"Bearer {config.api_token}",
