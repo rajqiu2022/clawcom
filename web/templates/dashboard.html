@@ -4,8 +4,8 @@
 {% block page_title %}Dashboard{% endblock %}
 
 {% block content %}
-<!-- 统计卡片 -->
-<div class="stats-grid" id="stats-grid">
+<!-- 核心统计卡片 -->
+<div class="stats-grid dashboard-stats" id="stats-grid">
     <div class="stat-card green">
         <div class="stat-value" id="stat-online">-</div>
         <div class="stat-label">在线 OpenClaw</div>
@@ -21,6 +21,26 @@
     <div class="stat-card yellow">
         <div class="stat-value" id="stat-pending">-</div>
         <div class="stat-label">待审核知识</div>
+    </div>
+</div>
+
+<!-- 辅助统计 -->
+<div class="quick-stats" id="quick-stats">
+    <div class="quick-stat-item">
+        <span class="quick-stat-icon">📋</span>
+        <span class="quick-stat-text"><strong id="qs-reported">0/0</strong> 今日已汇报</span>
+    </div>
+    <div class="quick-stat-item">
+        <span class="quick-stat-icon">🧩</span>
+        <span class="quick-stat-text"><strong id="qs-skills">0</strong> 技能 · <strong id="qs-evolved">0</strong> 进化</span>
+    </div>
+    <div class="quick-stat-item">
+        <span class="quick-stat-icon">📡</span>
+        <span class="quick-stat-text"><strong id="qs-agents">0</strong> Agent · <strong id="qs-unread">0</strong> 未读</span>
+    </div>
+    <div class="quick-stat-item">
+        <span class="quick-stat-icon">🔗</span>
+        <span class="quick-stat-text"><strong id="qs-tapd">0</strong> TAPD 项目</span>
     </div>
 </div>
 
@@ -54,6 +74,37 @@
         </div>
     </div>
 </div>
+
+<!-- 快捷入口 -->
+<div class="section" style="margin-top:24px">
+    <h2 class="section-title">快捷入口</h2>
+    <div class="quick-links">
+        <a href="/reports" class="quick-link-card">
+            <span class="quick-link-icon">📋</span>
+            <span class="quick-link-label">日报中心</span>
+        </a>
+        <a href="/skills" class="quick-link-card">
+            <span class="quick-link-icon">🧩</span>
+            <span class="quick-link-label">Skills 市场</span>
+        </a>
+        <a href="/knowledge" class="quick-link-card">
+            <span class="quick-link-icon">📚</span>
+            <span class="quick-link-label">知识库</span>
+        </a>
+        <a href="/hub" class="quick-link-card">
+            <span class="quick-link-icon">📡</span>
+            <span class="quick-link-label">OpenClaw 通信中心</span>
+        </a>
+        <a href="/tapd" class="quick-link-card">
+            <span class="quick-link-icon">🔗</span>
+            <span class="quick-link-label">TAPD 集成</span>
+        </a>
+        <a href="/settings" class="quick-link-card">
+            <span class="quick-link-icon">⚙️</span>
+            <span class="quick-link-label">系统设置</span>
+        </a>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -62,11 +113,19 @@ async function loadDashboard() {
     try {
         const data = await API.dashboardStats();
 
-        // 统计数字
+        // 核心统计
         $('#stat-online').textContent = `${data.online_count}/${data.total_claws}`;
         $('#stat-tasks').textContent = data.today_tasks;
         $('#stat-knowledge').textContent = data.total_knowledge;
         $('#stat-pending').textContent = data.pending_review;
+
+        // 辅助统计
+        $('#qs-reported').textContent = `${data.today_reported || 0}/${data.total_claws}`;
+        $('#qs-skills').textContent = data.total_skills || 0;
+        $('#qs-evolved').textContent = data.evolved_skills || 0;
+        $('#qs-agents').textContent = data.total_agents || 0;
+        $('#qs-unread').textContent = data.unread_messages || 0;
+        $('#qs-tapd').textContent = data.tapd_projects || 0;
 
         // OpenClaw 卡片
         const grid = $('#claw-grid');
@@ -89,6 +148,9 @@ async function loadDashboard() {
                             </div>
                             <div class="claw-role">${c.role_title || '未设置职位'}</div>
                         </div>
+                        ${c.reported_today 
+                            ? '<span class="tag tag-green" style="font-size:0.72rem">✅ 已汇报</span>' 
+                            : '<span class="tag tag-yellow" style="font-size:0.72rem">⏳ 待汇报</span>'}
                     </div>
                     <div class="claw-meta">
                         <span class="tag tag-blue">今日 ${c.today_tasks} 个任务</span>
