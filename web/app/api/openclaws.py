@@ -6,7 +6,7 @@ from flask import request, jsonify
 from app import db
 from app.models import (OpenClawInstance, DailyReport, Project, Rule,
                         OpenClawRule, OpenClawSkill, Skill,
-                        generate_api_token, hash_token)
+                        generate_api_token, hash_token, _simple_encrypt)
 from app.api import api_bp
 
 logger = logging.getLogger(__name__)
