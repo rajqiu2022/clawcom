@@ -149,8 +149,23 @@
             <p style="color:var(--text-secondary);margin-bottom:12px">尚未为该 OpenClaw 生成 API Token。</p>
         </div>
         <div class="modal-actions">
-            <button class="btn btn-ghost" id="btn-regenerate-token" onclick="regenerateToken()">重新生成</button>
+            <button class="btn btn-ghost" id="btn-regenerate-token" onclick="showRegenerateConfirm()">重新生成</button>
             <button class="btn btn-primary" onclick="closeTokenModal()">关闭</button>
+        </div>
+    </div>
+</div>
+
+<!-- 重新生成 Token 确认弹窗 -->
+<div class="modal-overlay" id="regenerate-confirm-modal">
+    <div class="modal" style="max-width:400px">
+        <h2 class="modal-title">⚠️ 确认重新生成</h2>
+        <p style="color:var(--text-secondary);margin-bottom:16px">
+            确定要重新生成 Token 吗？<br>
+            <strong style="color:#ef4444">旧的 Token 将立即失效！</strong>
+        </p>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeRegenerateConfirm()">取消</button>
+            <button class="btn btn-danger" onclick="doRegenerateToken()">确认重新生成</button>
         </div>
     </div>
 </div>
@@ -675,17 +690,31 @@ async function viewToken(clawId, clawName) {
     }
 }
 
-// 重新生成 Token
-async function regenerateToken() {
+// 显示重新生成确认弹窗
+function showRegenerateConfirm() {
+    document.getElementById('regenerate-confirm-modal').classList.add('active');
+}
+
+// 关闭重新生成确认弹窗
+function closeRegenerateConfirm() {
+    document.getElementById('regenerate-confirm-modal').classList.remove('active');
+}
+
+// 确认重新生成 Token
+async function doRegenerateToken() {
+    closeRegenerateConfirm();
     if (!currentClawId) return;
-    if (!confirm('确定要重新生成 Token 吗？旧的 Token 将立即失效！')) return;
 
     try {
         const result = await API.regenerateToken(currentClawId);
-        document.getElementById('token-display').textContent = result.api_token;
+        // 立即更新显示
+        document.getElementById('token-modal-hint').innerHTML = 'Token 已重新生成，请复制使用。';
         document.getElementById('token-content').style.display = 'block';
         document.getElementById('no-token-content').style.display = 'none';
+        document.getElementById('token-display').textContent = result.api_token;
         document.getElementById('token-warning').style.display = 'none';
+        // 同时更新卡片上的预览
+        loadClaws();
         showToast('Token 已重新生成', 'success');
     } catch (err) {
         showToast('重新生成 Token 失败: ' + err.message, 'error');
@@ -694,6 +723,10 @@ async function regenerateToken() {
 
 document.getElementById('token-modal').addEventListener('click', e => {
     if (e.target === document.getElementById('token-modal')) closeTokenModal();
+});
+
+document.getElementById('regenerate-confirm-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('regenerate-confirm-modal')) closeRegenerateConfirm();
 });
 
 document.getElementById('create-modal').addEventListener('click', e => {
