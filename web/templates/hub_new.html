@@ -1,0 +1,443 @@
+{% extends "base.html" %}
+
+{% block title %}通信中心 - OpenClaw{% endblock %}
+{% block page_title %}通信中心{% endblock %}
+
+{% block nav_hub %}active{% endblock %}
+
+{% block top_actions %}
+<div class="action-buttons">
+    <button class="btn btn-ghost" onclick="openRegisterModal()">+ 注册 Agent</button>
+    <button class="btn btn-primary" onclick="openBroadcastModal()">广播消息</button>
+</div>
+{% endblock %}
+
+{% block content %}
+<!-- Agent Topology Visualization -->
+<div class="topology-container" id="topologySection" style="display:none">
+    <div class="topology-header">
+        <h3 class="topology-title">&#x1F30E; Agent 拓扑网络</h3>
+        <button class="btn btn-sm btn-ghost" onclick="refreshTopology()">&#x21BB; 刷新</button>
+    </div>
+    <div class="topology-canvas" id="topologyCanvas"></div>
+    <div class="topology-legend">
+        <div class="legend-item"><div class="legend-dot ai"></div><span>AI Agent</span></div>
+        <div class="legend-item"><div class="legend-dot human"></div><span>人类成员</span></div>
+        <div class="legend-item"><div class="legend-dot busy"></div><span>忙碌中</span></div>
+    </div>
+</div>
+
+<div class="hub-container">
+    <div class="hub-sidebar">
+        <div class="panel">
+            <div class="panel-header">
+                <h3>Agent 列表</h3>
+                <span class="count-badge" id="onlineCount">0</span>
+            </div>
+            <div class="agent-list" id="agentList"><div class="loading"><span class="spinner"></span></div></div>
+        </div>
+        <div class="panel">
+            <div class="panel-header"><h3>统计概览</h3></div>
+            <div class="stats-grid" id="statsGrid">
+                <div class="stat-item"><div class="stat-value" id="statTotal">-</div><div class="stat-label">总 Agent</div></div>
+                <div class="stat-item"><div class="stat-value" id="statOnline">-</div><div class="stat-label">在线</div></div>
+                <div class="stat-item"><div class="stat-value" id="statMessages">-</div><div class="stat-label">总消息</div></div>
+                <div class="stat-item"><div class="stat-value" id="statConvs">-</div><div class="stat-label">会话</div></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="hub-main">
+        <div class="panel conversations-panel">
+            <div class="panel-header">
+                <h3>最近会话</h3>
+                <button class="btn btn-sm btn-ghost" onclick="loadConversations()">刷新</button>
+            </div>
+            <div class="conversation-list" id="conversationList"><div class="loading"><span class="spinner"></span></div></div>
+        </div>
+        <div id="chatPanel" style="display:none" class="panel">
+            <div class="panel-header">
+                <h3 id="chatTitle">对话详情</h3>
+                <button class="btn btn-sm btn-ghost" onclick="closeChat()">关闭</button>
+            </div>
+            <div class="chat-messages" id="chatMessages"></div>
+            <div class="compose-input" style="border-top:1px solid var(--border)">
+                <textarea id="chatInput" placeholder="发送消息..." rows="2"></textarea>
+                <button class="btn btn-primary btn-sm" onclick="sendChatMessage()">发送</button>
+            </div>
+        </div>
+        <div class="message-compose">
+            <div class="compose-recipient" id="composeRecipient"><span class="placeholder">点击会话查看详情，或选择左侧 Agent 发送消息</span></div>
+            <div class="compose-input">
+                <select class="form-select" id="msgType" style="width:120px;flex-shrink:0">
+                    <option value="text">文本</option>
+                    <option value="task_delegate">任务委派</option>
+                    <option value="knowledge_share">知识共享</option>
+                    <option value="request_help">请求帮助</option>
+                </select>
+                <textarea id="messageInput" placeholder="输入消息..." rows="3"></textarea>
+                <button class="btn-primary" id="sendBtn" disabled>发送</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="hub-inbox">
+        <div class="panel">
+            <div class="panel-header">
+                <h3>最新消息</h3>
+                <span class="count-badge" id="msgCount">0</span>
+            </div>
+            <div class="inbox-list" id="inboxList"><div class="loading"><span class="spinner"></span></div></div>
+        </div>
+    </div>
+</div>
+
+<!-- Modals -->
+<div class="modal-overlay" id="register-modal">
+    <div class="modal" style="max-width:480px">
+        <h2 class="modal-title">注册新 Agent</h2>
+        <form id="register-form">
+            <div class="form-group">
+                <label class="form-label">Agent 名称 *</label>
+                <input class="form-input" name="name" placeholder="如：小测-001" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Agent Key *</label>
+                <input class="form-input" name="agent_key" placeholder="如：claw-xiaoc-001" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">角色</label>
+                <select class="form-select" name="role">
+                    <option value="test_member">测试成员</option>
+                    <option value="test_manager">测试经理</option>
+                    <option value="test_executor">测试执行</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">所属项目</label>
+                <input class="form-input" name="project_name" placeholder="如：XX项目">
+            </div>
+            <div class="form-group">
+                <label class="form-label">所属模块</label>
+                <input class="form-input" name="module_name" placeholder="如：登录模块">
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeRegisterModal()">取消</button>
+                <button type="submit" class="btn btn-primary">注册</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="modal-overlay" id="broadcast-modal">
+    <div class="modal" style="max-width:500px">
+        <h2 class="modal-title">广播消息</h2>
+        <div class="form-group">
+            <label class="form-label">消息内容 *</label>
+            <textarea class="form-textarea" id="broadcastContent" rows="4" placeholder="输入要广播给所有在线 Agent 的消息..."></textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeBroadcastModal()">取消</button>
+            <button class="btn btn-primary" onclick="sendBroadcast()">广播</button>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="agent-detail-modal">
+    <div class="modal" style="max-width:480px">
+        <h2 class="modal-title">Agent 详情</h2>
+        <div id="agentDetailContent"></div>
+        <div class="modal-actions">
+            <button class="btn btn-danger btn-sm" onclick="deleteCurrentAgent()">删除</button>
+            <button class="btn btn-ghost" onclick="closeAgentDetail()">关闭</button>
+        </div>
+    </div>
+</div>
+
+<div class="node-tooltip" id="nodeTooltip">
+    <div class="tooltip-name" id="tooltipName"></div>
+    <div class="tooltip-role" id="tooltipRole"></div>
+    <div class="tooltip-meta" id="tooltipMeta"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const HUB_API = '/api/v1/agent-hub/web';
+let currentAgent = null, selectedReceiver = null, viewingAgentId = null;
+let topologyAgents = [], conversationsData = [];
+
+function initTopology() {
+    const s = document.getElementById('topologySection');
+    if (s) s.style.display = '';
+}
+
+function renderTopology(agents, conversations) {
+    const canvas = document.getElementById('topologyCanvas');
+    if (!canvas) return;
+    canvas.innerHTML = '';
+    if (agents.length === 0) { canvas.innerHTML = '<div class="empty-state" style="padding:40px">暂无 Agent 数据</div>'; return; }
+    
+    const rect = canvas.getBoundingClientRect();
+    const cx = rect.width / 2, cy = rect.height / 2;
+    const r = Math.min(cx, cy) - 60;
+    
+    agents.forEach((agent, i) => {
+        const angle = (2 * Math.PI * i) / agents.length - Math.PI / 2;
+        const x = cx + r * Math.cos(angle) - 36;
+        const y = cy + r * Math.sin(angle) - 36;
+        
+        const node = document.createElement('div');
+        node.className = `hex-node ${agent.status}`;
+        node.style.left = `${x}px`;
+        node.style.top = `${y}px`;
+        node.dataset.agentId = agent.id;
+        
+        const isAI = agent.role === 'admin' || agent.role === 'test_manager';
+        const innerClass = agent.status === 'offline' ? 'offline' : (agent.status === 'busy' ? 'busy' : (isAI ? 'ai' : 'human'));
+        
+        node.innerHTML = `<div class="hex-node-inner ${innerClass}"><span class="hex-node-avatar">${agent.name.charAt(0).toUpperCase()}</span><span class="hex-node-name">${agent.name}</span></div><div class="hex-node-status ${agent.status}"></div>`;
+        
+        node.addEventListener('click', () => selectAgentInTopology(agent));
+        node.addEventListener('mouseenter', e => showNodeTooltip(e, agent));
+        node.addEventListener('mouseleave', hideNodeTooltip);
+        canvas.appendChild(node);
+    });
+    
+    conversations.forEach(conv => {
+        const a = agents.find(x => x.id === conv.agent_a_id);
+        const b = agents.find(x => x.id === conv.agent_b_id);
+        if (a && b) drawConnectionLine(canvas, a, b, agents, cx, cy, r);
+    });
+}
+
+function drawConnectionLine(canvas, agentA, agentB, agents, cx, cy, r) {
+    const idxA = agents.indexOf(agentA), idxB = agents.indexOf(agentB);
+    const aA = (2 * Math.PI * idxA) / agents.length - Math.PI / 2;
+    const aB = (2 * Math.PI * idxB) / agents.length - Math.PI / 2;
+    const x1 = cx + r * Math.cos(aA), y1 = cy + r * Math.sin(aA);
+    const x2 = cx + r * Math.cos(aB), y2 = cy + r * Math.sin(aB);
+    
+    const line = document.createElement('div');
+    line.className = 'topology-line';
+    const length = Math.sqrt(Math.pow(x2-x1, 2) + Math.pow(y2-y1, 2));
+    const angle = Math.atan2(y2-y1, x2-x1) * 180 / Math.PI;
+    line.style.width = `${length}px`;
+    line.style.left = `${x1}px`;
+    line.style.top = `${y1}px`;
+    line.style.transform = `rotate(${angle}deg)`;
+    canvas.insertBefore(line, canvas.firstChild);
+}
+
+function selectAgentInTopology(agent) {
+    const item = document.querySelector(`.agent-item[data-id="${agent.id}"]`);
+    if (item) selectReceiver(item);
+}
+
+function showNodeTooltip(e, agent) {
+    const t = document.getElementById('nodeTooltip');
+    document.getElementById('tooltipName').textContent = agent.name;
+    document.getElementById('tooltipRole').textContent = agent.role_title || agent.role || 'Agent';
+    document.getElementById('tooltipMeta').innerHTML = `<span>&#x1F4C5; 项目: ${agent.project_name || '-'}</span><span>&#x1F4C5; 模块: ${agent.module_name || '-'}</span><span>&#x1F518; 状态: ${agent.status}</span>`;
+    t.style.left = `${e.offsetX + 10}px`;
+    t.style.top = `${e.offsetY + 10}px`;
+    t.classList.add('visible');
+}
+function hideNodeTooltip() { document.getElementById('nodeTooltip').classList.remove('visible'); }
+function refreshTopology() { loadAgentsForTopology(); }
+
+async function loadAgentsForTopology() {
+    try {
+        const res = await fetch(`${HUB_API}/agents`);
+        const data = await res.json();
+        topologyAgents = data.agents || [];
+        renderTopology(topologyAgents, conversationsData);
+    } catch (e) { console.error('加载拓扑数据失败:', e); }
+}
+
+async function loadStats() {
+    try {
+        const res = await fetch(`${HUB_API}/stats`);
+        const data = await res.json();
+        document.getElementById('statTotal').textContent = data.total_agents || 0;
+        document.getElementById('statOnline').textContent = data.online_agents || 0;
+        document.getElementById('statMessages').textContent = data.total_messages || 0;
+        document.getElementById('statConvs').textContent = data.total_conversations || 0;
+    } catch (e) { console.error('加载统计失败:', e); }
+}
+
+async function loadAgents() {
+    try {
+        const res = await fetch(`${HUB_API}/agents`);
+        const data = await res.json();
+        const agents = data.agents || [];
+        document.getElementById('onlineCount').textContent = data.online || 0;
+        const list = document.getElementById('agentList');
+        if (agents.length === 0) { list.innerHTML = '<div class="empty-state">暂无 Agent</div>'; return; }
+        list.innerHTML = agents.map(a => {
+            const sc = a.status === 'online' ? 'var(--green)' : a.status === 'busy' ? 'var(--yellow)' : 'var(--text-muted)';
+            return `<div class="agent-item" data-id="${a.id}" data-name="${a.name}"><div class="agent-avatar">${a.name.charAt(0).toUpperCase()}</div><div class="agent-info"><div class="agent-name" style="font-size:0.88rem">${a.name}</div><div class="agent-key">${a.agent_key}</div></div><span class="status-dot" style="background:${sc}"></span></div>`;
+        }).join('');
+        list.querySelectorAll('.agent-item').forEach(item => { item.addEventListener('click', () => selectReceiver(item)); });
+        list.querySelectorAll('.agent-item').forEach(item => { item.addEventListener('dblclick', () => showAgentDetail(parseInt(item.dataset.id))); });
+    } catch (e) { console.error('加载 Agent 失败:', e); }
+}
+
+async function loadConversations() {
+    try {
+        const res = await fetch(`${HUB_API}/conversations`);
+        const data = await res.json();
+        conversationsData = data.conversations || [];
+        const list = document.getElementById('conversationList');
+        if (conversationsData.length === 0) { list.innerHTML = '<div class="empty-state">暂无会话记录</div>'; return; }
+        list.innerHTML = conversationsData.map(c => {
+            const lm = c.last_message;
+            return `<div class="conversation-item" data-id="${c.id}" data-agent-a="${c.agent_a_id}" data-agent-b="${c.agent_b_id}"><div class="conversation-peer">${c.agent_a_name || '?'} &#x2194; ${c.agent_b_name || '?'}</div><div class="conversation-preview">${lm ? lm.sender_name + ': ' + lm.content : '无消息'}</div><div style="display:flex;justify-content:space-between;align-items:center"><span class="msg-time">${lm ? timeAgo(lm.created_at) : ''}</span>${c.unread_count > 0 ? `<span class="count-badge">${c.unread_count}</span>` : ''}</div></div>`;
+        }).join('');
+        list.querySelectorAll('.conversation-item').forEach(item => { item.addEventListener('click', () => viewConversation(item)); });
+    } catch (e) { console.error('加载会话失败:', e); }
+}
+
+async function loadMessages() {
+    try {
+        const res = await fetch(`${HUB_API}/messages`);
+        const data = await res.json();
+        const msgs = data.messages || [];
+        document.getElementById('msgCount').textContent = data.count || 0;
+        const list = document.getElementById('inboxList');
+        if (msgs.length === 0) { list.innerHTML = '<div class="empty-state">暂无消息</div>'; return; }
+        const labels = { text: '', task_delegate: '任务委派', knowledge_share: '知识共享', request_help: '请求帮助', broadcast: '广播' };
+        list.innerHTML = msgs.map(m => {
+            return `<div class="inbox-item" data-id="${m.id}"><div style="display:flex;justify-content:space-between;align-items:center"><div class="msg-sender">${m.sender_name || '管理员'} &#x2192; ${m.receiver_name || '?'}</div><span class="msg-time">${timeAgo(m.created_at)}</span></div><div class="msg-content">${m.content.substring(0, 60)}${m.content.length > 60 ? '...' : ''}</div>${labels[m.msg_type] ? `<span class="tag tag-blue" style="margin-top:4px">${labels[m.msg_type]}</span>` : ''}</div>`;
+        }).join('');
+    } catch (e) { console.error('加载消息失败:', e); }
+}
+
+function selectReceiver(item) {
+    document.querySelectorAll('.agent-item').forEach(i => i.classList.remove('selected'));
+    item.classList.add('selected');
+    selectedReceiver = { id: parseInt(item.dataset.id), name: item.dataset.name };
+    document.getElementById('composeRecipient').innerHTML = `<span class="recipient-label">发送给:</span> <strong>${selectedReceiver.name}</strong>`;
+    document.getElementById('sendBtn').disabled = false;
+    document.getElementById('messageInput').focus();
+}
+
+async function viewConversation(item) {
+    const agentAId = parseInt(item.dataset.agentA), agentBId = parseInt(item.dataset.agentB);
+    const panel = document.getElementById('chatPanel');
+    panel.style.display = 'flex';
+    panel.style.flexDirection = 'column';
+    panel.style.flex = '1';
+    panel.style.minHeight = '0';
+    
+    try {
+        const res = await fetch(`${HUB_API}/messages?agent_id=${agentAId}`);
+        const data = await res.json();
+        const msgs = (data.messages || []).filter(m => (m.sender_id === agentAId && m.receiver_id === agentBId) || (m.sender_id === agentBId && m.receiver_id === agentAId));
+        const conv = conversationsData.find(c => c.agent_a_id === agentAId && c.agent_b_id === agentBId);
+        document.getElementById('chatTitle').textContent = conv ? `${conv.agent_a_name} &#x2194; ${conv.agent_b_name}` : '对话详情';
+        const chatBox = document.getElementById('chatMessages');
+        chatBox.innerHTML = msgs.map(m => `<div class="chat-msg ${m.sender_id === 0 ? 'chat-msg-sent' : 'chat-msg-recv'}"><div class="chat-msg-sender">${m.sender_name || '管理员'}</div><div class="chat-msg-content">${m.content}</div><div class="chat-msg-time">${timeAgo(m.created_at)}</div></div>`).join('');
+        if (msgs.length === 0) chatBox.innerHTML = '<div class="empty-state" style="padding:20px">暂无消息</div>';
+        chatBox.scrollTop = chatBox.scrollHeight;
+        data.messages.filter(m => m.status === 'unread').forEach(m => fetch(`${HUB_API}/messages/${m.id}/read`, { method: 'PUT' }));
+        panel.dataset.agentAId = agentAId;
+        panel.dataset.agentBId = agentBId;
+    } catch (e) { console.error('加载对话失败:', e); }
+}
+
+function closeChat() { document.getElementById('chatPanel').style.display = 'none'; }
+
+async function sendChatMessage() {
+    const panel = document.getElementById('chatPanel');
+    const agentBId = parseInt(panel.dataset.agentBId);
+    const content = document.getElementById('chatInput').value.trim();
+    if (!content || !agentBId) return;
+    try {
+        await fetch(`${HUB_API}/broadcast`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, target_agent_ids: [parseInt(panel.dataset.agentAId), agentBId] }) });
+        document.getElementById('chatInput').value = '';
+        viewConversation({ dataset: panel.dataset });
+        loadMessages(); loadStats();
+    } catch (e) { showToast('发送失败', 'error'); }
+}
+
+async function sendDirectMessage() {
+    if (!selectedReceiver || !messageInput.value.trim()) return;
+    try {
+        await fetch(`${HUB_API}/broadcast`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: messageInput.value.trim(), msg_type: document.getElementById('msgType').value, target_agent_ids: [selectedReceiver.id] }) });
+        messageInput.value = '';
+        loadMessages(); loadStats(); loadConversations();
+        showToast('消息已发送', 'success');
+    } catch (e) { showToast('发送失败', 'error'); }
+}
+
+async function showAgentDetail(agentId) {
+    viewingAgentId = agentId;
+    try {
+        const data = await (await fetch(`${HUB_API}/agents`)).json();
+        const agent = data.agents.find(a => a.id === agentId);
+        if (!agent) return;
+        document.getElementById('agentDetailContent').innerHTML = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px"><div><span style="color:var(--text-muted)">名称:</span> <strong>${agent.name}</strong></div><div><span style="color:var(--text-muted)">Key:</span> ${agent.agent_key}</div><div><span style="color:var(--text-muted)">角色:</span> ${agent.role}</div><div><span style="color:var(--text-muted)">状态:</span> ${agent.status}</div><div><span style="color:var(--text-muted)">项目:</span> ${agent.project_name || '-'}</div><div><span style="color:var(--text-muted)">模块:</span> ${agent.module_name || '-'}</div></div><div style="font-size:0.82rem;color:var(--text-muted)">注册: ${timeAgo(agent.created_at)} | 最后心跳: ${timeAgo(agent.last_heartbeat)}</div>`;
+        document.getElementById('agent-detail-modal').classList.add('active');
+    } catch (e) { showToast('加载失败', 'error'); }
+}
+
+async function deleteCurrentAgent() {
+    if (!viewingAgentId) return;
+    if (!confirm('确定删除此 Agent？关联的消息将一并删除。')) return;
+    try {
+        await fetch(`${HUB_API}/agents/${viewingAgentId}`, { method: 'DELETE' });
+        showToast('已删除', 'success');
+        closeAgentDetail();
+        loadAgents(); loadStats(); loadAgentsForTopology();
+    } catch (e) { showToast('删除失败', 'error'); }
+}
+
+function closeAgentDetail() { document.getElementById('agent-detail-modal').classList.remove('active'); viewingAgentId = null; }
+
+function openRegisterModal() { document.getElementById('register-form').reset(); document.getElementById('register-modal').classList.add('active'); }
+function closeRegisterModal() { document.getElementById('register-modal').classList.remove('active'); }
+document.getElementById('register-modal').addEventListener('click', e => { if (e.target === document.getElementById('register-modal')) closeRegisterModal(); });
+
+document.getElementById('register-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const data = Object.fromEntries(form);
+    try {
+        const res = await fetch(`${HUB_API}/agents`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error);
+        showToast(`注册成功！Token: ${result.token}`, 'success');
+        closeRegisterModal();
+        loadAgents(); loadStats(); loadAgentsForTopology();
+    } catch (err) { showToast('注册失败: ' + err.message, 'error'); }
+});
+
+function openBroadcastModal() { document.getElementById('broadcastContent').value = ''; document.getElementById('broadcast-modal').classList.add('active'); }
+function closeBroadcastModal() { document.getElementById('broadcast-modal').classList.remove('active'); }
+document.getElementById('broadcast-modal').addEventListener('click', e => { if (e.target === document.getElementById('broadcast-modal')) closeBroadcastModal(); });
+
+async function sendBroadcast() {
+    const content = document.getElementById('broadcastContent').value.trim();
+    if (!content) return;
+    try {
+        const res = await fetch(`${HUB_API}/broadcast`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) });
+        const result = await res.json();
+        showToast(result.message, 'success');
+        closeBroadcastModal();
+        loadMessages(); loadStats();
+    } catch (err) { showToast('广播失败', 'error'); }
+}
+
+document.getElementById('sendBtn').addEventListener('click', sendDirectMessage);
+document.getElementById('messageInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendDirectMessage(); } });
+document.getElementById('chatInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(); } });
+
+initTopology();
+loadStats(); loadAgents(); loadConversations(); loadMessages(); loadAgentsForTopology();
+
+setInterval(() => { loadStats(); loadAgents(); loadConversations(); loadMessages(); loadAgentsForTopology(); }, 15000);
+
+window.addEventListener('resize', () => { if (topologyAgents.length > 0) renderTopology(topologyAgents, conversationsData); });
+</script>
+{% endblock %}
