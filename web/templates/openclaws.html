@@ -624,17 +624,23 @@ function closeTokenModal() {
 
 function copyToken() {
     const token = document.getElementById('token-display').textContent;
-    navigator.clipboard.writeText(token).then(() => {
-        showToast('Token 已复制到剪贴板', 'success');
-    }).catch(() => {
-        const el = document.createElement('textarea');
-        el.value = token;
-        document.body.appendChild(el);
-        el.select();
-        document.execCommand('copy');
-        document.body.removeChild(el);
-        showToast('Token 已复制到剪贴板', 'success');
-    });
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(token).then(() => {
+            showToast('Token 已复制到剪贴板', 'success');
+        }).catch(() => fallbackCopy(token));
+    } else {
+        fallbackCopy(token);
+    }
+}
+
+function fallbackCopy(token) {
+    const el = document.createElement('textarea');
+    el.value = token;
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand('copy');
+    document.body.removeChild(el);
+    showToast('Token 已复制到剪贴板', 'success');
 }
 
 // 查看 OpenClaw 的 Token
