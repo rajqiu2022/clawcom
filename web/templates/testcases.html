@@ -1,40 +1,253 @@
 {% extends "base.html" %}
 {% block title %}AI 用例库 - OpenClaw 管理系统{% endblock %}
 {% block page_title %}AI 用例库{% endblock %}
+{% block nav_testcases %}active{% endblock %}
 
 {% block top_actions %}
 <div style="display:flex;gap:10px;align-items:center">
-    <select class="form-select" id="library-select" onchange="switchLibrary()" style="min-width:200px">
+    <select class="form-select" id="library-select" onchange="switchLibrary()" style="min-width:220px">
         <option value="">-- 选择用例库 --</option>
     </select>
     <button class="btn btn-primary" onclick="openCreateLibraryModal()">+ 新建用例库</button>
-    <button class="btn btn-ghost" onclick="openAIGenerateModal()" style="color:#9b59b6">
-        &#x1F916; AI 生成用例
+    <button class="btn btn-ghost tc-ai-btn" onclick="openAIGenerateModal()">
+        🤖 AI 生成用例
     </button>
 </div>
 {% endblock %}
 
+{% block head %}
+<style>
+/* ===== 用例库专属样式 ===== */
+.tc-ai-btn { color: var(--accent) !important; border-color: var(--accent) !important; }
+.tc-ai-btn:hover { background: var(--accent-dim) !important; }
+
+/* 用例库信息头 */
+.tc-lib-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px 20px;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    margin-bottom: 16px;
+}
+.tc-lib-meta h3 { margin: 0; font-size: 1.1rem; color: var(--text-primary); }
+.tc-lib-meta p { margin: 4px 0 0; color: var(--text-muted); font-size: 0.88rem; }
+.tc-lib-actions { display: flex; gap: 8px; align-items: center; }
+
+/* Tab 栏 */
+.tc-tabs {
+    display: flex; gap: 0; margin-bottom: 16px;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 4px; overflow: hidden;
+}
+.tc-tab {
+    flex: 1; text-align: center; padding: 10px 16px;
+    cursor: pointer; font-size: 0.92rem; font-weight: 500;
+    color: var(--text-secondary); border-radius: var(--radius-sm);
+    transition: all 0.2s ease;
+}
+.tc-tab:hover { color: var(--text-primary); background: var(--bg-hover); }
+.tc-tab.active {
+    color: #fff; background: var(--accent);
+    box-shadow: 0 2px 6px rgba(108, 92, 231, 0.3);
+}
+
+/* ===== 脑图树状可视化 ===== */
+.tc-tree { padding: 20px; }
+.tc-tree-group {
+    margin-bottom: 24px;
+    border-left: 3px solid var(--border);
+    padding-left: 0;
+}
+.tc-tree-group-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 16px; margin-bottom: 8px;
+    cursor: pointer; user-select: none;
+}
+.tc-tree-group-header:hover { background: var(--bg-hover); border-radius: var(--radius-sm); }
+.tc-priority-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 36px; padding: 2px 10px; border-radius: 12px;
+    font-size: 0.82rem; font-weight: 700; color: #fff;
+}
+.tc-priority-badge.p0 { background: var(--red); }
+.tc-priority-badge.p1 { background: var(--yellow); color: #111; }
+.tc-priority-badge.p2 { background: var(--blue); }
+.tc-priority-badge.p3 { background: var(--text-muted); }
+.tc-tree-count { color: var(--text-muted); font-size: 0.82rem; }
+.tc-tree-toggle { color: var(--text-muted); font-size: 0.8rem; transition: transform 0.2s; }
+.tc-tree-toggle.collapsed { transform: rotate(-90deg); }
+
+.tc-tree-branch { padding-left: 16px; }
+.tc-tree-type-label {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px; margin-bottom: 4px;
+    font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);
+}
+.tc-tree-type-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); flex-shrink: 0;
+}
+
+.tc-tree-cases { padding-left: 14px; }
+.tc-tree-case {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px; margin: 2px 0;
+    border-radius: var(--radius-sm);
+    cursor: pointer; transition: all 0.15s ease;
+    border-left: 2px solid transparent;
+}
+.tc-tree-case:hover {
+    background: var(--bg-hover);
+    border-left-color: var(--accent);
+}
+.tc-tree-case-id {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.78rem; color: var(--text-muted);
+    min-width: 56px;
+}
+.tc-tree-case-title {
+    flex: 1; font-size: 0.9rem; color: var(--text-primary);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tc-tree-case-tags { display: flex; gap: 4px; flex-shrink: 0; }
+.tc-tree-case-tag {
+    font-size: 0.7rem; padding: 1px 7px; border-radius: 8px;
+    background: var(--accent-dim); color: var(--accent);
+}
+
+/* ===== AI Chat 视图 ===== */
+.tc-chat-wrap {
+    display: flex; gap: 16px; height: 500px;
+}
+.tc-chat-area {
+    flex: 1; display: flex; flex-direction: column;
+}
+.tc-chat-messages {
+    flex: 1; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px; margin-bottom: 12px;
+    background: var(--bg-secondary);
+}
+.tc-chat-empty {
+    text-align: center; color: var(--text-muted); padding: 60px 20px;
+}
+.tc-chat-empty .icon { font-size: 2.5rem; margin-bottom: 12px; }
+.tc-chat-empty .hint { font-size: 0.82rem; margin-top: 6px; color: var(--text-muted); }
+.tc-chat-input-row { display: flex; gap: 8px; }
+
+.tc-msg-user, .tc-msg-ai, .tc-msg-err {
+    display: flex; margin-bottom: 12px;
+}
+.tc-msg-user { justify-content: flex-end; }
+.tc-msg-ai, .tc-msg-err { justify-content: flex-start; }
+.tc-msg-user .tc-msg-bubble {
+    background: var(--accent); color: #fff;
+    padding: 8px 14px; border-radius: 12px 12px 4px 12px; max-width: 70%;
+}
+.tc-msg-ai .tc-msg-bubble {
+    background: var(--bg-card); color: var(--text-primary);
+    border: 1px solid var(--border);
+    padding: 8px 14px; border-radius: 12px 12px 12px 4px; max-width: 70%;
+    white-space: pre-wrap; line-height: 1.5;
+}
+.tc-msg-err .tc-msg-bubble {
+    background: var(--red-dim); color: var(--red);
+    padding: 8px 14px; border-radius: 12px 12px 12px 4px;
+}
+
+/* ===== 用例详情弹窗 ===== */
+.tc-detail-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+    display: none; align-items: center; justify-content: center;
+}
+.tc-detail-overlay.active { display: flex; }
+.tc-detail-panel {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); width: 640px; max-width: 92vw;
+    max-height: 85vh; overflow-y: auto;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+    animation: tc-slide-up 0.25s ease;
+}
+@keyframes tc-slide-up {
+    from { transform: translateY(20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+.tc-detail-header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding: 20px 24px 16px; border-bottom: 1px solid var(--border);
+}
+.tc-detail-header h2 { font-size: 1.1rem; margin: 0; color: var(--text-primary); }
+.tc-detail-close {
+    background: none; border: none; color: var(--text-muted);
+    font-size: 1.3rem; cursor: pointer; padding: 4px;
+}
+.tc-detail-close:hover { color: var(--text-primary); }
+.tc-detail-body { padding: 20px 24px; }
+.tc-detail-row {
+    margin-bottom: 16px;
+}
+.tc-detail-label {
+    font-size: 0.78rem; font-weight: 600; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
+}
+.tc-detail-value {
+    font-size: 0.92rem; color: var(--text-primary); line-height: 1.6;
+}
+.tc-detail-value ol { padding-left: 20px; margin: 0; }
+.tc-detail-value ol li { margin-bottom: 4px; }
+.tc-detail-meta {
+    display: flex; gap: 12px; flex-wrap: wrap; padding: 16px 24px;
+    border-top: 1px solid var(--border);
+}
+.tc-detail-meta-item {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 0.82rem; color: var(--text-secondary);
+}
+
+/* ===== 空状态 ===== */
+.tc-empty-state {
+    text-align: center; padding: 80px 20px;
+}
+.tc-empty-icon { font-size: 4rem; margin-bottom: 16px; opacity: 0.5; }
+.tc-empty-title { font-size: 1.1rem; color: var(--text-secondary); margin-bottom: 8px; }
+.tc-empty-hint { font-size: 0.88rem; color: var(--text-muted); }
+.tc-empty-actions { margin-top: 24px; display: flex; gap: 12px; justify-content: center; }
+
+/* ===== 列表视图多选 ===== */
+.tc-list-toolbar {
+    display: flex; gap: 10px; align-items: center;
+    margin-bottom: 12px; flex-wrap: wrap;
+}
+.tc-batch-bar {
+    display: none; align-items: center; gap: 10px;
+    padding: 8px 14px; margin-bottom: 12px;
+    background: var(--accent-dim); border: 1px solid var(--accent);
+    border-radius: var(--radius-sm); font-size: 0.88rem; color: var(--accent);
+}
+.tc-batch-bar.active { display: flex; }
+</style>
+{% endblock %}
+
 {% block content %}
 <div id="library-container" style="display:none">
-    <!-- 用例库信息 -->
-    <div class="panel" style="margin-bottom:16px">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-            <div>
-                <h3 id="library-name" style="margin:0;font-size:1.1rem"></h3>
-                <p id="library-desc" style="margin:4px 0 0;color:var(--text-muted);font-size:0.9rem"></p>
-            </div>
-            <div style="display:flex;gap:8px;align-items:center">
-                <span class="tag tag-blue" id="case-count">0 个用例</span>
-                <button class="btn btn-ghost" onclick="editLibrary()">编辑</button>
-            </div>
+    <!-- 用例库信息头 -->
+    <div class="tc-lib-header">
+        <div class="tc-lib-meta">
+            <h3 id="library-name"></h3>
+            <p id="library-desc"></p>
+        </div>
+        <div class="tc-lib-actions">
+            <span class="tag tag-blue" id="case-count">0 个用例</span>
+            <button class="btn btn-ghost" onclick="editLibrary()" title="编辑用例库">✏️ 编辑</button>
+            <button class="btn btn-ghost" onclick="deleteLibrary()" title="删除用例库" style="color:var(--red)">🗑️ 删除</button>
         </div>
     </div>
 
-    <!-- 标签页切换 -->
-    <div class="tab-bar" style="margin-bottom:16px">
-        <div class="tab-item active" data-tab="mindmap" onclick="switchTab('mindmap')">&#x1F4CB; 脑图</div>
-        <div class="tab-item" data-tab="list" onclick="switchTab('list')">&#x1F4C4; 列表</div>
-        <div class="tab-item" data-tab="chat" onclick="switchTab('chat')">&#x1F916; AI 对话</div>
+    <!-- 标签页 -->
+    <div class="tc-tabs">
+        <div class="tc-tab active" data-tab="mindmap" onclick="switchTab('mindmap')">🌲 脑图</div>
+        <div class="tc-tab" data-tab="list" onclick="switchTab('list')">📄 列表</div>
+        <div class="tc-tab" data-tab="chat" onclick="switchTab('chat')">🤖 AI 对话</div>
     </div>
 
     <!-- 脑图视图 -->
@@ -46,8 +259,8 @@
 
     <!-- 列表视图 -->
     <div id="list-view" class="panel" style="display:none">
-        <div style="margin-bottom:12px;display:flex;gap:10px;align-items:center">
-            <input class="form-input" id="case-search" placeholder="搜索用例..." oninput="filterCases()" style="max-width:300px">
+        <div class="tc-list-toolbar">
+            <input class="form-input" id="case-search" placeholder="搜索用例..." oninput="filterCases()" style="max-width:260px">
             <select class="form-select" id="priority-filter" onchange="filterCases()" style="width:120px">
                 <option value="">全部优先级</option>
                 <option value="P0">P0</option>
@@ -64,11 +277,18 @@
             </select>
             <button class="btn btn-primary" onclick="openCreateCaseModal()" style="margin-left:auto">+ 添加用例</button>
         </div>
+        <!-- 批量操作栏 -->
+        <div class="tc-batch-bar" id="batch-bar">
+            <span id="batch-count">已选 0 项</span>
+            <button class="btn btn-ghost" style="color:var(--red);padding:4px 10px" onclick="batchDelete()">批量删除</button>
+            <button class="btn btn-ghost" style="padding:4px 10px" onclick="clearSelection()">取消选择</button>
+        </div>
         <div id="cases-table-container">
             <table class="data-table">
                 <thead>
                     <tr>
-                        <th>用例编号</th>
+                        <th style="width:36px"><input type="checkbox" id="select-all" onchange="toggleSelectAll()"></th>
+                        <th>编号</th>
                         <th>用例标题</th>
                         <th>优先级</th>
                         <th>类型</th>
@@ -83,17 +303,17 @@
 
     <!-- AI 对话视图 -->
     <div id="chat-view" class="panel" style="display:none">
-        <div style="display:flex;gap:16px;height:500px">
-            <!-- 对话区域 -->
-            <div style="flex:1;display:flex;flex-direction:column">
-                <div id="chat-messages" style="flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:12px;background:#fafafa">
-                    <div style="text-align:center;color:var(--text-muted);padding:40px">
-                        &#x1F916; 输入你的需求，AI 会帮你管理用例库<br>
-                        <span style="font-size:0.85rem">支持：添加用例、修改用例、查询用例、生成脑图结构</span>
+        <div class="tc-chat-wrap">
+            <div class="tc-chat-area">
+                <div class="tc-chat-messages" id="chat-messages">
+                    <div class="tc-chat-empty">
+                        <div class="icon">🤖</div>
+                        <div>输入你的需求，AI 会帮你管理用例库</div>
+                        <div class="hint">支持：添加用例、修改用例、查询用例、生成脑图结构</div>
                     </div>
                 </div>
-                <div style="display:flex;gap:8px">
-                    <input class="form-input" id="chat-input" placeholder="输入你的需求..." onkeydown="if(event.key==='Enter')sendChat()">
+                <div class="tc-chat-input-row">
+                    <input class="form-input" id="chat-input" placeholder="描述你想生成的用例，如：登录功能的边界测试..." onkeydown="if(event.key==='Enter')sendChat()">
                     <button class="btn btn-primary" onclick="sendChat()">发送</button>
                 </div>
             </div>
@@ -102,9 +322,41 @@
 </div>
 
 <!-- 空状态 -->
-<div id="empty-state" class="empty-state">
-    <div class="empty-state-icon">&#x1F4CB;</div>
-    <div class="empty-state-text">请选择或创建一个用例库</div>
+<div id="empty-state" class="tc-empty-state">
+    <div class="tc-empty-icon">📋</div>
+    <div class="tc-empty-title">选择一个用例库，或创建新的</div>
+    <div class="tc-empty-hint">用例库支持脑图可视化、AI 智能生成、批量管理</div>
+    <div class="tc-empty-actions">
+        <button class="btn btn-primary" onclick="openCreateLibraryModal()">+ 新建用例库</button>
+    </div>
+</div>
+
+<!-- 用例详情弹窗 -->
+<div class="tc-detail-overlay" id="case-detail-overlay" onclick="if(event.target===this)closeCaseDetail()">
+    <div class="tc-detail-panel">
+        <div class="tc-detail-header">
+            <div>
+                <h2 id="detail-title"></h2>
+                <div style="display:flex;gap:8px;margin-top:8px" id="detail-badges"></div>
+            </div>
+            <button class="tc-detail-close" onclick="closeCaseDetail()">&times;</button>
+        </div>
+        <div class="tc-detail-body">
+            <div class="tc-detail-row" id="detail-preconditions-row">
+                <div class="tc-detail-label">前置条件</div>
+                <div class="tc-detail-value" id="detail-preconditions"></div>
+            </div>
+            <div class="tc-detail-row" id="detail-steps-row">
+                <div class="tc-detail-label">测试步骤</div>
+                <div class="tc-detail-value" id="detail-steps"></div>
+            </div>
+            <div class="tc-detail-row" id="detail-results-row">
+                <div class="tc-detail-label">预期结果</div>
+                <div class="tc-detail-value" id="detail-results"></div>
+            </div>
+        </div>
+        <div class="tc-detail-meta" id="detail-meta"></div>
+    </div>
 </div>
 
 <!-- 新建/编辑用例库弹窗 -->
@@ -150,7 +402,7 @@
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
                 <div class="form-group">
                     <label class="form-label">用例编号</label>
-                    <input class="form-input" name="case_id" id="case-id-input" placeholder="如：TC_001">
+                    <input class="form-input" name="case_id" id="case-id-input" placeholder="自动生成">
                 </div>
                 <div class="form-group">
                     <label class="form-label">优先级</label>
@@ -181,14 +433,14 @@
             </div>
             <div class="form-group">
                 <label class="form-label">测试步骤</label>
-                <textarea class="form-textarea" name="steps" id="case-steps-input" rows="3" placeholder="每行一个步骤，格式：1. xxx" style="font-family:monospace"></textarea>
+                <textarea class="form-textarea" name="steps" id="case-steps-input" rows="3" placeholder="每行一个步骤，格式：1. xxx" style="font-family:'SF Mono','Fira Code',monospace;font-size:0.88rem"></textarea>
             </div>
             <div class="form-group">
                 <label class="form-label">预期结果</label>
-                <textarea class="form-textarea" name="expected_results" id="case-results-input" rows="3" placeholder="每行一个预期结果" style="font-family:monospace"></textarea>
+                <textarea class="form-textarea" name="expected_results" id="case-results-input" rows="3" placeholder="每行一个预期结果" style="font-family:'SF Mono','Fira Code',monospace;font-size:0.88rem"></textarea>
             </div>
             <div class="form-group">
-                <label class="form-label">标签（多个用逗号分隔）</label>
+                <label class="form-label">标签（逗号分隔）</label>
                 <input class="form-input" name="tags_input" id="case-tags-input" placeholder="如：登录,冒烟测试">
             </div>
             <div class="modal-actions">
@@ -202,7 +454,7 @@
 <!-- AI 生成用例弹窗 -->
 <div class="modal-overlay" id="ai-generate-modal">
     <div class="modal" style="max-width:600px">
-        <h2 class="modal-title">&#x1F916; AI 批量生成用例</h2>
+        <h2 class="modal-title">🤖 AI 批量生成用例</h2>
         <form id="ai-generate-form">
             <div class="form-group">
                 <label class="form-label">需求描述 *</label>
@@ -225,7 +477,7 @@
             </div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeAIGenerateModal()">取消</button>
-                <button type="submit" class="btn btn-primary" style="background:#9b59b6">&#x1F916; 生成</button>
+                <button type="submit" class="btn btn-primary tc-ai-btn">🤖 生成</button>
             </div>
         </form>
     </div>
@@ -239,8 +491,12 @@ let currentLibraryId = null;
 let currentLibrary = null;
 let currentTab = 'mindmap';
 let allCases = [];
+let selectedCaseIds = new Set();
 
-// 加载用例库列表
+const TYPE_LABELS = { functional: '功能', interface: '接口', performance: '性能', security: '安全' };
+const PRIORITY_CLASSES = { P0: 'p0', P1: 'p1', P2: 'p2', P3: 'p3' };
+
+// ==================== 用例库列表 ====================
 async function loadLibraries() {
     try {
         libraries = await API.request('GET', '/testcase-libraries');
@@ -253,7 +509,7 @@ async function loadLibraries() {
 function renderLibrarySelect() {
     const select = $('#library-select');
     select.innerHTML = '<option value="">-- 选择用例库 --</option>' +
-        libraries.map(lib => `<option value="${lib.id}">${lib.name}</option>`).join('');
+        libraries.map(lib => `<option value="${lib.id}" ${lib.id === currentLibraryId ? 'selected' : ''}>${lib.name} (${lib.case_count || 0})</option>`).join('');
 }
 
 async function switchLibrary() {
@@ -271,7 +527,7 @@ async function switchLibrary() {
         currentLibraryId = id;
 
         $('#library-name').textContent = currentLibrary.name;
-        $('#library-desc').textContent = currentLibrary.description || '';
+        $('#library-desc').textContent = currentLibrary.description || '暂无描述';
         $('#case-count').textContent = `${currentLibrary.case_count} 个用例`;
 
         $('#library-container').style.display = '';
@@ -287,6 +543,8 @@ async function loadCases() {
     if (!currentLibraryId) return;
     try {
         allCases = await API.request('GET', `/testcase-libraries/${currentLibraryId}/cases`);
+        selectedCaseIds.clear();
+        updateBatchBar();
         renderMindmap();
         renderCasesTable();
     } catch (err) {
@@ -294,94 +552,106 @@ async function loadCases() {
     }
 }
 
-// 脑图渲染
+// ==================== 脑图渲染（树状结构） ====================
 function renderMindmap() {
     const container = $('#mindmap-container');
 
     if (allCases.length === 0) {
         container.innerHTML = `
-            <div style="text-align:center;padding:60px;color:var(--text-muted)">
-                <div style="font-size:3rem;margin-bottom:16px">&#x1F4CB;</div>
-                <div>暂无用例</div>
-                <div style="font-size:0.85rem;margin-top:8px">点击"添加用例"或"AI生成用例"创建</div>
+            <div class="tc-empty-state" style="padding:60px 20px">
+                <div class="tc-empty-icon">🌲</div>
+                <div class="tc-empty-title">暂无用例</div>
+                <div class="tc-empty-hint">点击「+ 添加用例」或「🤖 AI 生成用例」开始</div>
             </div>`;
         return;
     }
 
-    // 构建脑图树
-    const groups = {P0: [], P1: [], P2: [], P3: []};
+    // 按优先级 → 类型 分组
+    const groups = { P0: {}, P1: {}, P2: {}, P3: {} };
     allCases.forEach(c => {
         const p = c.priority || 'P2';
-        if (!groups[p]) groups[p] = [];
-        groups[p].push(c);
+        const t = c.type || 'functional';
+        if (!groups[p]) groups[p] = {};
+        if (!groups[p][t]) groups[p][t] = [];
+        groups[p][t].push(c);
     });
 
-    let html = `<div style="padding:20px">`;
+    let html = '<div class="tc-tree">';
 
-    for (const [priority, cases] of Object.entries(groups)) {
-        if (cases.length === 0) continue;
-
-        const priorityColors = {
-            'P0': '#e74c3c',
-            'P1': '#e67e22',
-            'P2': '#3498db',
-            'P3': '#95a5a6'
-        };
+    for (const [priority, types] of Object.entries(groups)) {
+        const totalInPriority = Object.values(types).reduce((sum, arr) => sum + arr.length, 0);
+        if (totalInPriority === 0) continue;
 
         html += `
-            <div style="margin-bottom:24px">
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-                    <span style="background:${priorityColors[priority]};color:#fff;padding:2px 10px;border-radius:12px;font-size:0.85rem;font-weight:600">${priority}</span>
-                    <span style="color:var(--text-muted);font-size:0.85rem">${cases.length} 个用例</span>
-                </div>
-                <div style="display:flex;flex-wrap:wrap;gap:8px;padding-left:20px">
-        `;
+        <div class="tc-tree-group" style="border-left-color:var(--${priority === 'P0' ? 'red' : priority === 'P1' ? 'yellow' : priority === 'P2' ? 'blue' : 'text-muted'})">
+            <div class="tc-tree-group-header" onclick="toggleGroup(this)">
+                <span class="tc-tree-toggle">▼</span>
+                <span class="tc-priority-badge ${PRIORITY_CLASSES[priority]}">${priority}</span>
+                <span class="tc-tree-count">${totalInPriority} 个用例</span>
+            </div>
+            <div class="tc-tree-branch">`;
 
-        cases.forEach(c => {
-            const typeLabels = {
-                'functional': '功能',
-                'interface': '接口',
-                'performance': '性能',
-                'security': '安全'
-            };
+        for (const [type, cases] of Object.entries(types)) {
             html += `
-                <div style="background:#f8f9fa;border:1px solid var(--border);border-radius:8px;padding:10px 14px;min-width:200px;max-width:300px;cursor:pointer"
-                     onclick="viewCase(${c.id})">
-                    <div style="font-weight:500;margin-bottom:4px">${c.title}</div>
-                    <div style="display:flex;gap:6px;align-items:center">
-                        <span class="tag" style="font-size:0.75rem">${typeLabels[c.type] || c.type}</span>
-                        ${(c.tags || []).slice(0, 2).map(t => `<span class="tag tag-blue" style="font-size:0.7rem">${t}</span>`).join('')}
-                    </div>
+                <div class="tc-tree-type-label">
+                    <span class="tc-tree-type-dot"></span>
+                    ${TYPE_LABELS[type] || type}测试 (${cases.length})
                 </div>
-            `;
-        });
+                <div class="tc-tree-cases">`;
 
-        html += `</div></div>`;
+            cases.forEach(c => {
+                const tagsHtml = (c.tags || []).slice(0, 3).map(t =>
+                    `<span class="tc-tree-case-tag">${t}</span>`
+                ).join('');
+
+                html += `
+                    <div class="tc-tree-case" onclick="viewCase(${c.id})">
+                        <span class="tc-tree-case-id">${c.case_id || '-'}</span>
+                        <span class="tc-tree-case-title">${c.title}</span>
+                        <span class="tc-tree-case-tags">${tagsHtml}</span>
+                    </div>`;
+            });
+
+            html += '</div>';
+        }
+
+        html += '</div></div>';
     }
 
-    html += `</div>`;
+    html += '</div>';
     container.innerHTML = html;
 }
 
-// 表格渲染
+function toggleGroup(header) {
+    const toggle = header.querySelector('.tc-tree-toggle');
+    const branch = header.nextElementSibling;
+    if (branch.style.display === 'none') {
+        branch.style.display = '';
+        toggle.classList.remove('collapsed');
+    } else {
+        branch.style.display = 'none';
+        toggle.classList.add('collapsed');
+    }
+}
+
+// ==================== 列表渲染 ====================
 function renderCasesTable() {
     const tbody = $('#cases-tbody');
+    const cases = filteredCases();
 
-    if (filteredCases().length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-muted)">暂无用例</td></tr>';
+    if (cases.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted)">暂无用例</td></tr>';
         return;
     }
 
-    const priorityColors = {'P0': 'style="color:#e74c3c"', 'P1': 'style="color:#e67e22"', 'P2': 'style="color:#3498db"', 'P3': 'style="color:#95a5a6"'};
-    const typeLabels = {'functional': '功能', 'interface': '接口', 'performance': '性能', 'security': '安全'};
-
-    tbody.innerHTML = filteredCases().map(c => `
+    tbody.innerHTML = cases.map(c => `
         <tr>
-            <td><code style="font-size:0.85rem">${c.case_id || '-'}</code></td>
-            <td>${c.title}</td>
-            <td ${priorityColors[c.priority] || ''}><strong>${c.priority || '-'}</strong></td>
-            <td>${typeLabels[c.type] || c.type}</td>
-            <td>${(c.tags || []).map(t => `<span class="tag tag-blue" style="margin-right:4px">${t}</span>`).join('')}</td>
+            <td><input type="checkbox" class="case-cb" value="${c.id}" ${selectedCaseIds.has(c.id) ? 'checked' : ''} onchange="toggleCaseSelect(${c.id}, this.checked)"></td>
+            <td><code style="font-size:0.82rem;color:var(--text-muted)">${c.case_id || '-'}</code></td>
+            <td style="cursor:pointer" onclick="viewCase(${c.id})">${c.title}</td>
+            <td><span class="tc-priority-badge ${PRIORITY_CLASSES[c.priority]}" style="font-size:0.75rem;padding:1px 8px">${c.priority || '-'}</span></td>
+            <td style="color:var(--text-secondary)">${TYPE_LABELS[c.type] || c.type}</td>
+            <td>${(c.tags || []).map(t => `<span class="tc-tree-case-tag">${t}</span>`).join(' ')}</td>
             <td>
                 <button class="btn btn-ghost" style="padding:4px 8px" onclick="viewCase(${c.id})">查看</button>
                 <button class="btn btn-ghost" style="padding:4px 8px" onclick="editCase(${c.id})">编辑</button>
@@ -393,32 +663,139 @@ function renderCasesTable() {
 
 function filteredCases() {
     let cases = allCases;
-    const search = $('#case-search').value.toLowerCase();
+    const search = ($('#case-search').value || '').toLowerCase();
     const priority = $('#priority-filter').value;
     const type = $('#type-filter').value;
 
-    if (search) cases = cases.filter(c => (c.title || '').toLowerCase().includes(search));
+    if (search) cases = cases.filter(c => (c.title || '').toLowerCase().includes(search) || (c.case_id || '').toLowerCase().includes(search));
     if (priority) cases = cases.filter(c => c.priority === priority);
     if (type) cases = cases.filter(c => c.type === type);
-
     return cases;
 }
 
-function filterCases() {
-    renderCasesTable();
+function filterCases() { renderCasesTable(); }
+
+// ==================== 批量操作 ====================
+function toggleCaseSelect(id, checked) {
+    if (checked) selectedCaseIds.add(id);
+    else selectedCaseIds.delete(id);
+    updateBatchBar();
 }
 
+function toggleSelectAll() {
+    const checked = $('#select-all').checked;
+    const cases = filteredCases();
+    if (checked) cases.forEach(c => selectedCaseIds.add(c.id));
+    else selectedCaseIds.clear();
+    renderCasesTable();
+    updateBatchBar();
+}
+
+function clearSelection() {
+    selectedCaseIds.clear();
+    $('#select-all').checked = false;
+    renderCasesTable();
+    updateBatchBar();
+}
+
+function updateBatchBar() {
+    const bar = $('#batch-bar');
+    if (selectedCaseIds.size > 0) {
+        bar.classList.add('active');
+        $('#batch-count').textContent = `已选 ${selectedCaseIds.size} 项`;
+    } else {
+        bar.classList.remove('active');
+    }
+}
+
+async function batchDelete() {
+    if (!confirm(`确定要删除选中的 ${selectedCaseIds.size} 个用例吗？`)) return;
+    try {
+        await API.request('DELETE', `/testcase-libraries/${currentLibraryId}/cases/batch`, {
+            case_ids: Array.from(selectedCaseIds)
+        });
+        showToast(`已删除 ${selectedCaseIds.size} 个用例`, 'success');
+        selectedCaseIds.clear();
+        loadCases();
+    } catch (err) {
+        showToast('批量删除失败: ' + err.message, 'error');
+    }
+}
+
+// ==================== Tab 切换 ====================
 function switchTab(tab) {
     currentTab = tab;
-    $$('.tab-item').forEach(t => t.classList.remove('active'));
-    $(`.tab-item[data-tab="${tab}"]`).classList.add('active');
+    $$('.tc-tab').forEach(t => t.classList.remove('active'));
+    $(`.tc-tab[data-tab="${tab}"]`).classList.add('active');
 
     $('#mindmap-view').style.display = tab === 'mindmap' ? '' : 'none';
     $('#list-view').style.display = tab === 'list' ? '' : 'none';
     $('#chat-view').style.display = tab === 'chat' ? '' : 'none';
 }
 
-// 用例库弹窗
+// ==================== 用例详情弹窗 ====================
+function viewCase(id) {
+    const c = allCases.find(x => x.id === id);
+    if (!c) return;
+
+    const content = c.content || {};
+    const overlay = $('#case-detail-overlay');
+
+    $('#detail-title').textContent = c.title;
+    $('#detail-badges').innerHTML = `
+        <span class="tc-priority-badge ${PRIORITY_CLASSES[c.priority]}" style="font-size:0.78rem;padding:2px 10px">${c.priority}</span>
+        <span class="tag" style="font-size:0.78rem">${TYPE_LABELS[c.type] || c.type}</span>
+        ${(c.tags || []).map(t => `<span class="tc-tree-case-tag" style="font-size:0.78rem">${t}</span>`).join('')}
+    `;
+
+    // 前置条件
+    const preRow = $('#detail-preconditions-row');
+    if (content.preconditions) {
+        preRow.style.display = '';
+        $('#detail-preconditions').textContent = content.preconditions;
+    } else {
+        preRow.style.display = 'none';
+    }
+
+    // 步骤
+    const stepsRow = $('#detail-steps-row');
+    const steps = content.steps || [];
+    if (steps.length > 0) {
+        stepsRow.style.display = '';
+        $('#detail-steps').innerHTML = '<ol>' + steps.map(s => `<li>${escHtml(s)}</li>`).join('') + '</ol>';
+    } else {
+        stepsRow.style.display = 'none';
+    }
+
+    // 预期结果
+    const resRow = $('#detail-results-row');
+    const results = content.expected_results || [];
+    if (results.length > 0) {
+        resRow.style.display = '';
+        $('#detail-results').innerHTML = '<ol>' + results.map(s => `<li>${escHtml(s)}</li>`).join('') + '</ol>';
+    } else {
+        resRow.style.display = 'none';
+    }
+
+    // 元信息
+    $('#detail-meta').innerHTML = `
+        <div class="tc-detail-meta-item">📌 编号：<strong>${c.case_id || '-'}</strong></div>
+        <div class="tc-detail-meta-item">📅 创建：${c.created_at || '-'}</div>
+        ${c.ai_generated ? '<div class="tc-detail-meta-item">🤖 AI 生成</div>' : ''}
+    `;
+
+    overlay.classList.add('active');
+}
+
+function closeCaseDetail() { $('#case-detail-overlay').classList.remove('active'); }
+
+function escHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+// ==================== 用例库 CRUD ====================
 function openCreateLibraryModal() {
     $('#library-edit-id').value = '';
     $('#library-modal-title').textContent = '新建用例库';
@@ -440,6 +817,22 @@ function editLibrary() {
     $('#library-modal').classList.add('active');
 }
 
+async function deleteLibrary() {
+    if (!currentLibraryId || !currentLibrary) return;
+    if (!confirm(`确定要删除用例库「${currentLibrary.name}」及其所有用例吗？此操作不可撤销！`)) return;
+    try {
+        await API.request('DELETE', `/testcase-libraries/${currentLibraryId}`);
+        showToast('用例库已删除', 'success');
+        currentLibraryId = null;
+        currentLibrary = null;
+        $('#library-container').style.display = 'none';
+        $('#empty-state').style.display = '';
+        loadLibraries();
+    } catch (err) {
+        showToast('删除失败: ' + err.message, 'error');
+    }
+}
+
 $('#library-modal').addEventListener('click', e => {
     if (e.target === $('#library-modal')) closeLibraryModal();
 });
@@ -449,23 +842,28 @@ $('#library-form').addEventListener('submit', async e => {
     const form = new FormData(e.target);
     const data = Object.fromEntries(form);
     const editId = $('#library-edit-id').value;
+    const btn = e.target.querySelector('button[type="submit"]');
+    btn.disabled = true;
 
     try {
         if (editId) {
             await API.request('PUT', `/testcase-libraries/${editId}`, data);
             showToast('用例库已更新', 'success');
         } else {
-            const result = await API.request('POST', '/testcase-libraries', data);
+            await API.request('POST', '/testcase-libraries', data);
             showToast('用例库创建成功', 'success');
         }
         closeLibraryModal();
-        loadLibraries();
+        await loadLibraries();
+        if (editId) switchLibrary();
     } catch (err) {
         showToast('保存失败: ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
     }
 });
 
-// 用例弹窗
+// ==================== 用例 CRUD ====================
 function openCreateCaseModal() {
     $('#case-edit-id').value = '';
     $('#case-modal-title').textContent = '添加用例';
@@ -504,25 +902,23 @@ $('#case-form').addEventListener('submit', async e => {
     const form = new FormData(e.target);
     const data = Object.fromEntries(form);
 
-    // 处理 steps 和 expected_results
     const steps = (data.steps || '').split('\n').map(s => s.trim()).filter(Boolean);
     const expected_results = (data.expected_results || '').split('\n').map(s => s.trim()).filter(Boolean);
     const tags = (data.tags_input || '').split(',').map(t => t.trim()).filter(Boolean);
 
     const payload = {
-        case_id: data.case_id,
+        case_id: data.case_id || undefined,
         title: data.title,
         priority: data.priority,
         type: data.type,
-        content: {
-            preconditions: data.preconditions,
-            steps: steps,
-            expected_results: expected_results
-        },
-        tags: tags
+        content: { preconditions: data.preconditions, steps, expected_results },
+        tags
     };
 
     const editId = $('#case-edit-id').value;
+    const btn = e.target.querySelector('button[type="submit"]');
+    btn.disabled = true;
+
     try {
         if (editId) {
             await API.request('PUT', `/testcase-libraries/${currentLibraryId}/cases/${editId}`, payload);
@@ -535,6 +931,8 @@ $('#case-form').addEventListener('submit', async e => {
         loadCases();
     } catch (err) {
         showToast('保存失败: ' + err.message, 'error');
+    } finally {
+        btn.disabled = false;
     }
 });
 
@@ -549,37 +947,22 @@ async function deleteCase(id) {
     }
 }
 
-function viewCase(id) {
-    const c = allCases.find(x => x.id === id);
-    if (!c) return;
-
-    const content = c.content || {};
-    const steps = (content.steps || []).map((s, i) => `${i + 1}. ${s}`).join('\n');
-    const results = (content.expected_results || []).map((s, i) => `${i + 1}. ${s}`).join('\n');
-
-    alert(`用例: ${c.title}\n\n优先级: ${c.priority}\n类型: ${c.type}\n\n前置条件: ${content.preconditions || '(无)'}\n\n测试步骤:\n${steps || '(无)'}\n\n预期结果:\n${results || '(无)'}`);
-}
-
-// AI 对话
+// ==================== AI 对话 ====================
 async function sendChat() {
     const input = $('#chat-input');
     const message = input.value.trim();
     if (!message) return;
 
-    const messagesEl = $('#chat-messages');
+    const el = $('#chat-messages');
 
-    // 添加用户消息
-    messagesEl.innerHTML += `
-        <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
-            <div style="background:#3498db;color:#fff;padding:8px 12px;border-radius:12px 12px 4px 12px;max-width:70%">
-                ${message}
-            </div>
-        </div>`;
+    // 清除空状态
+    const emptyHint = el.querySelector('.tc-chat-empty');
+    if (emptyHint) emptyHint.remove();
 
+    el.innerHTML += `<div class="tc-msg-user"><div class="tc-msg-bubble">${escHtml(message)}</div></div>`;
     input.value = '';
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    el.scrollTop = el.scrollHeight;
 
-    // 调用 AI
     try {
         const result = await API.request('POST', '/ai/testcases/chat', {
             library_id: currentLibraryId,
@@ -588,29 +971,19 @@ async function sendChat() {
 
         let responseText = result.response || JSON.stringify(result, null, 2);
         if (result.cases_updated) {
-            responseText += `\n\n(已更新 ${result.cases_updated} 个用例)`;
+            responseText += `\n\n✅ 已更新 ${result.cases_updated} 个用例`;
             loadCases();
         }
 
-        messagesEl.innerHTML += `
-            <div style="display:flex;justify-content:flex-start;margin-bottom:12px">
-                <div style="background:#f0f0f0;padding:8px 12px;border-radius:12px 12px 12px 4px;max-width:70%;white-space:pre-wrap">
-                    ${responseText}
-                </div>
-            </div>`;
+        el.innerHTML += `<div class="tc-msg-ai"><div class="tc-msg-bubble">${escHtml(responseText)}</div></div>`;
     } catch (err) {
-        messagesEl.innerHTML += `
-            <div style="display:flex;justify-content:flex-start;margin-bottom:12px">
-                <div style="background:#fee;color:#c00;padding:8px 12px;border-radius:12px 12px 12px 4px">
-                    错误: ${err.message}
-                </div>
-            </div>`;
+        el.innerHTML += `<div class="tc-msg-err"><div class="tc-msg-bubble">错误: ${escHtml(err.message)}</div></div>`;
     }
 
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    el.scrollTop = el.scrollHeight;
 }
 
-// AI 生成用例
+// ==================== AI 生成用例 ====================
 function openAIGenerateModal() {
     if (!currentLibraryId) {
         showToast('请先选择用例库', 'error');
@@ -634,7 +1007,7 @@ $('#ai-generate-form').addEventListener('submit', async e => {
 
     const btn = e.target.querySelector('button[type="submit"]');
     btn.disabled = true;
-    btn.textContent = '生成中...';
+    btn.textContent = '⏳ 生成中...';
 
     try {
         const result = await API.request('POST', '/ai/testcases/generate', data);
@@ -645,10 +1018,11 @@ $('#ai-generate-form').addEventListener('submit', async e => {
         showToast('生成失败: ' + err.message, 'error');
     } finally {
         btn.disabled = false;
-        btn.textContent = '🔥 AI 生成';
+        btn.textContent = '🤖 生成';
     }
 });
 
+// ==================== 初始化 ====================
 loadLibraries();
 </script>
 {% endblock %}

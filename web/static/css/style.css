@@ -181,6 +181,67 @@ a:hover { color: var(--accent-hover); }
 }
 
 /* ===== Stats Grid ===== */
+.dashboard-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    background: none;
+    margin-bottom: 16px;
+}
+
+.quick-stats {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+}
+
+.quick-stat-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.quick-stat-icon { font-size: 1rem; }
+.quick-stat-text strong { color: var(--text-primary); }
+
+.quick-links {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 12px;
+}
+
+.quick-link-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 20px 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    transition: all 0.15s;
+    text-decoration: none;
+}
+
+.quick-link-card:hover {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+}
+
+.quick-link-icon { font-size: 1.6rem; }
+.quick-link-label {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
 .stats-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -445,6 +506,11 @@ a:hover { color: var(--accent-hover); }
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 20px;
+}
+
+.skill-card-evolved {
+    border-left: 3px solid var(--orange, #f97316);
+    background: linear-gradient(135deg, var(--bg-card) 0%, rgba(249,115,22,0.03) 100%);
 }
 
 .skill-card-header {
@@ -929,5 +995,892 @@ a:hover { color: var(--accent-hover); }
     }
     .hub-inbox {
         display: none;
+    }
+}
+
+/* ===== Chat Messages ===== */
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-height: calc(100vh - 340px);
+}
+
+.chat-msg {
+    max-width: 75%;
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    font-size: 0.88rem;
+}
+
+.chat-msg-recv {
+    align-self: flex-start;
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+}
+
+.chat-msg-sent {
+    align-self: flex-end;
+    background: var(--accent-dim);
+    border: 1px solid var(--accent);
+}
+
+.chat-msg-sender {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+
+.chat-msg-content {
+    line-height: 1.5;
+    word-break: break-word;
+}
+
+.chat-msg-time {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-top: 4px;
+    text-align: right;
+}
+
+/* ===== Reports Center ===== */
+.report-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    background: none;
+    margin-bottom: 24px;
+}
+
+.report-progress-bar {
+    margin-bottom: 20px;
+}
+
+.progress-track {
+    height: 8px;
+    background: var(--bg-hover);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--green), var(--accent));
+    border-radius: 4px;
+    transition: width 0.6s ease;
+}
+
+.claw-report-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 10px;
+}
+
+.claw-report-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    transition: all 0.15s;
+}
+
+.claw-report-item.reported {
+    background: var(--green-dim);
+    border-color: rgba(34, 197, 94, 0.3);
+}
+
+.claw-report-item.not-reported {
+    background: var(--bg-hover);
+}
+
+.claw-report-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--accent-dim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+}
+
+.claw-report-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.claw-report-name {
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.claw-report-detail {
+    margin-top: 2px;
+}
+
+/* Report List Items */
+.report-date-group {
+    margin-bottom: 20px;
+}
+
+.report-date-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.report-date-label {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--text-primary);
+}
+
+.report-item {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.report-item:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent-dim);
+}
+
+.report-item-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.report-summary {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    padding: 10px;
+    background: var(--bg-hover);
+    border-radius: var(--radius-sm);
+    border-left: 3px solid var(--accent);
+}
+
+.detail-list {
+    list-style: none;
+    padding: 0;
+}
+
+.detail-list li {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+    color: var(--text-secondary);
+}
+
+.detail-list li:before {
+    content: '•';
+    color: var(--accent);
+    margin-right: 8px;
+    font-weight: 600;
+}
+
+.detail-list li:last-child {
+    border-bottom: none;
+}
+
+/* ===== TAPD Integration ===== */
+.tapd-table {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.tapd-table-header {
+    display: flex;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.tapd-table-row {
+    display: flex;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.88rem;
+    align-items: center;
+    transition: background 0.15s;
+}
+
+.tapd-table-row:last-child {
+    border-bottom: none;
+}
+
+.tapd-table-row:hover {
+    background: var(--bg-hover);
+}
+
+/* ===== Skills Market - Marketplace Style ===== */
+.market-header {
+    margin-bottom: 24px;
+}
+
+.market-search {
+    position: relative;
+    margin-bottom: 20px;
+}
+
+.market-search input {
+    width: 100%;
+    padding: 12px 16px 12px 44px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.market-search input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.market-search-icon {
+    position: absolute;
+    left: 14px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 1.1rem;
+    color: var(--text-muted);
+}
+
+.market-filters {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+}
+
+.filter-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.filter-chip:hover {
+    border-color: var(--accent);
+    color: var(--text-primary);
+}
+
+.filter-chip.active {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.filter-chip-icon { font-size: 0.9rem; }
+
+/* Market Grid */
+.market-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+}
+
+/* Skill Card - Enhanced Marketplace Style */
+.skill-card-market {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0;
+    overflow: hidden;
+    transition: all 0.2s;
+    cursor: pointer;
+    position: relative;
+}
+
+.skill-card-market:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+}
+
+.skill-card-market.featured {
+    border-color: var(--yellow);
+    background: linear-gradient(135deg, var(--bg-card) 0%, rgba(245,158,11,0.05) 100%);
+}
+
+.skill-card-market.featured::before {
+    content: '⭐ 精选';
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    padding: 3px 8px;
+    background: var(--yellow);
+    color: #000;
+    font-size: 0.72rem;
+    font-weight: 600;
+    border-radius: 4px;
+}
+
+.skill-card-top {
+    padding: 16px 18px 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+}
+
+.skill-icon-box {
+    width: 42px;
+    height: 42px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.3rem;
+    flex-shrink: 0;
+}
+
+.skill-icon-box.standard { background: var(--accent-dim); }
+.skill-icon-box.custom { background: var(--blue-dim); }
+.skill-icon-box.evolved { background: rgba(249,115,22,0.15); }
+
+.skill-card-title-area {
+    flex: 1;
+    min-width: 0;
+}
+
+.skill-card-name {
+    font-weight: 600;
+    font-size: 1rem;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.skill-card-desc {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.skill-card-body {
+    padding: 12px 18px;
+}
+
+.skill-meta-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+}
+
+.skill-meta-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.skill-rating {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    color: var(--yellow);
+}
+
+.skill-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+/* Evolved Skills Metrics */
+.evolved-metrics-bar {
+    margin: 10px 0;
+}
+
+.evolved-rate-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.evolved-rate-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    min-width: 45px;
+}
+
+.evolved-rate-track {
+    flex: 1;
+    height: 5px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.evolved-rate-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.4s;
+}
+
+.evolved-rate-fill.high { background: var(--green); }
+.evolved-rate-fill.medium { background: var(--yellow); }
+.evolved-rate-fill.low { background: var(--red); }
+
+.evolved-rate-value {
+    font-size: 0.78rem;
+    font-weight: 600;
+    min-width: 38px;
+    text-align: right;
+}
+
+.evolved-stats-row {
+    display: flex;
+    gap: 16px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+
+/* Skill Card Footer */
+.skill-card-footer {
+    padding: 10px 18px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.skill-install-count {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.skill-action-btn {
+    padding: 5px 12px;
+    font-size: 0.8rem;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+/* Skill Detail Modal - Large */
+.skill-detail-modal .modal {
+    max-width: 680px;
+}
+
+.skill-detail-header {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.skill-detail-icon {
+    width: 56px;
+    height: 56px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.8rem;
+    flex-shrink: 0;
+}
+
+.skill-detail-title-area { flex: 1; }
+
+.skill-detail-name {
+    font-size: 1.3rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+
+.skill-detail-meta {
+    display: flex;
+    gap: 12px;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+}
+
+.skill-detail-section {
+    margin-bottom: 16px;
+}
+
+.skill-detail-section-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.skill-detail-desc {
+    font-size: 0.92rem;
+    line-height: 1.6;
+    color: var(--text-primary);
+}
+
+.skill-template-preview {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 14px;
+    font-family: 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    max-height: 180px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+}
+
+.skill-evolve-history {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 14px;
+}
+
+.evolve-history-item {
+    display: flex;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.85rem;
+}
+
+.evolve-history-item:last-child { border-bottom: none; }
+
+.evolve-history-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    margin-top: 6px;
+    flex-shrink: 0;
+}
+
+.evolve-history-content { flex: 1; }
+.evolve-history-action { color: var(--text-primary); font-weight: 500; }
+.evolve-history-time { font-size: 0.78rem; color: var(--text-muted); margin-top: 2px; }
+
+/* ===== Agent Topology Visualization ===== */
+.topology-container {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 20px;
+    position: relative;
+    overflow: hidden;
+}
+
+.topology-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+}
+
+.topology-title {
+    font-size: 1rem;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.topology-canvas {
+    width: 100%;
+    height: 320px;
+    position: relative;
+    background: radial-gradient(circle at center, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+    border-radius: var(--radius-sm);
+}
+
+/* Hex Node */
+.hex-node {
+    position: absolute;
+    width: 72px;
+    height: 72px;
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+
+.hex-node:hover { transform: scale(1.1); z-index: 10; }
+
+.hex-node-inner {
+    width: 100%;
+    height: 100%;
+    clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    position: relative;
+}
+
+.hex-node-inner.human {
+    background: linear-gradient(135deg, var(--accent) 0%, #8b5cf6 100%);
+}
+
+.hex-node-inner.ai {
+    background: linear-gradient(135deg, var(--green) 0%, #10b981 100%);
+}
+
+.hex-node-inner.busy {
+    background: linear-gradient(135deg, var(--yellow) 0%, #f59e0b 100%);
+}
+
+.hex-node-inner.offline {
+    background: var(--bg-hover);
+}
+
+.hex-node-avatar {
+    font-size: 1.4rem;
+}
+
+.hex-node-name {
+    font-size: 0.68rem;
+    font-weight: 600;
+    color: #fff;
+    text-align: center;
+    max-width: 60px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hex-node.offline .hex-node-name { color: var(--text-muted); }
+
+.hex-node-status {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 2px solid var(--bg-card);
+}
+
+.hex-node-status.online { background: var(--green); }
+.hex-node-status.busy { background: var(--yellow); }
+.hex-node-status.offline { background: var(--text-muted); }
+
+/* Connection Lines */
+.topology-line {
+    position: absolute;
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent), var(--blue));
+    opacity: 0.3;
+    transform-origin: left center;
+    pointer-events: none;
+}
+
+/* Topology Legend */
+.topology-legend {
+    display: flex;
+    gap: 20px;
+    margin-top: 14px;
+    justify-content: center;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+.legend-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+}
+
+.legend-dot.ai { background: var(--green); }
+.legend-dot.human { background: var(--accent); }
+.legend-dot.busy { background: var(--yellow); }
+
+/* Node Detail Tooltip */
+.node-tooltip {
+    position: absolute;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 12px 16px;
+    min-width: 180px;
+    z-index: 100;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+
+.node-tooltip.visible { opacity: 1; }
+
+.tooltip-name {
+    font-weight: 600;
+    font-size: 0.95rem;
+    margin-bottom: 4px;
+}
+
+.tooltip-role {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.tooltip-meta {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+/* ===== OpenClaw Cards - Enhanced ===== */
+.claw-card-market {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0;
+    overflow: hidden;
+    transition: all 0.2s;
+    cursor: pointer;
+}
+
+.claw-card-market:hover {
+    border-color: var(--accent);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+}
+
+.claw-card-top-bar {
+    height: 4px;
+    background: linear-gradient(90deg, var(--accent), var(--blue));
+}
+
+.claw-card-content {
+    padding: 18px;
+}
+
+.claw-card-avatar-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.claw-avatar-market {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    background: var(--accent-dim);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+}
+
+.claw-market-info { flex: 1; }
+
+.claw-market-name {
+    font-weight: 600;
+    font-size: 1.05rem;
+    margin-bottom: 2px;
+}
+
+.claw-market-role {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.claw-status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.78rem;
+    padding: 4px 10px;
+    border-radius: 99px;
+    background: var(--bg-hover);
+}
+
+.claw-status-indicator.online { color: var(--green); background: var(--green-dim); }
+.claw-status-indicator.busy { color: var(--yellow); background: var(--yellow-dim); }
+.claw-status-indicator.offline { color: var(--text-muted); }
+
+.claw-card-skills-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 10px;
+}
+
+.claw-skill-chip {
+    padding: 3px 8px;
+    background: var(--bg-hover);
+    border-radius: 4px;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+@media (max-width: 900px) {
+    .report-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    .claw-report-grid {
+        grid-template-columns: 1fr;
+    }
+    .market-grid {
+        grid-template-columns: 1fr;
     }
 }

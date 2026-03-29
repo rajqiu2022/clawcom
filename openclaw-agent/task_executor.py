@@ -53,6 +53,10 @@ class TaskExecutor:
                 result = self._handle_restart()
             elif task_type == "get_status":
                 result = self._handle_get_status()
+            elif task_type == "sync_skills":
+                result = self._handle_sync_skills(payload)
+            elif task_type == "sync_rules":
+                result = self._handle_sync_rules(payload)
             else:
                 result = {"error": f"未知任务类型: {task_type}"}
                 status = "failed"
@@ -140,4 +144,43 @@ class TaskExecutor:
             "openclaw": status,
             "disk": disk,
             "config_keys": list(config.keys()) if config else [],
+        }
+
+    def _handle_sync_skills(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """处理 Skills 同步"""
+        skills = payload.get('skills', [])
+        if not skills:
+            return {"message": "没有需要同步的 Skills", "synced": 0}
+
+        # 更新 OpenClaw 的 skills 配置
+        config_path = self.operator.config_path
+        config = self.operator.read_config() or {}
+
+        # 存储 skills 到配置
+        config['skills'] = skills
+        self.operator.modify_config({'skills': skills})
+
+        return {
+            "message": f"已同步 {len(skills)} 个 Skills",
+            "synced": len(skills),
+            "skills": [s.get('name') for s in skills],
+        }
+
+    def _handle_sync_rules(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """处理 Rules 同步"""
+        rules = payload.get('rules', [])
+        if not rules:
+            return {"message": "没有需要同步的 Rules", "synced": 0}
+
+        # 更新 OpenClaw 的 rules 配置
+        config = self.operator.read_config() or {}
+
+        # 存储 rules 到配置
+        config['rules'] = rules
+        self.operator.modify_config({'rules': rules})
+
+        return {
+            "message": f"已同步 {len(rules)} 个 Rules",
+            "synced": len(rules),
+            "rules": [r.get('name') for r in rules],
         }

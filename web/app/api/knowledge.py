@@ -7,7 +7,7 @@ from app.api import api_bp
 
 @api_bp.route('/knowledge', methods=['GET'])
 def list_knowledge():
-    """查询知识（支持 scope/category/project/module 筛选）"""
+    """查询知识（支持 scope/category/project/source_type 筛选）"""
     query = KnowledgeEntry.query
 
     scope = request.args.get('scope')
@@ -15,6 +15,7 @@ def list_knowledge():
     project = request.args.get('project')
     module = request.args.get('module')
     status = request.args.get('status')
+    source_type = request.args.get('source_type')
 
     if scope:
         query = query.filter(KnowledgeEntry.scope == scope)
@@ -26,6 +27,8 @@ def list_knowledge():
         query = query.filter(KnowledgeEntry.module_name == module)
     if status:
         query = query.filter(KnowledgeEntry.status == status)
+    if source_type:
+        query = query.filter(KnowledgeEntry.source_type == source_type)
 
     entries = query.order_by(
         KnowledgeEntry.created_at.desc()
@@ -49,11 +52,53 @@ def create_knowledge():
         project_name=data.get('project_name'),
         module_name=data.get('module_name'),
         source_openclaw_id=data.get('source_openclaw_id'),
+        source_type=data.get('source_type', 'manual'),
         status=data.get('status', 'draft'),
     )
     db.session.add(entry)
     db.session.commit()
     return jsonify(entry.to_dict()), 201
+
+
+@api_bp.route('/knowledge/batch-import', methods=['POST'])
+def batch_import_knowledge():
+    """批量导入知识条目（来自 OpenSpace 或 Agent 上报）"""
+    data = request.get_json()
+    entries = data.get('entries', [])
+    source_type = data.get('source_type', 'openspace')
+
+    if not entries:
+        return jsonify({'error': 'entries 数组不能为空'}), 400
+
+    if source_type not in ('openclaw', 'openspace'):
+        return jsonify({'error': 'source_type 必须是 openclaw 或 openspace'}), 400
+
+    created = 0
+    for e_data in entries:
+        if not e_data.get('title') or not e_data.get('content'):
+            continue
+
+        entry = KnowledgeEntry(
+            memos_id=e_data.get('memos_id'),
+            title=e_data['title'],
+            content=e_data['content'],
+            category=e_data.get('category', 'general'),
+            scope=e_data.get('scope', 'global'),
+            project_name=e_data.get('project_name'),
+            module_name=e_data.get('module_name'),
+            source_openclaw_id=e_data.get('source_openclaw_id'),
+            source_type=source_type,
+            status=e_data.get('status', 'pending_review'),
+        )
+        db.session.add(entry)
+        created += 1
+
+    db.session.commit()
+
+    return jsonify({
+        'message': f'导入 {created} 条知识（待审核）',
+        'created': created,
+    })
 
 
 @api_bp.route('/knowledge/<int:entry_id>', methods=['PUT'])

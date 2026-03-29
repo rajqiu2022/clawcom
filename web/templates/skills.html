@@ -4,7 +4,12 @@
 {% block page_title %}Skills 市场{% endblock %}
 
 {% block top_actions %}
-<button class="btn btn-primary" onclick="openCreateModal()">+ 新增 Skill</button>
+<div style="display:flex;gap:10px;align-items:center">
+    <button class="btn btn-primary" onclick="openCreateModal()">+ 新增 Skill</button>
+    <button class="btn btn-ghost" onclick="openImportModal()" title="从 OpenSpace 批量导入">
+        &#x21BB; 导入进化技能
+    </button>
+</div>
 {% endblock %}
 
 {% block content %}
@@ -12,6 +17,9 @@
     <div class="tab-item active" data-tab="all" onclick="filterSkills('all')">全部</div>
     <div class="tab-item" data-tab="standard" onclick="filterSkills('standard')">标准 Skills</div>
     <div class="tab-item" data-tab="custom" onclick="filterSkills('custom')">自定义</div>
+    <div class="tab-item" data-tab="evolved" onclick="filterSkills('evolved')">
+        &#x1F916; 自动进化
+    </div>
 </div>
 
 <div class="skill-grid" id="skills-grid">
@@ -79,6 +87,36 @@
         </form>
     </div>
 </div>
+
+<!-- OpenSpace 导入弹窗 -->
+<div class="modal-overlay" id="import-modal">
+    <div class="modal" style="max-width:620px">
+        <h2 class="modal-title">&#x1F916; 从 OpenSpace 导入进化技能</h2>
+        <div class="form-group">
+            <label class="form-label">来源名称</label>
+            <input class="form-input" id="import-source" placeholder="如：OpenSpace / claw-小测" value="OpenSpace">
+        </div>
+        <div class="form-group">
+            <label class="form-label">技能 JSON 数组</label>
+            <textarea class="form-textarea" id="import-json" rows="12"
+                style="font-family:monospace;font-size:0.85rem"
+                placeholder='[
+  {
+    "name": "crash-analyzer",
+    "display_name": "崩溃日志分析器",
+    "description": "自动分析 crash log...",
+    "success_rate": 92.5,
+    "total_runs": 156,
+    "error_count": 12
+  }
+]'></textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeImportModal()">取消</button>
+            <button class="btn btn-primary" onclick="importEvolved()">导入</button>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -144,27 +182,70 @@ function scopeLabel(s) {
     return '';
 }
 
+function categoryTag(s) {
+    const map = {
+        standard: ['tag-accent', '标准'],
+        custom: ['tag-green', '自定义'],
+        evolved: ['tag-orange', '自动进化'],
+    };
+    const [cls, label] = map[s.category] || ['tag-blue', s.category];
+    return `<span class="tag ${cls}">${label}</span>`;
+}
+
+function evolvedMetrics(s) {
+    if (s.category !== 'evolved') return '';
+    const rate = s.success_rate || 0;
+    const rateColor = rate >= 80 ? 'var(--green)' : rate >= 50 ? 'var(--yellow)' : 'var(--red)';
+    return `
+        <div class="evolve-metrics" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                <div class="evolve-rate-bar" style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
+                    <div style="width:${rate}%;height:100%;background:${rateColor};border-radius:3px;transition:width 0.3s"></div>
+                </div>
+                <span style="font-size:0.82rem;font-weight:600;color:${rateColor}">${rate.toFixed(1)}%</span>
+            </div>
+            <div style="display:flex;gap:14px;font-size:0.78rem;color:var(--text-muted)">
+                <span>执行 ${s.total_runs || 0} 次</span>
+                <span>错误 ${s.error_count || 0} 次</span>
+                ${s.evolve_source ? `<span>来源: ${s.evolve_source}</span>` : ''}
+                ${s.last_evolved_at ? `<span>进化: ${timeAgo(s.last_evolved_at)}</span>` : ''}
+            </div>
+        </div>`;
+}
+
 function renderSkills() {
     const filtered = currentFilter === 'all'
         ? allSkills
         : allSkills.filter(s => s.category === currentFilter);
 
+    // evolved 排在前面（按成功率降序），其他按 name 排序
+    const sorted = [...filtered].sort((a, b) => {
+        if (a.category === 'evolved' && b.category !== 'evolved') return -1;
+        if (a.category !== 'evolved' && b.category === 'evolved') return 1;
+        if (a.category === 'evolved' && b.category === 'evolved')
+            return (b.success_rate || 0) - (a.success_rate || 0);
+        return a.name.localeCompare(b.name);
+    });
+
     const grid = $('#skills-grid');
 
-    if (filtered.length === 0) {
+    if (sorted.length === 0) {
+        const emptyMsg = currentFilter === 'evolved'
+            ? '暂无 OpenSpace 进化技能<br><span style="font-size:0.82rem;color:var(--text-muted)">接入 OpenSpace 后，Agent 自动进化的技能将在此展示</span>'
+            : '暂无 Skills';
         grid.innerHTML = `
             <div class="empty-state" style="grid-column:1/-1">
                 <div class="empty-state-icon">🧩</div>
-                <div class="empty-state-text">暂无 Skills</div>
+                <div class="empty-state-text">${emptyMsg}</div>
             </div>`;
         return;
     }
 
-    grid.innerHTML = filtered.map(s => `
-        <div class="skill-card">
+    grid.innerHTML = sorted.map(s => `
+        <div class="skill-card${s.category === 'evolved' ? ' skill-card-evolved' : ''}">
             <div class="skill-card-header">
                 <span class="skill-name">${s.display_name}</span>
-                <span class="tag ${s.category === 'standard' ? 'tag-accent' : 'tag-green'}">${s.category}</span>
+                ${categoryTag(s)}
                 ${scopeLabel(s)}
             </div>
             <div class="skill-desc">${s.description || ''}</div>
@@ -176,6 +257,7 @@ function renderSkills() {
                 </div>
                 <span style="font-size:0.82rem;color:var(--text-muted)">${s.used_by_count} 个 OpenClaw 使用</span>
             </div>
+            ${evolvedMetrics(s)}
         </div>
     `).join('');
 }
@@ -229,5 +311,34 @@ $('#create-form').addEventListener('submit', async e => {
 });
 
 loadSkills();
+
+// OpenSpace 导入
+function openImportModal() { $('#import-modal').classList.add('active'); }
+function closeImportModal() { $('#import-modal').classList.remove('active'); }
+
+$('#import-modal').addEventListener('click', e => {
+    if (e.target === $('#import-modal')) closeImportModal();
+});
+
+async function importEvolved() {
+    const source = $('#import-source').value.trim() || 'OpenSpace';
+    let skills;
+    try {
+        skills = JSON.parse($('#import-json').value);
+        if (!Array.isArray(skills) || skills.length === 0) throw new Error('空数组');
+    } catch (e) {
+        showToast('JSON 格式错误: ' + e.message, 'error');
+        return;
+    }
+
+    try {
+        const result = await API.request('POST', '/skills/batch-evolved', { skills, source });
+        showToast(`导入完成: 新建 ${result.created} 个，更新 ${result.updated} 个`, 'success');
+        closeImportModal();
+        loadSkills();
+    } catch (err) {
+        showToast('导入失败: ' + err.message, 'error');
+    }
+}
 </script>
 {% endblock %}

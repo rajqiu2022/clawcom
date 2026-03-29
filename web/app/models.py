@@ -1,7 +1,34 @@
 import secrets
 import hashlib
+import base64
 from datetime import datetime
 from app import db
+
+# 简单加密，用于存储可还原的 token 明文
+# 注意：实际生产环境建议使用更安全的密钥管理
+_ENCODING_KEY = base64.urlsafe_b64encode(b'change-me-in-prod-32bytes-secret')
+
+
+def _simple_encrypt(text: str) -> str:
+    """简单 XOR 加密（可还原）"""
+    key = _ENCODING_KEY
+    result = []
+    for i, c in enumerate(text):
+        result.append(chr(ord(c) ^ key[i % len(key)]))
+    return base64.urlsafe_b64encode(''.join(result).encode()).decode()
+
+
+def _simple_decrypt(encrypted: str) -> str:
+    """解密"""
+    try:
+        data = base64.urlsafe_b64decode(encrypted.encode()).decode()
+        key = _ENCODING_KEY
+        result = []
+        for i, c in enumerate(data):
+            result.append(chr(ord(c) ^ key[i % len(key)]))
+        return ''.join(result)
+    except Exception:
+        return ''
 
 
 def generate_api_token():
@@ -41,6 +68,8 @@ class OpenClawInstance(db.Model):
     web_system_url = db.Column(db.String(255),
                                comment='Web 管理系统地址')
     api_token_hash = db.Column(db.String(64), comment='API Token 哈希值')
+    api_token_plain = db.Column(db.String(128),
+                                comment='加密存储的 Token 明文（可还原）')
     project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
                            comment='所属项目ID')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -69,16 +98,17 @@ class OpenClawInstance(db.Model):
             'avatar': self.avatar,
             'status': self.status,
             'role': self.role,
-            'last_heartbeat': self.last_heartbeat.isoformat() if self.last_heartbeat else None,
+            'last_heartbeat': str(self.last_heartbeat) if self.last_heartbeat else None,
             'report_schedule': self.report_schedule,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'api_token_preview': self.get_token_preview() if self.api_token_plain else None,
         }
         if not brief:
             data.update({
                 'soul_config': self.soul_config,
                 'workflow_config': self.workflow_config,
                 'web_system_url': self.web_system_url,
-                'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+                'updated_at': str(self.updated_at) if self.updated_at else None,
                 'skills': [s.skill.to_dict() for s in self.skills if s.enabled],
             })
         return data
@@ -88,6 +118,19 @@ class OpenClawInstance(db.Model):
         if not self.api_token_hash or not token:
             return False
         return self.api_token_hash == hash_token(token)
+
+    def get_token_preview(self):
+        """获取 Token 预览（头尾各6字符）"""
+        plain = self.get_token_plain()
+        if plain and len(plain) > 16:
+            return plain[:10] + '...' + plain[-6:]
+        return plain or ''
+
+    def get_token_plain(self):
+        """获取 Token 明文（解密）"""
+        if self.api_token_plain:
+            return _simple_decrypt(self.api_token_plain)
+        return ''
 
 
 class Skill(db.Model):
@@ -111,6 +154,8 @@ class Skill(db.Model):
     applicable_modules = db.Column(db.JSON, comment='适用模块名列表（scope=module时）')
     used_by_count = db.Column(db.Integer, default=0,
                               comment='使用中的 OpenClaw 数量')
+    is_standard = db.Column(db.Boolean, default=False,
+                           comment='是否标准化 Skills（注册时自动安装）')
 
     # OpenSpace 进化指标（仅 evolved 类型有值）
     evolve_source = db.Column(db.String(100),
@@ -141,7 +186,8 @@ class Skill(db.Model):
             'applicable_projects': self.applicable_projects or [],
             'applicable_modules': self.applicable_modules or [],
             'used_by_count': self.used_by_count,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'is_standard': self.is_standard,
+            'created_at': str(self.created_at) if self.created_at else None,
         }
         # 进化指标
         if self.category == 'evolved':
@@ -150,7 +196,7 @@ class Skill(db.Model):
                 'success_rate': self.success_rate,
                 'total_runs': self.total_runs,
                 'error_count': self.error_count,
-                'last_evolved_at': (self.last_evolved_at.isoformat()
+                'last_evolved_at': (str(self.last_evolved_at)
                                     if self.last_evolved_at else None),
                 'evolve_history': self.evolve_history or [],
             })
@@ -204,14 +250,14 @@ class DailyReport(db.Model):
         return {
             'id': self.id,
             'openclaw_id': self.openclaw_id,
-            'report_date': self.report_date.isoformat() if self.report_date else None,
+            'report_date': str(self.report_date) if self.report_date else None,
             'report_time': self.report_time.strftime('%H:%M') if self.report_time else None,
             'tasks_completed': self.tasks_completed,
             'knowledge_recorded': self.knowledge_recorded,
             'experience_shared': self.experience_shared,
             'knowledge_learned': self.knowledge_learned,
             'ai_summary': self.ai_summary,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
         }
 
 
@@ -264,11 +310,11 @@ class KnowledgeEntry(db.Model):
             'source_type': self.source_type,
             'status': self.status,
             'reviewer_notes': self.reviewer_notes,
-            'approved_at': (self.approved_at.isoformat()
+            'approved_at': (str(self.approved_at)
                            if self.approved_at else None),
             'approved_by': self.approved_by,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
         }
 
 
@@ -311,7 +357,7 @@ class Project(db.Model):
             'description': self.description,
             'tapd_workspace_id': self.tapd_workspace_id,
             'modules': [m.to_dict() for m in self.modules],
-            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
         }
 
 
@@ -380,8 +426,8 @@ class Agent(db.Model):
             'project_name': self.project_name,
             'module_name': self.module_name,
             'status': self.status,
-            'last_heartbeat': self.last_heartbeat.isoformat() if self.last_heartbeat else None,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'last_heartbeat': str(self.last_heartbeat) if self.last_heartbeat else None,
+            'created_at': str(self.created_at) if self.created_at else None,
         }
         return data
 
@@ -421,8 +467,8 @@ class Message(db.Model):
             'msg_type': self.msg_type,
             'status': self.status,
             'metadata': self.extra_data,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'read_at': self.read_at.isoformat() if self.read_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'read_at': str(self.read_at) if self.read_at else None,
         }
 
 
@@ -453,7 +499,7 @@ class Conversation(db.Model):
             'agent_b_id': self.agent_b_id,
             'agent_b_name': self.agent_b.name if self.agent_b else None,
             'agent_b_key': self.agent_b.agent_key if self.agent_b else None,
-            'last_message_at': self.last_message_at.isoformat() if self.last_message_at else None,
+            'last_message_at': str(self.last_message_at) if self.last_message_at else None,
         }
         return data
 
@@ -480,6 +526,8 @@ class Rule(db.Model):
 
     # 生成的规范内容（Markdown格式，会被写入OpenClaw的配置文件）
     content_template = db.Column(db.Text, comment='规范内容模板')
+    is_standard = db.Column(db.Boolean, default=False,
+                           comment='是否标准化 Rules（注册时自动安装）')
 
     # 关联到哪些 OpenClaw
     openclaws = db.relationship('OpenClawRule', backref='rule',
@@ -497,12 +545,13 @@ class Rule(db.Model):
             'description': self.description,
             'category': self.category,
             'scope': self.scope,
+            'is_standard': self.is_standard,
             'applicable_projects': self.applicable_projects or [],
             'applicable_modules': self.applicable_modules or [],
             'content_template': self.content_template,
             'openclaw_ids': [r.openclaw_id for r in self.openclaws.filter_by(enabled=True)],
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
         }
 
 
@@ -563,8 +612,8 @@ class TestCaseLibrary(db.Model):
             'status': self.status,
             'mindmap': self.mindmap,
             'case_count': self.cases.count(),
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
         }
         if with_cases:
             data['cases'] = [c.to_dict() for c in self.cases]
@@ -615,6 +664,7 @@ class TestCase(db.Model):
             'mindmap_node_id': self.mindmap_node_id,
             'ai_generated': self.ai_generated,
             'tags': self.tags or [],
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
         }
+

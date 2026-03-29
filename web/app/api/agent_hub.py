@@ -2,6 +2,7 @@
 Agent Hub 通信中心 API
 供 OpenClaw 实例之间通信使用
 """
+from functools import wraps
 from flask import Blueprint, jsonify, request
 from datetime import datetime
 from app import db
@@ -29,9 +30,6 @@ def require_agent_token(f):
         kwargs['agent'] = agent
         return f(*args, **kwargs)
     return decorated
-
-
-from functools import wraps
 
 
 # ============== Agent 管理 ==============
@@ -269,4 +267,201 @@ def get_stats(agent=None):
         'online_agents': online_agents,
         'total_messages': total_messages,
         'my_unread': unread_messages,
+    })
+
+
+# ============== Web 管理端点（管理员面板用，免 Agent Token） ==============
+
+@agent_hub_bp.route('/web/stats', methods=['GET'])
+def web_stats():
+    """Web 管理端 - 通信中心统计概览"""
+    total_agents = Agent.query.count()
+    online_agents = Agent.query.filter_by(status='online').count()
+    total_messages = Message.query.count()
+    total_conversations = Conversation.query.count()
+    unread_messages = Message.query.filter_by(status='unread').count()
+
+    return jsonify({
+        'total_agents': total_agents,
+        'online_agents': online_agents,
+        'total_messages': total_messages,
+        'total_conversations': total_conversations,
+        'unread_messages': unread_messages,
+    })
+
+
+@agent_hub_bp.route('/web/agents', methods=['GET'])
+def web_list_agents():
+    """Web 管理端 - Agent 列表（含在线状态）"""
+    agents = Agent.query.order_by(Agent.status.desc(), Agent.name).all()
+    return jsonify({
+        'agents': [a.to_dict() for a in agents],
+        'total': len(agents),
+        'online': sum(1 for a in agents if a.status == 'online'),
+    })
+
+
+@agent_hub_bp.route('/web/agents', methods=['POST'])
+def web_register_agent():
+    """Web 管理端 - 注册新 Agent"""
+    data = request.get_json()
+
+    required = ['name', 'agent_key']
+    for field in required:
+        if not data.get(field):
+            return jsonify({'error': f'缺少必填字段: {field}'}), 400
+
+    if Agent.query.filter_by(name=data['name']).first():
+        return jsonify({'error': 'Agent 名称已存在'}), 409
+    if Agent.query.filter_by(agent_key=data['agent_key']).first():
+        return jsonify({'error': 'Agent Key 已存在'}), 409
+
+    token = generate_agent_token()
+    token_hash = hash_token(token)
+
+    agent = Agent(
+        name=data['name'],
+        agent_key=data['agent_key'],
+        role=data.get('role', 'test_member'),
+        project_name=data.get('project_name'),
+        module_name=data.get('module_name'),
+        hub_url=data.get('hub_url'),
+        api_token_hash=token_hash,
+        status='online',
+    )
+
+    db.session.add(agent)
+    db.session.commit()
+
+    return jsonify({
+        'message': '注册成功',
+        'agent': agent.to_dict(),
+        'token': token,
+    }), 201
+
+
+@agent_hub_bp.route('/web/agents/<int:agent_id>', methods=['PUT'])
+def web_update_agent(agent_id):
+    """Web 管理端 - 更新 Agent"""
+    agent = Agent.query.get_or_404(agent_id)
+    data = request.get_json()
+
+    for field in ['name', 'role', 'project_name', 'module_name',
+                  'hub_url', 'status']:
+        if field in data:
+            setattr(agent, field, data[field])
+
+    db.session.commit()
+    return jsonify({'agent': agent.to_dict()})
+
+
+@agent_hub_bp.route('/web/agents/<int:agent_id>', methods=['DELETE'])
+def web_delete_agent(agent_id):
+    """Web 管理端 - 删除 Agent"""
+    agent = Agent.query.get_or_404(agent_id)
+
+    # 删除关联消息
+    Message.query.filter(
+        (Message.sender_id == agent_id) | (Message.receiver_id == agent_id)
+    ).delete()
+    Conversation.query.filter(
+        (Conversation.agent_a_id == agent_id) | (Conversation.agent_b_id == agent_id)
+    ).delete()
+
+    db.session.delete(agent)
+    db.session.commit()
+    return jsonify({'message': f'已删除 Agent: {agent.name}'})
+
+
+@agent_hub_bp.route('/web/conversations', methods=['GET'])
+def web_list_conversations():
+    """Web 管理端 - 会话列表"""
+    convs = Conversation.query.order_by(
+        Conversation.last_message_at.desc()
+    ).limit(50).all()
+
+    result = []
+    for conv in convs:
+        d = conv.to_dict()
+        # 获取最近一条消息
+        last_msg = Message.query.filter(
+            ((Message.sender_id == conv.agent_a_id) & (Message.receiver_id == conv.agent_b_id)) |
+            ((Message.sender_id == conv.agent_b_id) & (Message.receiver_id == conv.agent_a_id))
+        ).order_by(Message.created_at.desc()).first()
+        if last_msg:
+            d['last_message'] = {
+                'content': last_msg.content[:80],
+                'sender_name': last_msg.sender.name if last_msg.sender else None,
+                'created_at': str(last_msg.created_at) if last_msg.created_at else None,
+            }
+        # 未读数
+        d['unread_count'] = Message.query.filter(
+            ((Message.sender_id == conv.agent_a_id) & (Message.receiver_id == conv.agent_b_id)) |
+            ((Message.sender_id == conv.agent_b_id) & (Message.receiver_id == conv.agent_a_id))
+        ).filter_by(status='unread').count()
+        result.append(d)
+
+    return jsonify({'conversations': result})
+
+
+@agent_hub_bp.route('/web/messages', methods=['GET'])
+def web_list_messages():
+    """Web 管理端 - 消息列表（支持 agent_id 筛选）"""
+    agent_id = request.args.get('agent_id', type=int)
+    query = Message.query
+
+    if agent_id:
+        query = query.filter(
+            (Message.sender_id == agent_id) | (Message.receiver_id == agent_id)
+        )
+
+    messages = query.order_by(Message.created_at.desc()).limit(100).all()
+    return jsonify({
+        'messages': [m.to_dict() for m in messages],
+        'count': len(messages),
+    })
+
+
+@agent_hub_bp.route('/web/messages/<int:msg_id>/read', methods=['PUT'])
+def web_mark_read(msg_id):
+    """Web 管理端 - 标记消息已读"""
+    msg = Message.query.get_or_404(msg_id)
+    msg.status = 'read'
+    msg.read_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'message': '已标记为已读'})
+
+
+@agent_hub_bp.route('/web/broadcast', methods=['POST'])
+def web_broadcast():
+    """Web 管理端 - 广播消息"""
+    data = request.get_json()
+    content = data.get('content')
+
+    if not content:
+        return jsonify({'error': '内容不能为空'}), 400
+
+    target_ids = data.get('target_agent_ids', [])
+    if target_ids:
+        agents = Agent.query.filter(Agent.id.in_(target_ids)).all()
+    else:
+        agents = Agent.query.filter_by(status='online').all()
+
+    sent = 0
+    for receiver in agents:
+        msg = Message(
+            sender_id=0,  # 0 = Web 管理员
+            receiver_id=receiver.id,
+            content=content,
+            msg_type='broadcast',
+            extra_data={'from': 'web_admin'},
+        )
+        db.session.add(msg)
+        sent += 1
+
+    db.session.commit()
+
+    return jsonify({
+        'message': f'广播成功，已发送给 {sent} 个 Agent',
+        'sent_count': sent,
     })
