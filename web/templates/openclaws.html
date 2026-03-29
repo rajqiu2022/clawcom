@@ -574,7 +574,7 @@ function renderClawCard(c) {
             <span class="token-preview" style="color:var(--text-secondary);font-size:0.8rem;font-family:monospace;">
                 🔑 ${c.api_token_preview || '未设置'}
             </span>
-            <button class="btn btn-sm" onclick="viewToken(${c.id}, '${c.name.replace(/'/g, "\\'")}')"
+            <button class="btn btn-sm" onclick="event.stopPropagation(); viewToken(${c.id}, '${c.name.replace(/'/g, "\\'")}')"
                     style="padding:4px 8px;font-size:0.75rem;margin-left:8px;">
                 查看
             </button>
