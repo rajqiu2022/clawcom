@@ -23,6 +23,7 @@ import time
 import logging
 import signal
 import threading
+import requests
 
 # 配置日志
 logging.basicConfig(
@@ -46,6 +47,23 @@ class OpenClawAgent:
         self.sse_client: SSClient = None
         self.executor = TaskExecutor()
         self._running = False
+        self._heartbeat_url = f"{config.manager_url}/api/openclaws/{config.claw_id}/heartbeat"
+        self._session = requests.Session()
+        self._session.headers.update({
+            "Authorization": f"Bearer {config.api_token}",
+            "Content-Type": "application/json",
+        })
+
+    def _send_heartbeat(self):
+        """发送心跳到Manager"""
+        try:
+            resp = self._session.post(self._heartbeat_url, timeout=5)
+            if resp.status_code == 200:
+                logger.debug("心跳已发送")
+            else:
+                logger.warning(f"心跳发送失败: HTTP {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"心跳发送异常: {e}")
 
     def start(self):
         """启动agent"""
@@ -69,20 +87,33 @@ class OpenClawAgent:
         )
         self.sse_client.start()
 
+        # 启动时发送一次心跳
+        self._send_heartbeat()
+
         # 主线程保持运行
         self._wait_loop()
 
     def _wait_loop(self):
         """主循环"""
         last_status_check = 0
+        last_heartbeat = time.time()
 
         while self._running:
             try:
-                # 每60秒检查一次OpenClaw状态
                 now = time.time()
+
+                # 每30秒发送一次心跳
+                if now - last_heartbeat >= config.heartbeat_interval:
+                    self._send_heartbeat()
+                    last_heartbeat = now
+
+                # 每60秒检查一次OpenClaw状态
                 if now - last_status_check > 60:
-                    status = self.executor.operator.get_openclaw_status()
-                    logger.info(f"OpenClaw状态: {status}")
+                    try:
+                        status = self.executor.operator.get_openclaw_status()
+                        logger.info(f"OpenClaw状态: {status}")
+                    except Exception as e:
+                        logger.warning(f"获取OpenClaw状态失败: {e}")
                     last_status_check = now
 
                 time.sleep(10)
