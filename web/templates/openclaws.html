@@ -133,12 +133,23 @@
         <p style="color:var(--text-secondary);margin-bottom:16px" id="token-modal-hint">
             以下是该 OpenClaw 的 API Token，可以复制使用。
         </p>
-        <div style="background:var(--bg-primary);border:1px solid var(--accent);border-radius:8px;padding:16px;margin-bottom:12px;position:relative">
-            <code id="token-display" style="word-break:break-all;font-size:0.95rem;color:var(--accent)"></code>
-            <button class="btn btn-primary btn-sm" onclick="copyToken()"
-                    style="position:absolute;top:8px;right:8px;font-size:0.78rem">复制</button>
+        <div id="token-content" style="margin-bottom:12px">
+            <div style="background:var(--bg-primary);border:1px solid var(--accent);border-radius:8px;padding:16px;margin-bottom:12px;position:relative">
+                <code id="token-display" style="word-break:break-all;font-size:0.95rem;color:var(--accent)"></code>
+                <button class="btn btn-primary btn-sm" onclick="copyToken()"
+                        style="position:absolute;top:8px;right:8px;font-size:0.78rem">复制</button>
+            </div>
+            <div id="token-warning" style="background:rgba(234,179,8,0.1);border:1px solid rgba(234,179,8,0.3);border-radius:8px;padding:12px;margin-bottom:12px;display:none">
+                <p style="font-size:0.85rem;color:#eab308;margin:0">
+                    ⚠️ 重新生成 Token 后，旧的 Token 将立即失效。请确保更新所有使用该 Token 的客户端。
+                </p>
+            </div>
+        </div>
+        <div id="no-token-content" style="margin-bottom:12px;display:none">
+            <p style="color:var(--text-secondary);margin-bottom:12px">尚未为该 OpenClaw 生成 API Token。</p>
         </div>
         <div class="modal-actions">
+            <button class="btn btn-ghost" id="btn-regenerate-token" onclick="regenerateToken()">重新生成</button>
             <button class="btn btn-primary" onclick="closeTokenModal()">关闭</button>
         </div>
     </div>
@@ -637,17 +648,47 @@ function fallbackCopy(token) {
     showToast('Token 已复制到剪贴板', 'success');
 }
 
+let currentClawId = null;
+
 // 查看 OpenClaw 的 Token
 async function viewToken(clawId, clawName) {
+    currentClawId = clawId;
     try {
         const result = await API.getClawToken(clawId);
         document.getElementById('token-modal-title').textContent = `🔑 ${clawName} 的 API Token`;
         document.getElementById('token-modal-hint').innerHTML = '以下是完整的 API Token，可以复制使用。';
+        document.getElementById('token-content').style.display = 'block';
+        document.getElementById('no-token-content').style.display = 'none';
+        document.getElementById('btn-regenerate-token').style.display = 'inline-block';
         document.getElementById('token-display').textContent = result.api_token;
-        document.getElementById('token-env-hint').textContent = result.api_token;
+        document.getElementById('token-warning').style.display = 'none';
         document.getElementById('token-modal').classList.add('active');
     } catch (err) {
-        showToast('获取 Token 失败: ' + err.message, 'error');
+        // 没有 token 的情况
+        document.getElementById('token-modal-title').textContent = `🔑 ${clawName} 的 API Token`;
+        document.getElementById('token-modal-hint').innerHTML = '尚未生成 API Token。';
+        document.getElementById('token-content').style.display = 'none';
+        document.getElementById('no-token-content').style.display = 'block';
+        document.getElementById('btn-regenerate-token').style.display = 'inline-block';
+        document.getElementById('token-warning').style.display = 'none';
+        document.getElementById('token-modal').classList.add('active');
+    }
+}
+
+// 重新生成 Token
+async function regenerateToken() {
+    if (!currentClawId) return;
+    if (!confirm('确定要重新生成 Token 吗？旧的 Token 将立即失效！')) return;
+
+    try {
+        const result = await API.regenerateToken(currentClawId);
+        document.getElementById('token-display').textContent = result.api_token;
+        document.getElementById('token-content').style.display = 'block';
+        document.getElementById('no-token-content').style.display = 'none';
+        document.getElementById('token-warning').style.display = 'none';
+        showToast('Token 已重新生成', 'success');
+    } catch (err) {
+        showToast('重新生成 Token 失败: ' + err.message, 'error');
     }
 }
 
