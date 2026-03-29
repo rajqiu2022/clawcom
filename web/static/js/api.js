@@ -33,6 +33,7 @@ const API = {
     deleteClaw(id) { return this.del(`/openclaws/${id}`); },
     getClawConfig(id) { return this.get(`/openclaws/${id}/config`); },
     regenerateToken(id) { return this.post(`/openclaws/${id}/regenerate-token`); },
+    getClawToken(id) { return this.get(`/openclaws/${id}/token`); },
     getClawReports(id, params = '') {
         return this.get(`/openclaws/${id}/reports${params ? '?' + params : ''}`);
     },
@@ -69,6 +70,21 @@ const API = {
     getSystemConfig() { return this.get('/system/config'); },
     updateSystemConfig(data) { return this.put('/system/config', data); },
     generateSpec(data) { return this.post('/system/llm/generate-spec', data); },
+
+    // Reports
+    listReports(params = '') {
+        return this.get(`/reports${params ? '?' + params : ''}`);
+    },
+    reportStats() { return this.get('/reports/stats'); },
+    reportTimeline(date) { return this.get(`/reports/timeline?date=${date}`); },
+
+    // TAPD
+    getTapdConfig() { return this.get('/tapd/config'); },
+    updateTapdConfig(data) { return this.put('/tapd/config', data); },
+    tapdStories(params = '') { return this.get(`/tapd/stories?${params}`); },
+    tapdBugs(params = '') { return this.get(`/tapd/bugs?${params}`); },
+    tapdIterations(params = '') { return this.get(`/tapd/iterations?${params}`); },
+    tapdDashboard() { return this.get('/tapd/dashboard'); },
 };
 
 /**

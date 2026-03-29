@@ -1,6 +1,6 @@
-"""种子数据：初始化标准 Skills 和默认项目"""
+"""种子数据：初始化标准 Skills、Rules 和默认项目"""
 from app import db
-from app.models import Skill, Project
+from app.models import Skill, Rule, Project
 
 
 STANDARD_SKILLS = [
@@ -161,6 +161,91 @@ STANDARD_SKILLS = [
 ]
 
 
+# 注册 Skill - 用于 OpenClaw 注册到 Hub 时执行
+REGISTRATION_SKILL = {
+    'name': 'registration-skill',
+    'display_name': '注册技能（标准化）',
+    'description': '标准化注册流程：注册到 Hub、安装标准化 Rules 和 Skills。本 Skill 由 Hub 管理员配置，新 OpenClaw 注册时自动执行。',
+    'category': 'standard',
+    'is_standard': True,
+    'trigger_phrase': '注册 Hub',
+    'scope': 'global',
+    'template_content': '''# 注册技能
+
+## 功能说明
+本 Skill 用于将 OpenClaw 注册到 Hub 系统，并自动安装标准化的 Rules 和 Skills。
+
+## 执行流程
+1. 调用 Hub 注册接口，提交 OpenClaw 基本信息
+2. 获取分配的 OpenClaw ID 和 API Token
+3. 安装标准化的 Rules
+4. 安装标准化的 Skills
+5. 配置工作规范
+
+## 待填写内容
+- Hub 注册接口地址
+- 注册参数模板
+- 标准化 Rules 列表
+- 标准化 Skills 列表
+''',
+}
+
+
+# 标准 Rules 模板
+STANDARD_RULES = [
+    {
+        'name': 'base-workflow',
+        'display_name': '基础工作规范',
+        'description': '所有 OpenClaw 必须遵守的基础工作规范，包括任务执行、日报提交、异常处理等基本要求。',
+        'category': 'standard',
+        'scope': 'global',
+        'is_standard': True,
+        'content_template': '''# 基础工作规范
+
+## 任务执行
+1. 收到任务后，先确认理解任务目标
+2. 遇到不清晰的地方，先提问再执行
+3. 任务完成后，简要汇报结果
+
+## 日报提交
+1. 每日按计划时间提交日报
+2. 日报内容包含：完成事项、学习收获、问题记录
+3. 如有紧急任务，提前报备
+
+## 异常处理
+1. 发现异常情况及时上报
+2. 遇到阻塞问题，主动寻求协助
+3. 重大问题不擅自决定，汇报后执行
+''',
+    },
+    {
+        'name': 'security-baseline',
+        'display_name': '安全基线规范',
+        'description': '安全相关的基本规范，确保 OpenClaw 操作符合安全要求。',
+        'category': 'standard',
+        'scope': 'global',
+        'is_standard': True,
+        'content_template': '''# 安全基线规范
+
+## 权限管理
+1. 不尝试越权操作
+2. 不获取超出职责范围的系统权限
+3. 敏感操作需确认授权
+
+## 数据处理
+1. 不操作真实生产数据
+2. 测试数据需脱敏处理
+3. 敏感信息不外泄
+
+## 操作规范
+1. 危险命令需二次确认
+2. 删除操作需谨慎
+3. 不执行来源不明的代码
+''',
+    },
+]
+
+
 def seed_skills():
     """初始化标准 Skills（跳过已存在的）"""
     created = 0
@@ -169,6 +254,26 @@ def seed_skills():
         if not existing:
             skill = Skill(**skill_data)
             db.session.add(skill)
+            created += 1
+
+    # 初始化注册 Skill
+    if not Skill.query.filter_by(name=REGISTRATION_SKILL['name']).first():
+        skill = Skill(**REGISTRATION_SKILL)
+        db.session.add(skill)
+        created += 1
+
+    db.session.commit()
+    return created
+
+
+def seed_rules():
+    """初始化标准 Rules（跳过已存在的）"""
+    created = 0
+    for rule_data in STANDARD_RULES:
+        existing = Rule.query.filter_by(name=rule_data['name']).first()
+        if not existing:
+            rule = Rule(**rule_data)
+            db.session.add(rule)
             created += 1
 
     db.session.commit()
@@ -201,5 +306,6 @@ def seed_projects():
 def seed_all():
     """执行所有种子数据初始化"""
     skills_count = seed_skills()
+    rules_count = seed_rules()
     projects_count = seed_projects()
-    return f'创建了 {skills_count} 个标准 Skills，{projects_count} 个默认项目'
+    return f'创建了 {skills_count} 个标准 Skills，{rules_count} 个标准 Rules，{projects_count} 个默认项目'

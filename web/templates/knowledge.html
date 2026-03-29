@@ -20,6 +20,12 @@
             <option value="project">项目级</option>
             <option value="module">模块级</option>
         </select>
+        <select class="form-select" id="filter-source" style="width:auto" onchange="loadKnowledge()">
+            <option value="">全部来源</option>
+            <option value="openclaw">Agent 记录</option>
+            <option value="openspace">OpenSpace 进化</option>
+            <option value="manual">手动录入</option>
+        </select>
         <select class="form-select" id="filter-category" style="width:auto" onchange="loadKnowledge()">
             <option value="">全部标签</option>
             <option value="bug-pattern">bug-pattern</option>
@@ -70,13 +76,20 @@ const statusLabels = {
     draft: '草稿', pending_review: '待审核',
     approved: '已通过', rejected: '已拒绝'
 };
+const sourceLabels = {
+    openclaw: ['tag-blue', 'Agent'],
+    openspace: ['tag-orange', 'OpenSpace'],
+    manual: ['tag-accent', '手动'],
+};
 
 function renderEntry(e) {
+    const src = sourceLabels[e.source_type] || sourceLabels.manual;
     return `
         <div class="knowledge-item">
             <div class="knowledge-item-body">
                 <div class="knowledge-title">${e.title}</div>
                 <div class="knowledge-meta">
+                    <span class="tag ${src[0]}">${src[1]}</span>
                     <span class="tag tag-accent">#${e.category}</span>
                     <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
                     <span>${e.scope}${e.project_name ? ' · ' + e.project_name : ''}${e.module_name ? ' · ' + e.module_name : ''}</span>
@@ -97,9 +110,11 @@ function renderEntry(e) {
 async function loadKnowledge() {
     const params = new URLSearchParams();
     const scope = $('#filter-scope').value;
+    const source = $('#filter-source').value;
     const category = $('#filter-category').value;
     const status = $('#filter-status').value;
     if (scope) params.set('scope', scope);
+    if (source) params.set('source_type', source);
     if (category) params.set('category', category);
     if (status) params.set('status', status);
 

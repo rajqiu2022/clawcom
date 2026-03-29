@@ -3,7 +3,7 @@ from flask import jsonify
 from sqlalchemy import func
 from app import db
 from app.models import (OpenClawInstance, DailyReport, KnowledgeEntry,
-                        Skill, OpenClawSkill)
+                        Skill, OpenClawSkill, Project, Agent, Message)
 from app.api import api_bp
 
 
@@ -28,6 +28,11 @@ def dashboard_stats():
         len(r.tasks_completed or []) for r in today_reports
     )
 
+    # 今日日报汇报率
+    today_reported = db.session.query(
+        func.count(func.distinct(DailyReport.openclaw_id))
+    ).filter(DailyReport.report_date == today).scalar() or 0
+
     # 知识库总条目
     total_knowledge = KnowledgeEntry.query.count()
 
@@ -40,6 +45,26 @@ def dashboard_stats():
     today_knowledge = KnowledgeEntry.query.filter(
         func.date(KnowledgeEntry.created_at) == today
     ).count()
+
+    # 技能总数
+    total_skills = Skill.query.count()
+    evolved_skills = Skill.query.filter_by(category='evolved').count()
+
+    # TAPD 绑定项目数
+    tapd_projects = Project.query.filter(
+        Project.tapd_workspace_id.isnot(None),
+        Project.tapd_workspace_id != ''
+    ).count()
+
+    # 通信中心统计
+    try:
+        total_agents = Agent.query.count()
+        online_agents = Agent.query.filter_by(status='online').count()
+        unread_messages = Message.query.filter_by(status='unread').count()
+    except Exception:
+        total_agents = 0
+        online_agents = 0
+        unread_messages = 0
 
     # 近30天知识增长趋势
     thirty_days_ago = today - timedelta(days=30)
@@ -80,22 +105,30 @@ def dashboard_stats():
             'name': c.name,
             'role_title': c.role_title,
             'status': c.status,
-            'last_heartbeat': (c.last_heartbeat.isoformat()
+            'last_heartbeat': (str(c.last_heartbeat)
                               if c.last_heartbeat else None),
             'today_tasks': (len(today_report.tasks_completed or [])
                           if today_report else 0),
             'today_summary': (today_report.ai_summary
                             if today_report else None),
             'avatar': c.avatar,
+            'reported_today': today_report is not None,
         })
 
     return jsonify({
         'online_count': online_count,
         'total_claws': total_claws,
         'today_tasks': today_tasks,
+        'today_reported': today_reported,
         'total_knowledge': total_knowledge,
         'pending_review': pending_count,
         'today_knowledge': today_knowledge,
+        'total_skills': total_skills,
+        'evolved_skills': evolved_skills,
+        'tapd_projects': tapd_projects,
+        'total_agents': total_agents,
+        'online_agents': online_agents,
+        'unread_messages': unread_messages,
         'knowledge_trend': [
             {'date': str(t.date), 'count': t.count} for t in trend_data
         ],

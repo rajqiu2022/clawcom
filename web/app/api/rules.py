@@ -124,7 +124,7 @@ def get_claw_rules(claw_id):
         'rule': association.rule.to_dict(),
         'enabled': association.enabled,
         'applied': association.applied,
-        'applied_at': association.applied_at.isoformat() if association.applied_at else None,
+        'applied_at': str(association.applied_at) if association.applied_at else None,
     } for association in associations])
 
 
@@ -250,4 +250,47 @@ def apply_rules_to_claw(claw_id):
         'message': 'Rules 已应用到 OpenClaw',
         'target_config': target_config,
         'applied_rules': len(rules),
+    })
+
+
+# ==================== 标准化 Rules 管理 ====================
+
+@api_bp.route('/rules/standard', methods=['GET'])
+def list_standard_rules():
+    """获取所有标准化 Rules"""
+    rules = Rule.query.filter_by(is_standard=True).order_by(Rule.name).all()
+    return jsonify([r.to_dict() for r in rules])
+
+
+@api_bp.route('/rules/standard', methods=['PUT'])
+def batch_update_standard_rules():
+    """
+    批量更新 Rules 的标准化标记
+
+    请求体：
+    {
+        "rule_ids": [1, 2, 3],  // 要标记为标准化的 rule_ids
+        "standard": true         // true=标记为标准化，false=取消标准化
+    }
+    """
+    data = request.get_json()
+    if not data or 'rule_ids' not in data:
+        return jsonify({'error': 'rule_ids 为必填项'}), 400
+
+    rule_ids = data['rule_ids']
+    is_standard = data.get('standard', True)
+
+    updated = 0
+    for rule_id in rule_ids:
+        rule = Rule.query.get(rule_id)
+        if rule:
+            rule.is_standard = is_standard
+            updated += 1
+
+    db.session.commit()
+
+    action = "已标记为标准化" if is_standard else "已取消标准化"
+    return jsonify({
+        'message': f'{updated} 个 Rules {action}',
+        'updated': updated,
     })

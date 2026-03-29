@@ -126,12 +126,12 @@
     </div>
 </div>
 
-<!-- Token 显示弹窗（创建成功后） -->
+<!-- Token 显示弹窗 -->
 <div class="modal-overlay" id="token-modal">
     <div class="modal">
-        <h2 class="modal-title">🔑 OpenClaw 创建成功</h2>
-        <p style="color:var(--text-secondary);margin-bottom:16px">
-            以下是该 OpenClaw 的 API Token，<strong style="color:var(--accent)">请立即复制保存，此 Token 只显示一次！</strong>
+        <h2 class="modal-title" id="token-modal-title">🔑 API Token</h2>
+        <p style="color:var(--text-secondary);margin-bottom:16px" id="token-modal-hint">
+            以下是该 OpenClaw 的 API Token，可以复制使用。
         </p>
         <div style="background:var(--bg-primary);border:1px solid var(--accent);border-radius:8px;padding:16px;margin-bottom:12px;position:relative">
             <code id="token-display" style="word-break:break-all;font-size:0.95rem;color:var(--accent)"></code>
@@ -145,7 +145,7 @@
             </p>
         </div>
         <div class="modal-actions">
-            <button class="btn btn-primary" onclick="closeTokenModal()">我已保存，关闭</button>
+            <button class="btn btn-primary" onclick="closeTokenModal()">关闭</button>
         </div>
     </div>
 </div>
@@ -358,6 +358,15 @@
     overflow: hidden;
 }
 
+.claw-token-row {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
 .project-group {
     margin-bottom: 28px;
 }
@@ -561,6 +570,15 @@ function renderClawCard(c) {
             <span class="claw-meta-tag">⏰ ${c.report_schedule || '15:00,21:00'}</span>
         </div>
         <div class="claw-desc">${c.responsibilities || '暂无描述'}</div>
+        <div class="claw-token-row">
+            <span class="token-preview" style="color:var(--text-secondary);font-size:0.8rem;font-family:monospace;">
+                🔑 ${c.api_token_preview || '未设置'}
+            </span>
+            <button class="btn btn-sm" onclick="viewToken(${c.id}, '${c.name.replace(/'/g, "\\'")}')"
+                    style="padding:4px 8px;font-size:0.75rem;margin-left:8px;">
+                查看
+            </button>
+        </div>
     </div>`;
 }
 
@@ -619,6 +637,24 @@ function copyToken() {
     });
 }
 
+// 查看 OpenClaw 的 Token
+async function viewToken(clawId, clawName) {
+    try {
+        const result = await API.getClawToken(clawId);
+        document.getElementById('token-modal-title').textContent = `🔑 ${clawName} 的 API Token`;
+        document.getElementById('token-modal-hint').innerHTML = '以下是完整的 API Token，可以复制使用。';
+        document.getElementById('token-display').textContent = result.api_token;
+        document.getElementById('token-env-hint').textContent = result.api_token;
+        document.getElementById('token-modal').classList.add('active');
+    } catch (err) {
+        showToast('获取 Token 失败: ' + err.message, 'error');
+    }
+}
+
+document.getElementById('token-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('token-modal')) closeTokenModal();
+});
+
 document.getElementById('create-modal').addEventListener('click', e => {
     if (e.target === document.getElementById('create-modal')) closeCreateModal();
 });
@@ -635,9 +671,12 @@ document.getElementById('create-form').addEventListener('submit', async e => {
         closeCreateModal();
         e.target.reset();
 
-        if (result.api_token) {
-            document.getElementById('token-display').textContent = result.api_token;
-            document.getElementById('token-env-hint').textContent = result.api_token;
+        if (result.has_token) {
+            // 创建成功后显示 token
+            document.getElementById('token-modal-title').textContent = `🔑 "${data.name}" 创建成功`;
+            document.getElementById('token-modal-hint').innerHTML = '以下是该 OpenClaw 的 API Token，请复制保存。';
+            document.getElementById('token-display').textContent = result.api_token_preview;
+            document.getElementById('token-env-hint').textContent = result.api_token_preview;
             document.getElementById('token-modal').classList.add('active');
         } else {
             showToast(`OpenClaw "${data.name}" 创建成功！`, 'success');

@@ -7,6 +7,9 @@ from config import config
 db = SQLAlchemy()
 migrate = Migrate()
 
+# SocketIO 实例（延迟初始化）
+socketio = None
+
 
 def create_app(config_name=None):
     if config_name is None:
@@ -34,5 +37,13 @@ def create_app(config_name=None):
     # 注册 MCP 蓝图
     from app.api.mcp_protocol import mcp_bp
     app.register_blueprint(mcp_bp)
+
+    # 注册 Agent Client 蓝图（SSE 任务推送）
+    from app.api.agent_client import agent_bp
+    app.register_blueprint(agent_bp, url_prefix='/api/openclaws')
+
+    # 初始化 SocketIO 并注册 WebSocket 处理器
+    from app.api.gateway_ws import init_socketio, socketio as _socketio
+    globals()['socketio'] = init_socketio(app)
 
     return app
