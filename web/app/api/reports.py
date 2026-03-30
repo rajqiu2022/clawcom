@@ -75,8 +75,9 @@ def report_stats():
         if isinstance(field_value, list):
             return len(field_value)
         elif isinstance(field_value, str) and field_value.strip():
-            # 字符串按换行分割计算行数
-            return len([l for l in field_value.split('\n') if l.strip()])
+            # 字符串可能是双重转义的换行符 \\n，先替换为真实换行符再分割
+            normalized = field_value.replace('\\n', '\n').replace('\\\\n', '\n')
+            return len([l for l in normalized.split('\n') if l.strip()])
         return 0
     today_tasks = sum(count_items(r.tasks_completed) for r in today_reports)
 
