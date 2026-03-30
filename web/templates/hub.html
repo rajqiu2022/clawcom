@@ -16,12 +16,9 @@
     </div>
     <div class="header-right">
         <div class="filter-group">
-            <input type="text" id="filter-name" class="form-input filter-input" placeholder="🔍 搜索 OpenClaw..." oninput="filterClaws()">
+            <input type="text" id="filter-name" class="form-input filter-input" placeholder="🔍 搜索..." oninput="filterClaws()">
         </div>
-        <div class="action-buttons">
-            <button class="btn btn-ghost" onclick="openMultiSelectModal()">📋 多选发送</button>
-            <button class="btn btn-primary" onclick="openBroadcastModal()">📢 全员通知</button>
-        </div>
+        <button class="btn btn-primary" onclick="openBroadcastModal()">📢 全员通知</button>
     </div>
 </div>
 {% endblock %}
@@ -64,6 +61,7 @@
             <div class="agent-list" id="clawList">
                 <div class="loading"><span class="spinner"></span></div>
             </div>
+            <div class="claw-list-hint">💡 点击勾选要发送的 OpenClaw</div>
         </div>
     </div>
 
@@ -71,16 +69,13 @@
     <div class="cc-main">
         <!-- 任务下发视图 -->
         <div class="view-content" id="view-command">
-            <!-- 已选 OpenClaw -->
+            <!-- 已选 OpenClaw 列表 -->
             <div class="panel selected-claw-panel" id="selectedClawPanel" style="display:none">
                 <div class="selected-claw-header">
-                    <div class="selected-claw-avatar" id="selectedAvatar">🤖</div>
-                    <div class="selected-claw-info">
-                        <h4 id="selectedClawName">未选择</h4>
-                        <p id="selectedClawMeta">选择一个 OpenClaw 开始通信</p>
-                    </div>
-                    <button class="btn btn-sm btn-ghost" onclick="clearSelection()">取消</button>
+                    <h4>📤 已选择 <span id="selectedCount">0</span> 个 OpenClaw</h4>
+                    <button class="btn btn-sm btn-ghost" onclick="clearAllSelection()">清空</button>
                 </div>
+                <div class="selected-claw-tags" id="selectedClawTags"></div>
             </div>
 
             <!-- 消息编辑器 -->
@@ -204,36 +199,6 @@
                     <div class="qs-label">新知识</div>
                 </div>
             </div>
-        </div>
-    </div>
-</div>
-
-<!-- 多选发送弹窗 -->
-<div class="modal-overlay" id="multi-select-modal">
-    <div class="modal">
-        <h2 class="modal-title">📋 多选发送任务</h2>
-        <div class="form-group">
-            <label class="form-label">选择接收方</label>
-            <div class="multi-select-list" id="multiSelectList">
-                <div class="loading"><span class="spinner"></span></div>
-            </div>
-        </div>
-        <div class="form-group">
-            <label class="form-label">消息类型</label>
-            <select class="form-select" id="multiMsgType">
-                <option value="text">💬 文本消息</option>
-                <option value="task_delegate">📋 任务委派</option>
-                <option value="knowledge_share">📚 知识共享</option>
-                <option value="request_help">🆘 请求帮助</option>
-            </select>
-        </div>
-        <div class="form-group">
-            <label class="form-label">消息内容 *</label>
-            <textarea class="form-textarea" id="multiMessageContent" rows="4" placeholder="输入任务或消息内容..."></textarea>
-        </div>
-        <div class="modal-actions">
-            <button class="btn btn-ghost" onclick="closeMultiSelectModal()">取消</button>
-            <button class="btn btn-primary" onclick="sendMultiMessage()">发送 (<span id="selectedCount">0</span>)</button>
         </div>
     </div>
 </div>
@@ -452,6 +417,17 @@
     background: rgba(234, 179, 8, 0.1);
 }
 
+.agent-item.offline {
+    opacity: 0.6;
+}
+
+.claw-checkbox {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+    flex-shrink: 0;
+}
+
 .agent-item .agent-avatar {
     width: 36px;
     height: 36px;
@@ -529,6 +505,59 @@
     margin: 0;
     font-size: 0.78rem;
     color: var(--text-muted);
+}
+
+.selected-claw-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.selected-claw-header h4 {
+    margin: 0;
+    font-size: 0.9rem;
+}
+
+.selected-claw-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.claw-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: var(--bg-primary);
+    border: 1px solid var(--accent);
+    border-radius: 16px;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+}
+
+.claw-tag.offline {
+    opacity: 0.6;
+    border-color: var(--border);
+}
+
+.claw-tag .remove-tag {
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    color: var(--text-muted);
+}
+
+.claw-tag .remove-tag:hover {
+    color: var(--text-primary);
+}
+
+.claw-list-hint {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    padding: 8px 4px;
+    text-align: center;
 }
 
 /* Message Editor */
@@ -983,7 +1012,6 @@ const API_BASE = '/api/v1';
 
 let allClaws = [];
 let selectedClaws = new Set();
-let selectedReceiver = null;
 
 // 视图切换
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -1049,9 +1077,12 @@ function filterClaws() {
 
     list.innerHTML = filtered.map(c => {
         const statusClass = c.status === 'online' ? 'online' : c.status === 'busy' ? 'busy' : 'offline';
+        const isSelected = selectedClaws.has(c.id);
         return `
-        <div class="agent-item ${selectedReceiver && selectedReceiver.id === c.id ? 'selected' : ''}"
-             data-id="${c.id}" data-name="${c.name}" data-status="${c.status}" data-avatar="${c.avatar || '🤖'}">
+        <div class="agent-item ${isSelected ? 'selected' : ''} ${c.status !== 'online' ? 'offline' : ''}"
+             data-id="${c.id}" data-name="${c.name}" data-status="${c.status}" data-avatar="${c.avatar || '🤖'}"
+             onclick="toggleClawSelection(${c.id})">
+            <input type="checkbox" class="claw-checkbox" ${isSelected ? 'checked' : ''} onclick="event.stopPropagation(); toggleClawSelection(${c.id})">
             <div class="agent-avatar">${c.avatar || '🤖'}</div>
             <div class="agent-info">
                 <div class="agent-name">${c.name}</div>
@@ -1060,10 +1091,6 @@ function filterClaws() {
             <span class="status-dot ${statusClass}"></span>
         </div>`;
     }).join('');
-
-    list.querySelectorAll('.agent-item').forEach(item => {
-        item.addEventListener('click', () => selectReceiver(item));
-    });
 }
 
 function updateFilterOptions() {
@@ -1072,53 +1099,70 @@ function updateFilterOptions() {
         allClaws.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
 }
 
-function selectReceiver(item) {
-    document.querySelectorAll('.agent-item').forEach(i => i.classList.remove('selected'));
-    item.classList.add('selected');
-
-    selectedReceiver = {
-        id: parseInt(item.dataset.id),
-        name: item.dataset.name,
-        status: item.dataset.status,
-        avatar: item.dataset.avatar
-    };
-
-    const panel = document.getElementById('selectedClawPanel');
-    panel.style.display = 'block';
-    document.getElementById('selectedAvatar').textContent = selectedReceiver.avatar;
-    document.getElementById('selectedClawName').textContent = selectedReceiver.name;
-
-    const claw = allClaws.find(c => c.id === selectedReceiver.id);
-    document.getElementById('selectedClawMeta').textContent =
-        `${claw?.role_title || claw?.role || 'OpenClaw'} · ${claw?.status === 'online' ? '🟢 在线' : '⚫ 离线'}`;
-
-    document.getElementById('sendBtn').disabled = false;
-    document.getElementById('messageInput').focus();
+function toggleClawSelection(clawId) {
+    if (selectedClaws.has(clawId)) {
+        selectedClaws.delete(clawId);
+    } else {
+        selectedClaws.add(clawId);
+    }
+    updateSelectedUI();
+    filterClaws(); // Re-render list with updated selection state
 }
 
-function clearSelection() {
-    selectedReceiver = null;
-    document.querySelectorAll('.agent-item').forEach(i => i.classList.remove('selected'));
-    document.getElementById('selectedClawPanel').style.display = 'none';
-    document.getElementById('sendBtn').disabled = true;
+function updateSelectedUI() {
+    const panel = document.getElementById('selectedClawPanel');
+    const countSpan = document.getElementById('selectedCount');
+    const tagsDiv = document.getElementById('selectedClawTags');
+    const sendBtn = document.getElementById('sendBtn');
+
+    if (selectedClaws.size === 0) {
+        panel.style.display = 'none';
+        sendBtn.disabled = true;
+        return;
+    }
+
+    panel.style.display = 'block';
+    countSpan.textContent = selectedClaws.size;
+    sendBtn.disabled = false;
+
+    // Render selected claw tags
+    const selected = allClaws.filter(c => selectedClaws.has(c.id));
+    tagsDiv.innerHTML = selected.map(c => `
+        <span class="claw-tag ${c.status !== 'online' ? 'offline' : ''}">
+            ${c.avatar || '🤖'} ${c.name}
+            <span class="remove-tag" onclick="toggleClawSelection(${c.id})">×</span>
+        </span>
+    `).join('');
+}
+
+function clearAllSelection() {
+    selectedClaws.clear();
+    updateSelectedUI();
+    filterClaws();
 }
 
 async function sendDirectMessage() {
-    if (!selectedReceiver || !messageInput.value.trim()) return;
+    if (selectedClaws.size === 0 || !messageInput.value.trim()) return;
+
+    const content = messageInput.value.trim();
+    const msgType = document.getElementById('msgType').value;
 
     try {
-        await fetch(`${HUB_API}/broadcast`, {
+        const res = await fetch(`${HUB_API}/broadcast`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                content: messageInput.value.trim(),
-                msg_type: document.getElementById('msgType').value,
-                target_claw_ids: [selectedReceiver.id]
+                content,
+                msg_type: msgType,
+                target_claw_ids: Array.from(selectedClaws)
             })
         });
 
+        const result = await res.json();
+        showToast(result.message || `任务已发送`, 'success');
+
         messageInput.value = '';
-        showToast(`任务已发送给 ${selectedReceiver.name}`, 'success');
+        clearAllSelection();
         loadMessages();
         loadRecentActivity();
         loadStats();
@@ -1295,82 +1339,6 @@ async function loadMonitorView() {
     `).join('');
 }
 
-// 多选发送
-let multiSelectedIds = new Set();
-
-async function openMultiSelectModal() {
-    multiSelectedIds.clear();
-    const list = document.getElementById('multiSelectList');
-
-    const onlineClaws = allClaws.filter(c => c.status === 'online');
-    if (onlineClaws.length === 0) {
-        list.innerHTML = '<div class="empty-state">没有在线的 OpenClaw</div>';
-        return;
-    }
-
-    list.innerHTML = onlineClaws.map(c => `
-        <div class="multi-select-item" data-id="${c.id}" onclick="toggleMultiSelect(${c.id})">
-            <input type="checkbox" id="ms-${c.id}">
-            <span>${c.avatar || '🤖'}</span>
-            <span style="flex:1">${c.name}</span>
-        </div>
-    `).join('');
-
-    document.getElementById('multi-select-modal').classList.add('active');
-    updateMultiSelectCount();
-}
-
-function toggleMultiSelect(id) {
-    if (multiSelectedIds.has(id)) {
-        multiSelectedIds.delete(id);
-    } else {
-        multiSelectedIds.add(id);
-    }
-    document.getElementById(`ms-${id}`).checked = multiSelectedIds.has(id);
-    updateMultiSelectCount();
-}
-
-function updateMultiSelectCount() {
-    document.getElementById('selectedCount').textContent = multiSelectedIds.size;
-}
-
-function closeMultiSelectModal() {
-    document.getElementById('multi-select-modal').classList.remove('active');
-}
-
-async function sendMultiMessage() {
-    if (multiSelectedIds.size === 0) {
-        showToast('请选择至少一个接收方', 'error');
-        return;
-    }
-
-    const content = document.getElementById('multiMessageContent').value.trim();
-    if (!content) {
-        showToast('请输入消息内容', 'error');
-        return;
-    }
-
-    try {
-        await fetch(`${HUB_API}/broadcast`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                content,
-                msg_type: document.getElementById('multiMsgType').value,
-                target_claw_ids: Array.from(multiSelectedIds)
-            })
-        });
-
-        showToast(`任务已发送给 ${multiSelectedIds.size} 个 OpenClaw`, 'success');
-        closeMultiSelectModal();
-        loadMessages();
-        loadRecentActivity();
-        loadStats();
-    } catch (e) {
-        showToast('发送失败', 'error');
-    }
-}
-
 // 全员通知
 function openBroadcastModal() {
     document.getElementById('broadcastContent').value = '';
@@ -1446,10 +1414,6 @@ document.getElementById('messageInput').addEventListener('keydown', e => {
         e.preventDefault();
         sendDirectMessage();
     }
-});
-
-document.getElementById('multi-select-modal').addEventListener('click', e => {
-    if (e.target === document.getElementById('multi-select-modal')) closeMultiSelectModal();
 });
 
 document.getElementById('broadcast-modal').addEventListener('click', e => {

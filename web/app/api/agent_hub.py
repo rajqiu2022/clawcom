@@ -496,10 +496,14 @@ def web_broadcast():
     sent_claws = 0
 
     # 发送给 OpenClaw（通信中心主要使用场景）
+    offline_claws = []
     if target_claw_ids:
-        # 指定发送给某些 OpenClaw
+        # 指定发送给某些 OpenClaw（必须在线才能接收）
         claws = OpenClawInstance.query.filter(OpenClawInstance.id.in_(target_claw_ids)).all()
         for claw in claws:
+            if claw.status != 'online':
+                offline_claws.append(claw.name)
+                continue
             claw_msg = ClawMessage(
                 claw_id=claw.id,
                 sender_name='Web Admin',
@@ -508,6 +512,8 @@ def web_broadcast():
             )
             db.session.add(claw_msg)
             sent_claws += 1
+        if offline_claws:
+            logger.warning(f"以下 OpenClaw 不在线，消息已跳过: {offline_claws}")
     elif not target_agent_ids:
         # 全员通知（默认发送给所有在线 OpenClaw）
         online_claws = OpenClawInstance.query.filter_by(status='online').all()
@@ -544,10 +550,14 @@ def web_broadcast():
         parts.append(f'{sent_agents} 个 Agent')
 
     if parts:
+        msg = f'发送成功，已发送给 {", ".join(parts)}'
+        if offline_claws:
+            msg += f'（{len(offline_claws)} 个离线已跳过: {", ".join(offline_claws)}）'
         return jsonify({
-            'message': f'广播成功，已发送给 {", ".join(parts)}',
+            'message': msg,
             'sent_agents': sent_agents,
             'sent_claws': sent_claws,
+            'offline_claws': offline_claws,
         })
     else:
         return jsonify({
