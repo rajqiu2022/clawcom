@@ -68,6 +68,7 @@ def create_rule():
         applicable_projects=data.get('applicable_projects'),
         applicable_modules=data.get('applicable_modules'),
         content_template=data.get('content_template', ''),
+        created_by=data.get('created_by', 'system'),
     )
     db.session.add(rule)
     db.session.commit()
