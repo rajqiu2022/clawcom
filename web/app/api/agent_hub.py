@@ -492,6 +492,11 @@ def web_broadcast():
     target_claw_ids = data.get('target_claw_ids', [])
     msg_type = data.get('msg_type', 'broadcast')
 
+    # 确保 target_claw_ids 是整数列表
+    if target_claw_ids:
+        target_claw_ids = [int(x) for x in target_claw_ids]
+        logger.info(f"广播请求: target_claw_ids={target_claw_ids}, msg_type={msg_type}")
+
     sent_agents = 0
     sent_claws = 0
 
