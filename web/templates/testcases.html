@@ -5,8 +5,11 @@
 
 {% block top_actions %}
 <div style="display:flex;gap:10px;align-items:center">
+    <select class="form-select" id="project-filter" onchange="onProjectFilterChange()" style="min-width:160px">
+        <option value="">-- 选择项目 --</option>
+    </select>
     <select class="form-select" id="library-select" onchange="switchLibrary()" style="min-width:220px">
-        <option value="">-- 选择用例库 --</option>
+        <option value="">-- 先选择项目 --</option>
     </select>
     <button class="btn btn-primary" onclick="openCreateLibraryModal()">+ 新建用例库</button>
     <button class="btn btn-ghost tc-ai-btn" onclick="openAIGenerateModal()">
@@ -500,6 +503,10 @@ const PRIORITY_CLASSES = { P0: 'p0', P1: 'p1', P2: 'p2', P3: 'p3' };
 async function loadLibraries() {
     try {
         libraries = await API.request('GET', '/testcase-libraries');
+        const projects = await API.listProjects();
+        const projectSel = document.getElementById('project-filter');
+        projectSel.innerHTML = '<option value="">-- 选择项目 --</option>' +
+            projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
         renderLibrarySelect();
     } catch (err) {
         showToast('加载用例库失败: ' + err.message, 'error');
@@ -507,9 +514,25 @@ async function loadLibraries() {
 }
 
 function renderLibrarySelect() {
+    const projectFilter = document.getElementById('project-filter').value;
     const select = $('#library-select');
+
+    if (!projectFilter) {
+        select.innerHTML = '<option value="">-- 先选择项目 --</option>';
+        return;
+    }
+
+    const filtered = libraries.filter(lib => lib.project_name === projectFilter);
     select.innerHTML = '<option value="">-- 选择用例库 --</option>' +
-        libraries.map(lib => `<option value="${lib.id}" ${lib.id === currentLibraryId ? 'selected' : ''}>${lib.name} (${lib.case_count || 0})</option>`).join('');
+        filtered.map(lib => `<option value="${lib.id}" ${lib.id === currentLibraryId ? 'selected' : ''}>${lib.name} (${lib.case_count || 0})</option>`).join('');
+}
+
+function onProjectFilterChange() {
+    currentLibraryId = null;
+    currentLibrary = null;
+    $('#library-container').style.display = 'none';
+    $('#empty-state').style.display = '';
+    renderLibrarySelect();
 }
 
 async function switchLibrary() {

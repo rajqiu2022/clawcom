@@ -16,6 +16,9 @@
     </div>
     <div class="header-right">
         <div class="filter-group">
+            <select id="filter-project" class="form-select filter-select" onchange="filterClaws()" style="min-width:120px">
+                <option value="">全部项目</option>
+            </select>
             <input type="text" id="filter-name" class="form-input filter-input" placeholder="🔍 搜索..." oninput="filterClaws()">
         </div>
         <button class="btn btn-primary" onclick="openBroadcastModal()">📢 全员通知</button>
@@ -55,7 +58,10 @@
         <!-- OpenClaw 列表 -->
         <div class="panel claw-list-panel">
             <div class="panel-header">
-                <h3>🤖 OpenClaw 列表</h3>
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                    <input type="checkbox" id="select-all" onchange="toggleSelectAll()" style="width:16px;height:16px">
+                    <span style="font-weight:600;font-size:0.9rem">全选</span>
+                </label>
                 <span class="count-badge" id="online-badge">0 在线</span>
             </div>
             <div class="agent-list" id="clawList">
@@ -1052,6 +1058,13 @@ async function loadClaws() {
         const res = await fetch(`${API_BASE}/openclaws`);
         allClaws = await res.json();
 
+        // 加载项目列表
+        const projectsRes = await fetch(`${API_BASE}/projects`);
+        const projects = await projectsRes.json();
+        const projectSel = document.getElementById('filter-project');
+        projectSel.innerHTML = '<option value="">全部项目</option>' +
+            projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+
         document.getElementById('online-badge').textContent =
             `${allClaws.filter(c => c.status === 'online').length} 在线`;
 
@@ -1063,11 +1076,14 @@ async function loadClaws() {
 }
 
 function filterClaws() {
-    const filter = document.getElementById('filter-name').value.toLowerCase();
-    const filtered = allClaws.filter(c =>
-        c.name.toLowerCase().includes(filter) ||
-        (c.project_name && c.project_name.toLowerCase().includes(filter))
-    );
+    const nameFilter = document.getElementById('filter-name').value.toLowerCase();
+    const projectFilter = document.getElementById('filter-project').value;
+    const filtered = allClaws.filter(c => {
+        const matchName = c.name.toLowerCase().includes(nameFilter) ||
+            (c.project_name && c.project_name.toLowerCase().includes(nameFilter));
+        const matchProject = !projectFilter || c.project_name === projectFilter;
+        return matchName && matchProject;
+    });
 
     const list = document.getElementById('clawList');
     if (filtered.length === 0) {
@@ -1091,6 +1107,50 @@ function filterClaws() {
             <span class="status-dot ${statusClass}"></span>
         </div>`;
     }).join('');
+
+    // 更新全选复选框状态
+    updateSelectAllState();
+}
+
+function toggleSelectAll() {
+    const selectAllCheckbox = document.getElementById('select-all');
+    const nameFilter = document.getElementById('filter-name').value.toLowerCase();
+    const projectFilter = document.getElementById('filter-project').value;
+    const filtered = allClaws.filter(c => {
+        const matchName = c.name.toLowerCase().includes(nameFilter) ||
+            (c.project_name && c.project_name.toLowerCase().includes(nameFilter));
+        const matchProject = !projectFilter || c.project_name === projectFilter;
+        return matchName && matchProject;
+    });
+
+    if (selectAllCheckbox.checked) {
+        filtered.forEach(c => selectedClaws.add(c.id));
+    } else {
+        filtered.forEach(c => selectedClaws.delete(c.id));
+    }
+    updateSelectedUI();
+    filterClaws();
+}
+
+function updateSelectAllState() {
+    const selectAllCheckbox = document.getElementById('select-all');
+    const nameFilter = document.getElementById('filter-name').value.toLowerCase();
+    const projectFilter = document.getElementById('filter-project').value;
+    const filtered = allClaws.filter(c => {
+        const matchName = c.name.toLowerCase().includes(nameFilter) ||
+            (c.project_name && c.project_name.toLowerCase().includes(nameFilter));
+        const matchProject = !projectFilter || c.project_name === projectFilter;
+        return matchName && matchProject;
+    });
+
+    if (filtered.length === 0) {
+        selectAllCheckbox.checked = false;
+        selectAllCheckbox.indeterminate = false;
+    } else {
+        const selectedCount = filtered.filter(c => selectedClaws.has(c.id)).length;
+        selectAllCheckbox.checked = selectedCount === filtered.length;
+        selectAllCheckbox.indeterminate = selectedCount > 0 && selectedCount < filtered.length;
+    }
 }
 
 function updateFilterOptions() {
@@ -1118,21 +1178,21 @@ function updateSelectedUI() {
     if (selectedClaws.size === 0) {
         panel.style.display = 'none';
         sendBtn.disabled = true;
-        return;
+    } else {
+        panel.style.display = 'block';
+        countSpan.textContent = selectedClaws.size;
+        sendBtn.disabled = false;
+
+        // Render selected claw tags
+        const selected = allClaws.filter(c => selectedClaws.has(c.id));
+        tagsDiv.innerHTML = selected.map(c => `
+            <span class="claw-tag ${c.status !== 'online' ? 'offline' : ''}">
+                ${c.avatar || '🤖'} ${c.name}
+                <span class="remove-tag" onclick="toggleClawSelection(${c.id})">×</span>
+            </span>
+        `).join('');
     }
-
-    panel.style.display = 'block';
-    countSpan.textContent = selectedClaws.size;
-    sendBtn.disabled = false;
-
-    // Render selected claw tags
-    const selected = allClaws.filter(c => selectedClaws.has(c.id));
-    tagsDiv.innerHTML = selected.map(c => `
-        <span class="claw-tag ${c.status !== 'online' ? 'offline' : ''}">
-            ${c.avatar || '🤖'} ${c.name}
-            <span class="remove-tag" onclick="toggleClawSelection(${c.id})">×</span>
-        </span>
-    `).join('');
+    updateSelectAllState();
 }
 
 function clearAllSelection() {
