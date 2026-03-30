@@ -689,7 +689,7 @@ async function sendDirectMessage() {
             body: JSON.stringify({
                 content: messageInput.value.trim(),
                 msg_type: document.getElementById('msgType').value,
-                target_agent_ids: [selectedReceiver.id]
+                target_claw_ids: [selectedReceiver.id]  // OpenClaw 使用 target_claw_ids
             })
         });
 
@@ -840,7 +840,7 @@ async function sendMultiMessage() {
             body: JSON.stringify({
                 content,
                 msg_type: document.getElementById('multiMsgType').value,
-                target_agent_ids: Array.from(multiSelectedIds)
+                target_claw_ids: Array.from(multiSelectedIds)  // OpenClaw 使用 target_claw_ids
             })
         });
 
