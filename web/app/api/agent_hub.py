@@ -432,6 +432,47 @@ def web_mark_read(msg_id):
     return jsonify({'message': '已标记为已读'})
 
 
+@agent_hub_bp.route('/web/claw-messages', methods=['GET'])
+def web_list_claw_messages():
+    """Web 管理端 - OpenClaw 消息列表（通信中心记录）
+
+    支持筛选：
+    - claw_id: 指定某个 OpenClaw
+    - status: pending/delivered/read
+    - msg_type: 消息类型
+    - limit: 返回条数
+    """
+    claw_id = request.args.get('claw_id', type=int)
+    status = request.args.get('status')
+    msg_type = request.args.get('msg_type')
+    limit = request.args.get('limit', 100, type=int)
+
+    query = ClawMessage.query
+
+    if claw_id:
+        query = query.filter_by(claw_id=claw_id)
+    if status:
+        query = query.filter_by(status=status)
+    if msg_type:
+        query = query.filter_by(msg_type=msg_type)
+
+    messages = query.order_by(ClawMessage.created_at.desc()).limit(limit).all()
+
+    # 附加 OpenClaw 名称
+    result = []
+    for m in messages:
+        d = m.to_dict()
+        claw = OpenClawInstance.query.get(m.claw_id)
+        d['claw_name'] = claw.name if claw else '未知'
+        d['claw_status'] = claw.status if claw else 'unknown'
+        result.append(d)
+
+    return jsonify({
+        'messages': result,
+        'count': len(result),
+    })
+
+
 @agent_hub_bp.route('/web/broadcast', methods=['POST'])
 def web_broadcast():
     """Web 管理端 - 广播消息（支持 Agent 和 OpenClaw）
