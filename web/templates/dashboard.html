@@ -48,7 +48,12 @@
 <div class="section">
     <div class="card-header">
         <h2 class="section-title">团队 OpenClaw</h2>
-        <a href="/openclaws" class="btn btn-ghost btn-sm">查看全部 →</a>
+        <div class="filter-group" style="gap:8px">
+            <select id="filter-project" class="form-select" style="min-width:140px;font-size:0.85rem" onchange="applyDashboardFilters()">
+                <option value="">全部项目</option>
+            </select>
+            <a href="/openclaws" class="btn btn-ghost btn-sm">查看全部 →</a>
+        </div>
     </div>
     <div class="claw-grid" id="claw-grid">
         <div class="loading"><span class="spinner"></span> 加载中...</div>
@@ -109,94 +114,109 @@
 
 {% block scripts %}
 <script>
+let dashboardData = null;
+
 async function loadDashboard() {
     try {
-        const data = await API.dashboardStats();
+        dashboardData = await API.dashboardStats();
 
-        // 核心统计
-        $('#stat-online').textContent = `${data.online_count}/${data.total_claws}`;
-        $('#stat-tasks').textContent = data.today_tasks;
-        $('#stat-knowledge').textContent = data.total_knowledge;
-        $('#stat-pending').textContent = data.pending_review;
+        // 加载项目筛选
+        const projects = await API.listProjects();
+        const projectSel = document.getElementById('filter-project');
+        projectSel.innerHTML = '<option value="">全部项目</option>' +
+            projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
 
-        // 辅助统计
-        $('#qs-reported').textContent = `${data.today_reported || 0}/${data.total_claws}`;
-        $('#qs-skills').textContent = data.total_skills || 0;
-        $('#qs-evolved').textContent = data.evolved_skills || 0;
-        $('#qs-agents').textContent = data.total_agents || 0;
-        $('#qs-unread').textContent = data.unread_messages || 0;
-        $('#qs-tapd').textContent = data.tapd_projects || 0;
-
-        // OpenClaw 卡片
-        const grid = $('#claw-grid');
-        if (data.claws.length === 0) {
-            grid.innerHTML = `
-                <div class="empty-state" style="grid-column:1/-1">
-                    <div class="empty-state-icon">🤖</div>
-                    <div class="empty-state-text">还没有 OpenClaw，去添加一个吧</div>
-                    <a href="/openclaws" class="btn btn-primary">添加 OpenClaw</a>
-                </div>`;
-        } else {
-            grid.innerHTML = data.claws.map(c => `
-                <div class="claw-card" onclick="location.href='/openclaws/${c.id}'">
-                    <div class="claw-card-header">
-                        <div class="claw-avatar">${c.avatar || '🤖'}</div>
-                        <div class="claw-info">
-                            <div class="claw-name">
-                                ${statusDot(c.status)}
-                                ${c.name}
-                            </div>
-                            <div class="claw-role">${c.role_title || '未设置职位'}</div>
-                        </div>
-                        ${c.reported_today 
-                            ? '<span class="tag tag-green" style="font-size:0.72rem">✅ 已汇报</span>' 
-                            : '<span class="tag tag-yellow" style="font-size:0.72rem">⏳ 待汇报</span>'}
-                    </div>
-                    <div class="claw-meta">
-                        <span class="tag tag-blue">今日 ${c.today_tasks} 个任务</span>
-                        ${c.last_heartbeat
-                            ? `<span class="tag tag-accent">${timeAgo(c.last_heartbeat)}</span>`
-                            : '<span class="tag tag-yellow">从未上线</span>'}
-                    </div>
-                    ${c.today_summary
-                        ? `<div class="claw-summary">${c.today_summary}</div>`
-                        : '<div class="claw-summary" style="color:var(--text-muted)">今日暂无汇报</div>'}
-                </div>
-            `).join('');
-        }
-
-        // 趋势图（简易 bar chart）
-        const trendEl = $('#trend-chart');
-        if (data.knowledge_trend.length === 0) {
-            trendEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无数据</div></div>';
-        } else {
-            const maxVal = Math.max(...data.knowledge_trend.map(t => t.count), 1);
-            trendEl.innerHTML = data.knowledge_trend.map(t => {
-                const h = Math.max((t.count / maxVal) * 180, 4);
-                return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;">
-                    <span style="font-size:0.7rem;color:var(--text-muted)">${t.count}</span>
-                    <div style="width:100%;max-width:24px;height:${h}px;background:var(--accent);border-radius:3px 3px 0 0;"></div>
-                    <span style="font-size:0.65rem;color:var(--text-muted);white-space:nowrap">${t.date.slice(5)}</span>
-                </div>`;
-            }).join('');
-        }
-
-        // 今日各标签新增
-        const catEl = $('#category-stats');
-        if (data.category_stats.length === 0) {
-            catEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">今日暂无新增</div></div>';
-        } else {
-            catEl.innerHTML = data.category_stats.map(c => `
-                <div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
-                    <span class="tag tag-accent">#${c.category}</span>
-                    <span style="font-weight:600;color:var(--green)">+${c.count}</span>
-                </div>
-            `).join('');
-        }
-
+        applyDashboardFilters();
     } catch (err) {
         console.error('Dashboard load error:', err);
         showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+function applyDashboardFilters() {
+    if (!dashboardData) return;
+
+    const projectFilter = document.getElementById('filter-project').value;
+
+    // 过滤后的 claws
+    const filteredClaws = projectFilter
+        ? dashboardData.claws.filter(c => c.project_name === projectFilter)
+        : dashboardData.claws;
+
+    // 核心统计（根据过滤后的数据）
+    const onlineClaws = filteredClaws.filter(c => c.status === 'online').length;
+    const totalClaws = filteredClaws.length;
+    const todayReported = filteredClaws.filter(c => c.reported_today).length;
+    const todayTasks = filteredClaws.reduce((sum, c) => sum + (c.today_tasks || 0), 0);
+
+    $('#stat-online').textContent = `${onlineClaws}/${totalClaws}`;
+    $('#stat-tasks').textContent = todayTasks;
+    $('#qs-reported').textContent = `${todayReported}/${totalClaws}`;
+
+    // OpenClaw 卡片
+    const grid = $('#claw-grid');
+    if (filteredClaws.length === 0) {
+        grid.innerHTML = `
+            <div class="empty-state" style="grid-column:1/-1">
+                <div class="empty-state-icon">🤖</div>
+                <div class="empty-state-text">${projectFilter ? '该项目暂无 OpenClaw' : '还没有 OpenClaw，去添加一个吧'}</div>
+                <a href="/openclaws" class="btn btn-primary">添加 OpenClaw</a>
+            </div>`;
+    } else {
+        grid.innerHTML = filteredClaws.map(c => `
+            <div class="claw-card" onclick="location.href='/openclaws/${c.id}'">
+                <div class="claw-card-header">
+                    <div class="claw-avatar">${c.avatar || '🤖'}</div>
+                    <div class="claw-info">
+                        <div class="claw-name">
+                            ${statusDot(c.status)}
+                            ${c.name}
+                        </div>
+                        <div class="claw-role">${c.role_title || '未设置职位'}</div>
+                    </div>
+                    ${c.reported_today
+                        ? '<span class="tag tag-green" style="font-size:0.72rem">✅ 已汇报</span>'
+                        : '<span class="tag tag-yellow" style="font-size:0.72rem">⏳ 待汇报</span>'}
+                </div>
+                <div class="claw-meta">
+                    <span class="tag tag-blue">今日 ${c.today_tasks} 个任务</span>
+                    ${c.last_heartbeat
+                        ? `<span class="tag tag-accent">${timeAgo(c.last_heartbeat)}</span>`
+                        : '<span class="tag tag-yellow">从未上线</span>'}
+                </div>
+                ${c.today_summary
+                    ? `<div class="claw-summary">${c.today_summary}</div>`
+                    : '<div class="claw-summary" style="color:var(--text-muted)">今日暂无汇报</div>'}
+            </div>
+        `).join('');
+    }
+
+    // 趋势图和分类统计保持不变（全量数据）
+    const trendEl = $('#trend-chart');
+    if (dashboardData.knowledge_trend.length === 0) {
+        trendEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无数据</div></div>';
+    } else {
+        const maxVal = Math.max(...dashboardData.knowledge_trend.map(t => t.count), 1);
+        trendEl.innerHTML = dashboardData.knowledge_trend.map(t => {
+            const h = Math.max((t.count / maxVal) * 180, 4);
+            return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;">
+                <span style="font-size:0.7rem;color:var(--text-muted)">${t.count}</span>
+                <div style="width:100%;max-width:24px;height:${h}px;background:var(--accent);border-radius:3px 3px 0 0;"></div>
+                <span style="font-size:0.65rem;color:var(--text-muted);white-space:nowrap">${t.date.slice(5)}</span>
+            </div>`;
+        }).join('');
+    }
+
+    const catEl = $('#category-stats');
+    if (dashboardData.category_stats.length === 0) {
+        catEl.innerHTML = '<div class="empty-state"><div class="empty-state-text">今日暂无新增</div></div>';
+    } else {
+        catEl.innerHTML = dashboardData.category_stats.map(c => `
+            <div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+                <span class="tag tag-accent">#${c.category}</span>
+                <span style="font-weight:600;color:var(--green)">+${c.count}</span>
+            </div>
+        `).join('');
     }
 }
 

@@ -52,11 +52,15 @@
                 <div>
                     <div class="form-group">
                         <label class="form-label">所属项目</label>
-                        <input class="form-input" name="project_name" id="f-project">
+                        <select class="form-input" name="project_id" id="f-project" onchange="onProjectChangeDetail(this.value)">
+                            <option value="">-- 未分配项目 --</option>
+                        </select>
                     </div>
                     <div class="form-group">
                         <label class="form-label">所属模块</label>
-                        <input class="form-input" name="module_name" id="f-module">
+                        <select class="form-input" name="module_name" id="f-module">
+                            <option value="">-- 先选择项目 --</option>
+                        </select>
                     </div>
                     <div class="form-group">
                         <label class="form-label">上报时间</label>
@@ -182,14 +186,34 @@ function switchTab(tab) {
 async function loadClaw() {
     try {
         clawData = await API.getClaw(CLAW_ID);
+
+        // 加载项目列表
+        const projects = await API.listProjects();
+        const projectSel = document.getElementById('f-project');
+        projectSel.innerHTML = '<option value="">-- 未分配项目 --</option>' +
+            projects.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+
         $('#page-claw-name').textContent = clawData.name;
         $('#f-name').value = clawData.name || '';
         $('#f-owner').value = clawData.owner || '';
         $('#f-role').value = clawData.role || 'test_member';
         $('#f-role-title').value = clawData.role_title || '';
         $('#f-tag').value = clawData.claw_tag || '';
-        $('#f-project').value = clawData.project_name || '';
-        $('#f-module').value = clawData.module_name || '';
+
+        // 设置项目（通过 project_id 或 project_name 匹配）
+        const projectId = clawData.project_id || '';
+        const projectName = clawData.project_name || '';
+        if (projectId) {
+            projectSel.value = projectId;
+        } else if (projectName) {
+            // 兼容旧数据：尝试通过名称匹配
+            const matched = projects.find(p => p.name === projectName);
+            projectSel.value = matched ? matched.id : '';
+        }
+
+        // 加载模块列表
+        await loadModulesForDetail(projectId || (matched ? matched.id : null));
+
         $('#f-schedule').value = clawData.report_schedule || '15:00,21:00';
         $('#f-conn-mode').value = clawData.connection_mode || 'sse';
         $('#f-status').value = clawData.status || 'offline';
@@ -199,6 +223,27 @@ async function loadClaw() {
     } catch (err) {
         showToast('加载失败: ' + err.message, 'error');
     }
+}
+
+async function loadModulesForDetail(projectId) {
+    const moduleSel = document.getElementById('f-module');
+    if (!projectId) {
+        moduleSel.innerHTML = '<option value="">-- 先选择项目 --</option>';
+        return;
+    }
+    try {
+        const modules = await API.getProjectModules(projectId);
+        moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>' +
+            modules.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+        // 设置当前模块
+        moduleSel.value = clawData.module_name || '';
+    } catch (err) {
+        moduleSel.innerHTML = '<option value="">加载模块失败</option>';
+    }
+}
+
+function onProjectChangeDetail(projectId) {
+    loadModulesForDetail(projectId);
 }
 
 $('#info-form').addEventListener('submit', async e => {
