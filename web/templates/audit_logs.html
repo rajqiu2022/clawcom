@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block title %}操作日志 - OpenClaw 管理系统{% endblock %}
+{% block nav_audit %}active{% endblock %}
+{% block page_title %}📝 操作日志{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <button class="btn btn-ghost btn-sm" onclick="exportCSV()">📥 导出 CSV</button>
+</div>
+{% endblock %}
+
+{% block content %}
+<!-- 筛选 -->
+<div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+    <input type="text" class="form-input" id="filter-search" placeholder="搜索..." style="width:180px" oninput="debounceSearch()">
+    <select class="form-select" id="filter-action" style="width:auto" onchange="loadLogs()">
+        <option value="">全部操作</option>
+        <option value="create">创建</option>
+        <option value="update">更新</option>
+        <option value="delete">删除</option>
+        <option value="review">审核</option>
+        <option value="install">安装</option>
+        <option value="uninstall">卸载</option>
+        <option value="dispatch">派发任务</option>
+        <option value="connect">连接</option>
+        <option value="disconnect">断开</option>
+    </select>
+    <select class="form-select" id="filter-resource" style="width:auto" onchange="loadLogs()">
+        <option value="">全部资源</option>
+        <option value="openclaw">OpenClaw</option>
+        <option value="skill">技能</option>
+        <option value="knowledge">知识库</option>
+        <option value="rule">工作规范</option>
+        <option value="testcase">用例</option>
+        <option value="report">日报</option>
+        <option value="project">项目</option>
+        <option value="config">配置</option>
+    </select>
+    <input type="date" class="form-input" id="filter-start" style="width:150px" onchange="loadLogs()">
+    <span style="color:var(--text-muted)">至</span>
+    <input type="date" class="form-input" id="filter-end" style="width:150px" onchange="loadLogs()">
+    <span id="log-count" style="color:var(--text-muted);font-size:0.82rem"></span>
+</div>
+
+<!-- 日志列表 -->
+<div class="card" style="overflow:hidden">
+    <table style="width:100%;border-collapse:collapse;font-size:0.88rem">
+        <thead>
+            <tr style="background:var(--bg-secondary);text-align:left">
+                <th style="padding:10px 14px;font-weight:600;width:160px">时间</th>
+                <th style="padding:10px 14px;font-weight:600;width:80px">操作</th>
+                <th style="padding:10px 14px;font-weight:600;width:90px">资源类型</th>
+                <th style="padding:10px 14px;font-weight:600">资源名称</th>
+                <th style="padding:10px 14px;font-weight:600;width:100px">操作者</th>
+                <th style="padding:10px 14px;font-weight:600">详情</th>
+            </tr>
+        </thead>
+        <tbody id="log-tbody">
+            <tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-muted)"><span class="spinner"></span> 加载中...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- 分页 -->
+<div style="display:flex;justify-content:center;gap:8px;margin-top:16px" id="pagination"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentPage = 1;
+let searchTimer = null;
+
+const actionLabels = {
+    create: ['tag-green', '创建'], update: ['tag-blue', '更新'],
+    delete: ['tag-red', '删除'], review: ['tag-yellow', '审核'],
+    install: ['tag-accent', '安装'], uninstall: ['tag-orange', '卸载'],
+    dispatch: ['tag-blue', '派发'], connect: ['tag-green', '连接'],
+    disconnect: ['tag-red', '断开'],
+};
+const resourceLabels = {
+    openclaw: '🤖 OpenClaw', skill: '🧩 技能', knowledge: '📚 知识库',
+    rule: '📐 规范', testcase: '🧪 用例', report: '📋 日报',
+    project: '📁 项目', config: '⚙️ 配置',
+};
+
+function debounceSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { currentPage = 1; loadLogs(); }, 300);
+}
+
+async function loadLogs() {
+    const params = new URLSearchParams();
+    const action = $('#filter-action').value;
+    const resource = $('#filter-resource').value;
+    const start = $('#filter-start').value;
+    const end = $('#filter-end').value;
+    const search = $('#filter-search').value.trim();
+
+    if (action) params.set('action', action);
+    if (resource) params.set('resource_type', resource);
+    if (start) params.set('start_date', start);
+    if (end) params.set('end_date', end);
+    if (search) params.set('search', search);
+    params.set('page', currentPage);
+    params.set('per_page', 50);
+
+    try {
+        const data = await API.get(`/audit-logs?${params}`);
+        const tbody = $('#log-tbody');
+        $('#log-count').textContent = `共 ${data.total} 条`;
+
+        if (data.logs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-muted)">暂无日志记录</td></tr>';
+        } else {
+            tbody.innerHTML = data.logs.map(l => {
+                const act = actionLabels[l.action] || ['tag-blue', l.action];
+                const res = resourceLabels[l.resource_type] || l.resource_type;
+                const time = l.created_at ? l.created_at.replace('T', ' ').substring(0, 19) : '';
+                return `<tr style="border-bottom:1px solid var(--border)">
+                    <td style="padding:10px 14px;font-size:0.82rem;color:var(--text-muted);white-space:nowrap">${time}</td>
+                    <td style="padding:10px 14px"><span class="tag ${act[0]}">${act[1]}</span></td>
+                    <td style="padding:10px 14px;font-size:0.85rem">${res}</td>
+                    <td style="padding:10px 14px;font-weight:500">${l.resource_name || '-'}</td>
+                    <td style="padding:10px 14px;font-size:0.85rem">${l.operator || 'system'}</td>
+                    <td style="padding:10px 14px;font-size:0.82rem;color:var(--text-secondary);max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${(l.detail||'').replace(/"/g,'&quot;')}">${l.detail || '-'}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        // 分页
+        renderPagination(data.page, data.pages);
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+function renderPagination(page, pages) {
+    const el = $('#pagination');
+    if (pages <= 1) { el.innerHTML = ''; return; }
+    let html = '';
+    if (page > 1) html += `<button class="btn btn-sm btn-ghost" onclick="goPage(${page-1})">上一页</button>`;
+    const start = Math.max(1, page - 2);
+    const end = Math.min(pages, page + 2);
+    for (let i = start; i <= end; i++) {
+        html += `<button class="btn btn-sm ${i === page ? 'btn-primary' : 'btn-ghost'}" onclick="goPage(${i})">${i}</button>`;
+    }
+    if (page < pages) html += `<button class="btn btn-sm btn-ghost" onclick="goPage(${page+1})">下一页</button>`;
+    el.innerHTML = html;
+}
+
+function goPage(p) {
+    currentPage = p;
+    loadLogs();
+}
+
+function exportCSV() {
+    const params = new URLSearchParams();
+    const action = $('#filter-action').value;
+    const resource = $('#filter-resource').value;
+    const start = $('#filter-start').value;
+    const end = $('#filter-end').value;
+    if (action) params.set('action', action);
+    if (resource) params.set('resource_type', resource);
+    if (start) params.set('start_date', start);
+    if (end) params.set('end_date', end);
+    window.open(`/api/v1/audit-logs/export?${params}`, '_blank');
+}
+
+loadLogs();
+</script>
+{% endblock %}

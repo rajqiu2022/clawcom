@@ -709,3 +709,34 @@ class ClawMessage(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
         }
 
+
+class AuditLog(db.Model):
+    """操作审计日志"""
+    __tablename__ = 'audit_logs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    action = db.Column(db.String(50), nullable=False,
+                       comment='操作类型：create/update/delete/review/login等')
+    resource_type = db.Column(db.String(50), nullable=False,
+                              comment='资源类型：openclaw/skill/knowledge/rule/report等')
+    resource_id = db.Column(db.Integer, comment='资源ID')
+    resource_name = db.Column(db.String(200), comment='资源名称')
+    operator = db.Column(db.String(100), default='system',
+                         comment='操作者')
+    ip_address = db.Column(db.String(45), comment='IP地址')
+    detail = db.Column(db.Text, comment='操作详情/变更内容')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'action': self.action,
+            'resource_type': self.resource_type,
+            'resource_id': self.resource_id,
+            'resource_name': self.resource_name,
+            'operator': self.operator,
+            'ip_address': self.ip_address,
+            'detail': self.detail,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+

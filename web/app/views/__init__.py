@@ -67,3 +67,9 @@ def rules():
 def testcases():
     """AI 用例库"""
     return render_template('testcases.html')
+
+
+@views_bp.route('/audit-logs')
+def audit_logs():
+    """操作日志"""
+    return render_template('audit_logs.html')
