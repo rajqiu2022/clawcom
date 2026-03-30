@@ -126,7 +126,6 @@ def report_stats():
         .order_by(DailyReport.report_date)
         .all()
     )
-    )
 
     # 各 OpenClaw 今日汇报情况
     claws = claws_query.order_by(OpenClawInstance.name).all()
