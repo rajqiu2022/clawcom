@@ -61,12 +61,15 @@ def create_app(config_name=None):
             try:
                 with app.app_context():
                     now = datetime.utcnow()
-                    # 查找状态为 online 但超过3分钟没有心跳的
+                    # 查找状态为 online 但超过3分钟没有心跳的（包括从未发送过心跳的）
                     offline_claws = OpenClawInstance.query.filter(
                         OpenClawInstance.status == 'online',
-                        OpenClawInstance.last_heartbeat < now - timeout
+                        db.or_(
+                            OpenClawInstance.last_heartbeat < now - timeout,
+                            OpenClawInstance.last_heartbeat == None
+                        )
                     ).all()
-                    
+
                     if offline_claws:
                         for claw in offline_claws:
                             claw.status = 'offline'

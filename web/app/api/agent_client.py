@@ -94,6 +94,12 @@ def claw_sse_events(claw_id, claw=None):
     - event: task\ndata: {task_id, task_type, command, target_path, payload}\n\n
     - event: ping\ndata: \n\n
     """
+    # 连接时更新状态为 online
+    claw.status = 'online'
+    claw.last_heartbeat = datetime.utcnow()
+    db.session.commit()
+    logger.info(f"SSE连接建立，OpenClaw {claw_id} ({claw.name}) 状态已设为 online")
+
     def generate():
         # 发送连接成功事件
         yield f"event: connected\ndata: {json.dumps({'claw_id': claw.id, 'name': claw.name, 'server_time': datetime.utcnow().isoformat()})}\n\n"
@@ -110,6 +116,10 @@ def claw_sse_events(claw_id, claw=None):
 
                 now = time.time()
                 if now - last_task_check > 5:
+                    # 更新心跳时间
+                    claw.last_heartbeat = datetime.utcnow()
+                    db.session.commit()
+
                     # 发送心跳
                     yield f"event: heartbeat\ndata: {json.dumps({'server_time': datetime.utcnow().isoformat()})}\n\n"
 
