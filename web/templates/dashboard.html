@@ -3,6 +3,12 @@
 {% block nav_dashboard %}active{% endblock %}
 {% block page_title %}Dashboard{% endblock %}
 
+{% block top_actions %}
+<select id="filter-project" class="form-select" style="min-width:140px;font-size:0.85rem" onchange="applyDashboardFilters()">
+    <option value="">全部项目</option>
+</select>
+{% endblock %}
+
 {% block content %}
 <!-- 核心统计卡片 -->
 <div class="stats-grid dashboard-stats" id="stats-grid">
@@ -48,12 +54,7 @@
 <div class="section">
     <div class="card-header">
         <h2 class="section-title">团队 OpenClaw</h2>
-        <div class="filter-group" style="gap:8px">
-            <select id="filter-project" class="form-select" style="min-width:140px;font-size:0.85rem" onchange="applyDashboardFilters()">
-                <option value="">全部项目</option>
-            </select>
-            <a href="/openclaws" class="btn btn-ghost btn-sm">查看全部 →</a>
-        </div>
+        <a href="/openclaws" class="btn btn-ghost btn-sm">查看全部 →</a>
     </div>
     <div class="claw-grid" id="claw-grid">
         <div class="loading"><span class="spinner"></span> 加载中...</div>

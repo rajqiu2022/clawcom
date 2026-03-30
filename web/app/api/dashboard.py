@@ -113,6 +113,7 @@ def dashboard_stats():
                             if today_report else None),
             'avatar': c.avatar,
             'reported_today': today_report is not None,
+            'project_name': c.project.name if c.project else (c.project_name or ''),
         })
 
     return jsonify({

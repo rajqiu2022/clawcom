@@ -20,6 +20,13 @@ def list_all_reports():
     if claw_id:
         query = query.filter(DailyReport.openclaw_id == claw_id)
 
+    # 筛选: 项目
+    project = request.args.get('project')
+    if project:
+        query = query.join(OpenClawInstance).filter(
+            OpenClawInstance.project_name == project
+        )
+
     # 筛选: 日期范围
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
@@ -46,6 +53,7 @@ def list_all_reports():
         d['openclaw_name'] = claw.name if claw else '未知'
         d['openclaw_avatar'] = claw.avatar if claw else None
         d['openclaw_role_title'] = claw.role_title if claw else None
+        d['openclaw_project_name'] = claw.project.name if (claw and claw.project) else (claw.project_name or '') if claw else ''
         result.append(d)
 
     return jsonify(result)
@@ -58,19 +66,38 @@ def report_stats():
     yesterday = today - timedelta(days=1)
     week_ago = today - timedelta(days=7)
 
+    # 项目过滤
+    project = request.args.get('project')
+
+    # 基础查询
+    base_query = DailyReport.query
+    if project:
+        base_query = base_query.join(OpenClawInstance).filter(
+            OpenClawInstance.project_name == project
+        )
+
     # 今日日报数
-    today_count = DailyReport.query.filter_by(report_date=today).count()
+    today_reports_q = base_query.filter_by(report_date=today)
+    today_count = today_reports_q.count()
 
     # 今日已汇报 OpenClaw 数
     today_reported_claws = db.session.query(
         func.count(func.distinct(DailyReport.openclaw_id))
-    ).filter(DailyReport.report_date == today).scalar() or 0
+    ).filter(DailyReport.report_date == today)
+    if project:
+        today_reported_claws = today_reported_claws.join(OpenClawInstance).filter(
+            OpenClawInstance.project_name == project
+        )
+    today_reported_claws = today_reported_claws.scalar() or 0
 
     # 全部 OpenClaw 数
-    total_claws = OpenClawInstance.query.count()
+    claws_query = OpenClawInstance.query
+    if project:
+        claws_query = claws_query.filter(OpenClawInstance.project_name == project)
+    total_claws = claws_query.count()
 
     # 今日任务总数（兼容字符串和列表类型）
-    today_reports = DailyReport.query.filter_by(report_date=today).all()
+    today_reports = today_reports_q.all()
     def count_items(field_value):
         if isinstance(field_value, list):
             return len(field_value)
@@ -85,19 +112,24 @@ def report_stats():
     today_knowledge = sum(count_items(r.knowledge_recorded) for r in today_reports)
 
     # 近 7 天趋势
-    trend_data = (
-        db.session.query(
-            DailyReport.report_date,
-            func.count().label('report_count'),
+    trend_query = db.session.query(
+        DailyReport.report_date,
+        func.count().label('count'),
+    ).filter(DailyReport.report_date >= week_ago)
+    if project:
+        trend_query = trend_query.join(OpenClawInstance).filter(
+            OpenClawInstance.project_name == project
         )
-        .filter(DailyReport.report_date >= week_ago)
+    trend_data = (
+        trend_query
         .group_by(DailyReport.report_date)
         .order_by(DailyReport.report_date)
         .all()
     )
+    )
 
     # 各 OpenClaw 今日汇报情况
-    claws = OpenClawInstance.query.order_by(OpenClawInstance.name).all()
+    claws = claws_query.order_by(OpenClawInstance.name).all()
     claw_status = []
     for c in claws:
         latest = DailyReport.query.filter_by(
@@ -109,6 +141,7 @@ def report_stats():
             'name': c.name,
             'avatar': c.avatar,
             'role_title': c.role_title,
+            'project_name': c.project.name if c.project else (c.project_name or ''),
             'reported': latest is not None,
             'report_time': latest.report_time.strftime('%H:%M') if latest else None,
             'task_count': count_items(latest.tasks_completed) if latest else 0,
@@ -124,7 +157,7 @@ def report_stats():
         'trend': [
             {
                 'date': str(t.report_date),
-                'count': t.report_count,
+                'count': t.count,
             }
             for t in trend_data
         ],
@@ -137,10 +170,15 @@ def report_timeline():
     """时间线视图 - 按日期分组，最新在前"""
     target_date = request.args.get('date', date.today().isoformat())
     target_date = date.fromisoformat(target_date)
+    project = request.args.get('project')
 
-    reports = DailyReport.query.filter_by(
-        report_date=target_date
-    ).order_by(DailyReport.report_time.desc()).all()
+    query = DailyReport.query.filter_by(report_date=target_date)
+    if project:
+        query = query.join(OpenClawInstance).filter(
+            OpenClawInstance.project_name == project
+        )
+
+    reports = query.order_by(DailyReport.report_time.desc()).all()
 
     timeline = []
     for r in reports:
@@ -149,6 +187,7 @@ def report_timeline():
             'id': r.id,
             'openclaw_name': claw.name if claw else '未知',
             'openclaw_avatar': claw.avatar if claw else None,
+            'openclaw_project_name': claw.project.name if (claw and claw.project) else (claw.project_name or '') if claw else '',
             'report_time': r.report_time.strftime('%H:%M') if r.report_time else None,
             'tasks_completed': r.tasks_completed or [],
             'knowledge_recorded': r.knowledge_recorded or [],
