@@ -21,6 +21,9 @@ from functools import wraps
 import json
 import time
 import hashlib
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 创建蓝图（注意：这里不再使用 api_bp 前缀，因为已在 __init__.py 中单独注册）
 agent_bp = Blueprint('agent_client', __name__, url_prefix='/api/openclaws')
@@ -126,7 +129,14 @@ def claw_sse_events(claw_id, claw=None):
                 time.sleep(3)
 
             except GeneratorExit:
-                # 客户端断开连接
+                # 客户端断开连接，更新状态为 offline
+                try:
+                    claw.status = 'offline'
+                    db.session.commit()
+                    logger.info(f"SSE断开，OpenClaw {claw_id} ({claw.name}) 状态已设为 offline")
+                except Exception as e:
+                    logger.error(f"更新 claw 状态失败: {e}")
+                    db.session.rollback()
                 break
             except Exception as e:
                 yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
