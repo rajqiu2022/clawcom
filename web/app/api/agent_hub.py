@@ -3,7 +3,7 @@ Agent Hub 通信中心 API
 供 OpenClaw 实例之间通信使用
 """
 from functools import wraps
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, current_app
 from datetime import datetime
 from app import db
 from app.models import Agent, Message, Conversation, OpenClawInstance, ClawMessage, hash_token, generate_agent_token
@@ -492,10 +492,10 @@ def web_broadcast():
     target_claw_ids = data.get('target_claw_ids', [])
     msg_type = data.get('msg_type', 'broadcast')
 
-    # 确保 target_claw_ids 是整数列表
+    # 确保 target_claw_ids 是整数列表（JSON 反序列化后可能是字符串）
     if target_claw_ids:
         target_claw_ids = [int(x) for x in target_claw_ids]
-        logger.info(f"广播请求: target_claw_ids={target_claw_ids}, msg_type={msg_type}")
+    current_app.logger.warning(f"[DEBUG] broadcast called: target_claw_ids={target_claw_ids}, target_agent_ids={target_agent_ids}, msg_type={msg_type}")
 
     sent_agents = 0
     sent_claws = 0
@@ -518,7 +518,7 @@ def web_broadcast():
             db.session.add(claw_msg)
             sent_claws += 1
         if offline_claws:
-            logger.warning(f"以下 OpenClaw 不在线，消息已跳过: {offline_claws}")
+            current_app.logger.warning(f"以下 OpenClaw 不在线，消息已跳过: {offline_claws}")
     elif not target_agent_ids:
         # 全员通知（默认发送给所有在线 OpenClaw）
         online_claws = OpenClawInstance.query.filter_by(status='online').all()
