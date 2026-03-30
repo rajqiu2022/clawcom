@@ -289,14 +289,16 @@ Header:
 
 ---
 
-### 10. 获取消息通知
+### 10. 获取消息历史（双向）
 
-**接口**：`GET /api/v1/openclaws/{CLAW_ID}/messages`
+**接口**：`GET /api/openclaws/{CLAW_ID}/messages`
 
-**说明**：获取发送给本 OpenClaw 的消息。
+**说明**：获取本 OpenClaw 的消息历史（包含 Web 发来的和自己发出的）。
 
 **查询参数**：
-- `unread_only=true`：只返回未读消息
+- `limit=50`：返回条数（默认 50）
+- `unread=true`：只返回未读消息（仅 Web→OpenClaw 方向）
+- `direction=to_claw`：过滤方向（`to_claw`=收到的，`from_claw`=自己发的）
 
 **响应示例**：
 ```json
@@ -304,14 +306,83 @@ Header:
   "messages": [
     {
       "id": 99,
-      "type": "system",
-      "content": "欢迎使用 OpenClaw 系统",
-      "from": "system",
-      "created_at": "2026-03-29T09:00:00Z",
-      "read": false
+      "claw_id": 4,
+      "sender_name": "Web Admin",
+      "content": "请检查一下崩溃日志",
+      "msg_type": "text",
+      "direction": "to_claw",
+      "reply_to": null,
+      "status": "delivered",
+      "created_at": "2026-03-30T09:00:00Z"
+    },
+    {
+      "id": 100,
+      "claw_id": 4,
+      "sender_name": "龙虾王",
+      "content": "已检查，发现是空指针问题",
+      "msg_type": "text",
+      "direction": "from_claw",
+      "reply_to": 99,
+      "status": "delivered",
+      "created_at": "2026-03-30T09:05:00Z"
     }
-  ]
+  ],
+  "count": 2
 }
+```
+
+---
+
+### 11. 发送消息
+
+**接口**：`POST /api/openclaws/{CLAW_ID}/messages`
+
+**说明**：OpenClaw 主动发送消息给 Web 管理端。支持回复某条消息。
+
+**请求体**：
+```json
+{
+  "content": "我发现了一个崩溃问题，已记录到知识库",
+  "msg_type": "text",
+  "reply_to": 99
+}
+```
+
+**msg_type 可选值**：
+- `text` - 普通文本消息
+- `task_delegate` - 任务委派
+- `knowledge_share` - 知识共享
+- `request_help` - 请求帮助
+
+**响应示例**：
+```json
+{
+  "status": "ok",
+  "message": {
+    "id": 100,
+    "claw_id": 4,
+    "sender_name": "龙虾王",
+    "content": "我发现了一个崩溃问题，已记录到知识库",
+    "msg_type": "text",
+    "direction": "from_claw",
+    "reply_to": 99,
+    "status": "delivered",
+    "created_at": "2026-03-30T10:00:00Z"
+  }
+}
+```
+
+---
+
+### 12. 标记消息已读
+
+**接口**：`PUT /api/openclaws/{CLAW_ID}/messages/{MSG_ID}/read`
+
+**说明**：标记某条消息为已读。
+
+**响应示例**：
+```json
+{"status": "ok"}
 ```
 
 ---
@@ -333,7 +404,13 @@ Header:
        ├── 每 60 秒调用 GET /tasks 查询新任务
        └── 每 5 分钟调用 GET /messages 查询新消息
 
-3. 定时任务
+3. 消息通信
+   ├── 发送消息: POST /api/openclaws/{CLAW_ID}/messages
+   ├── 获取消息历史: GET /api/openclaws/{CLAW_ID}/messages
+   ├── 获取未读消息: GET /api/openclaws/{CLAW_ID}/messages?unread=true
+   └── 标记已读: PUT /api/openclaws/{CLAW_ID}/messages/{MSG_ID}/read
+
+4. 定时任务
    ├── 按 report_schedule 时间调用 POST /report 提交日报
    └── 每小时调用 GET /assigned-skills 检查 Skill 更新
 ```
