@@ -495,7 +495,10 @@ def web_broadcast():
     # 确保 target_claw_ids 是整数列表（JSON 反序列化后可能是字符串）
     if target_claw_ids:
         target_claw_ids = [int(x) for x in target_claw_ids]
-    current_app.logger.warning(f"[DEBUG] broadcast called: target_claw_ids={target_claw_ids}, target_agent_ids={target_agent_ids}, msg_type={msg_type}")
+    import sys
+    sys.stderr.write(f"[DEBUG] web_broadcast called: target_claw_ids={target_claw_ids}, target_agent_ids={target_agent_ids}, msg_type={msg_type}\n")
+    sys.stderr.flush()
+    current_app.logger.warning(f"[WEB_BROADCAST] target_claw_ids={target_claw_ids}, target_agent_ids={target_agent_ids}, msg_type={msg_type}")
 
     sent_agents = 0
     sent_claws = 0
