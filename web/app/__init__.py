@@ -81,10 +81,9 @@ def create_app(config_name=None):
             import time
             time.sleep(60)  # 每60秒检查一次
     
-    # 启动后台线程（仅在 WSGI 模式下）
-    if not app.debug:
-        t = Thread(target=check_heartbeat_timeout, daemon=True)
-        t.start()
-        logger.info("心跳超时检测后台任务已启动")
+    # 启动后台心跳检测线程（daemon模式，不会阻止应用关闭）
+    t = Thread(target=check_heartbeat_timeout, daemon=True)
+    t.start()
+    logger.info("心跳超时检测后台任务已启动")
 
     return app
