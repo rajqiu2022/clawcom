@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    container_name: clawteam-web
+    ports:
+      - "8088:8088"
+    environment:
+      - FLASK_ENV=production
+      - MYSQL_HOST=${MYSQL_HOST:-127.0.0.1}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_USER=${MYSQL_USER:-booster}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-booster}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-openclaw_manager}
+      - SECRET_KEY=${SECRET_KEY:-clawteam-prod-secret}
+      - MEMOS_URL=${MEMOS_URL:-http://9.134.11.169:5230}
+      - MEMOS_API_KEY=${MEMOS_API_KEY:-}
+    restart: unless-stopped
+    network_mode: host

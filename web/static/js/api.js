@@ -56,6 +56,9 @@ const API = {
     reviewKnowledge(id, data) {
         return this.post(`/knowledge/${id}/review`, data);
     },
+    createKnowledge(data) { return this.post('/knowledge', data); },
+    updateKnowledge(id, data) { return this.put(`/knowledge/${id}`, data); },
+    deleteKnowledge(id) { return this.del(`/knowledge/${id}`); },
 
     // Projects
     listProjects() { return this.get('/projects'); },

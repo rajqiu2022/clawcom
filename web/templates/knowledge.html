@@ -3,6 +3,15 @@
 {% block nav_knowledge %}active{% endblock %}
 {% block page_title %}知识库管理{% endblock %}
 
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <select id="filter-project" class="form-select" style="min-width:140px" onchange="loadKnowledge()">
+        <option value="">全部项目</option>
+    </select>
+    <button class="btn btn-primary btn-sm" onclick="showCreateModal()">+ 新增知识</button>
+</div>
+{% endblock %}
+
 {% block content %}
 <div class="tab-bar">
     <div class="tab-item active" data-tab="browse" onclick="switchTab('browse')">浏览</div>
@@ -13,7 +22,8 @@
 
 <!-- 筛选 -->
 <div id="tab-browse">
-    <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+    <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+        <input type="text" class="form-input" id="filter-search" placeholder="搜索标题或内容..." style="width:220px" oninput="debounceSearch()">
         <select class="form-select" id="filter-scope" style="width:auto" onchange="loadKnowledge()">
             <option value="">全部作用域</option>
             <option value="global">通用</option>
@@ -34,6 +44,7 @@
             <option value="project-lesson">project-lesson</option>
             <option value="tool-usage">tool-usage</option>
             <option value="test-summary">test-summary</option>
+            <option value="general">general</option>
         </select>
         <select class="form-select" id="filter-status" style="width:auto" onchange="loadKnowledge()">
             <option value="">全部状态</option>
@@ -42,6 +53,7 @@
             <option value="approved">已通过</option>
             <option value="rejected">已拒绝</option>
         </select>
+        <span id="result-count" style="color:var(--text-muted);font-size:0.82rem"></span>
     </div>
 
     <div class="knowledge-list" id="knowledge-list">
@@ -55,16 +67,93 @@
         <div class="loading"><span class="spinner"></span></div>
     </div>
 </div>
+
+<!-- 新增/编辑弹窗 -->
+<div class="modal-overlay" id="edit-modal">
+    <div class="modal" style="max-width:680px">
+        <div class="modal-title" id="edit-modal-title">新增知识</div>
+        <input type="hidden" id="edit-id">
+        <div style="display:flex;flex-direction:column;gap:14px">
+            <div>
+                <label class="form-label">标题 *</label>
+                <input type="text" class="form-input" id="edit-title" placeholder="知识标题">
+            </div>
+            <div style="display:flex;gap:10px">
+                <div style="flex:1">
+                    <label class="form-label">分类标签</label>
+                    <select class="form-select" id="edit-category">
+                        <option value="bug-pattern">bug-pattern</option>
+                        <option value="test-checklist">test-checklist</option>
+                        <option value="performance-case">performance-case</option>
+                        <option value="project-lesson">project-lesson</option>
+                        <option value="tool-usage">tool-usage</option>
+                        <option value="test-summary">test-summary</option>
+                        <option value="general">general</option>
+                    </select>
+                </div>
+                <div style="flex:1">
+                    <label class="form-label">作用域</label>
+                    <select class="form-select" id="edit-scope">
+                        <option value="global">通用</option>
+                        <option value="project">项目级</option>
+                        <option value="module">模块级</option>
+                    </select>
+                </div>
+            </div>
+            <div style="display:flex;gap:10px">
+                <div style="flex:1">
+                    <label class="form-label">所属项目</label>
+                    <select class="form-select" id="edit-project">
+                        <option value="">无</option>
+                    </select>
+                </div>
+                <div style="flex:1">
+                    <label class="form-label">状态</label>
+                    <select class="form-select" id="edit-status">
+                        <option value="draft">草稿</option>
+                        <option value="pending_review">提交审核</option>
+                        <option value="approved">已通过</option>
+                    </select>
+                </div>
+            </div>
+            <div>
+                <label class="form-label">内容 * (支持 Markdown)</label>
+                <textarea class="form-input" id="edit-content" rows="12" placeholder="知识内容，支持 Markdown 格式..." style="font-family:monospace;font-size:0.88rem;line-height:1.6;resize:vertical"></textarea>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeEditModal()">取消</button>
+            <button class="btn btn-primary" onclick="saveKnowledge()">保存</button>
+        </div>
+    </div>
+</div>
+
+<!-- 详情弹窗 -->
+<div class="modal-overlay" id="detail-modal">
+    <div class="modal" style="max-width:720px">
+        <div class="modal-title" id="detail-title">知识详情</div>
+        <div id="detail-body" style="max-height:60vh;overflow-y:auto"></div>
+        <div class="modal-actions" id="detail-actions">
+            <button class="btn btn-ghost" onclick="closeDetailModal()">关闭</button>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+let searchTimer = null;
+
+function debounceSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(loadKnowledge, 300);
+}
+
 function switchTab(tab) {
     $$('.tab-item').forEach(t => t.classList.remove('active'));
     $(`.tab-item[data-tab="${tab}"]`).classList.add('active');
     $('#tab-browse').style.display = tab === 'browse' ? 'block' : 'none';
     $('#tab-pending').style.display = tab === 'pending' ? 'block' : 'none';
-
     if (tab === 'pending') loadPending();
 }
 
@@ -77,35 +166,69 @@ const statusLabels = {
     approved: '已通过', rejected: '已拒绝'
 };
 const sourceLabels = {
-    openclaw: ['tag-blue', 'Agent'],
-    openspace: ['tag-orange', 'OpenSpace'],
-    manual: ['tag-accent', '手动'],
+    openclaw: ['tag-blue', '🤖 Agent'],
+    openspace: ['tag-orange', '🧬 OpenSpace'],
+    manual: ['tag-accent', '✍️ 手动'],
 };
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 
 function renderEntry(e) {
     const src = sourceLabels[e.source_type] || sourceLabels.manual;
+    const preview = (e.content || '').substring(0, 120).replace(/\n/g, ' ');
     return `
-        <div class="knowledge-item">
-            <div class="knowledge-item-body">
-                <div class="knowledge-title">${e.title}</div>
-                <div class="knowledge-meta">
+        <div class="knowledge-item" style="cursor:pointer" onclick="showDetail(${e.id})">
+            <div class="knowledge-item-body" style="flex:1;min-width:0">
+                <div class="knowledge-title" style="font-size:0.95rem;font-weight:600;margin-bottom:4px">${escapeHtml(e.title)}</div>
+                <div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(preview)}${(e.content||'').length > 120 ? '...' : ''}</div>
+                <div class="knowledge-meta" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
                     <span class="tag ${src[0]}">${src[1]}</span>
                     <span class="tag tag-accent">#${e.category}</span>
                     <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
-                    <span>${e.scope}${e.project_name ? ' · ' + e.project_name : ''}${e.module_name ? ' · ' + e.module_name : ''}</span>
-                    ${e.source_openclaw_name ? `<span>来源: ${e.source_openclaw_name}</span>` : ''}
-                    <span>${timeAgo(e.created_at)}</span>
+                    ${e.project_name ? `<span class="tag tag-blue">${e.project_name}</span>` : ''}
+                    ${e.source_openclaw_name ? `<span style="font-size:0.78rem;color:var(--text-muted)">来源: ${e.source_openclaw_name}</span>` : ''}
+                    <span style="font-size:0.78rem;color:var(--text-muted)">${timeAgo(e.created_at)}</span>
                 </div>
             </div>
-            ${e.status === 'pending_review' ? `
-                <div style="display:flex;gap:6px;flex-shrink:0">
+            <div style="display:flex;gap:6px;flex-shrink:0;align-items:center" onclick="event.stopPropagation()">
+                ${e.status === 'pending_review' ? `
                     <button class="btn btn-sm btn-primary" onclick="reviewEntry(${e.id}, 'approve')">通过</button>
                     <button class="btn btn-sm btn-danger" onclick="reviewEntry(${e.id}, 'reject')">拒绝</button>
-                </div>
-            ` : ''}
+                ` : ''}
+                <button class="btn btn-sm btn-ghost" onclick="showEditModal(${e.id})" title="编辑">✏️</button>
+                <button class="btn btn-sm btn-ghost" onclick="deleteEntry(${e.id})" title="删除" style="color:var(--red)">🗑️</button>
+            </div>
         </div>
     `;
 }
+
+// 简单 Markdown 渲染
+function renderMarkdown(text) {
+    if (!text) return '';
+    let html = escapeHtml(text);
+    // 代码块
+    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre style="background:var(--bg-secondary);padding:12px;border-radius:6px;overflow-x:auto;font-size:0.85rem;margin:8px 0"><code>$2</code></pre>');
+    // 行内代码
+    html = html.replace(/`([^`]+)`/g, '<code style="background:var(--bg-secondary);padding:2px 6px;border-radius:3px;font-size:0.88em">$1</code>');
+    // 标题
+    html = html.replace(/^### (.+)$/gm, '<h4 style="margin:12px 0 6px;font-size:0.95rem">$1</h4>');
+    html = html.replace(/^## (.+)$/gm, '<h3 style="margin:14px 0 8px;font-size:1.05rem">$1</h3>');
+    html = html.replace(/^# (.+)$/gm, '<h2 style="margin:16px 0 10px;font-size:1.15rem">$1</h2>');
+    // 加粗/斜体
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    // 列表
+    html = html.replace(/^- (.+)$/gm, '<li style="margin-left:20px">$1</li>');
+    html = html.replace(/^\d+\. (.+)$/gm, '<li style="margin-left:20px;list-style:decimal">$1</li>');
+    // 换行
+    html = html.replace(/\n/g, '<br>');
+    return html;
+}
+
+let allEntries = [];
 
 async function loadKnowledge() {
     const params = new URLSearchParams();
@@ -113,16 +236,27 @@ async function loadKnowledge() {
     const source = $('#filter-source').value;
     const category = $('#filter-category').value;
     const status = $('#filter-status').value;
+    const project = $('#filter-project').value;
+    const search = $('#filter-search').value.trim();
     if (scope) params.set('scope', scope);
     if (source) params.set('source_type', source);
     if (category) params.set('category', category);
     if (status) params.set('status', status);
+    if (project) params.set('project', project);
+    if (search) params.set('search', search);
 
     try {
         const entries = await API.listKnowledge(params.toString());
+        allEntries = entries;
         const list = $('#knowledge-list');
+        $('#result-count').textContent = entries.length > 0 ? `共 ${entries.length} 条` : '';
         if (entries.length === 0) {
-            list.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无知识条目</div></div>';
+            list.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">📚</div>
+                    <div class="empty-state-text">${search ? '未找到匹配的知识' : '暂无知识条目'}</div>
+                    <button class="btn btn-primary" onclick="showCreateModal()">+ 新增知识</button>
+                </div>`;
         } else {
             list.innerHTML = entries.map(renderEntry).join('');
         }
@@ -158,7 +292,134 @@ async function reviewEntry(id, action) {
     }
 }
 
-loadKnowledge();
-loadPending();
+// 详情弹窗
+async function showDetail(id) {
+    const e = allEntries.find(x => x.id === id);
+    if (!e) return;
+    const src = sourceLabels[e.source_type] || sourceLabels.manual;
+    
+    $('#detail-title').textContent = e.title;
+    $('#detail-body').innerHTML = `
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px">
+            <span class="tag ${src[0]}">${src[1]}</span>
+            <span class="tag tag-accent">#${e.category}</span>
+            <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
+            ${e.project_name ? `<span class="tag tag-blue">${e.project_name}</span>` : ''}
+            ${e.scope ? `<span class="tag tag-blue">${e.scope}</span>` : ''}
+        </div>
+        <div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:12px">
+            ${e.source_openclaw_name ? `来源: ${e.source_openclaw_name} · ` : ''}
+            创建: ${e.created_at || '未知'}
+            ${e.approved_by ? ` · 审核: ${e.approved_by}` : ''}
+            ${e.reviewer_notes ? ` · 审核意见: ${e.reviewer_notes}` : ''}
+        </div>
+        <div style="line-height:1.8;font-size:0.92rem;color:var(--text-primary);padding:16px;background:var(--bg-secondary);border-radius:var(--radius-sm)">
+            ${renderMarkdown(e.content)}
+        </div>
+    `;
+    $('#detail-actions').innerHTML = `
+        <button class="btn btn-ghost" onclick="closeDetailModal()">关闭</button>
+        <button class="btn btn-primary" onclick="closeDetailModal();showEditModal(${e.id})">编辑</button>
+    `;
+    $('#detail-modal').classList.add('active');
+}
+
+function closeDetailModal() {
+    $('#detail-modal').classList.remove('active');
+}
+
+// 新增/编辑弹窗
+async function showCreateModal() {
+    $('#edit-modal-title').textContent = '新增知识';
+    $('#edit-id').value = '';
+    $('#edit-title').value = '';
+    $('#edit-content').value = '';
+    $('#edit-category').value = 'general';
+    $('#edit-scope').value = 'global';
+    $('#edit-project').value = '';
+    $('#edit-status').value = 'draft';
+    $('#edit-modal').classList.add('active');
+    $('#edit-title').focus();
+}
+
+async function showEditModal(id) {
+    const e = allEntries.find(x => x.id === id);
+    if (!e) return;
+    $('#edit-modal-title').textContent = '编辑知识';
+    $('#edit-id').value = e.id;
+    $('#edit-title').value = e.title;
+    $('#edit-content').value = e.content;
+    $('#edit-category').value = e.category || 'general';
+    $('#edit-scope').value = e.scope || 'global';
+    $('#edit-project').value = e.project_name || '';
+    $('#edit-status').value = e.status || 'draft';
+    $('#edit-modal').classList.add('active');
+}
+
+function closeEditModal() {
+    $('#edit-modal').classList.remove('active');
+}
+
+async function saveKnowledge() {
+    const id = $('#edit-id').value;
+    const data = {
+        title: $('#edit-title').value.trim(),
+        content: $('#edit-content').value.trim(),
+        category: $('#edit-category').value,
+        scope: $('#edit-scope').value,
+        project_name: $('#edit-project').value || null,
+        status: $('#edit-status').value,
+        source_type: 'manual',
+    };
+    if (!data.title || !data.content) {
+        showToast('标题和内容为必填项', 'error');
+        return;
+    }
+    try {
+        if (id) {
+            await API.updateKnowledge(id, data);
+            showToast('更新成功', 'success');
+        } else {
+            await API.createKnowledge(data);
+            showToast('创建成功', 'success');
+        }
+        closeEditModal();
+        loadKnowledge();
+    } catch (err) {
+        showToast('保存失败: ' + err.message, 'error');
+    }
+}
+
+async function deleteEntry(id) {
+    if (!confirm('确定删除该知识条目？')) return;
+    try {
+        await API.deleteKnowledge(id);
+        showToast('已删除', 'success');
+        loadKnowledge();
+        loadPending();
+    } catch (err) {
+        showToast('删除失败: ' + err.message, 'error');
+    }
+}
+
+// 初始化
+async function initPage() {
+    // 加载项目列表
+    try {
+        const projects = await API.listProjects();
+        const sel = $('#filter-project');
+        sel.innerHTML = '<option value="">全部项目</option>' +
+            projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+        // 编辑弹窗的项目下拉也填充
+        const editSel = $('#edit-project');
+        editSel.innerHTML = '<option value="">无</option>' +
+            projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+    } catch (err) { console.error(err); }
+
+    loadKnowledge();
+    loadPending();
+}
+
+initPage();
 </script>
 {% endblock %}

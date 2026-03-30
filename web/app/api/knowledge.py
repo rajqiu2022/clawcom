@@ -30,9 +30,20 @@ def list_knowledge():
     if source_type:
         query = query.filter(KnowledgeEntry.source_type == source_type)
 
+    # 全文搜索
+    search = request.args.get('search')
+    if search:
+        search_term = f'%{search}%'
+        query = query.filter(
+            db.or_(
+                KnowledgeEntry.title.like(search_term),
+                KnowledgeEntry.content.like(search_term),
+            )
+        )
+
     entries = query.order_by(
         KnowledgeEntry.created_at.desc()
-    ).limit(100).all()
+    ).limit(200).all()
     return jsonify([e.to_dict() for e in entries])
 
 
@@ -167,3 +178,15 @@ def distribute_knowledge(entry_id):
     db.session.add(dist)
     db.session.commit()
     return jsonify({'message': '知识已共享', 'distribution_id': dist.id}), 201
+
+
+@api_bp.route('/knowledge/<int:entry_id>', methods=['DELETE'])
+def delete_knowledge(entry_id):
+    """删除知识条目"""
+    entry = KnowledgeEntry.query.get_or_404(entry_id)
+
+    # 先删关联的分发记录
+    KnowledgeDistribution.query.filter_by(knowledge_id=entry_id).delete()
+    db.session.delete(entry)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
