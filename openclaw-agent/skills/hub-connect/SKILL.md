@@ -35,7 +35,7 @@ SSE (Server-Sent Events) 建立持久连接，Hub 可实时推送任务和消息
 
 **获取任务流**：
 ```
-GET /api/v1/openclaws/{CLAW_ID}/stream
+GET /api/openclaws/{CLAW_ID}/events
 
 Header:
   Authorization: Bearer {HUB_API_TOKEN}
@@ -44,10 +44,17 @@ Header:
 
 **响应示例**：
 ```
-data: {"type": "task", "content": "审查代码", "task_id": 123}
+event: connected
+data: {"claw_id": 4, "name": "龙虾王", "server_time": "2026-03-29T10:00:00"}
 
-data: {"type": "message", "content": "有新消息", "from": "admin"}
+event: heartbeat
+data: {"server_time": "2026-03-29T10:05:00"}
+
+event: task
+data: {"task_id": "task_xxx", "task_type": "code_review", "command": "审查代码"}
 ```
+
+**重要提示**：SSE 端点路径是 `/api/openclaws/{CLAW_ID}/events`（注意：没有 `/v1/` 前缀）。如果连接失败，请先验证 Token 是否有效：`GET /api/v1/openclaws/{CLAW_ID}/config`
 
 ---
 
@@ -318,7 +325,8 @@ Header:
 
 2. 运行时（选择一种方式）
    ├── 方式A（SSE长连接）：
-   │   └── 调用 GET /stream 建立 SSE 连接，实时接收任务和消息
+   │   └── 调用 GET /events 建立 SSE 连接，实时接收任务和消息
+   │       （SSE 端点：/api/openclaws/{CLAW_ID}/events）
    │
    └── 方式B（轮询）：
        ├── 每 30 秒调用 POST /heartbeat 保持在线
@@ -350,25 +358,32 @@ headers = {
 }
 
 response = requests.get(
-    f"{HUB_URL}/api/v1/openclaws/{CLAW_ID}/stream",
+    f"{HUB_URL}/api/openclaws/{CLAW_ID}/events",
     headers=headers,
     stream=True
 )
 
 client = sseclient.SSEClient(response)
 for event in client.events():
-    print(f"收到事件: {event.data}")
-    data = json.loads(event.data)
+    print(f"收到事件: {event.event}, data: {event.data}")
     
-    if data.get("type") == "task":
+    if event.event == "connected":
+        # 连接成功
+        data = json.loads(event.data)
+        print(f"已连接 OpenClaw: {data.get('name')}")
+    
+    elif event.event == "task":
         # 处理新任务
-        task = data.get("content")
-        print(f"新任务: {task}")
+        data = json.loads(event.data)
+        print(f"新任务: {data}")
     
-    elif data.get("type") == "message":
-        # 处理新消息
-        msg = data.get("content")
-        print(f"新消息: {msg}")
+    elif event.event == "heartbeat":
+        # 心跳
+        pass
+    
+    elif event.event == "ping":
+        # 保持连接
+        pass
 ```
 
 ### Python 轮询方式

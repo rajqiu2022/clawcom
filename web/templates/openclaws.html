@@ -118,6 +118,13 @@
                 <label class="form-label">上报时间</label>
                 <input class="form-input" name="report_schedule" value="15:00,21:00" placeholder="如：15:00,21:00">
             </div>
+            <div class="form-group">
+                <label class="form-label">连接方式</label>
+                <select class="form-input" name="connection_mode">
+                    <option value="sse" selected>🔌 SSE 长连接（推荐）</option>
+                    <option value="polling">🔄 轮询方式</option>
+                </select>
+            </div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
                 <button type="submit" class="btn btn-primary">创建</button>
@@ -353,6 +360,24 @@
 .role-tag.test_member { background: rgba(59,130,246,0.15); color: #3b82f6; }
 .role-tag.test_executor { background: rgba(34,197,94,0.15); color: #22c55e; }
 
+.conn-mode-badge {
+    font-size: 0.65rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 500;
+    margin-left: 6px;
+}
+
+.conn-mode-badge.conn-sse {
+    background: rgba(59,130,246,0.15);
+    color: #3b82f6;
+}
+
+.conn-mode-badge.conn-polling {
+    background: rgba(234,179,8,0.15);
+    color: #eab308;
+}
+
 .claw-meta-row {
     display: flex;
     flex-wrap: wrap;
@@ -570,6 +595,9 @@ function renderClaws() {
 function renderClawCard(c) {
     const roleInfo = ROLE_LABELS[c.role] || { text: '测试成员', cls: 'test_member' };
     const onlineCount = filteredClaws.filter(cl => cl.status === 'online').length;
+    const connMode = c.connection_mode || 'sse';
+    const connModeText = connMode === 'sse' ? '🔌 SSE' : '🔄 轮询';
+    const connModeClass = connMode === 'sse' ? 'conn-sse' : 'conn-polling';
 
     return `
     <div class="claw-item" data-id="${c.id}">
@@ -579,6 +607,7 @@ function renderClawCard(c) {
                 <div class="claw-name-row">
                     <span class="status-indicator ${c.status || 'offline'}"></span>
                     <span class="claw-name">${c.name}</span>
+                    <span class="conn-mode-badge ${connModeClass}" title="${connMode === 'sse' ? 'SSE 长连接' : '轮询方式'}">${connModeText}</span>
                 </div>
                 <div class="claw-role-text">${c.role_title || '未设置职位'}</div>
             </div>

@@ -60,6 +60,9 @@ class OpenClawInstance(db.Model):
     role = db.Column(db.Enum('admin', 'test_manager', 'test_member', 'test_executor'),
                      default='test_member',
                      comment='角色：admin=管理员，test_manager=测试经理，test_member=测试成员，test_executor=测试执行')
+    connection_mode = db.Column(db.Enum('sse', 'polling'),
+                                default='sse',
+                                comment='连接方式：sse=SSE长连接，polling=轮询')
     last_heartbeat = db.Column(db.DateTime, comment='最后心跳时间')
     soul_config = db.Column(db.Text, comment='SOUL.md 内容')
     workflow_config = db.Column(db.Text, comment='工作规范')
@@ -98,6 +101,7 @@ class OpenClawInstance(db.Model):
             'avatar': self.avatar,
             'status': self.status,
             'role': self.role,
+            'connection_mode': self.connection_mode or 'sse',
             'last_heartbeat': str(self.last_heartbeat) if self.last_heartbeat else None,
             'report_schedule': self.report_schedule,
             'created_at': str(self.created_at) if self.created_at else None,

@@ -82,6 +82,7 @@ def create_openclaw():
         soul_config=data.get('soul_config'),
         workflow_config=data.get('workflow_config'),
         report_schedule=data.get('report_schedule', '15:00,21:00'),
+        connection_mode=data.get('connection_mode', 'sse'),
         web_system_url=data.get('web_system_url'),
         api_token_hash=token_hash,
         api_token_plain=token_encrypted,
@@ -139,7 +140,7 @@ def update_openclaw(claw_id):
     updatable_fields = [
         'name', 'role', 'role_title', 'responsibilities', 'project_name',
         'module_name', 'avatar', 'soul_config', 'workflow_config',
-        'report_schedule', 'web_system_url'
+        'report_schedule', 'connection_mode', 'web_system_url'
     ]
     for field in updatable_fields:
         if field in data:

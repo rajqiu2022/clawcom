@@ -63,6 +63,13 @@
                         <input class="form-input" name="report_schedule" id="f-schedule">
                     </div>
                     <div class="form-group">
+                        <label class="form-label">连接方式</label>
+                        <select class="form-input" name="connection_mode" id="f-conn-mode">
+                            <option value="sse">🔌 SSE 长连接（推荐）</option>
+                            <option value="polling">🔄 轮询方式</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
                         <label class="form-label">状态</label>
                         <input class="form-input" id="f-status" disabled>
                     </div>
@@ -184,6 +191,7 @@ async function loadClaw() {
         $('#f-project').value = clawData.project_name || '';
         $('#f-module').value = clawData.module_name || '';
         $('#f-schedule').value = clawData.report_schedule || '15:00,21:00';
+        $('#f-conn-mode').value = clawData.connection_mode || 'sse';
         $('#f-status').value = clawData.status || 'offline';
         $('#f-resp').value = clawData.responsibilities || '';
         $('#f-soul').value = clawData.soul_config || '';
