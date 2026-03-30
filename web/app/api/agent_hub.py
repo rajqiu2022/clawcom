@@ -6,7 +6,7 @@ from functools import wraps
 from flask import Blueprint, jsonify, request
 from datetime import datetime
 from app import db
-from app.models import Agent, Message, Conversation, hash_token, generate_agent_token
+from app.models import Agent, Message, Conversation, OpenClawInstance, ClawMessage, hash_token, generate_agent_token
 
 agent_hub_bp = Blueprint('agent_hub', __name__)
 
@@ -434,34 +434,83 @@ def web_mark_read(msg_id):
 
 @agent_hub_bp.route('/web/broadcast', methods=['POST'])
 def web_broadcast():
-    """Web 管理端 - 广播消息"""
+    """Web 管理端 - 广播消息（支持 Agent 和 OpenClaw）
+
+    通信中心主要给 OpenClaw 用：
+    - target_claw_ids: 指定发送给哪些 OpenClaw
+    - target_agent_ids: 指定发送给哪些 Agent
+    - 如果都为空，默认发送给所有在线 OpenClaw
+    """
     data = request.get_json()
     content = data.get('content')
 
     if not content:
         return jsonify({'error': '内容不能为空'}), 400
 
-    target_ids = data.get('target_agent_ids', [])
-    if target_ids:
-        agents = Agent.query.filter(Agent.id.in_(target_ids)).all()
-    else:
-        agents = Agent.query.filter_by(status='online').all()
+    target_agent_ids = data.get('target_agent_ids', [])
+    target_claw_ids = data.get('target_claw_ids', [])
+    msg_type = data.get('msg_type', 'broadcast')
 
-    sent = 0
-    for receiver in agents:
-        msg = Message(
-            sender_id=0,  # 0 = Web 管理员
-            receiver_id=receiver.id,
-            content=content,
-            msg_type='broadcast',
-            extra_data={'from': 'web_admin'},
-        )
-        db.session.add(msg)
-        sent += 1
+    sent_agents = 0
+    sent_claws = 0
+
+    # 发送给 OpenClaw（通信中心主要使用场景）
+    if target_claw_ids:
+        # 指定发送给某些 OpenClaw
+        claws = OpenClawInstance.query.filter(OpenClawInstance.id.in_(target_claw_ids)).all()
+        for claw in claws:
+            claw_msg = ClawMessage(
+                claw_id=claw.id,
+                sender_name='Web Admin',
+                content=content,
+                msg_type=msg_type,
+            )
+            db.session.add(claw_msg)
+            sent_claws += 1
+    elif not target_agent_ids:
+        # 全员通知（默认发送给所有在线 OpenClaw）
+        online_claws = OpenClawInstance.query.filter_by(status='online').all()
+        for claw in online_claws:
+            claw_msg = ClawMessage(
+                claw_id=claw.id,
+                sender_name='Web Admin',
+                content=content,
+                msg_type=msg_type,
+            )
+            db.session.add(claw_msg)
+            sent_claws += 1
+
+    # 发送给 Agent（如果有指定）
+    if target_agent_ids:
+        agents = Agent.query.filter(Agent.id.in_(target_agent_ids)).all()
+        for receiver in agents:
+            msg = Message(
+                sender_id=0,  # 0 = Web 管理员
+                receiver_id=receiver.id,
+                content=content,
+                msg_type=msg_type,
+                extra_data={'from': 'web_admin'},
+            )
+            db.session.add(msg)
+            sent_agents += 1
 
     db.session.commit()
 
-    return jsonify({
-        'message': f'广播成功，已发送给 {sent} 个 Agent',
-        'sent_count': sent,
-    })
+    parts = []
+    if sent_claws > 0:
+        parts.append(f'{sent_claws} 个 OpenClaw')
+    if sent_agents > 0:
+        parts.append(f'{sent_agents} 个 Agent')
+
+    if parts:
+        return jsonify({
+            'message': f'广播成功，已发送给 {", ".join(parts)}',
+            'sent_agents': sent_agents,
+            'sent_claws': sent_claws,
+        })
+    else:
+        return jsonify({
+            'message': '没有在线的接收者',
+            'sent_agents': 0,
+            'sent_claws': 0,
+        })

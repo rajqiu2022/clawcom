@@ -16,7 +16,7 @@ API设计：
 from datetime import datetime
 from flask import request, jsonify, Response, stream_with_context, Blueprint
 from app import db
-from app.models import OpenClawInstance
+from app.models import OpenClawInstance, ClawMessage
 from functools import wraps
 import json
 import time
@@ -108,11 +108,17 @@ def claw_sse_events(claw_id, claw=None):
 
         while True:
             try:
-                # 每5秒发送一次心跳，并检查新任务
+                # 每5秒发送一次心跳，并检查新任务和新消息
                 tasks = AgentTask.query.filter(
                     AgentTask.claw_id == claw_id,
                     AgentTask.status == 'pending'
                 ).order_by(AgentTask.created_at.asc()).limit(10).all()
+
+                # 检查待发送的消息
+                messages = ClawMessage.query.filter(
+                    ClawMessage.claw_id == claw_id,
+                    ClawMessage.status == 'pending'
+                ).order_by(ClawMessage.created_at.asc()).limit(10).all()
 
                 now = time.time()
                 if now - last_task_check > 5:
@@ -130,6 +136,14 @@ def claw_sse_events(claw_id, claw=None):
                         db.session.commit()
 
                         yield f"event: task\ndata: {json.dumps(task.to_dict())}\n\n"
+
+                    # 发送待处理消息
+                    for msg in messages:
+                        msg.status = 'delivered'
+                        msg.delivered_at = datetime.utcnow()
+                        db.session.commit()
+
+                        yield f"event: message\ndata: {json.dumps(msg.to_dict())}\n\n"
 
                     last_task_check = now
 

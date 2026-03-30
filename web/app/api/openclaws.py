@@ -5,7 +5,7 @@ from functools import wraps
 from flask import request, jsonify
 from app import db
 from app.models import (OpenClawInstance, DailyReport, Project, Rule,
-                        OpenClawRule, OpenClawSkill, Skill,
+                        OpenClawRule, OpenClawSkill, Skill, ClawMessage,
                         generate_api_token, hash_token, _simple_encrypt)
 from app.api import api_bp
 
@@ -418,3 +418,45 @@ def update_report_schedule(claw_id):
         'name': claw.name,
         'report_schedule': claw.report_schedule,
     })
+
+
+# ============== OpenClaw 消息接口 ==============
+
+@api_bp.route('/openclaws/<int:claw_id>/messages', methods=['GET'])
+@require_claw_token
+def get_claw_messages(claw_id, claw=None):
+    """
+    OpenClaw 获取发给自己的消息（需 Token 认证）
+    用于轮询模式的客户端
+    """
+    # 获取未送达的消息
+    pending = ClawMessage.query.filter_by(
+        claw_id=claw_id,
+        status='pending'
+    ).order_by(ClawMessage.created_at.asc()).all()
+
+    # 将待送达消息标记为已送达
+    for msg in pending:
+        msg.status = 'delivered'
+        msg.delivered_at = datetime.utcnow()
+    db.session.commit()
+
+    return jsonify({
+        'messages': [m.to_dict() for m in pending],
+        'count': len(pending),
+    })
+
+
+@api_bp.route('/openclaws/<int:claw_id>/messages/<int:msg_id>/read', methods=['PUT'])
+@require_claw_token
+def mark_claw_message_read(claw_id, msg_id, claw=None):
+    """标记消息为已读"""
+    msg = ClawMessage.query.get_or_404(msg_id)
+
+    if msg.claw_id != claw_id:
+        return jsonify({'error': '无权操作'}), 403
+
+    msg.status = 'read'
+    msg.read_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({'message': '已标记为已读'})
