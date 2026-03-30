@@ -5,6 +5,9 @@
 
 {% block top_actions %}
 <div style="display:flex;gap:10px;align-items:center">
+    <select id="filter-project" class="form-select" style="width:140px" onchange="onProjectFilterChange()">
+        <option value="">全部项目</option>
+    </select>
     <input type="date" id="filter-date" class="form-input" style="width:160px">
     <select id="filter-claw" class="form-select" style="width:180px">
         <option value="">全部 OpenClaw</option>
@@ -103,7 +106,9 @@ let allClaws = [];
 
 async function loadStats() {
     try {
-        const stats = await API.get('/reports/stats');
+        const projectFilter = document.querySelector('#filter-project').value;
+        const qs = projectFilter ? `?project=${encodeURIComponent(projectFilter)}` : '';
+        const stats = await API.get(`/reports/stats${qs}`);
         
         // 统计卡片
         document.querySelector('#stat-reported').textContent = 
@@ -163,7 +168,10 @@ async function loadStats() {
 async function loadTimeline() {
     try {
         const dateVal = document.querySelector('#filter-date').value || new Date().toISOString().slice(0,10);
-        const data = await API.get(`/reports/timeline?date=${dateVal}`);
+        const projectFilter = document.querySelector('#filter-project').value;
+        let url = `/reports/timeline?date=${dateVal}`;
+        if (projectFilter) url += `&project=${encodeURIComponent(projectFilter)}`;
+        const data = await API.get(url);
         const el = document.querySelector('#report-timeline');
 
         if (data.timeline.length === 0) {
@@ -191,8 +199,10 @@ async function loadReports() {
     try {
         const dateVal = document.querySelector('#filter-date').value;
         const clawId = document.querySelector('#filter-claw').value;
+        const projectFilter = document.querySelector('#filter-project').value;
 
         let params = [];
+        if (projectFilter) params.push(`project=${encodeURIComponent(projectFilter)}`);
         if (dateVal) {
             params.push(`start_date=${dateVal}`);
             params.push(`end_date=${dateVal}`);
@@ -314,19 +324,46 @@ async function initPage() {
     const today = new Date().toISOString().slice(0, 10);
     document.querySelector('#filter-date').value = today;
 
+    // 加载项目筛选列表
+    try {
+        const projects = await API.listProjects();
+        const projectSel = document.querySelector('#filter-project');
+        projectSel.innerHTML = '<option value="">全部项目</option>' +
+            projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+    } catch (err) { console.error(err); }
+
     // 加载 OpenClaw 筛选列表
     try {
         const claws = await API.listClaws();
         const sel = document.querySelector('#filter-claw');
-        claws.forEach(c => {
-            const opt = document.createElement('option');
-            opt.value = c.id;
-            opt.textContent = c.name;
-            sel.appendChild(opt);
-        });
+        sel.innerHTML = '<option value="">全部 OpenClaw</option>' +
+            claws.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
     } catch (err) { console.error(err); }
 
     // 加载数据
+    loadStats();
+    loadTimeline();
+    loadReports();
+}
+
+function onProjectFilterChange() {
+    // 清空 OpenClaw 筛选，重新加载
+    const projectFilter = document.querySelector('#filter-project').value;
+    const clawSel = document.querySelector('#filter-claw');
+    clawSel.innerHTML = '<option value="">全部 OpenClaw</option>';
+    
+    // 根据项目过滤 OpenClaw 列表
+    API.listClaws().then(claws => {
+        const filtered = projectFilter ? claws.filter(c => c.project_name === projectFilter) : claws;
+        filtered.forEach(c => {
+            const opt = document.createElement('option');
+            opt.value = c.id;
+            opt.textContent = c.name;
+            clawSel.appendChild(opt);
+        });
+    }).catch(err => console.error(err));
+
+    // 刷新数据
     loadStats();
     loadTimeline();
     loadReports();
