@@ -208,6 +208,89 @@ def claw_task_report(claw_id, claw=None):
     return jsonify({'status': 'ok', 'task': task.to_dict()})
 
 
+# ==================== OpenClaw 消息 API ====================
+
+@agent_bp.route('/<int:claw_id>/messages', methods=['POST'])
+@require_claw_token
+def claw_send_message(claw_id, claw=None):
+    """
+    OpenClaw 发送消息给 Web 管理端
+
+    请求体：
+    {
+        "content": "消息内容",
+        "msg_type": "text|task_delegate|knowledge_share|request_help",
+        "reply_to": 123  // 可选，回复某条消息的ID
+    }
+    """
+    data = request.get_json()
+    if not data or not data.get('content'):
+        return jsonify({'error': 'content 为必填项'}), 400
+
+    msg = ClawMessage(
+        claw_id=claw_id,
+        sender_name=claw.name,
+        content=data['content'],
+        msg_type=data.get('msg_type', 'text'),
+        direction='from_claw',
+        reply_to=data.get('reply_to'),
+        status='delivered',
+        delivered_at=datetime.utcnow(),
+    )
+    db.session.add(msg)
+    db.session.commit()
+
+    return jsonify({'status': 'ok', 'message': msg.to_dict()}), 201
+
+
+@agent_bp.route('/<int:claw_id>/messages', methods=['GET'])
+@require_claw_token
+def claw_get_messages(claw_id, claw=None):
+    """
+    OpenClaw 获取消息历史（双向）
+
+    参数：
+    - limit: 返回条数（默认50）
+    - unread: true 只返回未读消息
+    - direction: to_claw/from_claw 过滤方向
+    """
+    limit = request.args.get('limit', 50, type=int)
+    unread = request.args.get('unread', 'false').lower() == 'true'
+    direction = request.args.get('direction')
+
+    query = ClawMessage.query.filter_by(claw_id=claw_id)
+
+    if unread:
+        query = query.filter(
+            ClawMessage.direction == 'to_claw',
+            ClawMessage.status.in_(['pending', 'delivered'])
+        )
+    if direction:
+        query = query.filter_by(direction=direction)
+
+    messages = query.order_by(ClawMessage.created_at.desc()).limit(limit).all()
+
+    return jsonify({
+        'messages': [m.to_dict() for m in messages],
+        'count': len(messages),
+    })
+
+
+@agent_bp.route('/<int:claw_id>/messages/<int:msg_id>/read', methods=['PUT'])
+@require_claw_token
+def claw_mark_read(claw_id, msg_id, claw=None):
+    """OpenClaw 标记消息已读"""
+    msg = ClawMessage.query.filter_by(id=msg_id, claw_id=claw_id).first()
+    if not msg:
+        return jsonify({'error': '消息不存在'}), 404
+
+    msg.status = 'read'
+    msg.read_at = datetime.utcnow()
+    db.session.commit()
+
+    return jsonify({'status': 'ok'})
+
+
 @agent_bp.route('/<int:claw_id>/dispatch', methods=['POST'])
 def dispatch_task_to_claw(claw_id):
     """
