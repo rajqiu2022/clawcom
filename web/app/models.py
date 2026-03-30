@@ -685,19 +685,22 @@ class TestCase(db.Model):
 # ============== OpenClaw 消息模型 ==============
 
 class ClawMessage(db.Model):
-    """OpenClaw 消息表（Web -> OpenClaw）"""
+    """OpenClaw 消息表（支持双向：Web ↔ OpenClaw）"""
     __tablename__ = 'claw_messages'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
-                       nullable=False, comment='接收消息的 OpenClaw ID')
+                       nullable=False, comment='关联的 OpenClaw ID')
     sender_name = db.Column(db.String(50), default='Web Admin',
                           comment='发送者名称')
     content = db.Column(db.Text, nullable=False, comment='消息内容')
     msg_type = db.Column(db.String(30), default='text',
                         comment='消息类型：text/task_delegate/knowledge_share/request_help')
+    direction = db.Column(db.String(10), default='to_claw',
+                         comment='方向：to_claw=Web发给OpenClaw, from_claw=OpenClaw发给Web')
+    reply_to = db.Column(db.Integer, comment='回复的消息ID')
     status = db.Column(db.String(20), default='pending',
-                      comment='状态：pending=待送达，delivered=已送达，read=已读')
+                      comment='状态：pending/delivered/read')
     delivered_at = db.Column(db.DateTime, comment='送达时间')
     read_at = db.Column(db.DateTime, comment='读取时间')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -712,6 +715,8 @@ class ClawMessage(db.Model):
             'sender_name': self.sender_name,
             'content': self.content,
             'msg_type': self.msg_type,
+            'direction': self.direction or 'to_claw',
+            'reply_to': self.reply_to,
             'status': self.status,
             'delivered_at': str(self.delivered_at) if self.delivered_at else None,
             'read_at': str(self.read_at) if self.read_at else None,
