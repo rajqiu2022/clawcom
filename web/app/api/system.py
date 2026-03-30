@@ -25,11 +25,18 @@ def update_system_config():
 
     conn = db.engine.connect()
     for key, value in data.items():
-        conn.execute(text(
-            "INSERT INTO system_config (config_key, config_value, updated_at) "
-            "VALUES (:k, :v, CURRENT_TIMESTAMP) "
-            "ON CONFLICT(config_key) DO UPDATE SET config_value=:v, updated_at=CURRENT_TIMESTAMP"
-        ), {'k': key, 'v': value})
+        # 兼容 MySQL 和 SQLite
+        existing = conn.execute(text(
+            "SELECT 1 FROM system_config WHERE config_key=:k"
+        ), {'k': key}).fetchone()
+        if existing:
+            conn.execute(text(
+                "UPDATE system_config SET config_value=:v, updated_at=CURRENT_TIMESTAMP WHERE config_key=:k"
+            ), {'k': key, 'v': value})
+        else:
+            conn.execute(text(
+                "INSERT INTO system_config (config_key, config_value, updated_at) VALUES (:k, :v, CURRENT_TIMESTAMP)"
+            ), {'k': key, 'v': value})
     conn.commit()
     conn.close()
     return jsonify({'message': '配置已更新'})
@@ -94,24 +101,106 @@ def generate_spec():
 请直接输出规范内容："""
 
     # 调用 LLM
-    import os
     try:
-        if provider == 'doubao':
-            spec_result = _call_doubao(prompt, model, api_base, api_key)
-        elif provider == 'ernie':
-            spec_result = _call_ernie(prompt, model, api_key)
-        elif provider == 'tongyi':
-            spec_result = _call_tongyi(prompt, model, api_key)
-        elif provider == 'zhipu':
-            spec_result = _call_zhipu(prompt, model, api_key)
-        elif provider == 'deepseek':
-            spec_result = _call_deepseek(prompt, model, api_key)
-        else:
-            return jsonify({'error': f'不支持的 LLM 提供商: {provider}'}), 400
-
+        spec_result = _call_llm(prompt, provider, model, api_base, api_key)
         return jsonify({'spec': spec_result})
     except Exception as e:
         return jsonify({'error': f'LLM 调用失败: {str(e)}'}), 500
+
+
+@api_bp.route('/system/llm/generate', methods=['POST'])
+def llm_generate():
+    """通用 AI 生成接口，支持生成 Skill / Rule 等内容"""
+    data = request.get_json()
+    gen_type = data.get('type', 'skill')  # skill / rule
+    description = (data.get('description') or '').strip()
+
+    if not description:
+        return jsonify({'error': '描述不能为空'}), 400
+
+    # 读取 LLM 配置
+    rows = dict(db.session.execute(
+        text("SELECT config_key, config_value FROM system_config")
+    ).fetchall())
+
+    provider = rows.get('llm_provider', 'doubao')
+    model = rows.get('llm_model', 'doubao-pro-32k')
+    api_base = rows.get('llm_api_base', 'https://ark.cn-beijing.volces.com/api/v3')
+    api_key = rows.get('llm_api_key', '')
+
+    if not api_key:
+        return jsonify({'error': 'LLM API Key 未配置，请先在系统设置中配置'}), 400
+
+    if gen_type == 'skill':
+        prompt = f"""你是一个 OpenClaw AI Agent 技能设计专家。
+
+根据以下描述生成一个 Skill（技能），要求输出严格的 JSON 格式（不要 markdown 包裹）：
+
+描述：{description}
+
+JSON 格式要求：
+{{
+  "name": "skill-identifier (英文短横线格式)",
+  "display_name": "中文显示名称",
+  "description": "功能描述（1-2句话）",
+  "trigger_phrase": "触发短语",
+  "template_content": "Skill 的详细执行模板（Markdown 格式，包含步骤、输入输出要求等）"
+}}
+
+直接输出 JSON："""
+    elif gen_type == 'rule':
+        prompt = f"""你是一个 OpenClaw AI Agent 工作规范设计专家。
+
+根据以下描述生成一个工作规范 Rule，要求输出严格的 JSON 格式（不要 markdown 包裹）：
+
+描述：{description}
+
+JSON 格式要求：
+{{
+  "name": "rule-identifier (英文短横线格式)",
+  "display_name": "中文显示名称",
+  "description": "功能描述（1-2句话）",
+  "content_template": "规范的详细内容（Markdown 格式，包含角色定义、工作流程、检查要点等）"
+}}
+
+直接输出 JSON："""
+    else:
+        return jsonify({'error': f'不支持的生成类型: {gen_type}'}), 400
+
+    try:
+        result = _call_llm(prompt, provider, model, api_base, api_key)
+        # 尝试解析 JSON
+        import json
+        # 去掉可能的 markdown 代码块包裹
+        cleaned = result.strip()
+        if cleaned.startswith('```'):
+            cleaned = cleaned.split('\n', 1)[1] if '\n' in cleaned else cleaned[3:]
+        if cleaned.endswith('```'):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+
+        parsed = json.loads(cleaned)
+        return jsonify({'result': parsed, 'raw': result})
+    except json.JSONDecodeError:
+        return jsonify({'result': None, 'raw': result, 'error': 'AI 输出格式不标准，请手动调整'})
+    except Exception as e:
+        return jsonify({'error': f'LLM 调用失败: {str(e)}'}), 500
+
+
+def _call_llm(prompt, provider, model, api_base, api_key):
+    """统一 LLM 调用"""
+    if provider == 'doubao':
+        return _call_doubao(prompt, model, api_base, api_key)
+    elif provider == 'ernie':
+        return _call_ernie(prompt, model, api_key)
+    elif provider == 'tongyi':
+        return _call_tongyi(prompt, model, api_key)
+    elif provider == 'zhipu':
+        return _call_zhipu(prompt, model, api_key)
+    elif provider == 'deepseek':
+        return _call_deepseek(prompt, model, api_key)
+    else:
+        raise ValueError(f'不支持的 LLM 提供商: {provider}')
 
 
 def _call_doubao(prompt, model, api_base, api_key):

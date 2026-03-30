@@ -176,6 +176,8 @@ class Skill(db.Model):
                                comment='进化历史 [{action, timestamp, detail}]')
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_by = db.Column(db.String(100), default='system',
+                           comment='创建者/提交人')
 
     def to_dict(self):
         data = {
@@ -192,6 +194,8 @@ class Skill(db.Model):
             'used_by_count': self.used_by_count,
             'is_standard': self.is_standard,
             'created_at': str(self.created_at) if self.created_at else None,
+            'created_by': self.created_by or 'system',
+            'install_count': len([i for i in (self.installations or []) if i.enabled]),
         }
         # 进化指标
         if self.category == 'evolved':
@@ -540,8 +544,11 @@ class Rule(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow,
                           onupdate=datetime.utcnow)
+    created_by = db.Column(db.String(100), default='system',
+                           comment='创建者/提交人')
 
     def to_dict(self):
+        install_count = self.openclaws.filter_by(enabled=True).count()
         return {
             'id': self.id,
             'name': self.name,
@@ -556,6 +563,8 @@ class Rule(db.Model):
             'openclaw_ids': [r.openclaw_id for r in self.openclaws.filter_by(enabled=True)],
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
+            'created_by': self.created_by or 'system',
+            'install_count': install_count,
         }
 
 

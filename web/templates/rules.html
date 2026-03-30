@@ -92,6 +92,10 @@
                 <textarea class="form-textarea" name="description" id="ai-description" rows="4" placeholder="描述你需要的规则，如：测试用例评审规范，定义评审流程、评审要点、输出要求等"></textarea>
             </div>
             <div class="form-group">
+                <label class="form-label">提交人</label>
+                <input class="form-input" id="ai-rule-author" placeholder="你的名字">
+            </div>
+            <div class="form-group">
                 <label class="form-label">适用范围</label>
                 <div style="display:flex;gap:16px;margin-top:6px">
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
@@ -227,7 +231,11 @@ function renderRules() {
                 ${scopeTag(r)}
             </div>
             <div class="skill-desc">${r.description || ''}</div>
-            <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+            <div style="margin-top:8px;font-size:0.78rem;color:var(--text-muted);display:flex;justify-content:space-between;align-items:center">
+                <span>提交: ${r.created_by || 'system'} · ${r.created_at ? timeAgo(r.created_at) : '未知'}</span>
+                <span>${r.install_count || 0} 个 OpenClaw 使用</span>
+            </div>
+            <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
                 <span style="font-size:0.78rem;color:var(--text-muted)">${r.name}</span>
                 <div style="display:flex;gap:8px">
                     <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="previewRule(${r.id})">预览</button>
@@ -354,10 +362,11 @@ $('#ai-modal').addEventListener('click', e => {
 
 $('#ai-generate-form').addEventListener('submit', async e => {
     e.preventDefault();
-    const form = new FormData(e.target);
-    const data = Object.fromEntries(form);
+    const desc = $('#ai-description').value.trim();
+    const scope = document.querySelector('#ai-generate-form input[name="scope"]:checked').value;
+    const author = $('#ai-rule-author').value.trim() || 'AI';
 
-    if (!data.description.trim()) {
+    if (!desc) {
         showToast('请输入需求描述', 'error');
         return;
     }
@@ -367,18 +376,33 @@ $('#ai-generate-form').addEventListener('submit', async e => {
     btn.textContent = '生成中...';
 
     try {
-        const result = await API.request('POST', '/ai/generate-rule', data);
-        showToast('Rule 生成成功！', 'success');
-        closeAIGenerateModal();
-        // 预览生成的 Rule
-        $('#preview-content').textContent = result.content || '(无内容)';
-        $('#preview-modal').classList.add('active');
-        loadRules();
+        const resp = await API.request('POST', '/system/llm/generate', { type: 'rule', description: desc });
+        if (resp.result) {
+            // 直接创建 Rule
+            const ruleData = {
+                name: resp.result.name || ('ai-rule-' + Date.now()),
+                display_name: resp.result.display_name || desc.substring(0, 30),
+                description: resp.result.description || desc,
+                content_template: resp.result.content_template || '',
+                category: 'ai_generated',
+                scope: scope,
+                created_by: author,
+            };
+            await API.request('POST', '/rules', ruleData);
+            showToast('Rule 生成并提交成功！', 'success');
+            closeAIGenerateModal();
+            // 预览生成的内容
+            $('#preview-content').textContent = ruleData.content_template || '(无内容)';
+            $('#preview-modal').classList.add('active');
+            loadRules();
+        } else {
+            showToast(resp.error || 'AI 输出格式不标准', 'error');
+        }
     } catch (err) {
         showToast('生成失败: ' + err.message, 'error');
     } finally {
         btn.disabled = false;
-        btn.textContent = '🔥 AI 生成';
+        btn.textContent = '🤖 生成';
     }
 });
 

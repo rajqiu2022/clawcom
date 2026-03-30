@@ -94,6 +94,23 @@
         </form>
     </div>
 </div>
+<!-- 添加模块弹窗 -->
+<div class="modal-overlay" id="module-modal">
+    <div class="modal" style="max-width:400px">
+        <h2 class="modal-title" id="module-modal-title">添加模块</h2>
+        <form id="module-form">
+            <input type="hidden" id="module-project-id">
+            <div class="form-group">
+                <label class="form-label">模块名称 *</label>
+                <input class="form-input" id="module-name" placeholder="如：登录模块" required>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeModuleModal()">取消</button>
+                <button type="submit" class="btn btn-primary">添加</button>
+            </div>
+        </form>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -179,17 +196,36 @@ $('#project-form').addEventListener('submit', async e => {
 });
 
 async function addModule(projectId, projectName) {
-    const name = prompt(`为 "${projectName}" 添加模块：`);
+    $('#module-modal-title').textContent = `为 "${projectName}" 添加模块`;
+    $('#module-project-id').value = projectId;
+    $('#module-name').value = '';
+    $('#module-modal').classList.add('active');
+    $('#module-name').focus();
+}
+
+function closeModuleModal() {
+    $('#module-modal').classList.remove('active');
+}
+
+$('#module-modal').addEventListener('click', e => {
+    if (e.target === $('#module-modal')) closeModuleModal();
+});
+
+$('#module-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const projectId = $('#module-project-id').value;
+    const name = $('#module-name').value.trim();
     if (!name) return;
 
     try {
         await API.createModule(projectId, { name });
         showToast('模块添加成功', 'success');
+        closeModuleModal();
         loadProjects();
     } catch (err) {
         showToast('添加失败: ' + err.message, 'error');
     }
-}
+});
 
 // --- 大模型配置 ---
 const PROVIDER_BASE_URLS = {

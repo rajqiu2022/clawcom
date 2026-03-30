@@ -48,6 +48,7 @@ def create_skill():
         scope=data.get('scope', 'global'),
         applicable_projects=data.get('applicable_projects'),
         applicable_modules=data.get('applicable_modules'),
+        created_by=data.get('created_by', 'system'),
     )
 
     # 进化技能额外字段
