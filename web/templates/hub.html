@@ -1142,23 +1142,30 @@ function clearAllSelection() {
 }
 
 async function sendDirectMessage() {
-    if (selectedClaws.size === 0 || !messageInput.value.trim()) return;
+    if (selectedClaws.size === 0 || !messageInput.value.trim()) {
+        console.log('[DEBUG] 发送失败: selectedClaws.size=', selectedClaws.size, 'input=', messageInput.value.trim());
+        return;
+    }
 
     const content = messageInput.value.trim();
     const msgType = document.getElementById('msgType').value;
+    const payload = {
+        content,
+        msg_type: msgType,
+        target_claw_ids: Array.from(selectedClaws)
+    };
+    console.log('[DEBUG] 发送单独消息:', payload);
 
     try {
         const res = await fetch(`${HUB_API}/broadcast`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                content,
-                msg_type: msgType,
-                target_claw_ids: Array.from(selectedClaws)
-            })
+            body: JSON.stringify(payload)
         });
 
+        console.log('[DEBUG] 响应状态:', res.status);
         const result = await res.json();
+        console.log('[DEBUG] 响应内容:', result);
         showToast(result.message || `任务已发送`, 'success');
 
         messageInput.value = '';
