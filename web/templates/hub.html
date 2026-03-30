@@ -33,25 +33,19 @@
         <!-- 统计卡片 -->
         <div class="stat-cards">
             <div class="stat-card">
-                <div class="stat-icon">🤖</div>
-                <div class="stat-info">
-                    <div class="stat-value" id="stat-total">-</div>
-                    <div class="stat-label">总 OpenClaw</div>
-                </div>
+                <span class="stat-icon">🤖</span>
+                <span class="stat-value" id="stat-total">-</span>
+                <span class="stat-label">总数</span>
             </div>
             <div class="stat-card online">
-                <div class="stat-icon">🟢</div>
-                <div class="stat-info">
-                    <div class="stat-value" id="stat-online">-</div>
-                    <div class="stat-label">在线</div>
-                </div>
+                <span class="stat-icon">🟢</span>
+                <span class="stat-value" id="stat-online">-</span>
+                <span class="stat-label">在线</span>
             </div>
             <div class="stat-card">
-                <div class="stat-icon">📨</div>
-                <div class="stat-info">
-                    <div class="stat-value" id="stat-pending">-</div>
-                    <div class="stat-label">待回复</div>
-                </div>
+                <span class="stat-icon">📨</span>
+                <span class="stat-value" id="stat-pending">-</span>
+                <span class="stat-label">待回复</span>
             </div>
         </div>
 
@@ -322,35 +316,34 @@
 /* Stat Cards */
 .stat-cards {
     display: flex;
-    flex-direction: column;
-    gap: 10px;
+    flex-direction: row;
+    gap: 8px;
+    margin-bottom: 2px;
 }
 
 .stat-card {
+    flex: 1;
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 14px;
+    justify-content: center;
+    gap: 6px;
+    padding: 8px 6px;
     background: var(--bg-secondary);
     border: 1px solid var(--border);
-    border-radius: 12px;
+    border-radius: 8px;
 }
 
 .stat-card.online {
-    background: linear-gradient(135deg, rgba(34, 197, 94, 0.15), var(--bg-secondary));
-    border-color: rgba(34, 197, 94, 0.3);
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), var(--bg-secondary));
+    border-color: rgba(34, 197, 94, 0.25);
 }
 
 .stat-icon {
-    font-size: 1.5rem;
-}
-
-.stat-info {
-    flex: 1;
+    font-size: 0.85rem;
 }
 
 .stat-value {
-    font-size: 1.4rem;
+    font-size: 1rem;
     font-weight: 700;
     color: var(--text-primary);
 }
@@ -360,7 +353,7 @@
 }
 
 .stat-label {
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     color: var(--text-muted);
 }
 
