@@ -24,7 +24,7 @@ def openclaw_detail(claw_id):
 @views_bp.route('/skills')
 def skills_market():
     """Skills 市场"""
-    return render_template('skills.html')
+    return render_template('skills_new.html')
 
 
 @views_bp.route('/knowledge')
