@@ -1,0 +1,668 @@
+{% extends "base.html" %}
+{% block title %}Skills 市场 - OpenClaw 管理系统{% endblock %}
+{% block nav_skills %}active{% endblock %}
+{% block page_title %}Skills 市场{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <button class="btn btn-primary" onclick="openCreateModal()">+ 新增 Skill</button>
+    <button class="btn btn-ghost" onclick="openImportModal()" title="从 OpenSpace 批量导入">
+        &#x21BB; 导入进化技能
+    </button>
+</div>
+{% endblock %}
+
+{% block content %}
+<!-- Market Header -->
+<div class="market-header">
+    <div class="market-search">
+        <span class="market-search-icon">&#x1F50D;</span>
+        <input type="text" id="skillSearch" placeholder="搜索 Skills... (名称、描述、触发词)" oninput="filterSkills()">
+    </div>
+    <div class="market-filters">
+        <div class="filter-chip active" data-filter="all" onclick="filterSkills('all')">
+            <span class="filter-chip-icon">&#x1F4E6;</span>
+            <span>全部</span>
+            <span id="countAll" class="filter-count">0</span>
+        </div>
+        <div class="filter-chip" data-filter="standard" onclick="filterSkills('standard')">
+            <span class="filter-chip-icon">&#x1F3AF;</span>
+            <span>标准</span>
+            <span id="countStandard" class="filter-count">0</span>
+        </div>
+        <div class="filter-chip" data-filter="custom" onclick="filterSkills('custom')">
+            <span class="filter-chip-icon">&#x1F916;</span>
+            <span>自定义</span>
+            <span id="countCustom" class="filter-count">0</span>
+        </div>
+        <div class="filter-chip" data-filter="evolved" onclick="filterSkills('evolved')">
+            <span class="filter-chip-icon">&#x2728;</span>
+            <span>自动进化</span>
+            <span id="countEvolved" class="filter-count">0</span>
+        </div>
+    </div>
+</div>
+
+<!-- Skills Grid -->
+<div class="market-grid" id="skills-grid">
+    <div class="loading"><span class="spinner"></span></div>
+</div>
+
+<!-- Skill Detail Modal -->
+<div class="modal-overlay skill-detail-modal" id="detail-modal">
+    <div class="modal">
+        <div class="skill-detail-header">
+            <div class="skill-detail-icon" id="detailIcon"></div>
+            <div class="skill-detail-title-area">
+                <div class="skill-detail-name" id="detailName"></div>
+                <div class="skill-detail-meta" id="detailMeta"></div>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="closeDetailModal()" style="margin-left:auto">&#x2715;</button>
+        </div>
+        
+        <div class="skill-detail-section">
+            <div class="skill-detail-section-title">&#x1F4DC; 描述</div>
+            <div class="skill-detail-desc" id="detailDesc"></div>
+        </div>
+        
+        <div class="skill-detail-section" id="detailTriggerSection">
+            <div class="skill-detail-section-title">&#x1F50E; 触发短语</div>
+            <div class="skill-detail-desc" id="detailTrigger" style="font-family:monospace"></div>
+        </div>
+        
+        <div class="skill-detail-section" id="detailTemplateSection">
+            <div class="skill-detail-section-title">&#x1F4C4; 模板内容</div>
+            <div class="skill-template-preview" id="detailTemplate"></div>
+        </div>
+        
+        <div class="skill-detail-section" id="detailEvolvedSection" style="display:none">
+            <div class="skill-detail-section-title">&#x2728; 进化指标</div>
+            <div class="evolved-metrics-bar">
+                <div class="evolved-rate-row">
+                    <span class="evolved-rate-label">成功率</span>
+                    <div class="evolved-rate-track">
+                        <div class="evolved-rate-fill" id="detailRateFill"></div>
+                    </div>
+                    <span class="evolved-rate-value" id="detailRateValue"></span>
+                </div>
+            </div>
+            <div class="evolved-stats-row">
+                <span>&#x1F504; 执行 <strong id="detailRuns">0</strong> 次</span>
+                <span>&#x274C; 错误 <strong id="detailErrors">0</strong> 次</span>
+                <span>&#x1F4C5; 最后进化 <strong id="detailLastEvolved">-</strong></span>
+            </div>
+        </div>
+        
+        <div class="skill-detail-section" id="detailHistorySection" style="display:none">
+            <div class="skill-detail-section-title">&#x1F4CA; 进化历史</div>
+            <div class="skill-evolve-history" id="detailHistory"></div>
+        </div>
+        
+        <div class="skill-detail-section">
+            <div class="skill-detail-section-title">&#x1F4CB; 适用范围</div>
+            <div id="detailScope"></div>
+        </div>
+        
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeDetailModal()">关闭</button>
+            <button class="btn btn-primary" onclick="installFromDetail()">&#x2934; 安装到 Agent</button>
+        </div>
+    </div>
+</div>
+
+<!-- 新建 Skill 弹窗 -->
+<div class="modal-overlay" id="create-modal">
+    <div class="modal" style="max-width:560px">
+        <h2 class="modal-title">创建新 Skill</h2>
+        <form id="create-form">
+            <div class="form-group">
+                <label class="form-label">标识名 *</label>
+                <input class="form-input" name="name" placeholder="如：crash-log-analyzer" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">显示名称 *</label>
+                <input class="form-input" name="display_name" placeholder="如：崩溃日志分析器" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">描述</label>
+                <textarea class="form-textarea" name="description" placeholder="这个 Skill 做什么..."></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">触发短语</label>
+                <input class="form-input" name="trigger_phrase" placeholder="如：分析崩溃日志">
+            </div>
+            <div class="form-group">
+                <label class="form-label">适用范围</label>
+                <div style="display:flex;gap:16px;margin-top:6px">
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="global" checked onchange="onScopeChange()">
+                        <span>通用</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="project" onchange="onScopeChange()">
+                        <span>按项目</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="scope" value="module" onchange="onScopeChange()">
+                        <span>按模块</span>
+                    </label>
+                </div>
+            </div>
+            <div class="form-group" id="scope-projects-group" style="display:none">
+                <label class="form-label">选择项目（可多选）</label>
+                <div id="project-checkboxes" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;max-height:160px;overflow-y:auto">
+                </div>
+            </div>
+            <div class="form-group" id="scope-modules-group" style="display:none">
+                <label class="form-label">适用模块名（多个用逗号分隔）</label>
+                <input class="form-input" name="applicable_modules_input" id="applicable-modules-input" placeholder="如：登录模块,支付模块">
+            </div>
+            <div class="form-group">
+                <label class="form-label">模板内容</label>
+                <textarea class="form-textarea" name="template_content" style="min-height:120px;font-family:monospace" placeholder="Skill 的详细模板..."></textarea>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
+                <button type="submit" class="btn btn-primary">创建</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- OpenSpace 导入弹窗 -->
+<div class="modal-overlay" id="import-modal">
+    <div class="modal" style="max-width:620px">
+        <h2 class="modal-title">&#x1F916; 从 OpenSpace 导入进化技能</h2>
+        <div class="form-group">
+            <label class="form-label">来源名称</label>
+            <input class="form-input" id="import-source" placeholder="如：OpenSpace / claw-小测" value="OpenSpace">
+        </div>
+        <div class="form-group">
+            <label class="form-label">技能 JSON 数组</label>
+            <textarea class="form-textarea" id="import-json" rows="12"
+                style="font-family:monospace;font-size:0.85rem"
+                placeholder='[
+  {
+    "name": "crash-analyzer",
+    "display_name": "崩溃日志分析器",
+    "description": "自动分析 crash log...",
+    "success_rate": 92.5,
+    "total_runs": 156,
+    "error_count": 12
+  }
+]'></textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeImportModal()">取消</button>
+            <button class="btn btn-primary" onclick="importEvolved()">导入</button>
+        </div>
+    </div>
+</div>
+
+<!-- Install to Agent Modal -->
+<div class="modal-overlay" id="install-modal">
+    <div class="modal" style="max-width:480px">
+        <h2 class="modal-title">&#x2934; 安装到 Agent</h2>
+        <div class="form-group">
+            <label class="form-label">选择 Agent</label>
+            <div id="agentCheckboxes" style="display:flex;flex-direction:column;gap:8px;margin-top:8px;max-height:300px;overflow-y:auto">
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeInstallModal()">取消</button>
+            <button class="btn btn-primary" onclick="confirmInstall()">确认安装</button>
+        </div>
+    </div>
+</div>
+
+<style>
+.filter-count {
+    background: var(--bg-hover);
+    padding: 1px 6px;
+    border-radius: 99px;
+    font-size: 0.72rem;
+    margin-left: 4px;
+}
+.filter-chip.active .filter-count {
+    background: var(--accent-dim);
+    color: var(--accent);
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let allSkills = [];
+let allProjects = [];
+let allAgents = [];
+let currentFilter = 'all';
+let searchQuery = '';
+let detailSkillId = null;
+
+async function loadSkills() {
+    try {
+        allSkills = await API.listSkills();
+        updateFilterCounts();
+        renderSkills();
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+async function loadProjectsForScope() {
+    try {
+        allProjects = await API.listProjects();
+        renderProjectCheckboxes();
+    } catch (err) {
+        console.error('加载项目失败', err);
+    }
+}
+
+async function loadAgentsForInstall() {
+    try {
+        const res = await fetch('/api/v1/openclaws');
+        allAgents = await res.json();
+        renderAgentCheckboxes();
+    } catch (err) {
+        console.error('加载 Agent 失败', err);
+    }
+}
+
+function updateFilterCounts() {
+    const counts = { all: allSkills.length, standard: 0, custom: 0, evolved: 0 };
+    allSkills.forEach(s => {
+        if (counts[s.category] !== undefined) counts[s.category]++;
+    });
+    document.getElementById('countAll').textContent = counts.all;
+    document.getElementById('countStandard').textContent = counts.standard;
+    document.getElementById('countCustom').textContent = counts.custom;
+    document.getElementById('countEvolved').textContent = counts.evolved;
+}
+
+function renderProjectCheckboxes() {
+    const container = document.getElementById('project-checkboxes');
+    if (!container) return;
+    container.innerHTML = allProjects.map(p => `
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.9rem">
+            <input type="checkbox" value="${p.id}" name="applicable_projects">
+            <span>${p.name}</span>
+        </label>
+    `).join('');
+}
+
+function renderAgentCheckboxes() {
+    const container = document.getElementById('agentCheckboxes');
+    if (!container) return;
+    if (allAgents.length === 0) {
+        container.innerHTML = '<div style="color:var(--text-muted);padding:12px">暂无在线 Agent</div>';
+        return;
+    }
+    container.innerHTML = allAgents.map(a => `
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.9rem;padding:8px;background:var(--bg-hover);border-radius:6px">
+            <input type="checkbox" value="${a.id}" name="target_agents">
+            <span style="font-weight:600">${a.name}</span>
+            <span style="font-size:0.78rem;color:var(--text-muted)">${a.role_title || a.role}</span>
+        </label>
+    `).join('');
+}
+
+function onScopeChange() {
+    const scope = document.querySelector('input[name="scope"]:checked').value;
+    document.getElementById('scope-projects-group').style.display = scope === 'project' ? '' : 'none';
+    document.getElementById('scope-modules-group').style.display = scope === 'module' ? '' : 'none';
+}
+
+function filterSkills(filterOrEvent) {
+    if (typeof filterOrEvent === 'string') {
+        currentFilter = filterOrEvent;
+    }
+    
+    document.querySelectorAll('.filter-chip').forEach(chip => {
+        chip.classList.toggle('active', chip.dataset.filter === currentFilter);
+    });
+    
+    searchQuery = document.getElementById('skillSearch')?.value?.toLowerCase() || '';
+    renderSkills();
+}
+
+function getFilteredSkills() {
+    let filtered = allSkills;
+    
+    if (currentFilter !== 'all') {
+        filtered = filtered.filter(s => s.category === currentFilter);
+    }
+    
+    if (searchQuery) {
+        filtered = filtered.filter(s => 
+            s.name.toLowerCase().includes(searchQuery) ||
+            (s.display_name && s.display_name.toLowerCase().includes(searchQuery)) ||
+            (s.description && s.description.toLowerCase().includes(searchQuery)) ||
+            (s.trigger_phrase && s.trigger_phrase.toLowerCase().includes(searchQuery))
+        );
+    }
+    
+    return filtered;
+}
+
+function categoryIcon(cat) {
+    const icons = { standard: '&#x1F3AF;', custom: '&#x1F916;', evolved: '&#x2728;' };
+    return icons[cat] || '&#x1F3AF;';
+}
+
+function categoryLabel(cat) {
+    const labels = { standard: '标准', custom: '自定义', evolved: '自动进化' };
+    return labels[cat] || cat;
+}
+
+function scopeLabel(s) {
+    if (s.scope === 'global') return '<span class="tag tag-accent">&#x1F30D; 通用</span>';
+    if (s.scope === 'project') {
+        const names = (s.applicable_projects || []).map(pid => {
+            const p = allProjects.find(x => x.id === pid);
+            return p ? p.name : pid;
+        }).join(', ');
+        return `<span class="tag tag-blue">&#x1F4C1; 项目</span>${names ? `<span style="font-size:0.78rem;margin-left:4px">${names}</span>` : ''}`;
+    }
+    if (s.scope === 'module') {
+        const names = (s.applicable_modules || []).join(', ');
+        return `<span class="tag" style="background:#6c5ce7;color:#fff">&#x1F4C2; 模块</span>${names ? `<span style="font-size:0.78rem;margin-left:4px">${names}</span>` : ''}`;
+    }
+    return '';
+}
+
+function rateColor(rate) {
+    if (rate >= 80) return 'high';
+    if (rate >= 50) return 'medium';
+    return 'low';
+}
+
+function rateColorHex(rate) {
+    if (rate >= 80) return 'var(--green)';
+    if (rate >= 50) return 'var(--yellow)';
+    return 'var(--red)';
+}
+
+function renderSkillCard(s) {
+    const iconClass = s.category;
+    const isFeatured = s.category === 'evolved' && (s.success_rate || 0) >= 80;
+    
+    return `
+    <div class="skill-card-market ${isFeatured ? 'featured' : ''}" onclick="openDetailModal(${s.id})">
+        <div class="skill-card-top">
+            <div class="skill-icon-box ${iconClass}">${categoryIcon(s.category)}</div>
+            <div class="skill-card-title-area">
+                <div class="skill-card-name">${s.display_name}</div>
+                <div class="skill-card-desc">${s.description || '暂无描述'}</div>
+            </div>
+        </div>
+        <div class="skill-card-body">
+            <div class="skill-meta-row">
+                <span class="tag ${s.category === 'evolved' ? 'tag-orange' : s.category === 'custom' ? 'tag-blue' : 'tag-accent'}">
+                    ${categoryIcon(s.category)} ${categoryLabel(s.category)}
+                </span>
+            </div>
+            ${s.category === 'evolved' ? `
+            <div class="evolved-metrics-bar">
+                <div class="evolved-rate-row">
+                    <span class="evolved-rate-label">成功率</span>
+                    <div class="evolved-rate-track">
+                        <div class="evolved-rate-fill ${rateColor(s.success_rate || 0)}" style="width:${s.success_rate || 0}%"></div>
+                    </div>
+                    <span class="evolved-rate-value" style="color:${rateColorHex(s.success_rate || 0)}">${(s.success_rate || 0).toFixed(1)}%</span>
+                </div>
+            </div>
+            <div class="evolved-stats-row">
+                <span>&#x1F504; ${s.total_runs || 0} 次执行</span>
+                <span>&#x274C; ${s.error_count || 0} 次错误</span>
+                ${s.evolve_source ? `<span>&#x1F4C5; 来源: ${s.evolve_source}</span>` : ''}
+            </div>
+            ` : ''}
+        </div>
+        <div class="skill-card-footer">
+            <span class="skill-install-count">&#x1F465; ${s.used_by_count || 0} 个 Agent 使用</span>
+            <span class="skill-action-btn btn btn-ghost btn-sm">查看详情 &#x203A;</span>
+        </div>
+    </div>`;
+}
+
+function renderSkills() {
+    const filtered = getFilteredSkills();
+    const grid = document.getElementById('skills-grid');
+    
+    const sorted = [...filtered].sort((a, b) => {
+        if (a.category === 'evolved' && b.category !== 'evolved') return -1;
+        if (a.category !== 'evolved' && b.category === 'evolved') return 1;
+        if (a.category === 'evolved' && b.category === 'evolved') {
+            return (b.success_rate || 0) - (a.success_rate || 0);
+        }
+        return a.name.localeCompare(b.name);
+    });
+    
+    if (sorted.length === 0) {
+        let message = '暂无 Skills';
+        if (searchQuery) {
+            message = `没有找到匹配 "<strong>${searchQuery}</strong>" 的 Skills`;
+        } else if (currentFilter === 'evolved') {
+            message = '暂无 OpenSpace 进化技能<br><span style="font-size:0.82rem">接入 OpenSpace 后，Agent 自动进化的技能将在此展示</span>';
+        }
+        grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1">
+            <div class="empty-state-icon">&#x1F3AD;</div>
+            <div class="empty-state-text">${message}</div>
+            <div style="font-size:0.85rem;color:var(--text-muted);margin-top:8px">试试其他筛选条件，或导入新的进化技能</div>
+        </div>`;
+        return;
+    }
+    
+    grid.innerHTML = sorted.map(s => renderSkillCard(s)).join('');
+}
+
+// Detail Modal
+function openDetailModal(skillId) {
+    detailSkillId = skillId;
+    const s = allSkills.find(x => x.id === skillId);
+    if (!s) return;
+    
+    document.getElementById('detailIcon').innerHTML = categoryIcon(s.category);
+    document.getElementById('detailIcon').className = `skill-detail-icon skill-icon-box ${s.category}`;
+    document.getElementById('detailName').textContent = s.display_name;
+    document.getElementById('detailMeta').innerHTML = `
+        <span class="tag ${s.category === 'evolved' ? 'tag-orange' : s.category === 'custom' ? 'tag-blue' : 'tag-accent'}">${categoryIcon(s.category)} ${categoryLabel(s.category)}</span>
+        <span style="color:var(--text-muted)">&#x1F4C5; ${s.created_at ? s.created_at.split('T')[0] : '-'}</span>
+    `;
+    document.getElementById('detailDesc').textContent = s.description || '暂无描述';
+    
+    const triggerSection = document.getElementById('detailTriggerSection');
+    if (s.trigger_phrase) {
+        triggerSection.style.display = '';
+        document.getElementById('detailTrigger').textContent = s.trigger_phrase;
+    } else {
+        triggerSection.style.display = 'none';
+    }
+    
+    const templateSection = document.getElementById('detailTemplateSection');
+    if (s.template_content) {
+        templateSection.style.display = '';
+        document.getElementById('detailTemplate').textContent = s.template_content;
+    } else {
+        templateSection.style.display = 'none';
+    }
+    
+    const evolvedSection = document.getElementById('detailEvolvedSection');
+    if (s.category === 'evolved') {
+        evolvedSection.style.display = '';
+        const rate = s.success_rate || 0;
+        document.getElementById('detailRateFill').style.width = rate + '%';
+        document.getElementById('detailRateFill').className = `evolved-rate-fill ${rateColor(rate)}`;
+        document.getElementById('detailRateValue').textContent = rate.toFixed(1) + '%';
+        document.getElementById('detailRateValue').style.color = rateColorHex(rate);
+        document.getElementById('detailRuns').textContent = s.total_runs || 0;
+        document.getElementById('detailErrors').textContent = s.error_count || 0;
+        document.getElementById('detailLastEvolved').textContent = s.last_evolved_at ? timeAgo(s.last_evolved_at) : '-';
+    } else {
+        evolvedSection.style.display = 'none';
+    }
+    
+    const historySection = document.getElementById('detailHistorySection');
+    if (s.category === 'evolved' && s.evolve_history && s.evolve_history.length > 0) {
+        historySection.style.display = '';
+        document.getElementById('detailHistory').innerHTML = s.evolve_history.slice().reverse().map(h => `
+            <div class="evolve-history-item">
+                <div class="evolve-history-dot"></div>
+                <div class="evolve-history-content">
+                    <div class="evolve-history-action">${h.detail || h.action}</div>
+                    <div class="evolve-history-time">${h.timestamp ? timeAgo(h.timestamp) : ''}</div>
+                </div>
+            </div>
+        `).join('');
+    } else {
+        historySection.style.display = 'none';
+    }
+    
+    document.getElementById('detailScope').innerHTML = scopeLabel(s);
+    document.getElementById('detail-modal').classList.add('active');
+}
+
+function closeDetailModal() {
+    document.getElementById('detail-modal').classList.remove('active');
+    detailSkillId = null;
+}
+
+document.getElementById('detail-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('detail-modal')) closeDetailModal();
+});
+
+// Install Modal
+function installFromDetail() {
+    closeDetailModal();
+    openInstallModal();
+}
+
+function openInstallModal() {
+    loadAgentsForInstall();
+    document.getElementById('install-modal').classList.add('active');
+}
+
+function closeInstallModal() {
+    document.getElementById('install-modal').classList.remove('active');
+}
+
+document.getElementById('install-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('install-modal')) closeInstallModal();
+});
+
+async function confirmInstall() {
+    const checked = [...document.querySelectorAll('input[name="target_agents"]:checked')];
+    if (checked.length === 0) {
+        showToast('请选择至少一个 Agent', 'error');
+        return;
+    }
+    
+    const agentIds = checked.map(el => parseInt(el.value));
+    let successCount = 0;
+    
+    for (const agentId of agentIds) {
+        try {
+            await fetch(`/api/v1/openclaws/${agentId}/skills`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ skill_id: detailSkillId })
+            });
+            successCount++;
+        } catch (e) {
+            console.error(`安装到 Agent ${agentId} 失败:`, e);
+        }
+    }
+    
+    showToast(`成功安装到 ${successCount} 个 Agent`, 'success');
+    closeInstallModal();
+    loadSkills();
+}
+
+// Create Modal
+function openCreateModal() {
+    loadProjectsForScope();
+    onScopeChange();
+    document.getElementById('create-form').reset();
+    document.getElementById('create-modal').classList.add('active');
+}
+
+function closeCreateModal() {
+    document.getElementById('create-modal').classList.remove('active');
+}
+
+document.getElementById('create-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('create-modal')) closeCreateModal();
+});
+
+document.getElementById('create-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const form = new FormData(e.target);
+    const data = Object.fromEntries(form);
+    data.category = 'custom';
+    
+    if (data.scope === 'project') {
+        const checked = [...document.querySelectorAll('input[name="applicable_projects"]:checked')]
+            .map(el => parseInt(el.value));
+        data.applicable_projects = checked;
+        delete data.applicable_modules_input;
+    } else if (data.scope === 'module') {
+        const modules = data.applicable_modules_input
+            ? data.applicable_modules_input.split(',').map(s => s.trim()).filter(Boolean)
+            : [];
+        data.applicable_modules = modules;
+        delete data.applicable_projects;
+        delete data.applicable_modules_input;
+    } else {
+        delete data.applicable_projects;
+        delete data.applicable_modules;
+        delete data.applicable_modules_input;
+    }
+    
+    try {
+        await API.createSkill(data);
+        showToast('Skill 创建成功！', 'success');
+        closeCreateModal();
+        loadSkills();
+    } catch (err) {
+        showToast('创建失败: ' + err.message, 'error');
+    }
+});
+
+// Import Modal
+function openImportModal() {
+    document.getElementById('import-modal').classList.add('active');
+}
+
+function closeImportModal() {
+    document.getElementById('import-modal').classList.remove('active');
+}
+
+document.getElementById('import-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('import-modal')) closeImportModal();
+});
+
+async function importEvolved() {
+    const source = document.getElementById('import-source').value.trim() || 'OpenSpace';
+    let skills;
+    try {
+        skills = JSON.parse(document.getElementById('import-json').value);
+        if (!Array.isArray(skills) || skills.length === 0) throw new Error('空数组');
+    } catch (e) {
+        showToast('JSON 格式错误: ' + e.message, 'error');
+        return;
+    }
+    
+    try {
+        const result = await API.request('POST', '/skills/batch-evolved', { skills, source });
+        showToast(`导入完成: 新建 ${result.created} 个，更新 ${result.updated} 个`, 'success');
+        closeImportModal();
+        loadSkills();
+    } catch (err) {
+        showToast('导入失败: ' + err.message, 'error');
+    }
+}
+
+// Init
+loadSkills();
+</script>
+{% endblock %}
