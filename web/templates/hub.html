@@ -1450,16 +1450,22 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function _fixUtcStr(s) {
+    if (!s) return s;
+    if (!s.endsWith('Z') && !s.includes('+')) { s = s.replace(' ', 'T'); if (!s.endsWith('Z')) s += 'Z'; }
+    return s;
+}
+
 function formatTime(timeStr) {
     if (!timeStr) return '';
-    const d = new Date(timeStr);
+    const d = new Date(_fixUtcStr(timeStr));
     return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
 function timeAgo(timeStr) {
     if (!timeStr) return '';
     const now = new Date();
-    const then = new Date(timeStr);
+    const then = new Date(_fixUtcStr(timeStr));
     const diff = Math.floor((now - then) / 1000);
 
     if (diff < 60) return '刚刚';
