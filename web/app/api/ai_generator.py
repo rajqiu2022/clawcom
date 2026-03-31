@@ -16,32 +16,36 @@ from app.api import api_bp
 def call_llm(prompt, system_prompt=None, model=None):
     """
     调用大模型（统一入口）
-    目前支持：
-    1. 直接调用外部 LLM API（如有配置）
-    2. 调用内部 AI 助手接口
+    从 system_config 表读取 LLM 配置，调用对应的大模型 API
     """
-    # TODO: 根据实际部署情况选择 LLM 调用方式
-    # 这里先使用模拟返回，实际部署时替换为真实 API
+    from sqlalchemy import text
 
     try:
-        # 方案1：调用内部 AI 助手接口
-        import requests
-        ai_url = "http://localhost:18788/chat"  # 假设内部 AI 服务
-        headers = {"Content-Type": "application/json"}
+        rows = dict(db.session.execute(
+            text("SELECT config_key, config_value FROM system_config")
+        ).fetchall())
 
-        payload = {
-            "prompt": prompt,
-            "system": system_prompt or "",
-            "model": model or "default"
-        }
+        provider = rows.get('llm_provider', 'doubao')
+        llm_model = model or rows.get('llm_model', 'doubao-pro-32k')
+        api_base = rows.get('llm_api_base', 'https://ark.cn-beijing.volces.com/api/v3')
+        api_key = rows.get('llm_api_key', '')
 
-        resp = requests.post(ai_url, json=payload, timeout=60)
-        if resp.status_code == 200:
-            return resp.json().get("response", "")
-        else:
+        if not api_key:
+            print("LLM API Key 未配置")
             return None
+
+        # 构造完整 prompt（含 system_prompt）
+        full_prompt = prompt
+        if system_prompt:
+            full_prompt = f"{system_prompt}\n\n{prompt}"
+
+        # 调用 system.py 中的统一 LLM 函数
+        from app.api.system import _call_llm as sys_call_llm
+        return sys_call_llm(full_prompt, provider, llm_model, api_base, api_key)
     except Exception as e:
         print(f"AI 调用失败: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
