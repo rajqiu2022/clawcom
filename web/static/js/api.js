@@ -98,7 +98,13 @@ function $$(sel) { return document.querySelectorAll(sel); }
 
 function timeAgo(dateStr) {
     if (!dateStr) return '未知';
-    const diff = Date.now() - new Date(dateStr).getTime();
+    // 后端存的是 UTC 时间但没带 Z 后缀，需要补上让浏览器正确解析
+    let str = dateStr;
+    if (!str.endsWith('Z') && !str.includes('+') && !str.includes('T00:00:00')) {
+        str = str.replace(' ', 'T');
+        if (!str.endsWith('Z')) str += 'Z';
+    }
+    const diff = Date.now() - new Date(str).getTime();
     const mins = Math.floor(diff / 60000);
     if (mins < 1) return '刚刚';
     if (mins < 60) return `${mins}分钟前`;
