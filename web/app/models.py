@@ -963,11 +963,15 @@ class ClawTodo(db.Model):
     title = db.Column(db.String(200), nullable=False, comment='待办标题')
     description = db.Column(db.Text, comment='详细描述/执行要求')
     schedule_type = db.Column(db.String(20), nullable=False, default='daily',
-                              comment='频率类型：daily=每天, weekly=每周, monthly=每月, once=一次性')
-    schedule_time = db.Column(db.String(10), comment='定时时间 HH:MM（为空则不限时间，当天完成即可）')
-    schedule_day = db.Column(db.Integer, comment='周几(1-7)/几号(1-31)，weekly/monthly 时使用')
+                              comment='频率类型：daily/weekly/monthly/once')
+    schedule_time = db.Column(db.String(10), comment='定时时间 HH:MM')
+    schedule_day = db.Column(db.Integer, comment='周几(1-7)/几号(1-31)')
     priority = db.Column(db.String(5), default='P1', comment='优先级 P0/P1/P2')
     enabled = db.Column(db.Boolean, default=True, comment='是否启用')
+    task_category = db.Column(db.String(20), default='routine',
+                              comment='任务类别：routine=日常, init=初始化验证, onboard=新人入职')
+    verification_target = db.Column(db.String(200),
+                                    comment='验证目标（init任务用），如 skill 名称或能力描述')
     created_by = db.Column(db.String(100), default='system', comment='创建者')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -986,6 +990,8 @@ class ClawTodo(db.Model):
             'schedule_day': self.schedule_day,
             'priority': self.priority,
             'enabled': self.enabled,
+            'task_category': self.task_category or 'routine',
+            'verification_target': self.verification_target,
             'created_by': self.created_by,
             'created_at': str(self.created_at) if self.created_at else None,
         }
