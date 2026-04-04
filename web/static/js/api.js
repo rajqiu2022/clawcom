@@ -47,6 +47,9 @@ const API = {
     uninstallSkill(clawId, skillId) {
         return this.del(`/openclaws/${clawId}/skills/${skillId}`);
     },
+    installRule(clawId, ruleId) {
+        return this.post(`/openclaws/${clawId}/rules`, { rule_ids: [ruleId] });
+    },
 
     // Knowledge
     listKnowledge(params = '') {
