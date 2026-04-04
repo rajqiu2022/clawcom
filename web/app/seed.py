@@ -786,7 +786,7 @@ STANDARD_RULES = [
 
 
 def seed_skills():
-    """初始化标准 Skills（跳过已存在的，但更新 is_standard 标记）"""
+    """初始化标准 Skills（已存在的只更新 template_content，不覆盖标签/scope 等管理员手动修改的字段）"""
     created = 0
     for skill_data in STANDARD_SKILLS:
         existing = Skill.query.filter_by(name=skill_data['name']).first()
@@ -795,17 +795,9 @@ def seed_skills():
             db.session.add(skill)
             created += 1
         else:
-            # 已有的同步关键字段
-            if 'is_standard' in skill_data and existing.is_standard != skill_data['is_standard']:
-                existing.is_standard = skill_data['is_standard']
+            # 仅更新内容，不覆盖管理员手动修改的 is_standard/scope/description 等
             if 'template_content' in skill_data:
                 existing.template_content = skill_data['template_content']
-            if 'description' in skill_data:
-                existing.description = skill_data['description']
-            if 'trigger_phrase' in skill_data:
-                existing.trigger_phrase = skill_data['trigger_phrase']
-            if 'scope' in skill_data:
-                existing.scope = skill_data['scope']
 
     # 初始化注册 Skill（已存在则更新 template_content）
     existing_reg = Skill.query.filter_by(name=REGISTRATION_SKILL['name']).first()
@@ -814,9 +806,8 @@ def seed_skills():
         db.session.add(skill)
         created += 1
     else:
-        # 更新已有注册 Skill 的内容
+        # 仅更新内容
         existing_reg.template_content = REGISTRATION_SKILL['template_content']
-        existing_reg.description = REGISTRATION_SKILL['description']
 
     db.session.commit()
     return created

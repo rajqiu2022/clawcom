@@ -230,10 +230,7 @@ function scopeLabel(s) {
 }
 
 function categoryTag(s) {
-    if (s.category === 'standard') return '';
-    const map = { custom: ['tag-green', '自定义'], evolved: ['tag-orange', '进化'] };
-    const [cls, label] = map[s.category] || ['tag-blue', s.category];
-    return `<span class="tag ${cls}">${label}</span>`;
+    return '';
 }
 
 function evolvedMetrics(s) {
