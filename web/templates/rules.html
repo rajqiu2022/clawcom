@@ -394,7 +394,7 @@ async function deleteRule(id) {
 function previewRule(id) {
     const rule = allRules.find(r => r.id === id);
     if (!rule) return;
-    $('#preview-content').textContent = rule.content_template || '(无内容)';
+    $('#preview-content').textContent = rule.content_template || rule.description || '(无内容)';
     $('#preview-modal').classList.add('active');
 }
 function closePreviewModal() { $('#preview-modal').classList.remove('active'); }

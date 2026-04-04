@@ -196,6 +196,11 @@ def create_openclaw():
 
     db.session.commit()
 
+    # === 下发初始化验证任务（不阻塞注册） ===
+    from app.seed import create_init_tasks_for_claw
+    init_task_count = create_init_tasks_for_claw(claw.id)
+    db.session.commit()
+
     # 返回 Token 预览（不返回完整明文）
     result = claw.to_dict()
     result['api_token_preview'] = claw.get_token_preview()
@@ -209,6 +214,7 @@ def create_openclaw():
         'rules': installed_rules,
         'packs': [p.name for p in active_packs],
     }
+    result['init_tasks'] = init_task_count
     return jsonify(result), 201
 
 
