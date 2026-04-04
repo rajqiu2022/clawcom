@@ -277,6 +277,7 @@ function renderSkills() {
             <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
                 <span style="font-size:0.78rem;color:var(--text-muted)">${s.created_by || 'system'} · ${s.created_at ? timeAgo(s.created_at) : ''}</span>
                 <div style="display:flex;gap:8px" onclick="event.stopPropagation()">
+                    ${_canDeleteSkill(s) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem;color:var(--accent)" onclick="openAssignModal(${s.id})">分配</button>` : ''}
                     ${_canEditSkill(s) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="editSkill(${s.id})">编辑</button>` : ''}
                     ${_canDeleteSkill(s) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem;color:var(--red)" onclick="deleteSkill(${s.id})">删除</button>` : ''}
                 </div>
@@ -489,5 +490,73 @@ function escapeHtml(str) {
     if (!str) return '';
     return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+
+// ========== 分配到 OpenClaw ==========
+let assignSkillId = null;
+
+async function openAssignModal(skillId) {
+    assignSkillId = skillId;
+    const s = allSkills.find(x => x.id === skillId);
+    $('#assign-skill-name').textContent = s ? s.display_name : 'Skill';
+
+    // 加载所有 OpenClaw
+    const claws = await API.listClaws();
+    const installed = (s && s.used_by) || [];
+
+    $('#assign-claw-list').innerHTML = claws.map(c => {
+        const isInstalled = installed.includes(c.name);
+        return `<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:6px;cursor:pointer;border:1px solid var(--border);${isInstalled ? 'background:var(--bg-success,#f0fff4)' : ''}">
+            <input type="checkbox" value="${c.id}" data-name="${c.name}" ${isInstalled ? 'checked disabled' : ''}>
+            <span style="flex:1">
+                <strong>${c.name}</strong>
+                <span style="font-size:0.82rem;color:var(--text-muted);margin-left:6px">${c.role_title || c.role || ''}</span>
+            </span>
+            ${isInstalled ? '<span class="tag tag-green" style="font-size:0.75rem">已安装</span>' : ''}
+        </label>`;
+    }).join('');
+
+    $('#assign-modal').classList.add('active');
+}
+
+function closeAssignModal() { $('#assign-modal').classList.remove('active'); }
+$('#assign-modal').addEventListener('click', e => { if (e.target === $('#assign-modal')) closeAssignModal(); });
+
+async function submitAssign() {
+    const checkboxes = $$('#assign-claw-list input[type=checkbox]:checked:not(:disabled)');
+    if (!checkboxes.length) {
+        showToast('请选择至少一个 OpenClaw', 'error');
+        return;
+    }
+
+    let success = 0, fail = 0;
+    for (const cb of checkboxes) {
+        try {
+            await API.installSkill(parseInt(cb.value), assignSkillId);
+            success++;
+        } catch (e) {
+            fail++;
+        }
+    }
+    closeAssignModal();
+    showToast(`分配完成：${success} 个成功${fail ? '，' + fail + ' 个失败' : ''}`, success ? 'success' : 'error');
+    loadSkills();
+}
 </script>
+
+<!-- 分配弹窗 -->
+<div class="modal-overlay" id="assign-modal">
+    <div class="modal" style="max-width:520px">
+        <div class="modal-header">
+            <h3>分配 Skill：<span id="assign-skill-name"></span></h3>
+        </div>
+        <div style="padding:16px;max-height:400px;overflow-y:auto">
+            <div style="margin-bottom:12px;font-size:0.88rem;color:var(--text-muted)">选择要安装此 Skill 的 OpenClaw（已安装的不可取消勾选）：</div>
+            <div id="assign-claw-list" style="display:flex;flex-direction:column;gap:8px"></div>
+        </div>
+        <div class="modal-actions" style="padding:12px 16px;border-top:1px solid var(--border)">
+            <button class="btn btn-ghost" onclick="closeAssignModal()">取消</button>
+            <button class="btn btn-primary" onclick="submitAssign()">确认分配</button>
+        </div>
+    </div>
+</div>
 {% endblock %}

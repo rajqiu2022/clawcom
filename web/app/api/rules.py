@@ -77,7 +77,20 @@ def list_rules():
             (r.applicable_projects and project_id in r.applicable_projects)
         )]
 
-    return jsonify([r.to_dict() for r in rules])
+    return jsonify([_rule_with_usage(r) for r in rules])
+
+
+def _rule_with_usage(r):
+    """Rule 字典 + 使用者信息"""
+    d = r.to_dict()
+    users = (db.session.query(OpenClawInstance.name)
+             .join(OpenClawRule)
+             .filter(OpenClawRule.rule_id == r.id,
+                     OpenClawRule.enabled == True)
+             .all())
+    d['used_by'] = [u[0] for u in users]
+    d['install_count'] = len(d['used_by'])
+    return d
 
 
 @api_bp.route('/rules', methods=['POST'])
