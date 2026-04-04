@@ -494,27 +494,75 @@ def get_openclaw_config(claw_id, claw=None):
 @require_claw_token
 def heartbeat(claw_id, claw=None):
     """心跳上报（轮询模式核心接口）
-    
-    返回：当前状态 + 待处理任务数 + 待收消息数
-    OpenClaw 每 30 秒调用一次，根据返回决定是否拉取任务/消息
+
+    返回：当前状态 + 消息 + 待办统计
+    OpenClaw 每 30 秒调用一次，根据返回决定下一步动作
     """
+    from app.models import ClawTodo, ClawTodoLog
+
     claw.status = 'online'
     claw.last_heartbeat = datetime.utcnow()
     db.session.commit()
 
-    # 统计待处理
+    today = date.today()
+
+    # 消息统计
     pending_messages = ClawMessage.query.filter_by(
         claw_id=claw_id, status='pending').count()
-
-    # 检查是否有配置变更通知（urgent 类型的消息）
     urgent = ClawMessage.query.filter_by(
         claw_id=claw_id, status='pending', msg_type='sync_config'
     ).first()
+
+    # 待办统计
+    all_todos = ClawTodo.query.filter_by(openclaw_id=claw_id, enabled=True).all()
+    today_logs = {l.todo_id: l for l in ClawTodoLog.query.filter_by(
+        openclaw_id=claw_id, log_date=today).all()}
+
+    # 分类统计
+    interrupt_pending = []  # 需要立即中断执行的
+    todos_pending = 0       # 今日待完成总数
+    todos_done = 0
+    init_pending = 0        # 初始化任务未完成
+
+    for t in all_todos:
+        log = today_logs.get(t.id)
+        is_done = log and log.status == 'completed'
+
+        # 判断今天是否需要执行
+        need_today = False
+        if t.schedule_type == 'once':
+            need_today = not is_done
+        elif t.schedule_type == 'daily':
+            need_today = True
+        elif t.schedule_type == 'weekly' and t.schedule_day:
+            need_today = today.isoweekday() == t.schedule_day
+        elif t.schedule_type == 'monthly' and t.schedule_day:
+            need_today = today.day == t.schedule_day
+
+        if need_today:
+            if is_done:
+                todos_done += 1
+            else:
+                todos_pending += 1
+                if t.task_category == 'init':
+                    init_pending += 1
+                if t.urgency_level == 'interrupt' and t.schedule_time:
+                    interrupt_pending.append({
+                        'id': t.id,
+                        'title': t.title,
+                        'time': t.schedule_time,
+                    })
 
     return jsonify({
         'status': 'ok',
         'pending_messages': pending_messages,
         'has_urgent': urgent is not None,
+        'todos': {
+            'pending': todos_pending,
+            'done': todos_done,
+            'init_pending': init_pending,
+            'interrupt': interrupt_pending,
+        },
         'server_time': datetime.utcnow().isoformat(),
     })
 

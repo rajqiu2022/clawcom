@@ -954,7 +954,15 @@ class AuditLog(db.Model):
 # ============== OpenClaw 待办系统 ==============
 
 class ClawTodo(db.Model):
-    """OpenClaw 待办定义表"""
+    """OpenClaw 待办任务表
+
+    urgency_level 紧急度分 5 级：
+      interrupt  — 定时中断：到点必须中断当前任务立即执行
+      flexible   — 当天弹性：有时间要求但可推后，当天完成即可
+      background — 后台任务：无时间要求，重要不紧急，空闲时做（初始化验证等）
+      periodic   — 周期容错-跳过：错过就下一周期，但要上报 skipped 记录
+      retry      — 周期容错-重试：错过延后 retry_delay 分钟重试 retry_max 次，仍失败则上报
+    """
     __tablename__ = 'claw_todos'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
@@ -962,17 +970,33 @@ class ClawTodo(db.Model):
                             nullable=False, comment='归属 OpenClaw')
     title = db.Column(db.String(200), nullable=False, comment='待办标题')
     description = db.Column(db.Text, comment='详细描述/执行要求')
+
+    # --- 调度参数 ---
     schedule_type = db.Column(db.String(20), nullable=False, default='daily',
-                              comment='频率类型：daily/weekly/monthly/once')
-    schedule_time = db.Column(db.String(10), comment='定时时间 HH:MM')
-    schedule_day = db.Column(db.Integer, comment='周几(1-7)/几号(1-31)')
-    priority = db.Column(db.String(5), default='P1', comment='优先级 P0/P1/P2')
-    enabled = db.Column(db.Boolean, default=True, comment='是否启用')
+                              comment='频率：daily/weekly/monthly/once')
+    schedule_time = db.Column(db.String(10),
+                              comment='定时时间 HH:MM（interrupt/flexible 必填，background 留空）')
+    schedule_day = db.Column(db.Integer,
+                             comment='周几(1-7)/几号(1-31)，weekly/monthly 时用')
+
+    # --- 紧急度 ---
+    urgency_level = db.Column(db.String(20), default='flexible',
+                              comment='interrupt/flexible/background/periodic/retry')
+
+    # --- 重试策略（仅 retry 级别用）---
+    retry_delay = db.Column(db.Integer, default=5,
+                            comment='重试延迟（分钟），默认 5')
+    retry_max = db.Column(db.Integer, default=1,
+                          comment='最大重试次数，默认 1')
+
+    # --- 分类与元信息 ---
+    priority = db.Column(db.String(5), default='P1', comment='展示优先级 P0/P1/P2')
     task_category = db.Column(db.String(20), default='routine',
-                              comment='任务类别：routine=日常, init=初始化验证, onboard=新人入职')
+                              comment='类别：routine/init/onboard')
     verification_target = db.Column(db.String(200),
-                                    comment='验证目标（init任务用），如 skill 名称或能力描述')
-    created_by = db.Column(db.String(100), default='system', comment='创建者')
+                                    comment='验证目标（init 任务用）')
+    enabled = db.Column(db.Boolean, default=True, comment='是否启用')
+    created_by = db.Column(db.String(100), default='system')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     openclaw = db.relationship('OpenClawInstance', backref='todos')
@@ -988,10 +1012,13 @@ class ClawTodo(db.Model):
             'schedule_type': self.schedule_type,
             'schedule_time': self.schedule_time,
             'schedule_day': self.schedule_day,
+            'urgency_level': self.urgency_level or 'flexible',
+            'retry_delay': self.retry_delay,
+            'retry_max': self.retry_max,
             'priority': self.priority,
-            'enabled': self.enabled,
             'task_category': self.task_category or 'routine',
             'verification_target': self.verification_target,
+            'enabled': self.enabled,
             'created_by': self.created_by,
             'created_at': str(self.created_at) if self.created_at else None,
         }
@@ -1009,17 +1036,29 @@ class ClawTodo(db.Model):
     def schedule_label(self):
         """生成可读的调度描述"""
         weekdays = {1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六', 7: '日'}
+        urgency_labels = {
+            'interrupt': '⚡中断执行',
+            'flexible': '📋当天完成',
+            'background': '🔄空闲执行',
+            'periodic': '🔁周期(跳过)',
+            'retry': '🔁周期(重试)',
+        }
         time_str = f' {self.schedule_time}' if self.schedule_time else ''
+        urgency = urgency_labels.get(self.urgency_level, '')
+
         if self.schedule_type == 'daily':
-            return f'每天{time_str}' if time_str else '每天（不限时间）'
+            base = f'每天{time_str}' if time_str else '每天（不限时间）'
         elif self.schedule_type == 'weekly':
             day = weekdays.get(self.schedule_day, '?')
-            return f'每周{day}{time_str}'
+            base = f'每周{day}{time_str}'
         elif self.schedule_type == 'monthly':
-            return f'每月{self.schedule_day}号{time_str}'
+            base = f'每月{self.schedule_day}号{time_str}'
         elif self.schedule_type == 'once':
-            return f'一次性{time_str}'
-        return self.schedule_type
+            base = f'一次性{time_str}'
+        else:
+            base = self.schedule_type
+
+        return f'{base} [{urgency}]' if urgency else base
 
 
 class ClawTodoLog(db.Model):
@@ -1035,7 +1074,9 @@ class ClawTodoLog(db.Model):
     completed_at = db.Column(db.DateTime, comment='完成时间')
     result_summary = db.Column(db.Text, comment='执行结果摘要')
     status = db.Column(db.String(20), default='completed',
-                       comment='completed=已完成, skipped=跳过, overdue=逾期')
+                       comment='completed/skipped/overdue/retry_failed')
+    retry_count = db.Column(db.Integer, default=0,
+                            comment='实际重试次数')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
     openclaw = db.relationship('OpenClawInstance', backref='todo_logs')
@@ -1053,5 +1094,6 @@ class ClawTodoLog(db.Model):
             'completed_at': str(self.completed_at) if self.completed_at else None,
             'result_summary': self.result_summary,
             'status': self.status,
+            'retry_count': self.retry_count or 0,
         }
 
