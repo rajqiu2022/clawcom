@@ -224,6 +224,74 @@ STANDARD_SKILLS = [
 - 创建快照、版本历史、回滚用例、版本对比、用例库备份
 ''',
     },
+    {
+        'name': 'todo-manager',
+        'display_name': '待办任务管理',
+        'description': '管理 OpenClaw 待办任务：5 级紧急度调度（interrupt/flexible/background/periodic/retry），任务执行上报，心跳感知，初始化验证。',
+        'category': 'standard',
+        'is_standard': True,
+        'trigger_phrase': '待办管理',
+        'scope': 'global',
+        'template_content': '''# 待办任务管理 (todo-manager)
+
+完整文档通过 Hub API 拉取: GET /api/v1/skills/{SKILL_ID}/raw
+
+## 5 级紧急度
+
+| 级别 | urgency_level | 行为 |
+|------|---------------|------|
+| ⚡ 中断 | interrupt | 到点中断当前任务立即执行 |
+| 📋 弹性 | flexible | 当天完成即可 |
+| 🔄 后台 | background | 无时间要求，空闲时做 |
+| 🔁 跳过 | periodic | 错过就下次，上报 skipped |
+| 🔁 重试 | retry | 错过延后重试 N 次 |
+
+## 核心 API
+
+### 待办 CRUD
+- GET /api/v1/openclaws/{CLAW_ID}/todos — 列表（支持 category/urgency 筛选）
+- POST /api/v1/openclaws/{CLAW_ID}/todos — 创建
+- PUT /api/v1/openclaws/{CLAW_ID}/todos/{id} — 更新
+- DELETE /api/v1/openclaws/{CLAW_ID}/todos/{id} — 删除
+
+### 执行上报（每个任务执行后必须上报）
+- POST /api/v1/openclaws/{CLAW_ID}/todos/{id}/complete — 上报完成
+  请求体: {"result_summary": "执行结果", "status": "completed"}
+  status 可选: completed / retry_failed
+- POST /api/v1/openclaws/{CLAW_ID}/todos/{id}/skip — 上报跳过
+  请求体: {"result_summary": "跳过原因"}
+
+### 汇总
+- GET /api/v1/openclaws/{CLAW_ID}/todo-summary?date=2026-04-04 — 完成汇总
+
+### 心跳中的待办统计
+POST /heartbeat 返回:
+{
+  "todos": {
+    "pending": 5, "done": 2, "init_pending": 1,
+    "interrupt": [{"id":7, "title":"发送日报", "time":"21:00"}]
+  }
+}
+
+## 调度决策逻辑
+
+收到心跳后:
+1. interrupt 非空 → 立即中断执行
+2. has_urgent → 拉取消息同步配置
+3. init_pending > 0 → 空闲处理初始化
+4. pending > 0 → 按 priority 排序执行
+
+## 推荐工作流
+1. 每日启动 → heartbeat → 设置 interrupt 定时器 → 处理 init 任务
+2. 执行中 → 每 30s heartbeat → 检查中断 → 完成后立即 complete 上报
+3. 每日收尾 → todo-summary → 未完成项纳入日报
+
+## 触发词
+- 查看待办、今日待办、待办列表、创建待办
+- 完成待办、上报完成、跳过待办
+- 待办汇总、完成率、初始化任务、紧急任务
+''',
+    },
 ]
 
 
