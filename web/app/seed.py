@@ -231,7 +231,7 @@ STANDARD_SKILLS = [
         'category': 'standard',
         'is_standard': True,
         'trigger_phrase': '待办管理',
-        'scope': 'global',
+        'scope': 'admin',
         'template_content': '''# 待办任务管理 (todo-manager)
 
 完整文档通过 Hub API 拉取: GET /api/v1/skills/{SKILL_ID}/raw
@@ -804,6 +804,8 @@ def seed_skills():
                 existing.description = skill_data['description']
             if 'trigger_phrase' in skill_data:
                 existing.trigger_phrase = skill_data['trigger_phrase']
+            if 'scope' in skill_data:
+                existing.scope = skill_data['scope']
 
     # 初始化注册 Skill（已存在则更新 template_content）
     existing_reg = Skill.query.filter_by(name=REGISTRATION_SKILL['name']).first()

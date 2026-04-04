@@ -43,11 +43,17 @@ from app.api import api_bp
 
 @api_bp.route('/skills', methods=['GET'])
 def list_skills():
-    """获取 Skills 列表"""
+    """获取 Skills 列表（scope=admin 的仅管理员可见）"""
     category_filter = request.args.get('category')
     query = Skill.query
     if category_filter:
         query = query.filter(Skill.category == category_filter)
+
+    # scope=admin 的 Skill 仅超级管理员和管理员可见
+    user = _get_current_user()
+    if not user or user.role not in ('super_admin', 'admin'):
+        query = query.filter(Skill.scope != 'admin')
+
     skills = query.order_by(Skill.category, Skill.name).all()
     result = []
     for s in skills:
