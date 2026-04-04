@@ -3,6 +3,40 @@ import hashlib
 import base64
 from datetime import datetime
 from app import db
+from werkzeug.security import generate_password_hash, check_password_hash
+
+
+class User(db.Model):
+    """用户表"""
+    __tablename__ = 'users'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    username = db.Column(db.String(50), nullable=False, unique=True)
+    password_hash = db.Column(db.String(256), nullable=False)
+    display_name = db.Column(db.String(50), comment='显示名称')
+    role = db.Column(db.Enum('super_admin', 'admin', 'user'), default='user',
+                     comment='super_admin=超级管理员, admin=项目管理员, user=普通用户')
+    bound_claw_id = db.Column(db.Integer, comment='绑定的 OpenClaw ID')
+    managed_projects = db.Column(db.JSON, comment='管理的项目ID列表（admin角色用）')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'username': self.username,
+            'display_name': self.display_name or self.username,
+            'role': self.role,
+            'bound_claw_id': self.bound_claw_id,
+            'managed_projects': self.managed_projects or [],
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
 
 # 简单加密，用于存储可还原的 token 明文
 # 注意：实际生产环境建议使用更安全的密钥管理
@@ -55,15 +89,17 @@ class OpenClawInstance(db.Model):
     project_name = db.Column(db.String(100), comment='所属项目')
     module_name = db.Column(db.String(100), comment='所属模块')
     avatar = db.Column(db.String(255), comment='头像URL')
-    status = db.Column(db.Enum('online', 'offline', 'busy'),
+    status = db.Column(db.Enum('online', 'offline', 'busy', 'deleted'),
                        default='offline')
-    role = db.Column(db.Enum('admin', 'test_manager', 'test_member', 'test_executor'),
-                     default='test_member',
-                     comment='角色：admin=管理员，test_manager=测试经理，test_member=测试成员，test_executor=测试执行')
+    role = db.Column(db.Enum('admin', 'test_manager', 'module_owner', 'specialist',
+                             'test_member', 'test_executor'),
+                     default='module_owner',
+                     comment='角色：test_manager=测试经理，module_owner=模块负责人，specialist=专项测试')
     connection_mode = db.Column(db.Enum('sse', 'polling'),
-                                default='sse',
-                                comment='连接方式：sse=SSE长连接，polling=轮询')
+                                default='polling',
+                                comment='连接方式：polling=轮询（推荐），sse=SSE长连接（保留）')
     last_heartbeat = db.Column(db.DateTime, comment='最后心跳时间')
+    deleted_at = db.Column(db.DateTime, comment='软删除时间，非空表示已删除')
     soul_config = db.Column(db.Text, comment='SOUL.md 内容')
     workflow_config = db.Column(db.Text, comment='工作规范')
     report_schedule = db.Column(db.String(100), default='15:00,21:00',
@@ -113,7 +149,7 @@ class OpenClawInstance(db.Model):
                 'workflow_config': self.workflow_config,
                 'web_system_url': self.web_system_url,
                 'updated_at': str(self.updated_at) if self.updated_at else None,
-                'skills': [s.skill.to_dict() for s in self.skills if s.enabled],
+                'skills': [s.skill.to_dict() for s in self.skills if s.enabled and s.skill],
             })
         return data
 
@@ -138,7 +174,7 @@ class OpenClawInstance(db.Model):
 
 
 class Skill(db.Model):
-    """Skills 库（支持 OpenSpace 自动进化技能）"""
+    """Skills 库 — 每个 Skill 是一个「文档包」，存储在磁盘目录中"""
     __tablename__ = 'skills'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
@@ -151,11 +187,13 @@ class Skill(db.Model):
                          default='standard',
                          comment='分类：standard=标准预置，custom=手动创建，evolved=OpenSpace自动进化')
     trigger_phrase = db.Column(db.String(255), comment='触发短语')
-    template_content = db.Column(db.Text, comment='Skill 模板内容')
-    scope = db.Column(db.Enum('global', 'project', 'module'),
-                      default='global', comment='作用域：global=全局，project=按项目，module=按模块')
-    applicable_projects = db.Column(db.JSON, comment='适用项目ID列表（scope=project时）')
-    applicable_modules = db.Column(db.JSON, comment='适用模块名列表（scope=module时）')
+    template_content = db.Column(db.Text, comment='Skill 主文件内容（SKILL.md）')
+    pack_path = db.Column(db.String(500), comment='文档包磁盘路径，如 hub-store/skills/bootstrap-init')
+    files = db.Column(db.JSON, comment='文档包文件清单 [{name, description}]')
+    scope = db.Column(db.Enum('global', 'project', 'module', 'admin', 'scoped'),
+                      default='global', comment='作用域')
+    applicable_projects = db.Column(db.JSON, comment='适用项目ID列表')
+    applicable_modules = db.Column(db.JSON, comment='适用模块名列表')
     used_by_count = db.Column(db.Integer, default=0,
                               comment='使用中的 OpenClaw 数量')
     is_standard = db.Column(db.Boolean, default=False,
@@ -178,6 +216,9 @@ class Skill(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     created_by = db.Column(db.String(100), default='system',
                            comment='创建者/提交人')
+    review_status = db.Column(db.Enum('approved', 'pending', 'rejected'),
+                              default='approved',
+                              comment='评审状态：approved=已通过，pending=待评审，rejected=已废弃')
 
     def to_dict(self):
         data = {
@@ -188,6 +229,8 @@ class Skill(db.Model):
             'category': self.category,
             'trigger_phrase': self.trigger_phrase,
             'template_content': self.template_content,
+            'pack_path': self.pack_path,
+            'files': self.files or [],
             'scope': self.scope,
             'applicable_projects': self.applicable_projects or [],
             'applicable_modules': self.applicable_modules or [],
@@ -196,6 +239,7 @@ class Skill(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
             'created_by': self.created_by or 'system',
             'install_count': len([i for i in (self.installations or []) if i.enabled]),
+            'review_status': self.review_status or 'approved',
         }
         # 进化指标
         if self.category == 'evolved':
@@ -209,6 +253,40 @@ class Skill(db.Model):
                 'evolve_history': self.evolve_history or [],
             })
         return data
+
+
+class SkillFile(db.Model):
+    """Skill 文档包文件（内容存 MySQL）"""
+    __tablename__ = 'skill_files'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    skill_id = db.Column(db.Integer, db.ForeignKey('skills.id'), nullable=False)
+    filename = db.Column(db.String(200), nullable=False, comment='文件名，如 SOUL.md')
+    content = db.Column(db.Text, comment='文件内容')
+    file_type = db.Column(db.String(20), default='markdown',
+                          comment='文件类型：markdown/yaml/json/text')
+    description = db.Column(db.String(500), comment='文件说明')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    skill = db.relationship('Skill', backref=db.backref('file_entries', lazy='dynamic',
+                            cascade='all, delete-orphan'))
+
+    __table_args__ = (
+        db.UniqueConstraint('skill_id', 'filename', name='uq_skill_file'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'skill_id': self.skill_id,
+            'filename': self.filename,
+            'content': self.content,
+            'file_type': self.file_type,
+            'description': self.description,
+            'size': len(self.content) if self.content else 0,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
 
 
 class OpenClawSkill(db.Model):
@@ -370,19 +448,17 @@ class Project(db.Model):
 
 
 class Module(db.Model):
-    """模块表"""
+    """模块表（独立于项目）"""
     __tablename__ = 'modules'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
-                           nullable=False)
-    name = db.Column(db.String(100), nullable=False)
+                           nullable=True, comment='关联项目（可选，向后兼容）')
+    name = db.Column(db.String(100), nullable=False, unique=True)
     description = db.Column(db.Text)
+    category = db.Column(db.String(50), default='other',
+                         comment='模块分类：peripheral/core_gameplay/commercialization/client_performance/server_special/other')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    __table_args__ = (
-        db.UniqueConstraint('project_id', 'name', name='uq_project_module'),
-    )
 
     def to_dict(self):
         return {
@@ -390,6 +466,7 @@ class Module(db.Model):
             'project_id': self.project_id,
             'name': self.name,
             'description': self.description,
+            'category': self.category or 'other',
         }
 
 
@@ -527,9 +604,11 @@ class Rule(db.Model):
     category = db.Column(db.Enum('standard', 'custom', 'ai_generated'),
                         default='standard',
                         comment='分类：standard=标准预置，custom=手动创建，ai_generated=AI生成')
-    scope = db.Column(db.Enum('global', 'project', 'module'),
-                      default='global', comment='作用域：global=全局，project=按项目，module=按模块')
-    applicable_projects = db.Column(db.JSON, comment='适用项目ID列表（scope=project时）')
+    scope = db.Column(db.Enum('global', 'project', 'module', 'admin', 'scoped'),
+                      default='global', comment='作用域')
+    owner_claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
+                              nullable=True, comment='所属 OpenClaw ID')
+    applicable_projects = db.Column(db.JSON, comment='适用项目ID列表')
     applicable_modules = db.Column(db.JSON, comment='适用模块名列表（scope=module时）')
 
     # 生成的规范内容（Markdown格式，会被写入OpenClaw的配置文件）
@@ -546,6 +625,9 @@ class Rule(db.Model):
                           onupdate=datetime.utcnow)
     created_by = db.Column(db.String(100), default='system',
                            comment='创建者/提交人')
+    review_status = db.Column(db.Enum('approved', 'pending', 'rejected'),
+                              default='approved',
+                              comment='评审状态')
 
     def to_dict(self):
         install_count = self.openclaws.filter_by(enabled=True).count()
@@ -556,6 +638,7 @@ class Rule(db.Model):
             'description': self.description,
             'category': self.category,
             'scope': self.scope,
+            'owner_claw_id': self.owner_claw_id,
             'is_standard': self.is_standard,
             'applicable_projects': self.applicable_projects or [],
             'applicable_modules': self.applicable_modules or [],
@@ -565,6 +648,7 @@ class Rule(db.Model):
             'updated_at': str(self.updated_at) if self.updated_at else None,
             'created_by': self.created_by or 'system',
             'install_count': install_count,
+            'review_status': self.review_status or 'approved',
         }
 
 
@@ -586,6 +670,62 @@ class OpenClawRule(db.Model):
         db.UniqueConstraint('openclaw_id', 'rule_id',
                            name='uq_openclaw_rule'),
     )
+
+
+# ============== 标准包模型 ==============
+
+class StandardPack(db.Model):
+    """标准包 — 语义纯净的资源捆绑
+
+    pack_type='skill' 的包只包含 Skill ID 列表
+    pack_type='rule'  的包只包含 Rule ID 列表
+    不混合。下发时 Hub 负责把包内 id 同步到具体 claw 的安装状态。
+    """
+    __tablename__ = 'standard_packs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(100), nullable=False, unique=True,
+                     comment='包标识名')
+    display_name = db.Column(db.String(100), nullable=False,
+                             comment='显示名称')
+    description = db.Column(db.Text, comment='包描述')
+    pack_type = db.Column(db.Enum('skill', 'rule'), nullable=False,
+                          comment='包类型：skill=Skills 标准包，rule=Rules 标准包')
+    item_ids = db.Column(db.Text, default='[]',
+                         comment='包含的 Skill/Rule ID 列表，JSON数组')
+    is_active = db.Column(db.Boolean, default=True,
+                          comment='是否激活（激活的包在注册时自动下发）')
+    created_by = db.Column(db.String(100), default='system', comment='创建者')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           onupdate=datetime.utcnow)
+
+    def _get_item_ids(self):
+        import json
+        try:
+            return json.loads(self.item_ids) if self.item_ids else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def _set_item_ids(self, ids):
+        import json
+        self.item_ids = json.dumps(ids or [])
+
+    def to_dict(self):
+        ids = self._get_item_ids()
+        return {
+            'id': self.id,
+            'name': self.name,
+            'display_name': self.display_name,
+            'description': self.description,
+            'pack_type': self.pack_type,
+            'item_ids': ids,
+            'item_count': len(ids),
+            'is_active': self.is_active,
+            'created_by': self.created_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
 
 
 # ============== AI 用例库模型 ==============
@@ -682,6 +822,62 @@ class TestCase(db.Model):
         }
 
 
+# ============== 用例库版本快照 ==============
+
+class TestCaseSnapshot(db.Model):
+    """用例库版本快照 — 类 git commit
+
+    每次快照保存用例库的全量状态（所有用例的 JSON），支持：
+    - 手动创建快照（commit）
+    - 自动快照（批量操作/AI生成前后）
+    - 回滚到任意版本（checkout）
+    - 版本对比（diff）
+    """
+    __tablename__ = 'testcase_snapshots'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    library_id = db.Column(db.Integer, db.ForeignKey('test_case_libraries.id'),
+                           nullable=False, comment='所属用例库')
+    version = db.Column(db.Integer, nullable=False, comment='版本号（自增）')
+    tag = db.Column(db.String(100), comment='版本标签，如 v1.0、AI生成后、发版前')
+    message = db.Column(db.String(500), comment='提交说明（类似 git commit message）')
+    snapshot_type = db.Column(db.String(20), default='manual',
+                              comment='快照类型：manual=手动, auto=自动, ai=AI操作前后, rollback=回滚')
+    case_count = db.Column(db.Integer, default=0, comment='快照时的用例总数')
+    cases_data = db.Column(db.Text, comment='全量用例数据 JSON')
+    diff_summary = db.Column(db.Text, comment='与上一版本的差异摘要 JSON')
+    created_by = db.Column(db.String(100), default='system', comment='操作者')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    library = db.relationship('TestCaseLibrary', backref=db.backref(
+        'snapshots', lazy='dynamic', cascade='all, delete-orphan'))
+
+    __table_args__ = (
+        db.UniqueConstraint('library_id', 'version', name='uq_snapshot_version'),
+    )
+
+    def to_dict(self, with_data=False):
+        d = {
+            'id': self.id,
+            'library_id': self.library_id,
+            'version': self.version,
+            'tag': self.tag,
+            'message': self.message,
+            'snapshot_type': self.snapshot_type,
+            'case_count': self.case_count,
+            'diff_summary': self.diff_summary,
+            'created_by': self.created_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+        if with_data:
+            import json as _json
+            try:
+                d['cases_data'] = _json.loads(self.cases_data) if self.cases_data else []
+            except Exception:
+                d['cases_data'] = []
+        return d
+
+
 # ============== OpenClaw 消息模型 ==============
 
 class ClawMessage(db.Model):
@@ -752,5 +948,104 @@ class AuditLog(db.Model):
             'ip_address': self.ip_address,
             'detail': self.detail,
             'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+# ============== OpenClaw 待办系统 ==============
+
+class ClawTodo(db.Model):
+    """OpenClaw 待办定义表"""
+    __tablename__ = 'claw_todos'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    openclaw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
+                            nullable=False, comment='归属 OpenClaw')
+    title = db.Column(db.String(200), nullable=False, comment='待办标题')
+    description = db.Column(db.Text, comment='详细描述/执行要求')
+    schedule_type = db.Column(db.String(20), nullable=False, default='daily',
+                              comment='频率类型：daily=每天, weekly=每周, monthly=每月, once=一次性')
+    schedule_time = db.Column(db.String(10), comment='定时时间 HH:MM（为空则不限时间，当天完成即可）')
+    schedule_day = db.Column(db.Integer, comment='周几(1-7)/几号(1-31)，weekly/monthly 时使用')
+    priority = db.Column(db.String(5), default='P1', comment='优先级 P0/P1/P2')
+    enabled = db.Column(db.Boolean, default=True, comment='是否启用')
+    created_by = db.Column(db.String(100), default='system', comment='创建者')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    openclaw = db.relationship('OpenClawInstance', backref='todos')
+    logs = db.relationship('ClawTodoLog', backref='todo',
+                           lazy='dynamic', cascade='all, delete-orphan')
+
+    def to_dict(self, with_today_status=False):
+        data = {
+            'id': self.id,
+            'openclaw_id': self.openclaw_id,
+            'title': self.title,
+            'description': self.description,
+            'schedule_type': self.schedule_type,
+            'schedule_time': self.schedule_time,
+            'schedule_day': self.schedule_day,
+            'priority': self.priority,
+            'enabled': self.enabled,
+            'created_by': self.created_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+        if with_today_status:
+            from datetime import date as d
+            today_log = ClawTodoLog.query.filter_by(
+                todo_id=self.id, log_date=d.today()
+            ).first()
+            data['today_status'] = today_log.status if today_log else 'pending'
+            data['today_completed_at'] = (
+                str(today_log.completed_at) if today_log and today_log.completed_at else None
+            )
+        return data
+
+    def schedule_label(self):
+        """生成可读的调度描述"""
+        weekdays = {1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六', 7: '日'}
+        time_str = f' {self.schedule_time}' if self.schedule_time else ''
+        if self.schedule_type == 'daily':
+            return f'每天{time_str}' if time_str else '每天（不限时间）'
+        elif self.schedule_type == 'weekly':
+            day = weekdays.get(self.schedule_day, '?')
+            return f'每周{day}{time_str}'
+        elif self.schedule_type == 'monthly':
+            return f'每月{self.schedule_day}号{time_str}'
+        elif self.schedule_type == 'once':
+            return f'一次性{time_str}'
+        return self.schedule_type
+
+
+class ClawTodoLog(db.Model):
+    """OpenClaw 待办执行记录"""
+    __tablename__ = 'claw_todo_logs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    todo_id = db.Column(db.Integer, db.ForeignKey('claw_todos.id'),
+                        nullable=False)
+    openclaw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
+                            nullable=False)
+    log_date = db.Column(db.Date, nullable=False, comment='执行日期')
+    completed_at = db.Column(db.DateTime, comment='完成时间')
+    result_summary = db.Column(db.Text, comment='执行结果摘要')
+    status = db.Column(db.String(20), default='completed',
+                       comment='completed=已完成, skipped=跳过, overdue=逾期')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    openclaw = db.relationship('OpenClawInstance', backref='todo_logs')
+
+    __table_args__ = (
+        db.UniqueConstraint('todo_id', 'log_date', name='uq_todo_log_date'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'todo_id': self.todo_id,
+            'openclaw_id': self.openclaw_id,
+            'log_date': str(self.log_date) if self.log_date else None,
+            'completed_at': str(self.completed_at) if self.completed_at else None,
+            'result_summary': self.result_summary,
+            'status': self.status,
         }
 

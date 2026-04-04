@@ -6,10 +6,39 @@ Rules 工作规范 API
 import json
 import secrets
 from datetime import datetime
-from flask import request, jsonify
+from flask import request, jsonify, session
 from app import db
-from app.models import Rule, OpenClawRule, OpenClawInstance
+from app.models import Rule, OpenClawRule, OpenClawInstance, User
 from app.api import api_bp
+
+
+def _get_current_user():
+    """获取当前登录用户"""
+    uid = session.get('user_id')
+    if not uid:
+        return None
+    return User.query.get(uid)
+
+
+def _can_edit(user, resource):
+    """检查用户是否有权编辑资源"""
+    if not user:
+        return False
+    if user.role == 'super_admin':
+        return True
+    created_by = getattr(resource, 'created_by', None) or ''
+    if created_by == user.username:
+        return True
+    if user.role == 'admin':
+        managed = user.managed_projects or []
+        if not managed:
+            return False
+        res_projects = getattr(resource, 'applicable_projects', None) or []
+        if not res_projects:
+            return False
+        if set(res_projects) & set(managed):
+            return True
+    return False
 
 
 @api_bp.route('/rules', methods=['GET'])
@@ -22,8 +51,12 @@ def list_rules():
 
     query = Rule.query
 
+    # By default, hide admin-scoped rules unless explicitly requested
+    include_admin = request.args.get('include_admin', 'false').lower() == 'true'
     if scope:
         query = query.filter_by(scope=scope)
+    elif not include_admin:
+        query = query.filter(Rule.scope != 'admin')
     if category:
         query = query.filter_by(category=category)
     if search:
@@ -70,8 +103,12 @@ def create_rule():
         content_template=data.get('content_template', ''),
         created_by=data.get('created_by', 'system'),
     )
-    db.session.add(rule)
-    db.session.commit()
+    try:
+        db.session.add(rule)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'创建 Rule 失败: {str(e)}'}), 500
 
     return jsonify(rule.to_dict()), 201
 
@@ -87,6 +124,11 @@ def get_rule(rule_id):
 def update_rule(rule_id):
     """更新 Rule"""
     rule = Rule.query.get_or_404(rule_id)
+
+    user = _get_current_user()
+    if not _can_edit(user, rule):
+        return jsonify({'error': '无权修改此 Rule，只有超级管理员、管理员或提交人可编辑'}), 403
+
     data = request.get_json()
 
     updatable_fields = [
@@ -97,14 +139,36 @@ def update_rule(rule_id):
         if field in data:
             setattr(rule, field, data[field])
 
+    if 'is_standard' in data:
+        rule.is_standard = bool(data['is_standard'])
+
+    # review_status 只有 admin 以上可改
+    if 'review_status' in data and data['review_status'] in ('approved', 'pending', 'rejected'):
+        if user and user.role in ('super_admin', 'admin'):
+            rule.review_status = data['review_status']
+        else:
+            return jsonify({'error': '只有管理员可以修改审核状态'}), 403
+
     db.session.commit()
     return jsonify(rule.to_dict())
 
 
 @api_bp.route('/rules/<int:rule_id>', methods=['DELETE'])
 def delete_rule(rule_id):
-    """删除 Rule"""
+    """删除 Rule（管理员权限）
+
+    删除后，所有安装过此 Rule 的 OpenClaw 的关联记录会被级联删除，
+    OpenClaw 自行在下次同步时感知到 Rule 已不存在。
+    """
     rule = Rule.query.get_or_404(rule_id)
+
+    user = _get_current_user()
+    if not user or user.role not in ('super_admin', 'admin'):
+        return jsonify({'error': '只有管理员可以删除 Rule'}), 403
+
+    # 级联删除所有安装关联（OpenClawRule）
+    OpenClawRule.query.filter_by(rule_id=rule_id).delete()
+
     db.session.delete(rule)
     db.session.commit()
     return jsonify({'message': f'Rule "{rule.name}" 已删除'})
@@ -147,6 +211,12 @@ def update_claw_rules(claw_id):
 
     rule_ids = data['rule_ids']
 
+    # Validate: admin-scoped rules can only be installed by their owner
+    for rule_id in rule_ids:
+        rule = Rule.query.get(rule_id)
+        if rule and rule.scope == 'admin' and rule.owner_claw_id and rule.owner_claw_id != claw_id:
+            return jsonify({'error': f'Rule "{rule.display_name}" 为管理员专属，不能安装到其他 OpenClaw'}), 403
+
     # 删除旧的关联
     OpenClawRule.query.filter_by(openclaw_id=claw_id).delete()
 
@@ -161,6 +231,14 @@ def update_claw_rules(claw_id):
             )
             db.session.add(assoc)
 
+    # 通知 OpenClaw 同步配置
+    from app.models import ClawMessage
+    msg = ClawMessage(
+        claw_id=claw_id, sender_name='Hub',
+        content=f'[更新 Rules] 已关联 {len(rule_ids)} 条规则，请同步配置',
+        msg_type='sync_config', direction='to_claw', status='pending',
+    )
+    db.session.add(msg)
     db.session.commit()
 
     return jsonify({'message': 'Rules 关联已更新', 'rule_ids': rule_ids})

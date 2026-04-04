@@ -15,9 +15,10 @@
 {% block content %}
 <div class="tab-bar">
     <div class="tab-item active" data-tab="all" onclick="filterRules('all')">全部</div>
+    <div class="tab-item" data-tab="standard" onclick="filterRules('standard')">标准规范</div>
     <div class="tab-item" data-tab="global" onclick="filterRules('global')">通用</div>
-    <div class="tab-item" data-tab="project" onclick="filterRules('project')">按项目</div>
-    <div class="tab-item" data-tab="module" onclick="filterRules('module')">按模块</div>
+    <div class="tab-item" data-tab="admin" onclick="filterRules('admin')">管理员</div>
+    <div class="tab-item" data-tab="scoped" onclick="filterRules('scoped')">指定范围</div>
 </div>
 
 <div class="skill-grid" id="rules-grid">
@@ -26,7 +27,7 @@
 
 <!-- 新建/编辑 Rule 弹窗 -->
 <div class="modal-overlay" id="create-modal">
-    <div class="modal" style="max-width:600px">
+    <div class="modal" style="max-width:620px">
         <h2 class="modal-title" id="modal-title">新建 Rule</h2>
         <form id="create-form">
             <input type="hidden" name="edit_id" id="edit-id">
@@ -43,36 +44,44 @@
                 <textarea class="form-textarea" name="description" placeholder="这个 Rule 做什么..."></textarea>
             </div>
             <div class="form-group">
-                <label class="form-label">适用范围</label>
+                <label class="form-label">适用类型</label>
                 <div style="display:flex;gap:16px;margin-top:6px">
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
                         <input type="radio" name="scope" value="global" checked onchange="onScopeChange()">
-                        <span>通用</span>
+                        <span>通用（所有 OpenClaw）</span>
                     </label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                        <input type="radio" name="scope" value="project" onchange="onScopeChange()">
-                        <span>按项目</span>
+                        <input type="radio" name="scope" value="admin" onchange="onScopeChange()">
+                        <span>管理员专属</span>
                     </label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                        <input type="radio" name="scope" value="module" onchange="onScopeChange()">
-                        <span>按模块</span>
+                        <input type="radio" name="scope" value="scoped" onchange="onScopeChange()">
+                        <span>指定范围</span>
                     </label>
                 </div>
             </div>
-            <!-- 按项目：项目多选 -->
+            <!-- 指定范围：项目多选 -->
             <div class="form-group" id="scope-projects-group" style="display:none">
-                <label class="form-label">选择项目（可多选）</label>
-                <div id="project-checkboxes" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;max-height:160px;overflow-y:auto">
+                <label class="form-label">适用项目（可多选，不选则不限项目）</label>
+                <div id="project-checkboxes" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;max-height:120px;overflow-y:auto">
                 </div>
             </div>
-            <!-- 按模块：模块名输入 -->
+            <!-- 指定范围：模块多选 -->
             <div class="form-group" id="scope-modules-group" style="display:none">
-                <label class="form-label">适用模块名（多个用逗号分隔）</label>
-                <input class="form-input" name="applicable_modules_input" id="applicable-modules-input" placeholder="如：登录模块,支付模块">
+                <label class="form-label">适用模块（可多选，不选则不限模块）</label>
+                <div id="module-checkboxes" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;max-height:120px;overflow-y:auto">
+                </div>
+            </div>
+            <!-- 标准规范标记 -->
+            <div class="form-group">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" id="rule-is-standard">
+                    <span class="form-label" style="margin:0">标准规范（所有 OpenClaw 必须同步）</span>
+                </label>
             </div>
             <div class="form-group">
                 <label class="form-label">规范内容模板（Markdown）</label>
-                <textarea class="form-textarea" name="content_template" style="min-height:160px;font-family:monospace" placeholder="# 规范标题&#10;&#10;## 角色定义&#10;...&#10;&#10;## 工作准则&#10;..."></textarea>
+                <textarea class="form-textarea" name="content_template" style="min-height:360px;font-family:monospace" placeholder="# 规范标题&#10;&#10;## 角色定义&#10;..."></textarea>
             </div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
@@ -84,37 +93,24 @@
 
 <!-- AI 生成 Rule 弹窗 -->
 <div class="modal-overlay" id="ai-modal">
-    <div class="modal" style="max-width:600px">
+    <div class="modal" style="max-width:800px">
         <h2 class="modal-title">&#x1F916; AI 生成 Rule</h2>
         <form id="ai-generate-form">
             <div class="form-group">
                 <label class="form-label">需求描述 *</label>
-                <textarea class="form-textarea" name="description" id="ai-description" rows="4" placeholder="描述你需要的规则，如：测试用例评审规范，定义评审流程、评审要点、输出要求等"></textarea>
+                <textarea class="form-textarea" name="description" id="ai-description" style="min-height:140px" placeholder="描述你需要的规则，如：测试用例评审规范"></textarea>
             </div>
             <div class="form-group">
                 <label class="form-label">提交人</label>
                 <input class="form-input" id="ai-rule-author" placeholder="你的名字">
             </div>
-            <div class="form-group">
-                <label class="form-label">适用范围</label>
-                <div style="display:flex;gap:16px;margin-top:6px">
-                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                        <input type="radio" name="scope" value="global" checked>
-                        <span>通用</span>
-                    </label>
-                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                        <input type="radio" name="scope" value="project">
-                        <span>按项目</span>
-                    </label>
-                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                        <input type="radio" name="scope" value="module">
-                        <span>按模块</span>
-                    </label>
-                </div>
+            <div id="ai-loading-area" style="display:none;padding:20px 0;text-align:center">
+                <span class="spinner"></span>
+                <div style="margin-top:8px;font-size:0.85rem;color:var(--text-muted)">AI 正在生成规范内容，请稍候...</div>
             </div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeAIGenerateModal()">取消</button>
-                <button type="submit" class="btn btn-primary" style="background:#9b59b6">&#x1F916; 生成</button>
+                <button type="submit" class="btn btn-primary" id="ai-gen-rule-btn" style="background:#9b59b6">&#x1F916; 生成</button>
             </div>
         </form>
     </div>
@@ -138,40 +134,74 @@
 <script>
 let allRules = [];
 let allProjects = [];
+let allModules = [];
+
+function _canEditRule(r) {
+    if (!currentUser) return false;
+    if (currentUser.role === 'super_admin') return true;
+    if (r.created_by === currentUser.username) return true;
+    if (currentUser.role === 'admin') {
+        const managed = currentUser.managed_projects || [];
+        const resPrj = r.applicable_projects || [];
+        if (managed.length && resPrj.length && resPrj.some(p => managed.includes(p))) return true;
+    }
+    return false;
+}
 let currentFilter = 'all';
 
 async function loadRules() {
     try {
-        allRules = await API.request('GET', '/rules');
+        allRules = await API.request('GET', '/rules?include_admin=true');
         renderRules();
     } catch (err) {
         showToast('加载失败: ' + err.message, 'error');
     }
 }
 
-async function loadProjectsForScope() {
+async function loadProjectsAndModules() {
     try {
-        allProjects = await API.listProjects();
+        [allProjects, allModules] = await Promise.all([
+            API.listProjects(),
+            API.request('GET', '/modules')
+        ]);
         renderProjectCheckboxes();
+        renderModuleCheckboxes();
     } catch (err) {
-        console.error('加载项目失败', err);
+        console.error('加载项目/模块失败', err);
     }
 }
 
 function renderProjectCheckboxes() {
-    const container = $('#project-checkboxes');
-    container.innerHTML = allProjects.map(p => `
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.9rem">
+    const c = $('#project-checkboxes');
+    if (!c) return;
+    c.innerHTML = allProjects.map(p => `
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.88rem;padding:3px 8px;background:var(--bg-hover);border-radius:4px">
             <input type="checkbox" value="${p.id}" name="applicable_projects">
             <span>${p.name}</span>
         </label>
     `).join('');
 }
 
+function renderModuleCheckboxes() {
+    const c = $('#module-checkboxes');
+    if (!c) return;
+    const categories = {
+        'peripheral': '外围系统', 'core_gameplay': '核心单局', 'commercialization': '商业化',
+        'client_performance': '客户端性能', 'server_special': '服务器专项', 'other': '其他专项'
+    };
+    c.innerHTML = Object.entries(categories).map(([k, v]) => `
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.88rem;padding:3px 8px;background:var(--bg-hover);border-radius:4px">
+            <input type="checkbox" value="${k}" name="applicable_modules">
+            <span>${v}</span>
+        </label>
+    `).join('');
+}
+
 function onScopeChange() {
-    const scope = document.querySelector('input[name="scope"]:checked').value;
-    $('#scope-projects-group').style.display = scope === 'project' ? '' : 'none';
-    $('#scope-modules-group').style.display = scope === 'module' ? '' : 'none';
+    const scope = document.querySelector('#create-form input[name="scope"]:checked').value;
+    const showScoped = scope === 'scoped';
+    $('#scope-projects-group').style.display = showScoped ? '' : 'none';
+    $('#scope-modules-group').style.display = showScoped ? '' : 'none';
 }
 
 function filterRules(tab) {
@@ -182,107 +212,123 @@ function filterRules(tab) {
 }
 
 function scopeTag(r) {
-    if (r.scope === 'global') return '<span class="tag tag-accent">通用</span>';
-    if (r.scope === 'project') {
-        const names = (r.applicable_projects || []).map(pid => {
+    const catLabels = {'peripheral':'外围系统','core_gameplay':'核心单局','commercialization':'商业化','client_performance':'客户端性能','server_special':'服务器专项','other':'其他专项'};
+    let tags = '';
+    if (r.is_standard) tags += '<span class="tag" style="background:#e74c3c;color:#fff">标准</span>';
+    if (r.scope === 'global') tags += '<span class="tag tag-accent">通用</span>';
+    else if (r.scope === 'admin') tags += '<span class="tag" style="background:#e74c3c;color:#fff">管理员</span>';
+    else {
+        const pNames = (r.applicable_projects || []).map(pid => {
             const p = allProjects.find(x => x.id === pid);
             return p ? p.name : pid;
-        }).join(', ');
-        return `<span class="tag tag-blue">项目</span>${names ? `<span style="font-size:0.82rem;margin-left:4px">${names}</span>` : ''}`;
+        });
+        const mNames = (r.applicable_modules || []).map(k => catLabels[k] || k);
+        if (pNames.length) tags += `<span class="tag tag-blue">项目: ${pNames.join(', ')}</span>`;
+        if (mNames.length) tags += `<span class="tag" style="background:#6c5ce7;color:#fff">模块: ${mNames.join(', ')}</span>`;
+        if (!pNames.length && !mNames.length) tags += '<span class="tag tag-accent">通用</span>';
     }
-    if (r.scope === 'module') {
-        const names = (r.applicable_modules || []).join(', ');
-        return `<span class="tag" style="background:#6c5ce7;color:#fff">模块</span>${names ? `<span style="font-size:0.82rem;margin-left:4px">${names}</span>` : ''}`;
-    }
-    return '';
+    return tags;
 }
 
 function categoryTag(r) {
-    const map = {
-        standard: ['tag-accent', '标准'],
-        custom: ['tag-green', '自定义'],
-        ai_generated: ['tag-orange', 'AI生成'],
-    };
+    const map = { standard: ['tag-accent', '标准'], custom: ['tag-green', '自定义'], ai_generated: ['tag-orange', 'AI生成'] };
     const [cls, label] = map[r.category] || ['tag-blue', r.category];
     return `<span class="tag ${cls}">${label}</span>`;
 }
 
 function renderRules() {
-    const filtered = currentFilter === 'all'
-        ? allRules
-        : allRules.filter(r => r.scope === currentFilter);
+    let filtered = allRules;
+    if (currentFilter === 'standard') filtered = filtered.filter(r => r.is_standard);
+    else if (currentFilter === 'global') filtered = filtered.filter(r => r.scope === 'global');
+    else if (currentFilter === 'admin') filtered = filtered.filter(r => r.scope === 'admin');
+    else if (currentFilter === 'scoped') filtered = filtered.filter(r => r.scope === 'scoped' || r.scope === 'project' || r.scope === 'module');
 
     const grid = $('#rules-grid');
-
     if (filtered.length === 0) {
-        grid.innerHTML = `
-            <div class="empty-state" style="grid-column:1/-1">
-                <div class="empty-state-icon">&#x1F4CB;</div>
-                <div class="empty-state-text">暂无 Rules<br><span style="font-size:0.82rem;color:var(--text-muted)">点击"新建"或"AI生成"创建工作规范</span></div>
-            </div>`;
+        grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><div class="empty-state-icon">&#x1F4CB;</div><div class="empty-state-text">暂无 Rules</div></div>`;
         return;
     }
 
     grid.innerHTML = filtered.map(r => `
-        <div class="skill-card">
+        <div class="skill-card" onclick="previewRule(${r.id})">
             <div class="skill-card-header">
                 <span class="skill-name">${r.display_name}</span>
                 ${categoryTag(r)}
-                ${scopeTag(r)}
             </div>
+            <div style="margin-top:4px">${scopeTag(r)}</div>
             <div class="skill-desc">${r.description || ''}</div>
             <div style="margin-top:8px;font-size:0.78rem;color:var(--text-muted);display:flex;justify-content:space-between;align-items:center">
-                <span>提交: ${r.created_by || 'system'} · ${r.created_at ? timeAgo(r.created_at) : '未知'}</span>
-                <span>${r.install_count || 0} 个 OpenClaw 使用</span>
+                <span>${r.created_by || 'system'} · ${r.created_at ? timeAgo(r.created_at) : ''}</span>
+                <span>${r.install_count || 0} 个使用</span>
             </div>
             <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
                 <span style="font-size:0.78rem;color:var(--text-muted)">${r.name}</span>
                 <div style="display:flex;gap:8px">
-                    <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="previewRule(${r.id})">预览</button>
-                    <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="editRule(${r.id})">编辑</button>
-                    <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem;color:var(--red)" onclick="deleteRule(${r.id})">删除</button>
+                    ${_canEditRule(r) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="event.stopPropagation();editRule(${r.id})">编辑</button>
+                    <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem;color:var(--red)" onclick="event.stopPropagation();deleteRule(${r.id})">删除</button>` : ''}
                 </div>
             </div>
         </div>
     `).join('');
 }
 
-// 新建/编辑
+// 新建
 async function openCreateModal() {
-    await loadProjectsForScope();
-    onScopeChange();
+    await loadProjectsAndModules();
     $('#create-form').reset();
     $('#edit-id').value = '';
     $('#modal-title').textContent = '新建 Rule';
     $('#rule-name').disabled = false;
+    $('#rule-is-standard').checked = false;
+    onScopeChange();
     $('#create-modal').classList.add('active');
 }
 
 function closeCreateModal() { $('#create-modal').classList.remove('active'); }
 
-function editRule(id) {
+// 编辑
+async function editRule(id) {
     const rule = allRules.find(r => r.id === id);
     if (!rule) return;
+    await loadProjectsAndModules();
 
     $('#edit-id').value = id;
     $('#modal-title').textContent = '编辑 Rule';
     $('#rule-name').value = rule.name;
-    $('#rule-name').disabled = true;  // 不允许修改标识名
+    $('#rule-name').disabled = true;
     $('#rule-display-name').value = rule.display_name;
-    $('#rule-name').closest('.form-group').querySelector('input').value = rule.name;
-    $('#create-form').description && ($('#create-form').description.value = rule.description || '');
-    // 设置 scope
-    document.querySelectorAll('input[name="scope"]').forEach(el => {
-        el.checked = el.value === rule.scope;
+    $('#rule-is-standard').checked = !!rule.is_standard;
+
+    const descEl = $('#create-form').querySelector('textarea[name="description"]');
+    if (descEl) descEl.value = rule.description || '';
+    const contentEl = $('#create-form').querySelector('textarea[name="content_template"]');
+    if (contentEl) contentEl.value = rule.content_template || rule.description || '';
+
+    // scope 映射
+    let scopeVal = rule.scope;
+    if (scopeVal === 'project' || scopeVal === 'module') scopeVal = 'scoped';
+    document.querySelectorAll('#create-form input[name="scope"]').forEach(el => {
+        el.checked = el.value === scopeVal;
     });
     onScopeChange();
+
+    // 回填项目
+    if (rule.applicable_projects) {
+        document.querySelectorAll('input[name="applicable_projects"]').forEach(el => {
+            el.checked = rule.applicable_projects.includes(parseInt(el.value));
+        });
+    }
+    // 回填模块
+    if (rule.applicable_modules) {
+        document.querySelectorAll('input[name="applicable_modules"]').forEach(el => {
+            el.checked = rule.applicable_modules.includes(el.value);
+        });
+    }
 
     $('#create-modal').classList.add('active');
 }
 
-$('#create-modal').addEventListener('click', e => {
-    if (e.target === $('#create-modal')) closeCreateModal();
-});
+$('#create-modal').addEventListener('click', e => { if (e.target === $('#create-modal')) closeCreateModal(); });
 
 $('#create-form').addEventListener('submit', async e => {
     e.preventDefault();
@@ -290,24 +336,21 @@ $('#create-form').addEventListener('submit', async e => {
     const data = Object.fromEntries(form);
     const editId = $('#edit-id').value;
 
-    // 处理适用范围
-    if (data.scope === 'project') {
-        const checked = [...document.querySelectorAll('input[name="applicable_projects"]:checked')]
-            .map(el => parseInt(el.value));
-        data.applicable_projects = checked;
-        delete data.applicable_modules_input;
-    } else if (data.scope === 'module') {
-        const modules = data.applicable_modules_input
-            ? data.applicable_modules_input.split(',').map(s => s.trim()).filter(Boolean)
-            : [];
-        data.applicable_modules = modules;
-        delete data.applicable_projects;
-        delete data.applicable_modules_input;
+    // scope 处理
+    if (data.scope === 'scoped') {
+        const projects = [...document.querySelectorAll('#create-form input[name="applicable_projects"]:checked')].map(el => parseInt(el.value));
+        const modules = [...document.querySelectorAll('#create-form input[name="applicable_modules"]:checked')].map(el => el.value);
+        data.applicable_projects = projects.length ? projects : null;
+        data.applicable_modules = modules.length ? modules : null;
+        // 用 scoped 作为 scope 值存储（后端需要支持）
+        data.scope = 'scoped';
     } else {
-        delete data.applicable_projects;
-        delete data.applicable_modules;
-        delete data.applicable_modules_input;
+        data.applicable_projects = null;
+        data.applicable_modules = null;
     }
+
+    data.is_standard = $('#rule-is-standard').checked;
+    delete data.edit_id;
 
     try {
         if (editId) {
@@ -325,10 +368,23 @@ $('#create-form').addEventListener('submit', async e => {
 });
 
 async function deleteRule(id) {
-    if (!confirm('确定要删除这个 Rule 吗？')) return;
+    const rule = allRules.find(r => r.id === id);
+    const name = rule ? rule.display_name : 'Rule';
+    const usedBy = rule ? (rule.install_count || 0) : 0;
+
+    if (!await customConfirm(
+        `确定要删除规范「${name}」吗？` +
+        (usedBy > 0 ? `<br><br><span style="color:var(--red)">⚠️ 当前有 ${usedBy} 个 OpenClaw 正在使用此规范</span>` : '') +
+        `<br><br><span style="font-size:0.82rem;color:var(--text-muted)">` +
+        `删除后系统会通知相关 OpenClaw，但不保证能完全清除已同步到本地的副本。<br>` +
+        `建议删除前先与对应的 OpenClaw 确认。</span>`
+    )) return;
+
+    if (!await customConfirm('⚠️ 二次确认：此操作不可撤销，确定删除？')) return;
+
     try {
         await API.request('DELETE', `/rules/${id}`);
-        showToast('Rule 已删除', 'success');
+        showToast('Rule 已删除，已通知相关 OpenClaw 同步', 'success');
         loadRules();
     } catch (err) {
         showToast('删除失败: ' + err.message, 'error');
@@ -341,69 +397,40 @@ function previewRule(id) {
     $('#preview-content').textContent = rule.content_template || '(无内容)';
     $('#preview-modal').classList.add('active');
 }
-
 function closePreviewModal() { $('#preview-modal').classList.remove('active'); }
-
-$('#preview-modal').addEventListener('click', e => {
-    if (e.target === $('#preview-modal')) closePreviewModal();
-});
+$('#preview-modal').addEventListener('click', e => { if (e.target === $('#preview-modal')) closePreviewModal(); });
 
 // AI 生成
-function openAIGenerateModal() {
-    $('#ai-generate-form').reset();
-    $('#ai-modal').classList.add('active');
-}
-
-function closeAIGenerateModal() { $('#ai-modal').classList.remove('active'); }
-
-$('#ai-modal').addEventListener('click', e => {
-    if (e.target === $('#ai-modal')) closeAIGenerateModal();
-});
+let aiGenerating = false;
+function openAIGenerateModal() { if (!aiGenerating) $('#ai-generate-form').reset(); $('#ai-modal').classList.add('active'); }
+function closeAIGenerateModal() { if (aiGenerating) return; $('#ai-modal').classList.remove('active'); }
+$('#ai-modal').addEventListener('click', e => { if (e.target === $('#ai-modal') && !aiGenerating) closeAIGenerateModal(); });
 
 $('#ai-generate-form').addEventListener('submit', async e => {
     e.preventDefault();
     const desc = $('#ai-description').value.trim();
-    const scope = document.querySelector('#ai-generate-form input[name="scope"]:checked').value;
     const author = $('#ai-rule-author').value.trim() || 'AI';
-
-    if (!desc) {
-        showToast('请输入需求描述', 'error');
-        return;
-    }
-
-    const btn = e.target.querySelector('button[type="submit"]');
-    btn.disabled = true;
-    btn.textContent = '生成中...';
-
+    if (!desc) { showToast('请输入需求描述', 'error'); return; }
+    const btn = $('#ai-gen-rule-btn');
+    aiGenerating = true;
+    btn.disabled = true; btn.textContent = '生成中...';
+    $('#ai-loading-area').style.display = 'block';
     try {
         const resp = await API.request('POST', '/system/llm/generate', { type: 'rule', description: desc });
         if (resp.result) {
-            // 直接创建 Rule
-            const ruleData = {
-                name: resp.result.name || ('ai-rule-' + Date.now()),
-                display_name: resp.result.display_name || desc.substring(0, 30),
-                description: resp.result.description || desc,
-                content_template: resp.result.content_template || '',
-                category: 'ai_generated',
-                scope: scope,
-                created_by: author,
-            };
-            await API.request('POST', '/rules', ruleData);
-            showToast('Rule 生成并提交成功！', 'success');
+            let ruleName = resp.result.name || ('ai-rule-' + Date.now());
+            ruleName = ruleName.replace(/[^a-zA-Z0-9_\-]/g, '_').substring(0, 50) + '-' + Date.now().toString(36);
+            await API.request('POST', '/rules', {
+                name: ruleName, display_name: resp.result.display_name || desc.substring(0, 30),
+                description: resp.result.description || desc, content_template: resp.result.content_template || '',
+                category: 'ai_generated', scope: 'global', created_by: author,
+            });
+            showToast('Rule 生成成功！', 'success');
             closeAIGenerateModal();
-            // 预览生成的内容
-            $('#preview-content').textContent = ruleData.content_template || '(无内容)';
-            $('#preview-modal').classList.add('active');
             loadRules();
-        } else {
-            showToast(resp.error || 'AI 输出格式不标准', 'error');
-        }
-    } catch (err) {
-        showToast('生成失败: ' + err.message, 'error');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '🤖 生成';
-    }
+        } else { showToast(resp.error || 'AI 输出格式不标准', 'error'); }
+    } catch (err) { showToast('生成失败: ' + err.message, 'error'); }
+    finally { aiGenerating = false; btn.disabled = false; btn.textContent = '🤖 生成'; $('#ai-loading-area').style.display = 'none'; }
 });
 
 loadRules();

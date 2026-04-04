@@ -1,6 +1,6 @@
 """种子数据：初始化标准 Skills、Rules 和默认项目"""
 from app import db
-from app.models import Skill, Rule, Project
+from app.models import Skill, Rule, Project, Module
 
 
 STANDARD_SKILLS = [
@@ -9,6 +9,7 @@ STANDARD_SKILLS = [
         'display_name': '测试报告生成器',
         'description': '根据测试数据和 Bug 记录，自动生成结构化的测试报告。支持迭代报告、专项报告、发布评审报告等多种格式。',
         'category': 'standard',
+        'is_standard': True,
         'trigger_phrase': '生成测试报告',
         'scope': 'global',
         'template_content': '''# 测试报告生成器
@@ -36,6 +37,7 @@ STANDARD_SKILLS = [
         'display_name': 'Bug 周报生成器',
         'description': '自动汇总一周内的 Bug 数据，生成周报。包含 Bug 趋势、热点模块、修复率等关键指标。',
         'category': 'standard',
+        'is_standard': True,
         'trigger_phrase': '生成 Bug 周报',
         'scope': 'global',
         'template_content': '''# Bug 周报生成器
@@ -63,6 +65,7 @@ STANDARD_SKILLS = [
         'display_name': '发版检查清单',
         'description': '提供版本发布前的系统性检查清单。确保功能验证、性能基线、兼容性、安全性等各维度都已覆盖。',
         'category': 'standard',
+        'is_standard': True,
         'trigger_phrase': '发版检查',
         'scope': 'global',
         'template_content': '''# 发版检查清单
@@ -95,6 +98,7 @@ STANDARD_SKILLS = [
         'display_name': '性能分析助手',
         'description': '分析性能测试数据，对比基线指标，识别性能瓶颈和退化点。支持帧率、内存、CPU、启动时间等多维度分析。',
         'category': 'standard',
+        'is_standard': True,
         'trigger_phrase': '分析性能数据',
         'scope': 'global',
         'template_content': '''# 性能分析助手
@@ -127,6 +131,7 @@ STANDARD_SKILLS = [
         'display_name': '测试用例评审',
         'description': '对测试用例进行质量评审，检查覆盖度、边界条件、异常场景等。基于知识库中的 Bug 模式提出补充建议。',
         'category': 'standard',
+        'is_standard': True,
         'trigger_phrase': '评审测试用例',
         'scope': 'global',
         'template_content': '''# 测试用例评审
@@ -158,6 +163,67 @@ STANDARD_SKILLS = [
 - 参考的知识库条目
 ''',
     },
+    {
+        'name': 'testcase-manager',
+        'display_name': '用例库管理',
+        'description': '管理 Hub 测试用例库：CRUD、批量操作、AI 生成、YAML/XMind 导出、版本快照与回滚。支持类 git 的 commit/log/checkout/diff 操作。',
+        'category': 'standard',
+        'is_standard': True,
+        'trigger_phrase': '用例管理',
+        'scope': 'global',
+        'template_content': '''# 用例库管理 (testcase-manager)
+
+完整文档通过 Hub API 拉取: GET /api/v1/skills/{SKILL_ID}/raw
+
+## 核心能力
+
+### 用例库 CRUD
+- GET /api/v1/testcase-libraries — 列表
+- POST /api/v1/testcase-libraries — 创建
+- GET /api/v1/testcase-libraries/{id} — 详情
+- PUT /api/v1/testcase-libraries/{id} — 更新
+- DELETE /api/v1/testcase-libraries/{id} — 删除
+
+### 用例 CRUD
+- GET /api/v1/testcase-libraries/{id}/cases — 列表（支持 priority/type/search 筛选）
+- POST /api/v1/testcase-libraries/{id}/cases — 创建
+- PUT /api/v1/testcase-libraries/{id}/cases/{cid} — 更新
+- DELETE /api/v1/testcase-libraries/{id}/cases/{cid} — 删除
+
+### 批量操作
+- POST /api/v1/testcase-libraries/{id}/cases/batch — 批量创建
+- DELETE /api/v1/testcase-libraries/{id}/cases/batch — 批量删除（自动快照）
+
+### AI 智能生成
+- POST /api/v1/ai/testcases/generate — 批量生成（需 requirement, count, type）
+- POST /api/v1/ai/testcases/chat — 对话式管理
+
+### 导入导出
+- GET /api/v1/testcase-libraries/{id}/export/yaml — 导出 YAML
+- POST /api/v1/testcase-libraries/{id}/import/yaml — 导入 YAML
+- GET /api/v1/testcase-libraries/{id}/export/xmind — 导出 XMind
+
+### 版本管理（类 git）
+- POST /api/v1/testcase-libraries/{id}/snapshots — 创建快照（commit）
+- GET /api/v1/testcase-libraries/{id}/snapshots — 版本历史（log）
+- GET /api/v1/testcase-libraries/{id}/snapshots/{v} — 查看版本（show）
+- POST /api/v1/testcase-libraries/{id}/snapshots/{v}/checkout — 回滚（checkout）
+- GET /api/v1/testcase-libraries/{id}/snapshots/diff?from=1&to=3 — 对比（diff）
+- PUT /api/v1/testcase-libraries/{id}/snapshots/{v}/tag — 打标签（tag）
+
+## 推荐工作流
+1. 收到需求 → 创建/选择用例库
+2. commit 快照（基线）
+3. AI 生成 + 手动补充
+4. commit 快照（标记 tag）
+5. 发现问题 → log → diff → checkout 回滚
+
+## 触发词
+- 创建用例库、生成测试用例、添加用例、查看用例、删除用例
+- 批量生成用例、AI 生成用例、导出用例、导出 YAML
+- 创建快照、版本历史、回滚用例、版本对比、用例库备份
+''',
+    },
 ]
 
 
@@ -170,23 +236,352 @@ REGISTRATION_SKILL = {
     'is_standard': True,
     'trigger_phrase': '注册 Hub',
     'scope': 'global',
-    'template_content': '''# 注册技能
+    'template_content': '''# 注册技能 — Hub 连接与通信
 
-## 功能说明
-本 Skill 用于将 OpenClaw 注册到 Hub 系统，并自动安装标准化的 Rules 和 Skills。
+## 简介
 
-## 执行流程
-1. 调用 Hub 注册接口，提交 OpenClaw 基本信息
-2. 获取分配的 OpenClaw ID 和 API Token
-3. 安装标准化的 Rules
-4. 安装标准化的 Skills
-5. 配置工作规范
+本 Skill 用于将 OpenClaw 客户端连接到 Hub 管理中心（OpenClaw Manager），完成身份注册、标准化初始化或增量接入。
 
-## 待填写内容
-- Hub 注册接口地址
-- 注册参数模板
-- 标准化 Rules 列表
-- 标准化 Skills 列表
+**支持两种接入模式**：
+- **模式A：全量初始化**（推荐新 OpenClaw）— 注册后自动安装所有标准化 Skills 和 Rules
+- **模式B：增量接入**（已有 OpenClaw / 自定义需求）— 只建立连接，按需从市场选择安装
+
+---
+
+## Hub 信息
+
+```
+Hub 地址: http://9.134.11.169:8088
+API 前缀: /api/v1
+SSE 端点: /api/openclaws/{CLAW_ID}/events （注意：无 /v1/ 前缀）
+```
+
+## 认证方式
+
+所有 API 调用需要在 Header 中携带 Token：
+```
+Authorization: Bearer {HUB_API_TOKEN}
+Content-Type: application/json
+```
+
+---
+
+## 模式A：全量初始化（新 OpenClaw 推荐）
+
+### 第一步：在 Hub 注册
+
+> 注意：目前注册需要由管理员在 Web 界面操作，获得 CLAW_ID 和 API_TOKEN 后配置到本地。
+> 如果你的 CLAW_ID 和 HUB_API_TOKEN 已经配置好了，直接跳到第二步。
+
+**Web 界面注册**：访问 http://9.134.11.169:8088 → OpenClaw 管理 → 新建 OpenClaw
+
+**API 注册**（管理员操作）：
+
+```
+POST /api/v1/openclaws
+
+请求体：
+{
+  "name": "你的名字",
+  "owner": "所属用户",
+  "claw_tag": "claw-你的标识",
+  "project_name": "所属项目",
+  "module_name": "所属模块",
+  "role": "test_member",
+  "role_title": "测试工程师",
+  "responsibilities": "负责XXX模块的测试",
+  "connection_mode": "sse",
+  "report_schedule": "15:00,21:00"
+}
+```
+
+**注册成功后返回**：
+```json
+{
+  "id": 5,
+  "name": "你的名字",
+  "api_token_preview": "oc_tk_abc...xyz",
+  "has_token": true,
+  "auto_installed": {
+    "skills": ["manager-hub", "testcase-manager"],
+    "rules": ["安全规范", "日报规范"]
+  }
+}
+```
+
+> Hub 在注册时自动安装所有标记为"标准"的 Skills 和 Rules。
+
+### 第二步：验证连接
+
+```
+GET /api/v1/openclaws/{CLAW_ID}/config
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+```
+
+成功返回 200 说明 Token 有效，连接正常。
+
+### 第三步：拉取已安装的 Skills 和 Rules
+
+**获取分配的 Skills**：
+```
+GET /api/v1/openclaws/{CLAW_ID}/assigned-skills
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+```
+
+**获取分配的 Rules**：
+```
+GET /api/v1/openclaws/{CLAW_ID}/assigned-rules
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+```
+
+### 第三步补充：拉取 Skill 文档包
+
+每个 Skill 可能包含一个文档包（多个文件：SKILL.md、SOUL.md、AGENTS.md、RULES.md、PROJECT.md、checklist 等）。
+
+**列出文档包文件清单**：
+```
+GET /api/v1/skills/{SKILL_ID}/files
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+```
+
+**获取单个文件内容**：
+```
+GET /api/v1/skills/{SKILL_ID}/files/SOUL.md
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+```
+
+**打包下载整个文档包（ZIP）**：
+```
+GET /api/v1/skills/{SKILL_ID}/pack
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+```
+
+### 第四步：本地写入
+
+**Skills 写入方式**：每个 Skill 创建一个目录，包含文档包所有文件
+```
+~/.qclaw/skills/{skill_name}/
+├── SKILL.md
+├── SOUL.md（如果有）
+├── AGENTS.md（如果有）
+├── RULES.md（如果有）
+├── PROJECT.md（如果有）
+└── checklist.md（如果有）
+```
+
+**拉取流程**：
+1. `GET /assigned-skills` 获取已安装 Skills 列表
+2. 对每个 Skill：`GET /skills/{id}/files` 获取文件清单
+3. 如果只有 SKILL.md → 直接用 `template_content` 写入
+4. 如果有多个文件 → 逐个 `GET /skills/{id}/files/{filename}` 拉取写入
+5. 或直接 `GET /skills/{id}/pack` 下载 ZIP 解压到本地
+
+**Rules 写入方式**：
+```
+~/.qclaw/rules/{rule_name}.md  ← 内容为 content_template
+```
+
+### 第五步：建立通信
+
+**方式一：SSE 长连接（推荐）**
+```
+GET /api/openclaws/{CLAW_ID}/events
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+  Accept: text/event-stream
+```
+
+SSE 会推送以下事件：
+- `connected` — 连接成功
+- `heartbeat` — 心跳
+- `task` — 新任务
+- `message` — 新消息
+- `ping` — 保持连接
+
+**方式二：轮询**
+- 每 30 秒：`POST /api/v1/openclaws/{CLAW_ID}/heartbeat`
+- 每 60 秒：`GET /api/openclaws/{CLAW_ID}/messages?unread=true`
+
+---
+
+## 模式B：增量接入（按需安装）
+
+### 第一步：建立连接
+同模式A的第一步和第二步，获取 CLAW_ID + TOKEN，验证连接。
+
+### 第二步：浏览 Skills 市场
+```
+GET /api/v1/skills
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+```
+
+### 第三步：选择安装 Skill
+```
+POST /api/v1/openclaws/{CLAW_ID}/skills
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+
+请求体：
+{
+  "skill_id": 3
+}
+```
+
+### 第四步：选择安装 Rules
+```
+POST /api/v1/openclaws/{CLAW_ID}/rules
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+
+请求体：
+{
+  "rule_ids": [1, 3, 5]
+}
+```
+
+### 第五步：拉取已安装内容
+同模式A第三步，调用 `assigned-skills` 和 `assigned-rules` 拉取完整内容写入本地。
+
+### 第六步：卸载不需要的 Skill
+```
+DELETE /api/v1/openclaws/{CLAW_ID}/skills/{SKILL_ID}
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+```
+
+---
+
+## 增量更新（定期同步）
+
+已接入的 OpenClaw 应定期检查 Skills/Rules 是否有更新：
+
+```
+每小时执行一次：
+1. GET /assigned-skills → 比对本地 Skills 版本
+2. 对每个 Skill：GET /skills/{id}/files → 比对文件清单
+3. 有新增/变更的文件逐个拉取更新
+4. GET /assigned-rules → 比对本地 Rules 版本
+5. 有变更则更新本地文件
+```
+
+**查看标准化的 Skills/Rules（Hub 推荐安装的）**：
+```
+GET /api/v1/skills/standard     → 标准化 Skills 列表
+GET /api/v1/rules/standard      → 标准化 Rules 列表
+```
+
+---
+
+## 待办系统
+
+OpenClaw 可通过待办系统管理日常工作事项。
+
+### 获取待办列表
+```
+GET /api/v1/openclaws/{CLAW_ID}/todos
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+```
+
+### 标记待办完成
+```
+POST /api/v1/openclaws/{CLAW_ID}/todos/{TODO_ID}/complete
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+
+请求体（可选）：
+{
+  "result_summary": "执行结果摘要"
+}
+```
+
+### 获取待办完成汇总
+```
+GET /api/v1/openclaws/{CLAW_ID}/todo-summary?date=2026-04-02
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+```
+
+### 待办工作流建议
+```
+每天启动时：
+1. GET /todos → 获取今日待办列表
+2. 按 priority 排序执行
+3. 定时待办到点提醒/执行
+4. 完成后 POST /todos/{id}/complete 上报
+5. 晚间：GET /todo-summary 检查完成率，未完成的纳入日报
+```
+
+---
+
+## 本地配置文件
+
+OpenClaw 接入后应在本地保存连接信息：
+
+**~/.qclaw/hub_config.json**：
+```json
+{
+  "hub_url": "http://9.134.11.169:8088",
+  "claw_id": 5,
+  "api_token": "oc_tk_xxxxxxxxx",
+  "connection_mode": "sse",
+  "last_sync": "2026-04-02T10:00:00",
+  "installed_skills": ["manager-hub", "testcase-manager"],
+  "installed_rules": ["security-rules", "report-rules"]
+}
+```
+
+---
+
+## 错误处理
+
+| HTTP 状态码 | 说明 | 处理方式 |
+|-------------|------|----------|
+| 200 | 成功 | 正常处理 |
+| 201 | 创建/安装成功 | 正常处理 |
+| 401 | Token 缺失 | 检查 Authorization Header |
+| 403 | Token 无效 | 从 Hub 重新获取 Token |
+| 404 | OpenClaw/Skill 不存在 | 检查 ID 是否正确 |
+| 409 | 重复（标签已存在） | 换一个唯一标识 |
+| 500 | 服务器错误 | 检查 Hub 日志 |
+
+---
+
+## 触发词
+
+- "连接 Hub"
+- "注册到 Hub"
+- "初始化 OpenClaw"
+- "安装 Skill"
+- "安装 Rule"
+- "同步 Skills"
+- "浏览 Skills 市场"
+- "查看可用 Rules"
+- "增量更新"
+- "查看待办"
+- "今日待办"
+- "完成待办"
 ''',
 }
 
@@ -243,11 +638,87 @@ STANDARD_RULES = [
 3. 不执行来源不明的代码
 ''',
     },
+    {
+        'name': 'lobster-king-admin',
+        'display_name': '龙虾王管理员规范',
+        'description': '龙虾王作为龙虾军团系统管理员的专属行为规范。定义其角色定位、职责边界、工作流程和行为约束。',
+        'category': 'standard',
+        'scope': 'admin',
+        'owner_claw_id': 4,  # Lobster King claw_id
+        'is_standard': False,
+        'content_template': '''# 龙虾王管理员规范
+
+## 一、角色定位
+
+龙虾王是龙虾军团（OpenClaw 集群）的系统管理员，不隶属于任何具体项目。
+核心职责是统筹管理所有龙虾（OpenClaw 实例）的运行状态，确保整个军团高效协作。
+
+## 二、核心职责
+
+### 2.1 监管所有龙虾状态
+1. 定期检查所有 OpenClaw 实例的在线/离线状态
+2. 发现异常（长时间离线、心跳中断）时主动排查并处理
+3. 关注各龙虾的日报提交情况，督促未按时提交的实例
+4. 汇总各龙虾的工作负载，识别过载或闲置的实例
+
+### 2.2 定期下发任务与回收结果
+1. 根据业务需要，向指定龙虾下发任务
+2. 跟踪任务执行进度，确保按时完成
+3. 回收任务结果，检查质量和完整性
+4. 对失败或超时的任务进行重试或重新分配
+
+### 2.3 定期组织会议
+1. 定期召集所有龙虾进行工作同步（通过 Hub 广播或消息）
+2. 汇总各龙虾的工作进展和问题
+3. 协调跨项目的资源和信息共享
+4. 发布重要通知和决策
+
+### 2.4 学习游戏测试知识
+1. 持续学习游戏测试领域的专业知识
+2. 关注行业最佳实践和新技术趋势
+3. 将学到的知识整理到知识库（Memos），供全军团共享
+4. 评审和审核其他龙虾提交的知识条目
+
+## 三、行为边界（严格遵守）
+
+### 3.1 不做的事情
+1. **不参与具体项目的测试执行工作**——这是各项目龙虾的职责
+2. **不直接编写测试用例**——这是测试成员的职责
+3. **不直接提交 Bug**——这是测试执行者的职责
+4. **不代替其他龙虾完成其分内任务**
+5. **不处理与龙虾军团管理无关的事务**
+
+### 3.2 必须做的事情
+1. 每日检查军团整体状态
+2. 按时提交自己的管理日报
+3. 及时响应其他龙虾的求助消息
+4. 定期更新知识库中的管理类知识
+
+## 四、工作节奏
+
+| 时间 | 事项 |
+|------|------|
+| 每日上午 | 检查所有龙虾状态，处理异常 |
+| 每日下午 | 下发任务、回收结果、学习知识 |
+| 每日 15:00 | 提交上午工作日报 |
+| 每日 21:00 | 提交全天工作日报 |
+| 每周一 | 召开周例会，同步各龙虾工作进展 |
+| 每周五 | 汇总本周军团整体工作报告 |
+
+## 五、权限说明
+
+1. 拥有 Hub 管理员权限（admin 角色）
+2. 可以向任意龙虾发送消息和下发任务
+3. 可以广播消息给所有在线龙虾
+4. 可以审核知识库条目
+5. 可以查看所有龙虾的日报和状态
+''',
+    },
 ]
 
 
 def seed_skills():
-    """初始化标准 Skills（跳过已存在的）"""
+    """初始化标准 Skills（跳过已存在的，但更新 is_standard 标记）"""
     created = 0
     for skill_data in STANDARD_SKILLS:
         existing = Skill.query.filter_by(name=skill_data['name']).first()
@@ -255,19 +726,34 @@ def seed_skills():
             skill = Skill(**skill_data)
             db.session.add(skill)
             created += 1
+        else:
+            # 已有的同步关键字段
+            if 'is_standard' in skill_data and existing.is_standard != skill_data['is_standard']:
+                existing.is_standard = skill_data['is_standard']
+            if 'template_content' in skill_data:
+                existing.template_content = skill_data['template_content']
+            if 'description' in skill_data:
+                existing.description = skill_data['description']
+            if 'trigger_phrase' in skill_data:
+                existing.trigger_phrase = skill_data['trigger_phrase']
 
-    # 初始化注册 Skill
-    if not Skill.query.filter_by(name=REGISTRATION_SKILL['name']).first():
+    # 初始化注册 Skill（已存在则更新 template_content）
+    existing_reg = Skill.query.filter_by(name=REGISTRATION_SKILL['name']).first()
+    if not existing_reg:
         skill = Skill(**REGISTRATION_SKILL)
         db.session.add(skill)
         created += 1
+    else:
+        # 更新已有注册 Skill 的内容
+        existing_reg.template_content = REGISTRATION_SKILL['template_content']
+        existing_reg.description = REGISTRATION_SKILL['description']
 
     db.session.commit()
     return created
 
 
 def seed_rules():
-    """初始化标准 Rules（跳过已存在的）"""
+    """初始化标准 Rules（跳过已存在的，但更新 scope/owner_claw_id）"""
     created = 0
     for rule_data in STANDARD_RULES:
         existing = Rule.query.filter_by(name=rule_data['name']).first()
@@ -275,6 +761,12 @@ def seed_rules():
             rule = Rule(**rule_data)
             db.session.add(rule)
             created += 1
+        else:
+            # Update scope and owner_claw_id for existing rules
+            if 'scope' in rule_data and existing.scope != rule_data['scope']:
+                existing.scope = rule_data['scope']
+            if 'owner_claw_id' in rule_data and existing.owner_claw_id != rule_data.get('owner_claw_id'):
+                existing.owner_claw_id = rule_data['owner_claw_id']
 
     db.session.commit()
     return created
@@ -303,9 +795,115 @@ def seed_projects():
     return created
 
 
+STANDARD_MODULES = [
+    # 外围系统
+    {'name': '大厅系统', 'category': 'peripheral', 'description': '游戏大厅、主界面、导航'},
+    {'name': '社交系统', 'category': 'peripheral', 'description': '好友、聊天、组队'},
+    {'name': '活动系统', 'category': 'peripheral', 'description': '运营活动、任务系统'},
+    {'name': '商城系统', 'category': 'peripheral', 'description': '道具商城、礼包'},
+    # 核心单局
+    {'name': '单局玩法', 'category': 'core_gameplay', 'description': '核心游戏玩法'},
+    {'name': '匹配系统', 'category': 'core_gameplay', 'description': '匹配、房间、对局'},
+    {'name': '操控系统', 'category': 'core_gameplay', 'description': '操控手感、输入响应'},
+    # 商业化
+    {'name': '充值系统', 'category': 'commercialization', 'description': '支付、充值'},
+    {'name': '会员系统', 'category': 'commercialization', 'description': 'VIP、特权'},
+    {'name': '抽奖系统', 'category': 'commercialization', 'description': '扭蛋、抽卡'},
+    # 客户端性能
+    {'name': '帧率性能', 'category': 'client_performance', 'description': '帧率、流畅度'},
+    {'name': '内存性能', 'category': 'client_performance', 'description': '内存占用、泄漏'},
+    {'name': '启动性能', 'category': 'client_performance', 'description': '冷启动、热启动耗时'},
+    {'name': '包体大小', 'category': 'client_performance', 'description': '安装包体积'},
+    # 服务器专项
+    {'name': '服务器压测', 'category': 'server_special', 'description': '服务器承载能力'},
+    {'name': '网络延迟', 'category': 'server_special', 'description': '网络质量、断线重连'},
+    # 其他专项
+    {'name': '兼容性测试', 'category': 'other', 'description': '多机型、多系统兼容'},
+    {'name': '安全测试', 'category': 'other', 'description': '安全漏洞、外挂检测'},
+]
+
+
+def seed_modules():
+    """初始化默认模块（跳过已存在的）"""
+    created = 0
+    for mod_data in STANDARD_MODULES:
+        existing = Module.query.filter_by(name=mod_data['name']).first()
+        if not existing:
+            module = Module(**mod_data)
+            db.session.add(module)
+            created += 1
+
+    db.session.commit()
+    return created
+
+
+# ============== 标准包种子数据 ==============
+
+STANDARD_PACKS = [
+    {
+        'name': 'standard-skills-pack',
+        'display_name': 'Skills 标准包',
+        'description': '所有注册的 OpenClaw 必须安装的基础 Skills 集合',
+        'pack_type': 'skill',
+        'is_active': True,
+        # item_ids 在 seed 时动态填充（取所有 is_standard=True 的 Skill ID）
+    },
+    {
+        'name': 'standard-rules-pack',
+        'display_name': 'Rules 标准包',
+        'description': '所有注册的 OpenClaw 必须遵守的基础规范集合',
+        'pack_type': 'rule',
+        'is_active': True,
+        # item_ids 在 seed 时动态填充（取所有 is_standard=True 的 Rule ID）
+    },
+]
+
+
+def seed_packs():
+    """初始化标准包（动态收集 is_standard=True 的资源 ID）"""
+    from app.models import StandardPack, Skill, Rule
+    created = 0
+
+    for pack_data in STANDARD_PACKS:
+        existing = StandardPack.query.filter_by(name=pack_data['name']).first()
+
+        # 动态收集 ID
+        if pack_data['pack_type'] == 'skill':
+            items = Skill.query.filter_by(is_standard=True).all()
+            item_ids = [s.id for s in items if s.name != 'registration-skill']
+        else:
+            items = Rule.query.filter_by(is_standard=True).all()
+            item_ids = [r.id for r in items]
+
+        if existing:
+            # 更新已有包的 item_ids
+            existing._set_item_ids(item_ids)
+            existing.display_name = pack_data['display_name']
+            existing.description = pack_data['description']
+        else:
+            import json as _json
+            pack = StandardPack(
+                name=pack_data['name'],
+                display_name=pack_data['display_name'],
+                description=pack_data['description'],
+                pack_type=pack_data['pack_type'],
+                item_ids=_json.dumps(item_ids),
+                is_active=pack_data.get('is_active', True),
+            )
+            db.session.add(pack)
+            created += 1
+
+    db.session.commit()
+    return created
+
+
 def seed_all():
     """执行所有种子数据初始化"""
     skills_count = seed_skills()
     rules_count = seed_rules()
     projects_count = seed_projects()
-    return f'创建了 {skills_count} 个标准 Skills，{rules_count} 个标准 Rules，{projects_count} 个默认项目'
+    modules_count = seed_modules()
+    packs_count = seed_packs()
+    return (f'创建了 {skills_count} 个标准 Skills，{rules_count} 个标准 Rules，'
+            f'{projects_count} 个默认项目，{modules_count} 个默认模块，'
+            f'{packs_count} 个标准包')

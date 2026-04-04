@@ -6,39 +6,36 @@
 {% block top_actions %}
 <div style="display:flex;gap:10px;align-items:center">
     <button class="btn btn-primary" onclick="openCreateModal()" style="white-space:nowrap">+ 新增 Skill</button>
-    <button class="btn btn-ghost" onclick="openAISkillModal()" style="color:#9b59b6;white-space:nowrap">🤖 AI 生成</button>
-    <button class="btn btn-ghost" onclick="openImportModal()" title="从 OpenSpace 批量导入" style="white-space:nowrap">
-        &#x21BB; 导入进化技能
-    </button>
+    <button class="btn btn-ghost" onclick="openAISkillModal()" style="color:#9b59b6;white-space:nowrap">&#x1F916; AI 生成</button>
+    <button class="btn btn-ghost" onclick="openImportModal()" style="white-space:nowrap">&#x21BB; 导入进化技能</button>
 </div>
 {% endblock %}
 
 {% block content %}
 <div class="tab-bar">
     <div class="tab-item active" data-tab="all" onclick="filterSkills('all')">全部</div>
-    <div class="tab-item" data-tab="standard" onclick="filterSkills('standard')">标准 Skills</div>
+    <div class="tab-item" data-tab="standard" onclick="filterSkills('standard')">标准</div>
     <div class="tab-item" data-tab="custom" onclick="filterSkills('custom')">自定义</div>
-    <div class="tab-item" data-tab="evolved" onclick="filterSkills('evolved')">
-        &#x1F916; 自动进化
-    </div>
+    <div class="tab-item" data-tab="evolved" onclick="filterSkills('evolved')">&#x1F916; 自动进化</div>
 </div>
 
 <div class="skill-grid" id="skills-grid">
     <div class="loading"><span class="spinner"></span></div>
 </div>
 
-<!-- 新建 Skill 弹窗 -->
+<!-- 新建/编辑 Skill 弹窗 -->
 <div class="modal-overlay" id="create-modal">
-    <div class="modal" style="max-width:560px">
-        <h2 class="modal-title">创建新 Skill</h2>
+    <div class="modal" style="max-width:800px">
+        <h2 class="modal-title" id="skill-modal-title">创建新 Skill</h2>
         <form id="create-form">
+            <input type="hidden" id="skill-edit-id">
             <div class="form-group">
                 <label class="form-label">标识名 *</label>
-                <input class="form-input" name="name" placeholder="如：crash-log-analyzer" required>
+                <input class="form-input" name="name" id="skill-name" placeholder="如：crash-log-analyzer" required>
             </div>
             <div class="form-group">
                 <label class="form-label">显示名称 *</label>
-                <input class="form-input" name="display_name" placeholder="如：崩溃日志分析器" required>
+                <input class="form-input" name="display_name" id="skill-display-name" placeholder="如：崩溃日志分析器" required>
             </div>
             <div class="form-group">
                 <label class="form-label">描述</label>
@@ -48,42 +45,45 @@
                 <label class="form-label">触发短语</label>
                 <input class="form-input" name="trigger_phrase" placeholder="如：分析崩溃日志">
             </div>
-            <!-- 作用域选择 -->
             <div class="form-group">
-                <label class="form-label">适用范围</label>
+                <label class="form-label">适用类型</label>
                 <div style="display:flex;gap:16px;margin-top:6px">
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
                         <input type="radio" name="scope" value="global" checked onchange="onScopeChange()">
                         <span>通用</span>
                     </label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                        <input type="radio" name="scope" value="project" onchange="onScopeChange()">
-                        <span>按项目</span>
+                        <input type="radio" name="scope" value="admin" onchange="onScopeChange()">
+                        <span>管理员</span>
                     </label>
                     <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                        <input type="radio" name="scope" value="module" onchange="onScopeChange()">
-                        <span>按模块</span>
+                        <input type="radio" name="scope" value="scoped" onchange="onScopeChange()">
+                        <span>指定范围</span>
                     </label>
                 </div>
             </div>
-            <!-- 按项目：项目多选 -->
             <div class="form-group" id="scope-projects-group" style="display:none">
-                <label class="form-label">选择项目（可多选）</label>
-                <div id="project-checkboxes" style="display:flex;flex-direction:column;gap:6px;margin-top:6px;max-height:160px;overflow-y:auto">
-                </div>
+                <label class="form-label">适用项目（可多选）</label>
+                <div id="project-checkboxes" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;max-height:120px;overflow-y:auto"></div>
             </div>
-            <!-- 按模块：模块名输入 -->
             <div class="form-group" id="scope-modules-group" style="display:none">
-                <label class="form-label">适用模块名（多个用逗号分隔）</label>
-                <input class="form-input" name="applicable_modules_input" id="applicable-modules-input" placeholder="如：登录模块,支付模块">
+                <label class="form-label">适用模块（可多选）</label>
+                <div id="module-checkboxes" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;max-height:120px;overflow-y:auto"></div>
+            </div>
+            <!-- 标准 Skill 标记 -->
+            <div class="form-group">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" id="skill-is-standard">
+                    <span class="form-label" style="margin:0">标准 Skill（所有注册的 OpenClaw 必须安装）</span>
+                </label>
             </div>
             <div class="form-group">
                 <label class="form-label">模板内容</label>
-                <textarea class="form-textarea" name="template_content" style="min-height:120px;font-family:monospace" placeholder="Skill 的详细模板..."></textarea>
+                <textarea class="form-textarea" name="template_content" style="min-height:300px;font-family:monospace" placeholder="Skill 模板内容..."></textarea>
             </div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
-                <button type="submit" class="btn btn-primary">创建</button>
+                <button type="submit" class="btn btn-primary" id="skill-submit-btn">创建</button>
             </div>
         </form>
     </div>
@@ -95,22 +95,11 @@
         <h2 class="modal-title">&#x1F916; 从 OpenSpace 导入进化技能</h2>
         <div class="form-group">
             <label class="form-label">来源名称</label>
-            <input class="form-input" id="import-source" placeholder="如：OpenSpace / claw-小测" value="OpenSpace">
+            <input class="form-input" id="import-source" value="OpenSpace">
         </div>
         <div class="form-group">
             <label class="form-label">技能 JSON 数组</label>
-            <textarea class="form-textarea" id="import-json" rows="12"
-                style="font-family:monospace;font-size:0.85rem"
-                placeholder='[
-  {
-    "name": "crash-analyzer",
-    "display_name": "崩溃日志分析器",
-    "description": "自动分析 crash log...",
-    "success_rate": 92.5,
-    "total_runs": 156,
-    "error_count": 12
-  }
-]'></textarea>
+            <textarea class="form-textarea" id="import-json" rows="10" style="font-family:monospace;font-size:0.85rem" placeholder='[{"name":"...","display_name":"..."}]'></textarea>
         </div>
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeImportModal()">取消</button>
@@ -122,14 +111,14 @@
 <!-- AI 生成 Skill 弹窗 -->
 <div class="modal-overlay" id="ai-skill-modal">
     <div class="modal" style="max-width:560px">
-        <h2 class="modal-title">🤖 AI 生成 Skill</h2>
+        <h2 class="modal-title">&#x1F916; AI 生成 Skill</h2>
         <div class="form-group">
-            <label class="form-label">描述你需要的 Skill *</label>
-            <textarea class="form-textarea" id="ai-skill-desc" rows="4" placeholder="例如：分析崩溃日志，自动提取关键堆栈信息并归类问题类型"></textarea>
+            <label class="form-label">描述需求 *</label>
+            <textarea class="form-textarea" id="ai-skill-desc" rows="4" placeholder="例如：分析崩溃日志，自动提取关键堆栈信息"></textarea>
         </div>
         <div class="form-group">
             <label class="form-label">提交人</label>
-            <input class="form-input" id="ai-skill-author" placeholder="你的名字" value="">
+            <input class="form-input" id="ai-skill-author" placeholder="你的名字">
         </div>
         <div id="ai-skill-result" style="display:none;margin-top:12px">
             <label class="form-label">AI 生成结果（可编辑后提交）</label>
@@ -143,8 +132,18 @@
         </div>
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeAISkillModal()">取消</button>
-            <button class="btn btn-primary" id="ai-skill-gen-btn" onclick="generateAISkill()" style="background:#9b59b6">🤖 生成</button>
-            <button class="btn btn-primary" id="ai-skill-submit-btn" onclick="submitAISkill()" style="display:none">提交 Skill</button>
+            <button class="btn btn-primary" id="ai-skill-gen-btn" onclick="generateAISkill()" style="background:#9b59b6">&#x1F916; 生成</button>
+            <button class="btn btn-primary" id="ai-skill-submit-btn" onclick="submitAISkill()" style="display:none">提交</button>
+        </div>
+    </div>
+</div>
+<!-- 预览弹窗 -->
+<div class="modal-overlay" id="preview-modal">
+    <div class="modal" style="max-width:680px">
+        <div class="modal-title" id="preview-title">Skill 详情</div>
+        <div id="preview-body" style="max-height:60vh;overflow-y:auto"></div>
+        <div class="modal-actions" id="preview-actions">
+            <button class="btn btn-ghost" onclick="closePreviewModal()">关闭</button>
         </div>
     </div>
 </div>
@@ -154,40 +153,61 @@
 <script>
 let allSkills = [];
 let allProjects = [];
+let allModules = [];
+
+function _canEditSkill(s) {
+    if (!currentUser) return false;
+    if (currentUser.role === 'super_admin') return true;
+    // 自己创建的可以编辑
+    if (s.created_by === currentUser.username) return true;
+    // 项目管理员：资源适用项目与自己管理项目有交集
+    if (currentUser.role === 'admin') {
+        const managed = currentUser.managed_projects || [];
+        const resPrj = s.applicable_projects || [];
+        if (managed.length && resPrj.length && resPrj.some(p => managed.includes(p))) return true;
+    }
+    return false;
+}
+function _canDeleteSkill(s) {
+    if (!currentUser) return false;
+    return currentUser.role === 'super_admin' || currentUser.role === 'admin';
+}
 let currentFilter = 'all';
 
 async function loadSkills() {
-    try {
-        allSkills = await API.listSkills();
-        renderSkills();
-    } catch (err) {
-        showToast('加载失败: ' + err.message, 'error');
-    }
+    try { allSkills = await API.listSkills(); renderSkills(); }
+    catch (err) { showToast('加载失败: ' + err.message, 'error'); }
 }
 
-async function loadProjectsForScope() {
+async function loadProjectsAndModules() {
     try {
-        allProjects = await API.listProjects();
+        [allProjects, allModules] = await Promise.all([API.listProjects(), API.request('GET', '/modules')]);
         renderProjectCheckboxes();
-    } catch (err) {
-        console.error('加载项目失败', err);
-    }
+        renderModuleCheckboxes();
+    } catch (err) { console.error(err); }
 }
 
 function renderProjectCheckboxes() {
-    const container = $('#project-checkboxes');
-    container.innerHTML = allProjects.map(p => `
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:0.9rem">
-            <input type="checkbox" value="${p.id}" name="applicable_projects">
-            <span>${p.name}</span>
-        </label>
-    `).join('');
+    const c = $('#project-checkboxes');
+    if (!c) return;
+    c.innerHTML = allProjects.map(p => `<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.88rem;padding:3px 8px;background:var(--bg-hover);border-radius:4px"><input type="checkbox" value="${p.id}" name="applicable_projects"><span>${p.name}</span></label>`).join('');
+}
+
+function renderModuleCheckboxes() {
+    const c = $('#module-checkboxes');
+    if (!c) return;
+    const categories = {
+        'peripheral': '外围系统', 'core_gameplay': '核心单局', 'commercialization': '商业化',
+        'client_performance': '客户端性能', 'server_special': '服务器专项', 'other': '其他专项'
+    };
+    c.innerHTML = Object.entries(categories).map(([k, v]) => `<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:0.88rem;padding:3px 8px;background:var(--bg-hover);border-radius:4px"><input type="checkbox" value="${k}" name="applicable_modules"><span>${v}</span></label>`).join('');
 }
 
 function onScopeChange() {
-    const scope = document.querySelector('input[name="scope"]:checked').value;
-    $('#scope-projects-group').style.display = scope === 'project' ? '' : 'none';
-    $('#scope-modules-group').style.display = scope === 'module' ? '' : 'none';
+    const scope = document.querySelector('#create-form input[name="scope"]:checked').value;
+    const show = scope === 'scoped';
+    $('#scope-projects-group').style.display = show ? '' : 'none';
+    $('#scope-modules-group').style.display = show ? '' : 'none';
 }
 
 function filterSkills(tab) {
@@ -198,27 +218,20 @@ function filterSkills(tab) {
 }
 
 function scopeLabel(s) {
+    const catLabels = {'peripheral':'外围系统','core_gameplay':'核心单局','commercialization':'商业化','client_performance':'客户端性能','server_special':'服务器专项','other':'其他专项'};
     if (s.scope === 'global') return '<span class="tag tag-accent">通用</span>';
-    if (s.scope === 'project') {
-        const names = (s.applicable_projects || []).map(pid => {
-            const p = allProjects.find(x => x.id === pid);
-            return p ? p.name : pid;
-        }).join(', ');
-        return `<span class="tag tag-blue">项目</span>${names ? `<span style="font-size:0.82rem;margin-left:4px">${names}</span>` : ''}`;
-    }
-    if (s.scope === 'module') {
-        const names = (s.applicable_modules || []).join(', ');
-        return `<span class="tag" style="background:#6c5ce7;color:#fff">模块</span>${names ? `<span style="font-size:0.82rem;margin-left:4px">${names}</span>` : ''}`;
-    }
-    return '';
+    if (s.scope === 'admin') return '<span class="tag" style="background:#e74c3c;color:#fff">管理员</span>';
+    let tags = '';
+    const pNames = (s.applicable_projects || []).map(pid => { const p = allProjects.find(x => x.id === pid); return p ? p.name : pid; });
+    const mNames = (s.applicable_modules || []).map(k => catLabels[k] || k);
+    if (pNames.length) tags += `<span class="tag tag-blue">项目: ${pNames.join(', ')}</span>`;
+    if (mNames.length) tags += `<span class="tag" style="background:#6c5ce7;color:#fff">模块: ${mNames.join(', ')}</span>`;
+    return tags || '<span class="tag tag-accent">通用</span>';
 }
 
 function categoryTag(s) {
-    const map = {
-        standard: ['tag-accent', '标准'],
-        custom: ['tag-green', '自定义'],
-        evolved: ['tag-orange', '自动进化'],
-    };
+    if (s.category === 'standard') return '';
+    const map = { custom: ['tag-green', '自定义'], evolved: ['tag-orange', '进化'] };
     const [cls, label] = map[s.category] || ['tag-blue', s.category];
     return `<span class="tag ${cls}">${label}</span>`;
 }
@@ -226,177 +239,195 @@ function categoryTag(s) {
 function evolvedMetrics(s) {
     if (s.category !== 'evolved') return '';
     const rate = s.success_rate || 0;
-    const rateColor = rate >= 80 ? 'var(--green)' : rate >= 50 ? 'var(--yellow)' : 'var(--red)';
-    return `
-        <div class="evolve-metrics" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                <div class="evolve-rate-bar" style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden">
-                    <div style="width:${rate}%;height:100%;background:${rateColor};border-radius:3px;transition:width 0.3s"></div>
-                </div>
-                <span style="font-size:0.82rem;font-weight:600;color:${rateColor}">${rate.toFixed(1)}%</span>
-            </div>
-            <div style="display:flex;gap:14px;font-size:0.78rem;color:var(--text-muted)">
-                <span>执行 ${s.total_runs || 0} 次</span>
-                <span>错误 ${s.error_count || 0} 次</span>
-                ${s.evolve_source ? `<span>来源: ${s.evolve_source}</span>` : ''}
-                ${s.last_evolved_at ? `<span>进化: ${timeAgo(s.last_evolved_at)}</span>` : ''}
-            </div>
-        </div>`;
+    const color = rate >= 80 ? 'var(--green)' : rate >= 50 ? 'var(--yellow)' : 'var(--red)';
+    return `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><div style="flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden"><div style="width:${rate}%;height:100%;background:${color};border-radius:3px"></div></div><span style="font-size:0.82rem;font-weight:600;color:${color}">${rate.toFixed(1)}%</span></div><div style="font-size:0.78rem;color:var(--text-muted);display:flex;gap:12px"><span>执行 ${s.total_runs || 0} 次</span><span>错误 ${s.error_count || 0}</span></div></div>`;
 }
 
 function renderSkills() {
-    const filtered = currentFilter === 'all'
-        ? allSkills
-        : allSkills.filter(s => s.category === currentFilter);
-
-    // evolved 排在前面（按成功率降序），其他按 name 排序
+    let filtered;
+    if (currentFilter === 'all') {
+        filtered = allSkills;
+    } else if (currentFilter === 'standard') {
+        filtered = allSkills.filter(s => s.is_standard);
+    } else {
+        filtered = allSkills.filter(s => s.category === currentFilter);
+    }
     const sorted = [...filtered].sort((a, b) => {
         if (a.category === 'evolved' && b.category !== 'evolved') return -1;
         if (a.category !== 'evolved' && b.category === 'evolved') return 1;
-        if (a.category === 'evolved' && b.category === 'evolved')
-            return (b.success_rate || 0) - (a.success_rate || 0);
         return a.name.localeCompare(b.name);
     });
-
     const grid = $('#skills-grid');
-
     if (sorted.length === 0) {
-        const emptyMsg = currentFilter === 'evolved'
-            ? '暂无 OpenSpace 进化技能<br><span style="font-size:0.82rem;color:var(--text-muted)">接入 OpenSpace 后，Agent 自动进化的技能将在此展示</span>'
-            : '暂无 Skills';
-        grid.innerHTML = `
-            <div class="empty-state" style="grid-column:1/-1">
-                <div class="empty-state-icon">🧩</div>
-                <div class="empty-state-text">${emptyMsg}</div>
-            </div>`;
+        grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><div class="empty-state-icon">&#x1F9E9;</div><div class="empty-state-text">暂无 Skills</div></div>`;
         return;
     }
-
     grid.innerHTML = sorted.map(s => `
-        <div class="skill-card${s.category === 'evolved' ? ' skill-card-evolved' : ''}">
+        <div class="skill-card${s.category === 'evolved' ? ' skill-card-evolved' : ''}" style="cursor:pointer" onclick="previewSkill(${s.id})">
             <div class="skill-card-header">
                 <span class="skill-name">${s.display_name}</span>
                 ${categoryTag(s)}
-                ${scopeLabel(s)}
+                ${s.is_standard ? '<span class="tag" style="background:#e74c3c;color:#fff">标准</span>' : ''}
             </div>
+            <div style="margin-top:4px">${scopeLabel(s)}</div>
             <div class="skill-desc">${s.description || ''}</div>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
                 <div class="skill-users">
-                    ${(s.used_by || []).length > 0
-                        ? s.used_by.map(u => `<span class="tag tag-blue">${u}</span>`).join('')
-                        : '<span style="font-size:0.82rem;color:var(--text-muted)">暂无使用者</span>'}
+                    ${(s.used_by || []).length > 0 ? s.used_by.map(u => `<span class="tag tag-blue">${u}</span>`).join('') : '<span style="font-size:0.82rem;color:var(--text-muted)">暂无使用者</span>'}
                 </div>
                 <span style="font-size:0.82rem;color:var(--text-muted)">${s.install_count || 0} 个安装</span>
             </div>
-            <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-size:0.78rem;color:var(--text-muted)">
-                <span>提交: ${s.created_by || 'system'} · ${s.created_at ? timeAgo(s.created_at) : '未知'}</span>
-            </div>
-            ${evolvedMetrics(s)}
+            <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+                <span style="font-size:0.78rem;color:var(--text-muted)">${s.created_by || 'system'} · ${s.created_at ? timeAgo(s.created_at) : ''}</span>
+                <div style="display:flex;gap:8px" onclick="event.stopPropagation()">
+                    ${_canEditSkill(s) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="editSkill(${s.id})">编辑</button>` : ''}
+                    ${_canDeleteSkill(s) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem;color:var(--red)" onclick="deleteSkill(${s.id})">删除</button>` : ''}
+                </div>
+            </div>${s.category === 'evolved' ? evolvedMetrics(s) : ''}
         </div>
     `).join('');
 }
 
+// 新建
 async function openCreateModal() {
-    await loadProjectsForScope();
-    onScopeChange(); // reset visibility
+    await loadProjectsAndModules();
     $('#create-form').reset();
+    $('#skill-edit-id').value = '';
+    $('#skill-modal-title').textContent = '创建新 Skill';
+    $('#skill-name').disabled = false;
+    $('#skill-submit-btn').textContent = '创建';
+    $('#skill-is-standard').checked = false;
+    onScopeChange();
     $('#create-modal').classList.add('active');
 }
-function closeCreateModal() { $('#create-modal').classList.remove('active'); }
 
-$('#create-modal').addEventListener('click', e => {
-    if (e.target === $('#create-modal')) closeCreateModal();
-});
+// 编辑
+async function editSkill(id) {
+    const s = allSkills.find(x => x.id === id);
+    if (!s) return;
+    await loadProjectsAndModules();
+
+    $('#skill-edit-id').value = id;
+    $('#skill-modal-title').textContent = '编辑 Skill';
+    $('#skill-name').value = s.name;
+    $('#skill-name').disabled = true;
+    $('#skill-display-name').value = s.display_name;
+    $('#skill-submit-btn').textContent = '保存';
+    $('#skill-is-standard').checked = !!s.is_standard;
+
+    const descEl = $('#create-form').querySelector('textarea[name="description"]');
+    if (descEl) descEl.value = s.description || '';
+    const trigEl = $('#create-form').querySelector('input[name="trigger_phrase"]');
+    if (trigEl) trigEl.value = s.trigger_phrase || '';
+    const contentEl = $('#create-form').querySelector('textarea[name="template_content"]');
+    if (contentEl) contentEl.value = s.template_content || '';
+
+    let scopeVal = s.scope;
+    if (scopeVal === 'project' || scopeVal === 'module') scopeVal = 'scoped';
+    document.querySelectorAll('#create-form input[name="scope"]').forEach(el => { el.checked = el.value === scopeVal; });
+    onScopeChange();
+
+    if (s.applicable_projects) {
+        document.querySelectorAll('input[name="applicable_projects"]').forEach(el => { el.checked = s.applicable_projects.includes(parseInt(el.value)); });
+    }
+    if (s.applicable_modules) {
+        document.querySelectorAll('input[name="applicable_modules"]').forEach(el => { el.checked = s.applicable_modules.includes(el.value); });
+    }
+
+    $('#create-modal').classList.add('active');
+}
+
+function closeCreateModal() { $('#create-modal').classList.remove('active'); }
+$('#create-modal').addEventListener('click', e => { if (e.target === $('#create-modal')) closeCreateModal(); });
 
 $('#create-form').addEventListener('submit', async e => {
     e.preventDefault();
     const form = new FormData(e.target);
     const data = Object.fromEntries(form);
-    data.category = 'custom';
+    const editId = $('#skill-edit-id').value;
 
-    // 处理适用范围
-    if (data.scope === 'project') {
-        const checked = [...document.querySelectorAll('input[name="applicable_projects"]:checked')]
-            .map(el => parseInt(el.value));
-        data.applicable_projects = checked;
-        delete data.applicable_modules_input;
-    } else if (data.scope === 'module') {
-        const modules = data.applicable_modules_input
-            ? data.applicable_modules_input.split(',').map(s => s.trim()).filter(Boolean)
-            : [];
-        data.applicable_modules = modules;
-        delete data.applicable_projects;
-        delete data.applicable_modules_input;
+    if (data.scope === 'scoped') {
+        data.applicable_projects = [...document.querySelectorAll('#create-form input[name="applicable_projects"]:checked')].map(el => parseInt(el.value));
+        data.applicable_modules = [...document.querySelectorAll('#create-form input[name="applicable_modules"]:checked')].map(el => el.value);
+        if (!data.applicable_projects.length) data.applicable_projects = null;
+        if (!data.applicable_modules.length) data.applicable_modules = null;
+        data.scope = 'scoped';
     } else {
-        delete data.applicable_projects;
-        delete data.applicable_modules;
-        delete data.applicable_modules_input;
+        data.applicable_projects = null;
+        data.applicable_modules = null;
     }
+
+    if (!editId) data.category = 'custom';
+
+    data.is_standard = $('#skill-is-standard').checked;
 
     try {
-        await API.createSkill(data);
-        showToast('Skill 创建成功！', 'success');
+        if (editId) {
+            await API.request('PUT', `/skills/${editId}`, data);
+            showToast('Skill 更新成功！', 'success');
+        } else {
+            await API.createSkill(data);
+            showToast('Skill 创建成功！', 'success');
+        }
         closeCreateModal();
-        e.target.reset();
         loadSkills();
     } catch (err) {
-        showToast('创建失败: ' + err.message, 'error');
+        showToast((editId ? '更新' : '创建') + '失败: ' + err.message, 'error');
     }
 });
+
+async function deleteSkill(id) {
+    const s = allSkills.find(x => x.id === id);
+    const name = s ? s.display_name : 'Skill';
+    const usedBy = s ? (s.install_count || 0) : 0;
+
+    if (!await customConfirm(
+        `确定要删除 Skill「${name}」吗？` +
+        (usedBy > 0 ? `<br><br><span style="color:var(--red)">⚠️ 当前有 ${usedBy} 个 OpenClaw 正在使用</span>` : '') +
+        `<br><br><span style="font-size:0.82rem;color:var(--text-muted)">删除后所有 OpenClaw 的安装关联会被清除。</span>`
+    )) return;
+
+    try {
+        await API.request('DELETE', `/skills/${id}`);
+        showToast('Skill 已删除', 'success');
+        loadSkills();
+    } catch (err) {
+        showToast('删除失败: ' + err.message, 'error');
+    }
+}
 
 loadSkills();
 
-// OpenSpace 导入
+// 导入
 function openImportModal() { $('#import-modal').classList.add('active'); }
 function closeImportModal() { $('#import-modal').classList.remove('active'); }
-
-$('#import-modal').addEventListener('click', e => {
-    if (e.target === $('#import-modal')) closeImportModal();
-});
+$('#import-modal').addEventListener('click', e => { if (e.target === $('#import-modal')) closeImportModal(); });
 
 async function importEvolved() {
     const source = $('#import-source').value.trim() || 'OpenSpace';
     let skills;
+    try { skills = JSON.parse($('#import-json').value); if (!Array.isArray(skills)) throw new Error('非数组'); }
+    catch (e) { showToast('JSON 错误: ' + e.message, 'error'); return; }
     try {
-        skills = JSON.parse($('#import-json').value);
-        if (!Array.isArray(skills) || skills.length === 0) throw new Error('空数组');
-    } catch (e) {
-        showToast('JSON 格式错误: ' + e.message, 'error');
-        return;
-    }
-
-    try {
-        const result = await API.request('POST', '/skills/batch-evolved', { skills, source });
-        showToast(`导入完成: 新建 ${result.created} 个，更新 ${result.updated} 个`, 'success');
-        closeImportModal();
-        loadSkills();
-    } catch (err) {
-        showToast('导入失败: ' + err.message, 'error');
-    }
+        const r = await API.request('POST', '/skills/batch-evolved', { skills, source });
+        showToast(`导入: 新建 ${r.created}，更新 ${r.updated}`, 'success');
+        closeImportModal(); loadSkills();
+    } catch (err) { showToast('导入失败: ' + err.message, 'error'); }
 }
 
-// AI 生成 Skill
+// AI 生成
 function openAISkillModal() {
-    $('#ai-skill-desc').value = '';
-    $('#ai-skill-result').style.display = 'none';
-    $('#ai-skill-gen-btn').style.display = '';
-    $('#ai-skill-submit-btn').style.display = 'none';
+    $('#ai-skill-desc').value = ''; $('#ai-skill-result').style.display = 'none';
+    $('#ai-skill-gen-btn').style.display = ''; $('#ai-skill-submit-btn').style.display = 'none';
     $('#ai-skill-modal').classList.add('active');
-    $('#ai-skill-desc').focus();
 }
 function closeAISkillModal() { $('#ai-skill-modal').classList.remove('active'); }
-$('#ai-skill-modal').addEventListener('click', e => {
-    if (e.target === $('#ai-skill-modal')) closeAISkillModal();
-});
+$('#ai-skill-modal').addEventListener('click', e => { if (e.target === $('#ai-skill-modal')) closeAISkillModal(); });
 
 async function generateAISkill() {
     const desc = $('#ai-skill-desc').value.trim();
     if (!desc) { showToast('请输入描述', 'error'); return; }
-
-    const btn = $('#ai-skill-gen-btn');
-    btn.disabled = true;
-    btn.textContent = '生成中...';
-
+    const btn = $('#ai-skill-gen-btn'); btn.disabled = true; btn.textContent = '生成中...';
     try {
         const resp = await API.request('POST', '/system/llm/generate', { type: 'skill', description: desc });
         if (resp.result) {
@@ -407,41 +438,59 @@ async function generateAISkill() {
             $('#ai-result-content').value = resp.result.template_content || '';
             $('#ai-skill-result').style.display = '';
             $('#ai-skill-submit-btn').style.display = '';
-            showToast('AI 生成完成，请确认后提交', 'success');
-        } else {
-            showToast(resp.error || 'AI 输出格式不标准', 'error');
-        }
-    } catch (err) {
-        showToast('生成失败: ' + err.message, 'error');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '🤖 生成';
-    }
+        } else { showToast(resp.error || 'AI 格式不标准', 'error'); }
+    } catch (err) { showToast('生成失败: ' + err.message, 'error'); }
+    finally { btn.disabled = false; btn.textContent = '🤖 生成'; }
 }
 
 async function submitAISkill() {
     const data = {
-        name: $('#ai-result-name').value.trim(),
-        display_name: $('#ai-result-display').value.trim(),
-        description: $('#ai-result-desc').value.trim(),
-        trigger_phrase: $('#ai-result-trigger').value.trim(),
-        template_content: $('#ai-result-content').value.trim(),
-        category: 'custom',
-        scope: 'global',
+        name: $('#ai-result-name').value.trim(), display_name: $('#ai-result-display').value.trim(),
+        description: $('#ai-result-desc').value.trim(), trigger_phrase: $('#ai-result-trigger').value.trim(),
+        template_content: $('#ai-result-content').value.trim(), category: 'custom', scope: 'global',
         created_by: $('#ai-skill-author').value.trim() || 'AI',
     };
-    if (!data.name || !data.display_name) {
-        showToast('标识名和显示名称不能为空', 'error');
-        return;
-    }
-    try {
-        await API.createSkill(data);
-        showToast('Skill 已提交！', 'success');
-        closeAISkillModal();
-        loadSkills();
-    } catch (err) {
-        showToast('提交失败: ' + err.message, 'error');
-    }
+    if (!data.name || !data.display_name) { showToast('标识名和显示名称必填', 'error'); return; }
+    try { await API.createSkill(data); showToast('Skill 已提交！', 'success'); closeAISkillModal(); loadSkills(); }
+    catch (err) { showToast('提交失败: ' + err.message, 'error'); }
+}
+
+// 预览
+function previewSkill(id) {
+    const s = allSkills.find(x => x.id === id);
+    if (!s) return;
+    $('#preview-title').textContent = s.display_name;
+    const contentHtml = s.template_content
+        ? `<div style="background:var(--bg-secondary);padding:14px;border-radius:var(--radius-sm);font-family:monospace;font-size:0.85rem;white-space:pre-wrap;line-height:1.7;max-height:40vh;overflow-y:auto">${escapeHtml(s.template_content)}</div>`
+        : '<div style="color:var(--text-muted)">暂无模板内容</div>';
+    $('#preview-body').innerHTML = `
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
+            ${categoryTag(s)}
+            ${scopeLabel(s)}
+            ${s.is_standard ? '<span class="tag" style="background:#e74c3c;color:#fff">标准</span>' : ''}
+            <span class="tag tag-blue">${s.install_count || 0} 个安装</span>
+        </div>
+        ${s.description ? `<div style="margin-bottom:12px;font-size:0.9rem;color:var(--text-secondary)">${escapeHtml(s.description)}</div>` : ''}
+        ${s.trigger_phrase ? `<div style="margin-bottom:12px;font-size:0.85rem"><strong>触发短语：</strong>${escapeHtml(s.trigger_phrase)}</div>` : ''}
+        <div style="margin-bottom:8px;font-size:0.85rem;font-weight:600">模板内容</div>
+        ${contentHtml}
+        <div style="margin-top:12px;font-size:0.78rem;color:var(--text-muted)">
+            创建者: ${s.created_by || 'system'} · ${s.created_at || ''}
+        </div>
+    `;
+    const canEdit = _canEditSkill(s);
+    $('#preview-actions').innerHTML = `
+        <button class="btn btn-ghost" onclick="closePreviewModal()">关闭</button>
+        ${canEdit ? `<button class="btn btn-primary" onclick="closePreviewModal();editSkill(${s.id})">编辑</button>` : ''}
+    `;
+    $('#preview-modal').classList.add('active');
+}
+function closePreviewModal() { $('#preview-modal').classList.remove('active'); }
+$('#preview-modal').addEventListener('click', e => { if (e.target === $('#preview-modal')) closePreviewModal(); });
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 </script>
 {% endblock %}
