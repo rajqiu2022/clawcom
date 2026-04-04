@@ -844,35 +844,35 @@ INIT_TASKS = [
         'title': '验证 Memos 连接',
         'description': '确认你能正常访问 Memos 服务，执行一次读取操作（如获取最近的 memo 列表）。如果不可用，报告具体错误。',
         'priority': 'P0',
+        'urgency_level': 'background',
         'verification_target': 'memos-access',
     },
     {
         'title': '验证本地 Skills 加载',
         'description': '检查本地 ~/.qclaw/skills/ 目录下的 Skill 文件是否正确加载。列出已加载的 Skill 名称和文件数量。',
         'priority': 'P0',
+        'urgency_level': 'background',
         'verification_target': 'local-skills',
     },
     {
         'title': '验证 Hub 通信',
         'description': '调用 Hub 心跳接口 POST /heartbeat，确认返回 200 且 pending_messages 字段存在。',
         'priority': 'P0',
+        'urgency_level': 'retry',
         'verification_target': 'hub-heartbeat',
     },
     {
         'title': '执行首次日报上报',
         'description': '生成一份简单的注册日报，包含：1) 注册时间 2) 已安装的 Skills/Rules 列表 3) 初始化任务完成情况。通过 POST /report 上报。',
         'priority': 'P1',
+        'urgency_level': 'flexible',
         'verification_target': 'first-report',
     },
 ]
 
 
 def create_init_tasks_for_claw(claw_id):
-    """为新注册的 OpenClaw 创建初始化验证任务
-
-    返回创建的任务数量。任务为 once 类型 + init 类别，
-    不阻塞注册，OpenClaw 上线后自行完成。
-    """
+    """为新注册的 OpenClaw 创建初始化验证任务"""
     from app.models import ClawTodo
     created = 0
     for task in INIT_TASKS:
@@ -882,6 +882,7 @@ def create_init_tasks_for_claw(claw_id):
             description=task['description'],
             schedule_type='once',
             priority=task['priority'],
+            urgency_level=task.get('urgency_level', 'background'),
             task_category='init',
             verification_target=task['verification_target'],
             enabled=True,
