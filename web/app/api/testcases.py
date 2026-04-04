@@ -149,6 +149,12 @@ def update_testcase_library(library_id):
 def delete_testcase_library(library_id):
     """删除用例库"""
     library = TestCaseLibrary.query.get_or_404(library_id)
+
+    # 自动快照：删库前保存（最后的安全网）
+    from app.api.snapshots import auto_snapshot
+    auto_snapshot(library_id, f'删除用例库 "{library.name}" 前', 'auto')
+    db.session.flush()
+
     db.session.delete(library)
     db.session.commit()
     return jsonify({'message': f'用例库 "{library.name}" 已删除'})
@@ -339,6 +345,10 @@ def batch_delete_cases(library_id):
     if not data or 'case_ids' not in data:
         return jsonify({'error': 'case_ids 为必填项'}), 400
 
+    # 自动快照：批量删除前保存
+    from app.api.snapshots import auto_snapshot
+    auto_snapshot(library_id, f'批量删除 {len(data["case_ids"])} 条用例前', 'auto')
+
     deleted_count = TestCase.query.filter(
         TestCase.library_id == library_id,
         TestCase.id.in_(data['case_ids'])
@@ -347,3 +357,192 @@ def batch_delete_cases(library_id):
     db.session.commit()
 
     return jsonify({'message': f'成功删除 {deleted_count} 个用例'})
+
+
+# ==================== YAML 导入导出 ====================
+
+@api_bp.route('/testcase-libraries/<int:library_id>/export/yaml', methods=['GET'])
+def export_cases_yaml(library_id):
+    """导出用例为 YAML 格式"""
+    from flask import Response
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    cases = library.cases.order_by(TestCase.priority, TestCase.case_id).all()
+
+    lines = [f"# 用例库: {library.name}",
+             f"# 项目: {library.project_name or '未指定'}",
+             f"# 模块: {library.module_name or '未指定'}",
+             f"# 导出时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}",
+             "", "cases:"]
+
+    for c in cases:
+        lines.append(f"  - id: {c.case_id}")
+        lines.append(f"    title: \"{c.title}\"")
+        lines.append(f"    priority: {c.priority}")
+        lines.append(f"    type: {c.type}")
+        if c.tags:
+            lines.append(f"    tags: [{', '.join(c.tags)}]")
+        content = c.content or {}
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except Exception:
+                content = {}
+        if content.get('preconditions'):
+            lines.append(f"    preconditions: \"{content['preconditions']}\"")
+        steps = content.get('steps', [])
+        if steps:
+            lines.append("    steps:")
+            for s in steps:
+                if isinstance(s, dict):
+                    lines.append(f"      - action: \"{s.get('action', '')}\"")
+                    lines.append(f"        expected: \"{s.get('expected', '')}\"")
+                else:
+                    lines.append(f"      - action: \"{s}\"")
+        if content.get('notes'):
+            lines.append(f"    notes: \"{content['notes']}\"")
+        lines.append("")
+
+    yaml_str = "\n".join(lines)
+    return Response(yaml_str, mimetype='text/yaml; charset=utf-8',
+                    headers={'Content-Disposition': f'inline; filename="testcases-lib-{library_id}.yaml"'})
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/import/yaml', methods=['POST'])
+def import_cases_yaml(library_id):
+    """从 YAML 导入用例"""
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    data = request.get_json()
+    yaml_content = data.get('yaml', '')
+    if not yaml_content:
+        return jsonify({'error': 'yaml 内容为空'}), 400
+
+    try:
+        import yaml as yaml_lib
+        parsed = yaml_lib.safe_load(yaml_content)
+    except Exception:
+        # 简单解析（无 PyYAML 依赖的 fallback）
+        return jsonify({'error': '服务器未安装 PyYAML，请先 pip install pyyaml'}), 500
+
+    cases_data = parsed.get('cases', [])
+    if not cases_data:
+        return jsonify({'error': '未找到用例数据'}), 400
+
+    base_count = library.cases.count()
+    created = []
+    for i, cd in enumerate(cases_data):
+        steps = cd.get('steps', [])
+        content = {
+            'preconditions': cd.get('preconditions', ''),
+            'steps': steps if isinstance(steps, list) else [],
+            'notes': cd.get('notes', ''),
+        }
+        case = TestCase(
+            library_id=library_id,
+            case_id=cd.get('id', f"TC_{base_count + i + 1:03d}"),
+            title=cd.get('title', '未命名'),
+            priority=cd.get('priority', 'P2'),
+            type=cd.get('type', 'functional'),
+            content=content,
+            mindmap_node_id=generate_mindmap_node_id(),
+            tags=cd.get('tags', []),
+        )
+        db.session.add(case)
+        created.append(case)
+
+    db.session.commit()
+    return jsonify({'message': f'导入 {len(created)} 条用例', 'count': len(created)}), 201
+
+
+# ==================== XMind 导出 ====================
+
+@api_bp.route('/testcase-libraries/<int:library_id>/export/xmind', methods=['GET'])
+def export_cases_xmind(library_id):
+    """导出为 XMind 格式（.xmind 文件）"""
+    from flask import Response
+    import zipfile
+    import io
+
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    cases = library.cases.order_by(TestCase.priority, TestCase.case_id).all()
+
+    # 按优先级 → 类型分组构建 XMind 树
+    groups = {}
+    for c in cases:
+        key = c.priority or 'P2'
+        if key not in groups:
+            groups[key] = {}
+        ctype = c.type or 'functional'
+        if ctype not in groups[key]:
+            groups[key][ctype] = []
+        groups[key][ctype].append(c)
+
+    type_labels = {'functional': '功能测试', 'interface': '接口测试',
+                   'performance': '性能测试', 'security': '安全测试'}
+
+    # 构建 XMind content.json
+    root_children = []
+    for prio in ['P0', 'P1', 'P2', 'P3']:
+        if prio not in groups:
+            continue
+        prio_children = []
+        for ctype, type_cases in groups[prio].items():
+            case_nodes = []
+            for c in type_cases:
+                node = {"title": f"[{c.case_id}] {c.title}"}
+                # 步骤作为子节点
+                content = c.content or {}
+                if isinstance(content, str):
+                    try:
+                        content = json.loads(content)
+                    except Exception:
+                        content = {}
+                steps = content.get('steps', [])
+                if steps:
+                    step_nodes = []
+                    for s in steps:
+                        if isinstance(s, dict):
+                            step_nodes.append({"title": f"{s.get('action', '')} → {s.get('expected', '')}"})
+                        else:
+                            step_nodes.append({"title": str(s)})
+                    node["children"] = {"attached": step_nodes}
+                case_nodes.append(node)
+            prio_children.append({
+                "title": type_labels.get(ctype, ctype),
+                "children": {"attached": case_nodes}
+            })
+        root_children.append({
+            "title": prio,
+            "children": {"attached": prio_children}
+        })
+
+    xmind_content = [{
+        "id": "sheet1",
+        "class": "sheet",
+        "title": library.name,
+        "rootTopic": {
+            "id": "root",
+            "class": "topic",
+            "title": library.name,
+            "children": {"attached": root_children},
+            "structureClass": "org.xmind.ui.map.unbalanced"
+        }
+    }]
+
+    # 打包为 .xmind（ZIP）
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('content.json', json.dumps(xmind_content, ensure_ascii=False, indent=2))
+        zf.writestr('metadata.json', json.dumps({"creator": {"name": "OpenClaw Manager"}}))
+        # manifest 必须有
+        manifest = {
+            "file-entries": {
+                "content.json": {},
+                "metadata.json": {}
+            }
+        }
+        zf.writestr('manifest.json', json.dumps(manifest))
+
+    buf.seek(0)
+    return Response(buf.getvalue(),
+                    mimetype='application/octet-stream',
+                    headers={'Content-Disposition': f'attachment; filename="testcases-{library_id}.xmind"'})

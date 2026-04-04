@@ -68,6 +68,18 @@ const API = {
     createModule(projectId, data) {
         return this.post(`/projects/${projectId}/modules`, data);
     },
+    getProjectModules(projectId) {
+        return this.get(`/projects/${projectId}/modules`);
+    },
+
+    // Modules (独立)
+    listModules(category) {
+        return this.get(`/modules${category ? '?category=' + category : ''}`);
+    },
+    createStandaloneModule(data) { return this.post('/modules', data); },
+    updateModule(id, data) { return this.put(`/modules/${id}`, data); },
+    deleteModule(id) { return this.del(`/modules/${id}`); },
+    getModuleCategories() { return this.get('/modules/categories'); },
 
     // System config
     getSystemConfig() { return this.get('/system/config'); },
