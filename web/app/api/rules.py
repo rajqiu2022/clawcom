@@ -209,11 +209,11 @@ def get_claw_rules(claw_id):
 @api_bp.route('/openclaws/<int:claw_id>/rules', methods=['POST'])
 def update_claw_rules(claw_id):
     """
-    更新 OpenClaw 关联的 Rules（勾选/取消勾选）
+    为 OpenClaw 安装 Rules（增量添加，不会删除已有的）
 
     请求体：
     {
-        "rule_ids": [1, 2, 3]  // 要关联的 rule_id 列表
+        "rule_ids": [1, 2, 3]  // 要安装的 rule_id 列表
     }
     """
     claw = OpenClawInstance.query.get_or_404(claw_id)
@@ -230,31 +230,57 @@ def update_claw_rules(claw_id):
         if rule and rule.scope == 'admin' and rule.owner_claw_id and rule.owner_claw_id != claw_id:
             return jsonify({'error': f'Rule "{rule.display_name}" 为管理员专属，不能安装到其他 OpenClaw'}), 403
 
-    # 删除旧的关联
-    OpenClawRule.query.filter_by(openclaw_id=claw_id).delete()
-
-    # 创建新的关联
+    # 增量安装（已有的跳过）
+    from app.models import ClawTodo
+    installed_names = []
     for rule_id in rule_ids:
         rule = Rule.query.get(rule_id)
-        if rule:
-            assoc = OpenClawRule(
-                openclaw_id=claw_id,
-                rule_id=rule_id,
-                enabled=True
-            )
-            db.session.add(assoc)
+        if not rule:
+            continue
+        existing = OpenClawRule.query.filter_by(
+            openclaw_id=claw_id, rule_id=rule_id
+        ).first()
+        if existing:
+            existing.enabled = True
+        else:
+            db.session.add(OpenClawRule(
+                openclaw_id=claw_id, rule_id=rule_id, enabled=True
+            ))
+        installed_names.append(rule.display_name)
+
+        # 下发安装待办
+        todo = ClawTodo(
+            openclaw_id=claw_id,
+            title=f'安装 Rule：{rule.display_name}',
+            description=(
+                f'Hub 已分配 Rule「{rule.display_name}」(id={rule.id})，请拉取并安装到本地。\n\n'
+                f'执行步骤：\n'
+                f'1. GET /api/v1/openclaws/{claw_id}/assigned-rules 获取最新 Rules 列表\n'
+                f'2. 找到 name="{rule.name}" 的 Rule，获取 content_template\n'
+                f'3. 写入 ~/.qclaw/rules/{rule.name}.md\n'
+                f'4. 完成后上报 POST /todos/{{todo_id}}/complete'
+            ),
+            schedule_type='once',
+            urgency_level='interrupt',
+            priority='P0',
+            task_category='routine',
+            verification_target=f'install-rule:{rule.name}',
+            enabled=True,
+            created_by='hub',
+        )
+        db.session.add(todo)
 
     # 通知 OpenClaw 同步配置
     from app.models import ClawMessage
     msg = ClawMessage(
         claw_id=claw_id, sender_name='Hub',
-        content=f'[更新 Rules] 已关联 {len(rule_ids)} 条规则，请同步配置',
+        content=f'[安装 Rules] 已分配 {len(installed_names)} 条规则：{", ".join(installed_names)}，请同步配置',
         msg_type='sync_config', direction='to_claw', status='pending',
     )
     db.session.add(msg)
     db.session.commit()
 
-    return jsonify({'message': 'Rules 关联已更新', 'rule_ids': rule_ids})
+    return jsonify({'message': f'Rules 已分配', 'rule_ids': rule_ids})
 
 
 @api_bp.route('/openclaws/<int:claw_id>/rules/preview', methods=['POST'])
