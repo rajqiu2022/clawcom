@@ -264,7 +264,7 @@ function renderRules() {
             <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
                 <span style="font-size:0.78rem;color:var(--text-muted)">${r.name}</span>
                 <div style="display:flex;gap:8px">
-                    ${_canEditRule(r) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem;color:var(--accent)" onclick="event.stopPropagation();openAssignRuleModal(${r.id})">分配</button>` : ''}
+                    ${_canEditRule(r) ? `<button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#e67e22;color:#fff;border:none;border-radius:4px" onclick="event.stopPropagation();openAssignRuleModal(${r.id})">分配</button>` : ''}
                     ${_canEditRule(r) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="event.stopPropagation();editRule(${r.id})">编辑</button>
                     <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem;color:var(--red)" onclick="event.stopPropagation();deleteRule(${r.id})">删除</button>` : ''}
                 </div>
