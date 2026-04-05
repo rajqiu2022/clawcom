@@ -219,14 +219,14 @@ function filterSkills(tab) {
 
 function scopeLabel(s) {
     const catLabels = {'peripheral':'外围系统','core_gameplay':'核心单局','commercialization':'商业化','client_performance':'客户端性能','server_special':'服务器专项','other':'其他专项'};
-    if (s.scope === 'global') return '<span class="tag tag-accent">通用</span>';
-    if (s.scope === 'admin') return '<span class="tag" style="background:#e74c3c;color:#fff">管理员</span>';
+    if (s.scope === 'global') return '<span class="tag" style="background:#3498db;color:#fff;font-weight:600">通用</span>';
+    if (s.scope === 'admin') return '<span class="tag" style="background:#e74c3c;color:#fff;font-weight:600">管理员</span>';
     let tags = '';
     const pNames = (s.applicable_projects || []).map(pid => { const p = allProjects.find(x => x.id === pid); return p ? p.name : pid; });
     const mNames = (s.applicable_modules || []).map(k => catLabels[k] || k);
     if (pNames.length) tags += `<span class="tag tag-blue">项目: ${pNames.join(', ')}</span>`;
     if (mNames.length) tags += `<span class="tag" style="background:#6c5ce7;color:#fff">模块: ${mNames.join(', ')}</span>`;
-    return tags || '<span class="tag tag-accent">通用</span>';
+    return tags || '<span class="tag" style="background:#3498db;color:#fff;font-weight:600">通用</span>';
 }
 
 function categoryTag(s) {
@@ -264,7 +264,7 @@ function renderSkills() {
             <div class="skill-card-header">
                 <span class="skill-name">${s.display_name}</span>
                 ${categoryTag(s)}
-                ${s.is_standard ? '<span class="tag" style="background:#e74c3c;color:#fff">标准</span>' : ''}
+                ${s.is_standard ? '<span class="tag" style="background:#e74c3c;color:#fff;font-weight:600">标准</span>' : ''}
             </div>
             <div style="margin-top:4px">${scopeLabel(s)}</div>
             <div class="skill-desc">${s.description || ''}</div>

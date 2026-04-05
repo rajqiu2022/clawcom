@@ -214,9 +214,9 @@ function filterRules(tab) {
 function scopeTag(r) {
     const catLabels = {'peripheral':'外围系统','core_gameplay':'核心单局','commercialization':'商业化','client_performance':'客户端性能','server_special':'服务器专项','other':'其他专项'};
     let tags = '';
-    if (r.is_standard) tags += '<span class="tag" style="background:#e74c3c;color:#fff">标准</span>';
-    if (r.scope === 'global') tags += '<span class="tag tag-accent">通用</span>';
-    else if (r.scope === 'admin') tags += '<span class="tag" style="background:#e74c3c;color:#fff">管理员</span>';
+    if (r.is_standard) tags += '<span class="tag" style="background:#e74c3c;color:#fff;font-weight:600">标准</span>';
+    if (r.scope === 'global') tags += '<span class="tag" style="background:#3498db;color:#fff;font-weight:600">通用</span>';
+    else if (r.scope === 'admin') tags += '<span class="tag" style="background:#e74c3c;color:#fff;font-weight:600">管理员</span>';
     else {
         const pNames = (r.applicable_projects || []).map(pid => {
             const p = allProjects.find(x => x.id === pid);
