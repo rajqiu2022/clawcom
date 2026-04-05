@@ -229,7 +229,53 @@ Header:
 }
 ```
 
-### 8. 心跳返回中的待办统计
+### 8. 已完成待办列表
+
+**查询最近的执行记录（默认最近 3 天 / 最多 50 条），包含已完成、已跳过、重试失败的记录。**
+
+```
+GET /api/v1/openclaws/{CLAW_ID}/todos/completed
+
+Header:
+  Authorization: Bearer {HUB_API_TOKEN}
+
+查询参数（均可选）：
+  days=3        回溯天数（默认 3）
+  limit=50      最大条数（默认 50）
+
+返回示例：
+{
+  "since": "2026-04-03",
+  "count": 12,
+  "items": [
+    {
+      "log": {
+        "id": 45,
+        "todo_id": 7,
+        "log_date": "2026-04-05",
+        "completed_at": "2026-04-05T21:02:15",
+        "result_summary": "日报已发送，包含 5 个工作项",
+        "status": "completed",
+        "retry_count": 0
+      },
+      "todo": {
+        "id": 7,
+        "title": "发送日报",
+        "urgency_level": "interrupt",
+        "task_category": "routine",
+        ...
+      }
+    }
+  ]
+}
+```
+
+**用途**：
+- 日报生成时引用近期完成的待办作为工作内容
+- 检查 init 任务是否全部完成
+- 审计 OpenClaw 的任务执行历史
+
+### 9. 心跳返回中的待办统计
 
 **心跳不是本 Skill 的接口，但待办统计在心跳中返回，是调度决策的核心数据源。**
 

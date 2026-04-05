@@ -192,7 +192,6 @@ def todo_summary(claw_id):
     for t in todos:
         need = False
         if t.schedule_type == 'once':
-            # once 类型只在创建当天需要
             need = t.created_at and t.created_at.date() == target
         elif t.schedule_type == 'daily':
             need = True
@@ -216,5 +215,52 @@ def todo_summary(claw_id):
         'date': target_date,
         'total': total, 'completed': done, 'pending': total - done,
         'rate': round(done / total * 100, 1) if total else 100,
+        'items': items,
+    })
+
+
+@api_bp.route('/openclaws/<int:claw_id>/todos/completed', methods=['GET'])
+def list_completed_todos(claw_id):
+    """已完成待办列表（最近 3 天或最近 50 条，取较小集合）
+
+    查询参数：
+      days:  回溯天数（默认 3）
+      limit: 最大条数（默认 50）
+
+    返回按完成时间倒序的执行记录列表，每条包含待办详情和执行结果。
+    """
+    from datetime import timedelta
+
+    OpenClawInstance.query.get_or_404(claw_id)
+    days = request.args.get('days', 3, type=int)
+    limit = request.args.get('limit', 50, type=int)
+
+    since = date.today() - timedelta(days=max(days, 1) - 1)
+
+    # 查询指定天数内的执行记录
+    logs = (ClawTodoLog.query
+            .filter(ClawTodoLog.openclaw_id == claw_id,
+                    ClawTodoLog.log_date >= since)
+            .order_by(ClawTodoLog.completed_at.desc().nullslast(),
+                      ClawTodoLog.created_at.desc())
+            .limit(limit)
+            .all())
+
+    # 批量获取关联的待办信息
+    todo_ids = list({l.todo_id for l in logs})
+    todos_map = {t.id: t for t in ClawTodo.query.filter(
+        ClawTodo.id.in_(todo_ids)).all()} if todo_ids else {}
+
+    items = []
+    for log in logs:
+        todo = todos_map.get(log.todo_id)
+        items.append({
+            'log': log.to_dict(),
+            'todo': todo.to_dict() if todo else {'id': log.todo_id, 'title': '(已删除)'},
+        })
+
+    return jsonify({
+        'since': since.isoformat(),
+        'count': len(items),
         'items': items,
     })
