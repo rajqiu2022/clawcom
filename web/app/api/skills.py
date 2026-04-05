@@ -252,7 +252,11 @@ def _notify_claw_sync(claw_id, action, detail):
 
 @api_bp.route('/openclaws/<int:claw_id>/skills', methods=['POST'])
 def install_skill(claw_id):
-    """为 OpenClaw 安装 Skill"""
+    """为 OpenClaw 安装 Skill
+
+    1. 写入 OpenClawSkill 关联记录
+    2. 下发待办任务（interrupt 级别），OpenClaw 心跳时感知并拉取安装
+    """
     claw = OpenClawInstance.query.get_or_404(claw_id)
     data = request.get_json()
     skill_id = data.get('skill_id')
@@ -274,6 +278,30 @@ def install_skill(claw_id):
         )
         db.session.add(existing)
 
+    # 下发安装待办（interrupt 级别，心跳时立即感知）
+    from app.models import ClawTodo
+    todo = ClawTodo(
+        openclaw_id=claw_id,
+        title=f'安装 Skill：{skill.display_name}',
+        description=(
+            f'Hub 已分配 Skill「{skill.display_name}」(id={skill.id})，请拉取并安装到本地。\n\n'
+            f'执行步骤：\n'
+            f'1. GET /api/v1/openclaws/{claw_id}/assigned-skills 获取最新 Skills 列表\n'
+            f'2. 找到 name="{skill.name}" 的 Skill\n'
+            f'3. GET /api/v1/skills/{skill.id}/files 获取文档包文件清单\n'
+            f'4. 逐个拉取文件写入 ~/.qclaw/skills/{skill.name}/\n'
+            f'5. 完成后上报 POST /todos/{{todo_id}}/complete'
+        ),
+        schedule_type='once',
+        urgency_level='interrupt',
+        priority='P0',
+        task_category='routine',
+        verification_target=f'install-skill:{skill.name}',
+        enabled=True,
+        created_by='hub',
+    )
+    db.session.add(todo)
+
     _notify_claw_sync(claw_id, '分配 Skill', skill.display_name)
     db.session.commit()
     return jsonify({'message': f'已为 {claw.name} 分配 {skill.display_name}'}), 201
@@ -287,8 +315,27 @@ def uninstall_skill(claw_id, skill_id):
         openclaw_id=claw_id, skill_id=skill_id
     ).first_or_404()
 
+    skill_name = link.skill.display_name if link.skill else str(skill_id)
+    skill_ident = link.skill.name if link.skill else str(skill_id)
     link.enabled = False
-    _notify_claw_sync(claw_id, '移除 Skill', link.skill.display_name if link.skill else str(skill_id))
+
+    # 下发卸载待办
+    from app.models import ClawTodo
+    todo = ClawTodo(
+        openclaw_id=claw_id,
+        title=f'卸载 Skill：{skill_name}',
+        description=f'Hub 已移除 Skill「{skill_name}」，请从本地删除 ~/.qclaw/skills/{skill_ident}/ 目录。',
+        schedule_type='once',
+        urgency_level='flexible',
+        priority='P1',
+        task_category='routine',
+        verification_target=f'uninstall-skill:{skill_ident}',
+        enabled=True,
+        created_by='hub',
+    )
+    db.session.add(todo)
+
+    _notify_claw_sync(claw_id, '移除 Skill', skill_name)
     db.session.commit()
     return jsonify({'message': '已移除'})
 
