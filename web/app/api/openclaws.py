@@ -463,12 +463,14 @@ curl -X POST -H "Authorization: Bearer {token}" \\
 @require_claw_token
 def get_openclaw_config(claw_id, claw=None):
     """OpenClaw 拉取自己的配置（需 Token 认证）"""
-    # 获取已安装的 Skills
-    installed_skills = [s.skill.to_dict() for s in claw.skills if s.enabled]
+    # 获取已安装的 Skills（跳过已删除的）
+    installed_skills = [s.skill.to_dict() for s in claw.skills if s.enabled and s.skill]
 
-    # 获取已安装的 Rules
+    # 获取已安装的 Rules（跳过已删除的）
     installed_rules = []
     for r in OpenClawRule.query.filter_by(openclaw_id=claw_id, enabled=True).all():
+        if not r.rule:
+            continue
         installed_rules.append({
             'id': r.rule.id,
             'name': r.rule.name,
@@ -644,7 +646,7 @@ def get_assigned_skills(claw_id, claw=None):
     """OpenClaw 获取分配给自己的 Skills（需 Token 认证）"""
     skills = []
     for s in claw.skills:
-        if s.enabled:
+        if s.enabled and s.skill:
             skills.append({
                 'id': s.skill.id,
                 'name': s.skill.name,
