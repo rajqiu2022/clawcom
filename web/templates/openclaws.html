@@ -72,38 +72,33 @@
 
 <!-- 新建弹窗 -->
 <div class="modal-overlay" id="create-modal">
-    <div class="modal">
+    <div class="modal" style="max-width:640px">
         <h2 class="modal-title">注册新 OpenClaw</h2>
         <form id="create-form">
-            <div class="form-group">
-                <label class="form-label">名称 *</label>
-                <input class="form-input" name="name" placeholder="如：小测" required>
-            </div>
-            <div class="form-group">
-                <label class="form-label">所属用户 *</label>
-                <input class="form-input" name="owner" placeholder="如：张三">
+            <div class="two-col">
+                <div class="form-group">
+                    <label class="form-label">名称 *</label>
+                    <input class="form-input" name="name" placeholder="如：小测" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">所属用户 *</label>
+                    <input class="form-input" name="owner" placeholder="如：张三">
+                </div>
             </div>
             <div class="form-group">
                 <label class="form-label">角色 *</label>
-                <select class="form-input" name="role" id="claw-role-select" required>
-                    <option value="test_member" selected>测试成员</option>
+                <select class="form-input" name="role" id="claw-role-select" required onchange="onRoleChange()">
+                    <option value="">-- 选择角色 --</option>
                     <option value="test_manager">测试经理</option>
-                    <option value="test_executor">测试执行</option>
-                    <option value="admin">管理员</option>
+                    <option value="module_owner">模块负责人</option>
+                    <option value="specialist">专项测试</option>
                 </select>
-            </div>
-            <div class="form-group">
-                <label class="form-label">职位头衔</label>
-                <input class="form-input" name="role_title" placeholder="如：功能测试工程师">
-            </div>
-            <div class="form-group">
-                <label class="form-label">负责内容</label>
-                <textarea class="form-textarea" name="responsibilities" placeholder="描述这个 OpenClaw 负责什么..."></textarea>
+                <div id="role-hint" style="margin-top:6px;font-size:0.82rem;color:var(--text-muted)"></div>
             </div>
             <div class="two-col">
                 <div class="form-group">
-                    <label class="form-label">所属项目</label>
-                    <select class="form-input" name="project_id" id="project-select" onchange="onProjectChange(this)">
+                    <label class="form-label">所属项目 *</label>
+                    <select class="form-input" name="project_id" id="project-select" onchange="onProjectChange(this)" required>
                         <option value="">-- 选择项目 --</option>
                     </select>
                 </div>
@@ -115,16 +110,20 @@
                 </div>
             </div>
             <div class="form-group">
-                <label class="form-label">上报时间</label>
-                <input class="form-input" name="report_schedule" value="15:00,21:00" placeholder="如：15:00,21:00">
+                <label class="form-label">职位头衔</label>
+                <input class="form-input" name="role_title" placeholder="如：功能测试工程师">
             </div>
             <div class="form-group">
-                <label class="form-label">连接方式</label>
-                <select class="form-input" name="connection_mode">
-                    <option value="sse" selected>🔌 SSE 长连接（推荐）</option>
-                    <option value="polling">🔄 轮询方式</option>
-                </select>
+                <label class="form-label">负责内容</label>
+                <textarea class="form-textarea" name="responsibilities" placeholder="描述这个 OpenClaw 负责什么..."></textarea>
             </div>
+            <div class="two-col">
+                <div class="form-group">
+                    <label class="form-label">上报时间</label>
+                    <input class="form-input" name="report_schedule" value="15:00,21:00" placeholder="如：15:00,21:00">
+                </div>
+            </div>
+            <input type="hidden" name="connection_mode" value="polling">
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
                 <button type="submit" class="btn btn-primary">创建</button>
@@ -357,6 +356,8 @@
 
 .role-tag.admin { background: rgba(234,179,8,0.15); color: #eab308; }
 .role-tag.test_manager { background: rgba(168,85,247,0.15); color: #a855f7; }
+.role-tag.module_owner { background: rgba(59,130,246,0.15); color: #3b82f6; }
+.role-tag.specialist { background: rgba(236,72,153,0.15); color: #ec4899; }
 .role-tag.test_member { background: rgba(59,130,246,0.15); color: #3b82f6; }
 .role-tag.test_executor { background: rgba(34,197,94,0.15); color: #22c55e; }
 
@@ -462,6 +463,8 @@ let filteredClaws = [];
 const ROLE_LABELS = {
     'admin': { text: '管理员', cls: 'admin' },
     'test_manager': { text: '测试经理', cls: 'test_manager' },
+    'module_owner': { text: '模块负责人', cls: 'module_owner' },
+    'specialist': { text: '专项测试', cls: 'specialist' },
     'test_member': { text: '测试成员', cls: 'test_member' },
     'test_executor': { text: '测试执行', cls: 'test_executor' },
 };
@@ -595,9 +598,6 @@ function renderClaws() {
 function renderClawCard(c) {
     const roleInfo = ROLE_LABELS[c.role] || { text: '测试成员', cls: 'test_member' };
     const onlineCount = filteredClaws.filter(cl => cl.status === 'online').length;
-    const connMode = c.connection_mode || 'sse';
-    const connModeText = connMode === 'sse' ? '🔌 SSE' : '🔄 轮询';
-    const connModeClass = connMode === 'sse' ? 'conn-sse' : 'conn-polling';
 
     return `
     <div class="claw-item" data-id="${c.id}">
@@ -607,7 +607,6 @@ function renderClawCard(c) {
                 <div class="claw-name-row">
                     <span class="status-indicator ${c.status || 'offline'}"></span>
                     <span class="claw-name">${c.name}</span>
-                    <span class="conn-mode-badge ${connModeClass}" title="${connMode === 'sse' ? 'SSE 长连接' : '轮询方式'}">${connModeText}</span>
                 </div>
                 <div class="claw-role-text">${c.role_title || '未设置职位'}</div>
             </div>
@@ -660,7 +659,24 @@ function onProjectChange(sel) {
 
 function openCreateModal() {
     loadProjectsForSelect();
+    document.getElementById('create-form').reset();
+    document.getElementById('role-hint').textContent = '';
+    // 所属用户默认为当前登录用户
+    if (currentUser) {
+        document.querySelector('#create-form input[name="owner"]').value = currentUser.display_name || currentUser.username || '';
+    }
     document.getElementById('create-modal').classList.add('active');
+}
+
+const roleHints = {
+    'test_manager': '📋 测试经理：负责项目整体测试规划、任务分配、质量把控和团队协调',
+    'module_owner': '📦 模块负责人：负责特定模块的测试覆盖、用例维护和缺陷跟踪',
+    'specialist': '🔬 专项测试：负责性能、安全、兼容性等专项测试领域',
+};
+
+function onRoleChange() {
+    const role = document.getElementById('claw-role-select').value;
+    document.getElementById('role-hint').textContent = roleHints[role] || '';
 }
 
 function closeCreateModal() {
