@@ -11,6 +11,7 @@
 {% block content %}
 <div class="tab-bar">
     <div class="tab-item active" data-tab="info" onclick="switchTab('info')">基本信息</div>
+    <div class="tab-item" data-tab="todos" onclick="switchTab('todos')">待办管理</div>
     <div class="tab-item" data-tab="skills" onclick="switchTab('skills')">Skills 配置</div>
     <div class="tab-item" data-tab="reports" onclick="switchTab('reports')">工作日报</div>
     <div class="tab-item" data-tab="config" onclick="switchTab('config')">工作规范</div>
@@ -34,10 +35,9 @@
                     <div class="form-group">
                         <label class="form-label">角色</label>
                         <select class="form-input" name="role" id="f-role">
-                            <option value="test_member">测试成员</option>
                             <option value="test_manager">测试经理</option>
-                            <option value="test_executor">测试执行</option>
-                            <option value="admin">管理员</option>
+                            <option value="module_owner">模块负责人</option>
+                            <option value="specialist">专项测试</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -67,13 +67,6 @@
                         <input class="form-input" name="report_schedule" id="f-schedule">
                     </div>
                     <div class="form-group">
-                        <label class="form-label">连接方式</label>
-                        <select class="form-input" name="connection_mode" id="f-conn-mode">
-                            <option value="sse">🔌 SSE 长连接（推荐）</option>
-                            <option value="polling">🔄 轮询方式</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
                         <label class="form-label">状态</label>
                         <input class="form-input" id="f-status" disabled>
                     </div>
@@ -84,6 +77,84 @@
                 <textarea class="form-textarea" name="responsibilities" id="f-resp"></textarea>
             </div>
             <button type="submit" class="btn btn-primary">保存修改</button>
+        </form>
+    </div>
+</div>
+
+<!-- 待办管理 -->
+<div class="tab-content" id="tab-todos" style="display:none">
+    <div class="card">
+        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+            <h3 class="card-title">待办事项</h3>
+            <div style="display:flex;gap:8px;align-items:center">
+                <span id="todo-stats" style="font-size:0.82rem;color:var(--text-muted)"></span>
+                <button class="btn btn-primary btn-sm" onclick="showCreateTodo()">+ 新建待办</button>
+            </div>
+        </div>
+        <div id="todo-list"></div>
+        <!-- 已完成待办（最近3天） -->
+        <div id="todo-completed-section" style="margin-top:16px;display:none">
+            <div style="padding:8px 0;font-size:0.88rem;color:var(--text-muted);cursor:pointer;display:flex;align-items:center;gap:6px" onclick="toggleCompletedSection()">
+                <span id="completed-toggle-icon">▶</span>
+                <span>已完成 (<span id="completed-count">0</span>)</span>
+                <span style="font-size:0.75rem">最近3天</span>
+            </div>
+            <div id="todo-completed-list" style="display:none;opacity:0.7"></div>
+        </div>
+    </div>
+</div>
+
+<!-- 新建/编辑待办弹窗 -->
+<div class="modal-overlay" id="todo-modal">
+    <div class="modal" style="max-width:560px">
+        <h2 class="modal-title" id="todo-modal-title">新建待办</h2>
+        <form id="todo-form">
+            <div class="form-group">
+                <label class="form-label">标题 *</label>
+                <input class="form-input" name="title" id="todo-title" required placeholder="如：查看KM文章深度学习总结">
+            </div>
+            <div class="form-group">
+                <label class="form-label">描述</label>
+                <textarea class="form-textarea" name="description" id="todo-desc" style="min-height:80px" placeholder="详细要求..."></textarea>
+            </div>
+            <div class="two-col">
+                <div class="form-group">
+                    <label class="form-label">频率</label>
+                    <select class="form-input" name="schedule_type" id="todo-type" onchange="onTodoTypeChange()">
+                        <option value="daily">每天</option>
+                        <option value="weekly">每周</option>
+                        <option value="monthly">每月</option>
+                        <option value="once">一次性</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">定时时间（可选）</label>
+                    <input class="form-input" type="time" name="schedule_time" id="todo-time" placeholder="留空=不限时间">
+                </div>
+            </div>
+            <div class="form-group" id="todo-day-group" style="display:none">
+                <label class="form-label" id="todo-day-label">周几</label>
+                <select class="form-input" name="schedule_day" id="todo-day">
+                    <option value="1">周一</option><option value="2">周二</option>
+                    <option value="3">周三</option><option value="4">周四</option>
+                    <option value="5">周五</option><option value="6">周六</option>
+                    <option value="7">周日</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">紧急度</label>
+                <select class="form-input" name="urgency_level" id="todo-urgency">
+                    <option value="interrupt">⚡ 定时中断（到点立即执行）</option>
+                    <option value="flexible" selected>📋 当天弹性（当天完成即可）</option>
+                    <option value="background">🔄 后台任务（空闲时做）</option>
+                    <option value="periodic">🔁 周期-可跳过（错过就下次）</option>
+                    <option value="retry">🔁 周期-可重试（错过延后重试）</option>
+                </select>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeTodoModal()">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
         </form>
     </div>
 </div>
@@ -102,22 +173,16 @@
     </div>
 </div>
 
-<!-- 工作规范 -->
+<!-- 工作规范（显示已安装的 Rules） -->
 <div class="tab-content" id="tab-config" style="display:none">
     <div class="card">
         <div class="card-header">
-            <h3 class="card-title">SOUL 配置</h3>
+            <h3 class="card-title">已安装的工作规范</h3>
+            <span id="rules-count" style="font-size:0.82rem;color:var(--text-muted)"></span>
         </div>
-        <div class="form-group">
-            <textarea class="form-textarea" id="f-soul" style="min-height:200px;font-family:monospace;font-size:0.85rem;"></textarea>
+        <div id="installed-rules-list">
+            <div class="loading"><span class="spinner"></span></div>
         </div>
-        <div class="card-header" style="margin-top:20px">
-            <h3 class="card-title">工作流规范</h3>
-        </div>
-        <div class="form-group">
-            <textarea class="form-textarea" id="f-workflow" style="min-height:200px;font-family:monospace;font-size:0.85rem;"></textarea>
-        </div>
-        <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
     </div>
 </div>
 
@@ -128,22 +193,27 @@
             <h3 class="card-title">🤖 AI 生成工作规范</h3>
         </div>
         <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:16px">
-            输入功能描述，AI 将基于 OpenClaw 规范格式生成对应的工作流 Markdown 文件。
+            输入功能描述，AI 生成规范后可提交到系统进入审核流程。
         </p>
-        <div class="form-group">
-            <label class="form-label">OpenClaw 角色</label>
-            <select class="form-input" id="ai-claw-role">
-                <option value="test_member" selected>测试成员</option>
-                <option value="test_manager">测试经理</option>
-                <option value="test_executor">测试执行</option>
-                <option value="admin">管理员</option>
-            </select>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="form-group">
+                <label class="form-label">OpenClaw 角色</label>
+                <select class="form-select" id="ai-claw-role" style="width:100%">
+                    <option value="test_manager">测试经理</option>
+                    <option value="module_owner" selected>模块负责人</option>
+                    <option value="specialist">专项测试</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">规范名称</label>
+                <input class="form-input" id="ai-rule-name" placeholder="如：赛车模块测试规范">
+            </div>
         </div>
         <div class="form-group">
             <label class="form-label">功能描述 *</label>
             <textarea class="form-textarea" id="ai-desc"
-                placeholder="描述这个 OpenClaw 需要负责的功能或测试范围，例如：负责游戏内赛车物理引擎的功能测试，包括碰撞检测、漂移手感、赛车调校等..."
-                style="min-height:120px"></textarea>
+                placeholder="描述需要负责的功能或测试范围..."
+                style="min-height:100px"></textarea>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
             <button class="btn btn-primary" id="ai-gen-btn" onclick="generateSpec()">
@@ -157,12 +227,11 @@
                 <h3 class="card-title">生成预览</h3>
                 <div style="display:flex;gap:6px">
                     <button class="btn btn-ghost btn-sm" onclick="copySpec()">复制内容</button>
-                    <button class="btn btn-primary btn-sm" onclick="applySpec()">应用到工作规范</button>
+                    <button class="btn btn-primary btn-sm" onclick="submitSpecAsRule()">📋 提交到系统审核</button>
                 </div>
             </div>
             <textarea class="form-textarea" id="ai-spec-output"
-                style="min-height:400px;font-family:monospace;font-size:0.85rem;background:var(--bg-primary)"
-                readonly></textarea>
+                style="min-height:400px;font-family:monospace;font-size:0.85rem;background:var(--bg-primary)"></textarea>
         </div>
     </div>
 </div>
@@ -179,8 +248,10 @@ function switchTab(tab) {
     $$('.tab-content').forEach(c => c.style.display = 'none');
     $(`#tab-${tab}`).style.display = 'block';
 
+    if (tab === 'todos') loadTodos();
     if (tab === 'skills') loadSkills();
     if (tab === 'reports') loadReports();
+    if (tab === 'config') loadInstalledRules();
 }
 
 async function loadClaw() {
@@ -203,23 +274,22 @@ async function loadClaw() {
         // 设置项目（通过 project_id 或 project_name 匹配）
         const projectId = clawData.project_id || '';
         const projectName = clawData.project_name || '';
+        let matchedProjectId = projectId;
         if (projectId) {
             projectSel.value = projectId;
         } else if (projectName) {
             // 兼容旧数据：尝试通过名称匹配
             const matched = projects.find(p => p.name === projectName);
-            projectSel.value = matched ? matched.id : '';
+            matchedProjectId = matched ? matched.id : '';
+            projectSel.value = matchedProjectId;
         }
 
         // 加载模块列表
-        await loadModulesForDetail(projectId || (matched ? matched.id : null));
+        await loadModulesForDetail(matchedProjectId || null);
 
         $('#f-schedule').value = clawData.report_schedule || '15:00,21:00';
-        $('#f-conn-mode').value = clawData.connection_mode || 'sse';
         $('#f-status').value = clawData.status || 'offline';
         $('#f-resp').value = clawData.responsibilities || '';
-        $('#f-soul').value = clawData.soul_config || '';
-        $('#f-workflow').value = clawData.workflow_config || '';
     } catch (err) {
         showToast('加载失败: ' + err.message, 'error');
     }
@@ -259,16 +329,30 @@ $('#info-form').addEventListener('submit', async e => {
     }
 });
 
-async function saveConfig() {
+async function loadInstalledRules() {
     try {
-        await API.updateClaw(CLAW_ID, {
-            soul_config: $('#f-soul').value,
-            workflow_config: $('#f-workflow').value,
-        });
-        showToast('配置已保存', 'success');
-    } catch (err) {
-        showToast('保存失败: ' + err.message, 'error');
-    }
+        const rules = await API.request('GET', `/openclaws/${CLAW_ID}/assigned-rules`);
+        const list = $('#installed-rules-list');
+        const ruleList = rules.rules || [];
+        $('#rules-count').textContent = `${ruleList.length} 条规范`;
+
+        if (!ruleList.length) {
+            list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted)">暂无安装的工作规范，请在 Rules 页面为此 OpenClaw 分配规范</div>';
+            return;
+        }
+        list.innerHTML = ruleList.map(r => `
+            <div style="padding:14px 0;border-bottom:1px solid var(--border)">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                    <span style="font-weight:600">${r.display_name}</span>
+                    <span class="tag tag-blue" style="font-size:0.75rem">${r.name}</span>
+                </div>
+                ${r.description ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:8px">${r.description}</div>` : ''}
+                ${r.content_template ? `<details><summary style="font-size:0.82rem;color:var(--accent);cursor:pointer">查看规范内容</summary>
+                    <pre style="margin-top:8px;padding:12px;background:var(--bg-secondary);border-radius:var(--radius-sm);font-size:0.82rem;white-space:pre-wrap;max-height:300px;overflow-y:auto">${r.content_template}</pre>
+                </details>` : ''}
+            </div>
+        `).join('');
+    } catch(e) { showToast('加载规范失败:'+e.message,'error'); }
 }
 
 async function loadSkills() {
@@ -290,12 +374,10 @@ async function loadSkills() {
                         <div class="skill-users">
                             ${(s.used_by || []).map(u => `<span class="tag tag-blue">${u}</span>`).join('')}
                         </div>
-                        <button class="btn btn-sm ${installed ? 'btn-danger' : 'btn-primary'}"
-                                onclick="${installed
-                                    ? `uninstallSkill(${s.id})`
-                                    : `installSkill(${s.id})`}">
-                            ${installed ? '卸载' : '安装'}
-                        </button>
+                        ${installed
+                            ? `<span class="tag tag-green">✓ 已生效</span>`
+                            : `<button class="btn btn-sm btn-primary" onclick="installSkill(${s.id})">分配</button>`
+                        }
                     </div>
                 </div>
             `;
@@ -317,13 +399,18 @@ async function installSkill(skillId) {
 }
 
 async function uninstallSkill(skillId) {
+    if (!await customConfirm(
+        '确定要移除此 Skill 吗？' +
+        '<br><br><span style="font-size:0.82rem;color:var(--text-muted)">' +
+        '移除后系统会通知 OpenClaw，但已同步到本地的 Skill 文件可能需要手动清理。</span>'
+    )) return;
     try {
         await API.uninstallSkill(CLAW_ID, skillId);
-        showToast('已卸载', 'success');
+        showToast('已移除，已通知 OpenClaw 同步', 'success');
         clawData = await API.getClaw(CLAW_ID);
         loadSkills();
     } catch (err) {
-        showToast('卸载失败: ' + err.message, 'error');
+        showToast('移除失败: ' + err.message, 'error');
     }
 }
 
@@ -341,28 +428,40 @@ async function loadReports() {
             return;
         }
 
-        timeline.innerHTML = reports.map(r => `
+        // Helper: normalize JSON field that may be string or array
+        function normalizeList(val) {
+            if (Array.isArray(val)) return val;
+            if (typeof val === 'string' && val.trim()) {
+                return val.replace(/\\n/g, '\n').split('\n').filter(l => l.trim()).map(l => l.trim());
+            }
+            return [];
+        }
+
+        timeline.innerHTML = reports.map(r => {
+            const tasks = normalizeList(r.tasks_completed);
+            const knowledge = normalizeList(r.knowledge_recorded);
+            return `
             <div class="timeline-item">
                 <div class="timeline-time">${r.report_date} ${r.report_time}</div>
                 ${r.ai_summary ? `<p style="margin-bottom:10px">${r.ai_summary}</p>` : ''}
-                ${r.tasks_completed && r.tasks_completed.length > 0 ? `
+                ${tasks.length > 0 ? `
                     <div style="margin-bottom:8px">
                         <strong style="font-size:0.85rem">完成任务：</strong>
                         <ul style="margin-top:4px;padding-left:18px;font-size:0.85rem;color:var(--text-secondary)">
-                            ${r.tasks_completed.map(t => `<li>${t.task}${t.duration ? ` (${t.duration})` : ''}</li>`).join('')}
+                            ${tasks.map(t => `<li>${typeof t === 'object' ? (t.task || JSON.stringify(t)) + (t.duration ? ` (${t.duration})` : '') : t}</li>`).join('')}
                         </ul>
                     </div>
                 ` : ''}
-                ${r.knowledge_recorded && r.knowledge_recorded.length > 0 ? `
+                ${knowledge.length > 0 ? `
                     <div>
                         <strong style="font-size:0.85rem">新增知识：</strong>
                         <div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:6px">
-                            ${r.knowledge_recorded.map(k => `<span class="tag tag-accent">${k.title || k.category}</span>`).join('')}
+                            ${knowledge.map(k => `<span class="tag tag-accent">${typeof k === 'object' ? (k.title || k.category || JSON.stringify(k)) : k}</span>`).join('')}
                         </div>
                     </div>
                 ` : ''}
             </div>
-        `).join('');
+        `}).join('');
     } catch (err) {
         showToast('日报加载失败: ' + err.message, 'error');
     }
@@ -425,14 +524,200 @@ function copySpec() {
     }).catch(() => showToast('复制失败', 'error'));
 }
 
-function applySpec() {
-    if (!generatedSpecContent) return;
-    // 应用到工作规范 textarea
-    $('#f-workflow').value = generatedSpecContent;
-    // 切换到工作规范 tab
-    switchTab('config');
-    showToast('已应用到工作规范，请检查后保存', 'success');
+async function submitSpecAsRule() {
+    const content = $('#ai-spec-output').value.trim();
+    if (!content) { showToast('请先生成规范', 'error'); return; }
+    const ruleName = ($('#ai-rule-name').value.trim() || `ai-rule-${CLAW_ID}-${Date.now().toString(36)}`);
+    const displayName = $('#ai-rule-name').value.trim() || 'AI 生成规范';
+
+    try {
+        await API.request('POST', '/rules', {
+            name: ruleName.replace(/[^a-zA-Z0-9_\-]/g, '_').substring(0, 50) + '-' + Date.now().toString(36),
+            display_name: displayName,
+            description: $('#ai-desc').value.trim(),
+            content_template: content,
+            category: 'ai_generated',
+            scope: 'global',
+            created_by: clawData?.name || 'AI',
+            review_status: 'pending',
+        });
+        showToast('规范已提交到系统，等待管理员审核', 'success');
+    } catch(e) { showToast('提交失败: ' + e.message, 'error'); }
 }
+
+// ============== 待办管理 ==============
+let editingTodoId = null;
+const scheduleLabels = {daily:'每天',weekly:'每周',monthly:'每月',once:'一次性'};
+const dayNames = {1:'一',2:'二',3:'三',4:'四',5:'五',6:'六',7:'日'};
+const urgencyLabels = {
+    interrupt: {icon:'⚡', label:'定时中断', color:'#e74c3c'},
+    flexible:  {icon:'📋', label:'当天完成', color:'#3498db'},
+    background:{icon:'🔄', label:'空闲执行', color:'#95a5a6'},
+    periodic:  {icon:'🔁', label:'可跳过',   color:'#e67e22'},
+    retry:     {icon:'🔁', label:'可重试',   color:'#9b59b6'},
+};
+
+async function loadTodos() {
+    try {
+        const todos = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos`).then(r=>r.json());
+        const list = $('#todo-list');
+        if (!todos.length) {
+            list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">暂无待办，点击右上角新建</div></div>';
+            $('#todo-stats').textContent = '';
+        } else {
+            const done = todos.filter(t=>t.today_status==='completed').length;
+            $('#todo-stats').textContent = `今日 ${done}/${todos.length} 完成`;
+
+            list.innerHTML = todos.map(t => {
+                const isDone = t.today_status === 'completed';
+                let schedStr = scheduleLabels[t.schedule_type] || t.schedule_type;
+                if (t.schedule_type==='weekly' && t.schedule_day) schedStr += dayNames[t.schedule_day]||'';
+                if (t.schedule_type==='monthly' && t.schedule_day) schedStr += t.schedule_day+'号';
+                if (t.schedule_time) schedStr += ' ' + t.schedule_time;
+                else if (t.schedule_type==='daily') schedStr += '（不限时间）';
+                const urg = urgencyLabels[t.urgency_level] || urgencyLabels.flexible;
+                return `<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+                    <div style="cursor:pointer;font-size:1.2rem" onclick="toggleTodo(${t.id},${isDone})">${isDone ? '✅' : '⬜'}</div>
+                    <div style="flex:1;min-width:0">
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                            <span style="font-weight:600;${isDone?'text-decoration:line-through;opacity:0.5':''}">${t.title}</span>
+                            <span class="tag" style="background:${urg.color};color:#fff;font-size:0.72rem">${urg.icon} ${urg.label}</span>
+                            <span style="font-size:0.78rem;color:var(--text-muted)">${schedStr}</span>
+                        </div>
+                        ${t.description ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px">${t.description}</div>` : ''}
+                        ${isDone && t.today_completed_at ? `<div style="font-size:0.75rem;color:var(--success);margin-top:2px">完成于 ${t.today_completed_at.substring(11,16)}</div>` : ''}
+                    </div>
+                    <div style="display:flex;gap:4px">
+                        <button class="btn btn-ghost" style="padding:2px 6px;font-size:0.78rem" onclick="editTodo(${t.id})">编辑</button>
+                        <button class="btn btn-ghost" style="padding:2px 6px;font-size:0.78rem;color:var(--red)" onclick="deleteTodo(${t.id})">删除</button>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        // 加载已完成列表
+        loadCompletedTodos();
+    } catch(e) { showToast('加载待办失败:'+e.message,'error'); }
+}
+
+async function loadCompletedTodos() {
+    try {
+        const data = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/completed?days=3&limit=50`).then(r=>r.json());
+        const section = $('#todo-completed-section');
+        const list = $('#todo-completed-list');
+        if (!data.items || !data.items.length) {
+            section.style.display = 'none';
+            return;
+        }
+        section.style.display = 'block';
+        $('#completed-count').textContent = data.count;
+        list.innerHTML = data.items.map(item => {
+            const log = item.log;
+            const todo = item.todo;
+            const statusMap = {completed:'✅ 完成', skipped:'⏭️ 跳过', retry_failed:'❌ 重试失败', overdue:'⏰ 逾期'};
+            const statusLabel = statusMap[log.status] || log.status;
+            return `<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+                <span style="font-size:0.85rem;min-width:24px">${statusMap[log.status] ? statusMap[log.status].split(' ')[0] : '📋'}</span>
+                <div style="flex:1;min-width:0">
+                    <span style="font-size:0.88rem;text-decoration:line-through;opacity:0.6">${todo.title}</span>
+                    <span style="font-size:0.75rem;color:var(--text-muted);margin-left:8px">${log.log_date}</span>
+                    ${log.result_summary ? `<div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px">${log.result_summary}</div>` : ''}
+                </div>
+                <span style="font-size:0.75rem;color:var(--text-muted)">${log.completed_at ? log.completed_at.substring(11,16) : ''}</span>
+            </div>`;
+        }).join('');
+    } catch(e) {}
+}
+
+function toggleCompletedSection() {
+    const list = $('#todo-completed-list');
+    const icon = $('#completed-toggle-icon');
+    if (list.style.display === 'none') {
+        list.style.display = 'block';
+        icon.textContent = '▼';
+    } else {
+        list.style.display = 'none';
+        icon.textContent = '▶';
+    }
+}
+
+async function toggleTodo(todoId, isDone) {
+    if (isDone) return;
+    if (!await customConfirm('确认标记此待办为已完成？')) return;
+    try {
+        await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${todoId}/complete`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+        loadTodos();
+    } catch(e) { showToast('操作失败','error'); }
+}
+
+function showCreateTodo() {
+    editingTodoId = null;
+    $('#todo-modal-title').textContent = '新建待办';
+    $('#todo-form').reset();
+    $('#todo-day-group').style.display = 'none';
+    $('#todo-modal').classList.add('active');
+}
+function closeTodoModal() { $('#todo-modal').classList.remove('active'); }
+$('#todo-modal').addEventListener('click', e => { if(e.target===$('#todo-modal')) closeTodoModal(); });
+
+function onTodoTypeChange() {
+    const type = $('#todo-type').value;
+    const dg = $('#todo-day-group');
+    if (type === 'weekly') {
+        dg.style.display = 'block';
+        $('#todo-day-label').textContent = '周几';
+        $('#todo-day').innerHTML = '<option value="1">周一</option><option value="2">周二</option><option value="3">周三</option><option value="4">周四</option><option value="5">周五</option><option value="6">周六</option><option value="7">周日</option>';
+    } else if (type === 'monthly') {
+        dg.style.display = 'block';
+        $('#todo-day-label').textContent = '几号';
+        $('#todo-day').innerHTML = Array.from({length:31},(_,i)=>`<option value="${i+1}">${i+1}号</option>`).join('');
+    } else { dg.style.display = 'none'; }
+}
+
+async function editTodo(id) {
+    try {
+        const todos = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos?enabled_only=false`).then(r=>r.json());
+        const t = todos.find(x=>x.id===id);
+        if (!t) return;
+        editingTodoId = id;
+        $('#todo-modal-title').textContent = '编辑待办';
+        $('#todo-title').value = t.title;
+        $('#todo-desc').value = t.description||'';
+        $('#todo-type').value = t.schedule_type;
+        $('#todo-time').value = t.schedule_time||'';
+        $('#todo-urgency').value = t.urgency_level||'flexible';
+        onTodoTypeChange();
+        if (t.schedule_day) $('#todo-day').value = t.schedule_day;
+        $('#todo-modal').classList.add('active');
+    } catch(e) { showToast('加载失败','error'); }
+}
+
+async function deleteTodo(id) {
+    if (!await customConfirm('确定删除此待办？')) return;
+    try {
+        await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${id}`,{method:'DELETE'});
+        showToast('已删除','success'); loadTodos();
+    } catch(e) { showToast('删除失败','error'); }
+}
+
+$('#todo-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const data = {
+        title: $('#todo-title').value.trim(),
+        description: $('#todo-desc').value.trim()||null,
+        schedule_type: $('#todo-type').value,
+        schedule_time: $('#todo-time').value||null,
+        urgency_level: $('#todo-urgency').value,
+    };
+    if (['weekly','monthly'].includes(data.schedule_type))
+        data.schedule_day = parseInt($('#todo-day').value);
+    try {
+        const url = editingTodoId ? `/api/v1/openclaws/${CLAW_ID}/todos/${editingTodoId}` : `/api/v1/openclaws/${CLAW_ID}/todos`;
+        await fetch(url, {method:editingTodoId?'PUT':'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+        showToast(editingTodoId?'已更新':'已创建','success');
+        closeTodoModal(); loadTodos();
+    } catch(e) { showToast('保存失败','error'); }
+});
 
 loadClaw();
 </script>
