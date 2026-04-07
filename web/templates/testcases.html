@@ -6,10 +6,10 @@
 {% block top_actions %}
 <div style="display:flex;gap:10px;align-items:center">
     <select class="form-select" id="project-filter" onchange="onProjectFilterChange()" style="min-width:160px">
-        <option value="">-- 选择项目 --</option>
+        <option value="">全部项目</option>
     </select>
     <select class="form-select" id="library-select" onchange="switchLibrary()" style="min-width:220px">
-        <option value="">-- 先选择项目 --</option>
+        <option value="">-- 选择用例库 --</option>
     </select>
     <button class="btn btn-primary" onclick="openCreateLibraryModal()" style="white-space:nowrap;padding:6px 14px;font-size:0.82rem">+ 新建用例库</button>
     <button class="btn btn-ghost tc-ai-btn" onclick="openAIGenerateModal()" style="white-space:nowrap;padding:6px 14px;font-size:0.82rem">
@@ -241,6 +241,8 @@
         </div>
         <div class="tc-lib-actions">
             <span class="tag tag-blue" id="case-count">0 个用例</span>
+            <button class="btn btn-ghost" onclick="exportYAML()" title="导出 YAML">📝 YAML</button>
+            <button class="btn btn-ghost" onclick="exportXMind()" title="导出 XMind">🧠 XMind</button>
             <button class="btn btn-ghost" onclick="editLibrary()" title="编辑用例库">✏️ 编辑</button>
             <button class="btn btn-ghost" onclick="deleteLibrary()" title="删除用例库" style="color:var(--red)">🗑️ 删除</button>
         </div>
@@ -278,7 +280,7 @@
                 <option value="performance">性能测试</option>
                 <option value="security">安全测试</option>
             </select>
-            <button class="btn btn-primary" onclick="openCreateCaseModal()" style="margin-left:auto">+ 添加用例</button>
+            <button class="btn btn-primary" onclick="openCaseModal()" style="margin-left:auto">+ 添加用例</button>
         </div>
         <!-- 批量操作栏 -->
         <div class="tc-batch-bar" id="batch-bar">
@@ -369,20 +371,18 @@
         <form id="library-form">
             <input type="hidden" id="library-edit-id">
             <div class="form-group">
-                <label class="form-label">用例库名称 *</label>
-                <input class="form-input" name="name" id="library-name-input" placeholder="如：登录模块用例库" required>
+                <label class="form-label">用例库名称（项目） *</label>
+                <input class="form-input" name="name" id="library-name-input" placeholder="如：QQ飞车用例库" required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">所属项目 *</label>
+                <select class="form-select" name="project_name" id="library-project-input" required>
+                    <option value="">-- 选择项目 --</option>
+                </select>
             </div>
             <div class="form-group">
                 <label class="form-label">描述</label>
                 <textarea class="form-textarea" name="description" id="library-desc-input" placeholder="用例库描述..."></textarea>
-            </div>
-            <div class="form-group">
-                <label class="form-label">项目</label>
-                <input class="form-input" name="project_name" id="library-project-input" placeholder="所属项目">
-            </div>
-            <div class="form-group">
-                <label class="form-label">模块</label>
-                <input class="form-input" name="module_name" id="library-module-input" placeholder="所属模块">
             </div>
             <div class="form-group">
                 <label class="form-label">负责人</label>
@@ -398,53 +398,49 @@
 
 <!-- 添加/编辑用例弹窗 -->
 <div class="modal-overlay" id="case-modal">
-    <div class="modal" style="max-width:700px">
+    <div class="modal" style="max-width:800px">
         <h2 class="modal-title" id="case-modal-title">添加用例</h2>
         <form id="case-form">
             <input type="hidden" id="case-edit-id">
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
                 <div class="form-group">
-                    <label class="form-label">用例编号</label>
-                    <input class="form-input" name="case_id" id="case-id-input" placeholder="自动生成">
+                    <label class="form-label">用例目录（模块） *</label>
+                    <select class="form-select" name="module_name" id="case-module-input" required>
+                        <option value="">-- 选择模块 --</option>
+                    </select>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">优先级</label>
+                    <label class="form-label">优先级 *</label>
                     <select class="form-select" name="priority" id="case-priority-input">
                         <option value="P0">P0 - 最高</option>
-                        <option value="P1">P1 - 高</option>
-                        <option value="P2" selected>P2 - 中</option>
-                        <option value="P3">P3 - 低</option>
+                        <option value="P1" selected>P1 - 高</option>
+                        <option value="P2">P2 - 中</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">用例状态</label>
+                    <select class="form-select" name="status" id="case-status-input">
+                        <option value="normal" selected>正常</option>
+                        <option value="pending">待定</option>
+                        <option value="deprecated">废弃</option>
                     </select>
                 </div>
             </div>
             <div class="form-group">
-                <label class="form-label">用例标题 *</label>
-                <input class="form-input" name="title" id="case-title-input" placeholder="用例标题" required>
-            </div>
-            <div class="form-group">
-                <label class="form-label">用例类型</label>
-                <select class="form-select" name="type" id="case-type-input">
-                    <option value="functional">功能测试</option>
-                    <option value="interface">接口测试</option>
-                    <option value="performance">性能测试</option>
-                    <option value="security">安全测试</option>
-                </select>
+                <label class="form-label">用例名称 *</label>
+                <input class="form-input" name="title" id="case-title-input" placeholder="用例名称" required>
             </div>
             <div class="form-group">
                 <label class="form-label">前置条件</label>
-                <textarea class="form-textarea" name="preconditions" id="case-pre-input" rows="2" placeholder="执行用例的前置条件..."></textarea>
+                <textarea class="form-textarea" name="preconditions" id="case-pre-input" style="min-height:60px" placeholder="执行用例的前置条件..."></textarea>
             </div>
             <div class="form-group">
-                <label class="form-label">测试步骤</label>
-                <textarea class="form-textarea" name="steps" id="case-steps-input" rows="3" placeholder="每行一个步骤，格式：1. xxx" style="font-family:'SF Mono','Fira Code',monospace;font-size:0.88rem"></textarea>
+                <label class="form-label">操作步骤 *</label>
+                <textarea class="form-textarea" name="steps" id="case-steps-input" style="min-height:120px;font-family:'SF Mono','Fira Code',monospace;font-size:0.88rem" placeholder="每行一个步骤，如：&#10;1. 打开登录页面&#10;2. 输入用户名和密码&#10;3. 点击登录按钮" required></textarea>
             </div>
             <div class="form-group">
-                <label class="form-label">预期结果</label>
-                <textarea class="form-textarea" name="expected_results" id="case-results-input" rows="3" placeholder="每行一个预期结果" style="font-family:'SF Mono','Fira Code',monospace;font-size:0.88rem"></textarea>
-            </div>
-            <div class="form-group">
-                <label class="form-label">标签（逗号分隔）</label>
-                <input class="form-input" name="tags_input" id="case-tags-input" placeholder="如：登录,冒烟测试">
+                <label class="form-label">预期结果 *</label>
+                <textarea class="form-textarea" name="expected_results" id="case-results-input" style="min-height:120px;font-family:'SF Mono','Fira Code',monospace;font-size:0.88rem" placeholder="每行一个预期结果，如：&#10;1. 登录页面正常显示&#10;2. 输入框正常输入&#10;3. 成功跳转到首页" required></textarea>
             </div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeCaseModal()">取消</button>
@@ -504,11 +500,13 @@ async function loadLibraries() {
     try {
         libraries = await API.request('GET', '/testcase-libraries');
         const projects = await API.listProjects();
+        console.log('projects loaded:', projects.length, 'libraries:', libraries.length);
         const projectSel = document.getElementById('project-filter');
-        projectSel.innerHTML = '<option value="">-- 选择项目 --</option>' +
+        projectSel.innerHTML = '<option value="">全部项目</option>' +
             projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
         renderLibrarySelect();
     } catch (err) {
+        console.error('loadLibraries error:', err);
         showToast('加载用例库失败: ' + err.message, 'error');
     }
 }
@@ -517,12 +515,9 @@ function renderLibrarySelect() {
     const projectFilter = document.getElementById('project-filter').value;
     const select = $('#library-select');
 
-    if (!projectFilter) {
-        select.innerHTML = '<option value="">-- 先选择项目 --</option>';
-        return;
-    }
-
-    const filtered = libraries.filter(lib => lib.project_name === projectFilter);
+    const filtered = projectFilter
+        ? libraries.filter(lib => lib.project_name === projectFilter)
+        : libraries;
     select.innerHTML = '<option value="">-- 选择用例库 --</option>' +
         filtered.map(lib => `<option value="${lib.id}" ${lib.id === currentLibraryId ? 'selected' : ''}>${lib.name} (${lib.case_count || 0})</option>`).join('');
 }
@@ -819,23 +814,61 @@ function escHtml(str) {
 }
 
 // ==================== 用例库 CRUD ====================
-function openCreateLibraryModal() {
+let libProjects = [];
+
+async function loadLibProjectList() {
+    try {
+        libProjects = await API.listProjects();
+        const sel = $('#library-project-input');
+        const current = sel.value;
+        sel.innerHTML = '<option value="">-- 选择项目 --</option>' +
+            libProjects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+        if (current) sel.value = current;
+    } catch(e) { console.error('loadLibProjectList error:', e); }
+}
+
+async function onLibProjectChange() {
+    const projectName = $('#library-project-input').value;
+    const moduleSel = $('#library-module-input');
+    if (!moduleSel) return;
+    if (!projectName) {
+        moduleSel.innerHTML = '<option value="">-- 先选择项目 --</option>';
+        return;
+    }
+    const project = libProjects.find(p => p.name === projectName);
+    if (project && project.modules) {
+        moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>' +
+            project.modules.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+    } else {
+        // 通过 API 获取模块
+        try {
+            const modules = await API.getProjectModules(project ? project.id : null);
+            moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>' +
+                modules.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+        } catch(e) {
+            moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>';
+        }
+    }
+}
+
+async function openCreateLibraryModal() {
     $('#library-edit-id').value = '';
     $('#library-modal-title').textContent = '新建用例库';
     $('#library-form').reset();
+    await loadLibProjectList();
     $('#library-modal').classList.add('active');
 }
 
 function closeLibraryModal() { $('#library-modal').classList.remove('active'); }
 
-function editLibrary() {
+async function editLibrary() {
     if (!currentLibrary) return;
     $('#library-edit-id').value = currentLibrary.id;
     $('#library-modal-title').textContent = '编辑用例库';
     $('#library-name-input').value = currentLibrary.name;
     $('#library-desc-input').value = currentLibrary.description || '';
+    await loadLibProjectList();
     $('#library-project-input').value = currentLibrary.project_name || '';
-    $('#library-module-input').value = currentLibrary.module_name || '';
     $('#library-owner-input').value = currentLibrary.owner || '';
     $('#library-modal').classList.add('active');
 }
@@ -854,6 +887,19 @@ async function deleteLibrary() {
     } catch (err) {
         showToast('删除失败: ' + err.message, 'error');
     }
+}
+
+function exportYAML() {
+    if (!currentLibraryId) return;
+    window.open(`/api/v1/testcase-libraries/${currentLibraryId}/export/yaml`, '_blank');
+}
+
+function exportXMind() {
+    if (!currentLibraryId) return;
+    const a = document.createElement('a');
+    a.href = `/api/v1/testcase-libraries/${currentLibraryId}/export/xmind`;
+    a.download = `testcases-${currentLibraryId}.xmind`;
+    a.click();
 }
 
 $('#library-modal').addEventListener('click', e => {
@@ -887,31 +933,53 @@ $('#library-form').addEventListener('submit', async e => {
 });
 
 // ==================== 用例 CRUD ====================
-function openCreateCaseModal() {
+async function openCaseModal() {
+    if (!currentLibraryId) { showToast('请先选择用例库', 'error'); return; }
     $('#case-edit-id').value = '';
     $('#case-modal-title').textContent = '添加用例';
     $('#case-form').reset();
+    // 加载当前项目的模块列表
+    await loadCaseModules();
     $('#case-modal').classList.add('active');
+}
+
+async function loadCaseModules() {
+    const moduleSel = $('#case-module-input');
+    if (!currentLibrary || !currentLibrary.project_name) {
+        moduleSel.innerHTML = '<option value="">-- 无项目 --</option>';
+        return;
+    }
+    try {
+        const project = libProjects.find(p => p.name === currentLibrary.project_name);
+        if (project && project.modules && project.modules.length) {
+            moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>' +
+                project.modules.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+        } else if (project) {
+            const modules = await API.getProjectModules(project.id);
+            moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>' +
+                modules.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
+        }
+    } catch(e) { moduleSel.innerHTML = '<option value="">加载失败</option>'; }
 }
 
 function closeCaseModal() { $('#case-modal').classList.remove('active'); }
 
-function editCase(id) {
+async function editCase(id) {
     const c = allCases.find(x => x.id === id);
     if (!c) return;
 
     $('#case-edit-id').value = c.id;
     $('#case-modal-title').textContent = '编辑用例';
-    $('#case-id-input').value = c.case_id || '';
-    $('#case-title-input').value = c.title;
-    $('#case-priority-input').value = c.priority || 'P2';
-    $('#case-type-input').value = c.type || 'functional';
+    await loadCaseModules();
 
     const content = c.content || {};
+    $('#case-module-input').value = content.module_name || c.tags?.[0] || '';
+    $('#case-title-input').value = c.title;
+    $('#case-priority-input').value = c.priority || 'P1';
+    $('#case-status-input').value = content.status || 'normal';
     $('#case-pre-input').value = content.preconditions || '';
-    $('#case-steps-input').value = (content.steps || []).join('\n');
-    $('#case-results-input').value = (content.expected_results || []).join('\n');
-    $('#case-tags-input').value = (c.tags || []).join(',');
+    $('#case-steps-input').value = Array.isArray(content.steps) ? content.steps.join('\n') : (content.steps || '');
+    $('#case-results-input').value = Array.isArray(content.expected_results) ? content.expected_results.join('\n') : (content.expected_results || '');
 
     $('#case-modal').classList.add('active');
 }
@@ -927,15 +995,19 @@ $('#case-form').addEventListener('submit', async e => {
 
     const steps = (data.steps || '').split('\n').map(s => s.trim()).filter(Boolean);
     const expected_results = (data.expected_results || '').split('\n').map(s => s.trim()).filter(Boolean);
-    const tags = (data.tags_input || '').split(',').map(t => t.trim()).filter(Boolean);
 
     const payload = {
-        case_id: data.case_id || undefined,
         title: data.title,
         priority: data.priority,
-        type: data.type,
-        content: { preconditions: data.preconditions, steps, expected_results },
-        tags
+        type: 'functional',
+        content: {
+            module_name: data.module_name,
+            status: data.status,
+            preconditions: data.preconditions,
+            steps,
+            expected_results,
+        },
+        tags: data.module_name ? [data.module_name] : [],
     };
 
     const editId = $('#case-edit-id').value;
@@ -960,7 +1032,7 @@ $('#case-form').addEventListener('submit', async e => {
 });
 
 async function deleteCase(id) {
-    if (!confirm('确定要删除这个用例吗？')) return;
+    if (!await customConfirm('确定要删除这个用例吗？')) return;
     try {
         await API.request('DELETE', `/testcase-libraries/${currentLibraryId}/cases/${id}`);
         showToast('用例已删除', 'success');
