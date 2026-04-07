@@ -242,6 +242,38 @@ STANDARD_SKILLS = [
 ''',
     },
     {
+        'name': 'registration-init-tasks',
+        'display_name': '注册初始化任务管理',
+        'description': '管理新 OpenClaw 注册时自动下发的初始化待办任务。支持查看/修改/补发初始化任务配置。',
+        'category': 'standard',
+        'is_standard': False,
+        'trigger_phrase': '初始化任务配置',
+        'scope': 'admin',
+        'template_content': '''# 注册初始化任务管理
+
+管理新 OpenClaw 注册时自动下发的待办任务列表。
+
+## API
+
+- GET /api/v1/registration/init-tasks — 查看当前配置
+- PUT /api/v1/registration/init-tasks — 更新配置（提交 tasks 数组）
+- POST /api/v1/openclaws/{CLAW_ID}/init-tasks — 手动为已注册的 OpenClaw 补发
+- GET /api/v1/openclaws/{CLAW_ID}/todos?category=init — 查看某 OpenClaw 的初始化任务完成情况
+
+## 修改方式
+
+PUT 提交新的 tasks 数组即可，每个 task 包含：
+- title: 任务标题（必填）
+- description: 任务描述
+- priority: P0/P1/P2/P3
+- urgency_level: interrupt/flexible/background/periodic/retry
+- verification_target: 验证目标标识
+
+## 触发词
+- 查看初始化任务、注册待办配置、修改初始化任务、补发初始化任务
+''',
+    },
+    {
         'name': 'todo-manager',
         'display_name': '待办任务管理',
         'description': '管理 OpenClaw 待办任务：5 级紧急度调度（interrupt/flexible/background/periodic/retry），任务执行上报，心跳感知，初始化验证。',
@@ -950,19 +982,34 @@ INIT_TASKS = [
 
 
 def create_init_tasks_for_claw(claw_id):
-    """为新注册的 OpenClaw 创建初始化验证任务"""
-    from app.models import ClawTodo
+    """为新注册的 OpenClaw 创建初始化验证任务
+
+    优先从数据库 system_config 表读取配置（龙虾王可通过 API 修改），
+    fallback 到 INIT_TASKS 硬编码。
+    """
+    from app.models import ClawTodo, SystemConfig
+    import json as _json
+
+    # 优先读数据库配置
+    tasks = INIT_TASKS
+    cfg = SystemConfig.query.filter_by(config_key='init_tasks').first()
+    if cfg and cfg.value:
+        try:
+            tasks = _json.loads(cfg.value)
+        except Exception:
+            pass
+
     created = 0
-    for task in INIT_TASKS:
+    for task in tasks:
         todo = ClawTodo(
             openclaw_id=claw_id,
             title=task['title'],
-            description=task['description'],
+            description=task.get('description', ''),
             schedule_type='once',
-            priority=task['priority'],
+            priority=task.get('priority', 'P1'),
             urgency_level=task.get('urgency_level', 'background'),
             task_category='init',
-            verification_target=task['verification_target'],
+            verification_target=task.get('verification_target', ''),
             enabled=True,
             created_by='system',
         )
