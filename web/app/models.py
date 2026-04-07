@@ -878,6 +878,19 @@ class TestCaseSnapshot(db.Model):
         return d
 
 
+# ============== 系统配置 KV 表 ==============
+
+class SystemConfig(db.Model):
+    """系统配置键值对"""
+    __tablename__ = 'system_config'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    config_key = db.Column(db.String(100), nullable=False, unique=True, comment='配置项名称')
+    value = db.Column(db.Text, comment='配置值（JSON 字符串）')
+    description = db.Column(db.String(255), comment='说明')
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # ============== OpenClaw 消息模型 ==============
 
 class ClawMessage(db.Model):
