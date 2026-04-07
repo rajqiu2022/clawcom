@@ -175,6 +175,19 @@ STANDARD_SKILLS = [
 
 完整文档通过 Hub API 拉取: GET /api/v1/skills/{SKILL_ID}/raw
 
+## 用例格式规范（必读）
+
+每条用例必须包含：
+- title: 用例名称（必填，≤255字符）
+- priority: P0/P1/P2/P3
+- type: functional/interface/performance/security
+- content.steps: 操作步骤（字符串数组）
+- content.expected_results: 预期结果（字符串数组，与steps一一对应）
+- content.preconditions: 前置条件（选填）
+- content.module_name: 所属模块（外围系统/核心单局/商业化/客户端性能/服务器专项/其他专项）
+- content.status: normal/pending/deprecated
+- tags: 标签数组
+
 ## 核心能力
 
 ### 用例库 CRUD

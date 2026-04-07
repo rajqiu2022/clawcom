@@ -12,6 +12,110 @@
 
 ---
 
+## 用例格式规范
+
+**每条用例必须包含以下固定字段，提交到 Hub 时严格按此格式。**
+
+### 必填字段
+
+| 字段 | 类型 | 说明 | 示例 |
+|------|------|------|------|
+| `title` | string | 用例名称 | "登录成功后跳转到首页" |
+| `priority` | enum | 优先级：`P0`（最高）/ `P1`（高）/ `P2`（中）/ `P3`（低） | "P1" |
+| `type` | enum | 用例类型：`functional`（功能）/ `interface`（接口）/ `performance`（性能）/ `security`（安全） | "functional" |
+| `content.steps` | string[] | 操作步骤，每步一条，数组格式 | ["打开登录页面", "输入用户名和密码", "点击登录按钮"] |
+| `content.expected_results` | string[] | 预期结果，与步骤一一对应 | ["登录页面正常显示", "输入框正常输入", "成功跳转到首页"] |
+
+### 选填字段
+
+| 字段 | 类型 | 说明 | 示例 |
+|------|------|------|------|
+| `content.preconditions` | string | 前置条件 | "用户已注册且账号未被封禁" |
+| `content.module_name` | string | 所属模块（一级分类） | "外围系统" |
+| `content.status` | enum | 用例状态：`normal`（正常）/ `pending`（待定）/ `deprecated`（废弃） | "normal" |
+| `content.notes` | string | 备注 | "需在 WiFi 环境下测试" |
+| `tags` | string[] | 标签列表 | ["回归", "冒烟"] |
+| `case_id` | string | 用例编号（不传则自动生成 TC_001） | "TC_042" |
+
+### 完整用例 JSON 示例
+
+```json
+{
+  "title": "登录成功后跳转到首页",
+  "priority": "P1",
+  "type": "functional",
+  "tags": ["冒烟", "核心流程"],
+  "content": {
+    "module_name": "外围系统",
+    "status": "normal",
+    "preconditions": "1. 用户已注册\n2. 账号未被封禁\n3. 网络正常",
+    "steps": [
+      "打开客户端登录页面",
+      "输入已注册的用户名和密码",
+      "点击登录按钮",
+      "等待页面跳转"
+    ],
+    "expected_results": [
+      "登录页面正常显示，输入框可交互",
+      "用户名和密码正确填入",
+      "显示加载状态，无报错",
+      "成功跳转到首页，显示用户昵称"
+    ],
+    "notes": ""
+  }
+}
+```
+
+### 批量创建格式
+
+```json
+{
+  "cases": [
+    {
+      "title": "用例1标题",
+      "priority": "P1",
+      "type": "functional",
+      "content": {
+        "module_name": "核心单局",
+        "preconditions": "...",
+        "steps": ["步骤1", "步骤2"],
+        "expected_results": ["结果1", "结果2"]
+      }
+    },
+    {
+      "title": "用例2标题",
+      "priority": "P2",
+      "type": "functional",
+      "content": { ... }
+    }
+  ]
+}
+```
+
+### 一级模块分类（module_name 标准值）
+
+| 模块名 | 说明 |
+|--------|------|
+| 外围系统 | 商城、大厅、活动、社交系统 |
+| 核心单局 | 匹配、单局玩法、操控系统 |
+| 商业化 | 会员、充值、抽奖系统 |
+| 客户端性能 | 内存、包体、启动、帧率性能 |
+| 服务器专项 | 服务器压测、网络延迟 |
+| 其他专项 | 兼容性测试、安全测试 |
+
+### 格式校验规则
+
+OpenClaw 在创建/修改用例时**必须确保**：
+
+1. `title` 不能为空，长度 ≤ 255 字符
+2. `priority` 必须是 P0/P1/P2/P3 之一
+3. `type` 必须是 functional/interface/performance/security 之一
+4. `steps` 和 `expected_results` 必须是数组，每个元素是字符串
+5. `steps` 和 `expected_results` 的数组长度应一致（步骤和预期结果一一对应）
+6. 通过 AI 生成的用例，`ai_generated` 自动标记为 `true`
+
+---
+
 ## 前置条件
 
 - 已通过 `hub-connect` Skill 连接到 Hub
