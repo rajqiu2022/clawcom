@@ -119,6 +119,39 @@ def create_testcase_library():
     return jsonify(library.to_dict()), 201
 
 
+@api_bp.route('/testcase-libraries/by-project', methods=['POST'])
+def get_or_create_library_by_project():
+    """按项目获取用例库，不存在则自动创建（根节点）
+
+    请求体：{ "project_name": "项目名" }
+    返回：用例库详情（已有或新建的）
+    """
+    data = request.get_json()
+    project_name = (data or {}).get('project_name')
+    if not project_name:
+        return jsonify({'error': 'project_name 必填'}), 400
+
+    # 查找该项目的根用例库
+    library = TestCaseLibrary.query.filter_by(
+        project_name=project_name
+    ).first()
+
+    if library:
+        return jsonify(library.to_dict(with_cases=True))
+
+    # 不存在则自动创建
+    library = TestCaseLibrary(
+        name=f'{project_name} 用例库',
+        description=f'{project_name} 项目用例库（自动创建）',
+        project_name=project_name,
+        owner=data.get('owner', 'system'),
+        mindmap={'id': 'root', 'text': f'{project_name} 用例库', 'children': []},
+    )
+    db.session.add(library)
+    db.session.commit()
+    return jsonify(library.to_dict(with_cases=True)), 201
+
+
 @api_bp.route('/testcase-libraries/<int:library_id>', methods=['GET'])
 def get_testcase_library(library_id):
     """获取用例库详情"""
