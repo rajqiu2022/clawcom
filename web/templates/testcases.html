@@ -523,11 +523,36 @@ function renderLibrarySelect() {
 }
 
 function onProjectFilterChange() {
-    currentLibraryId = null;
-    currentLibrary = null;
-    $('#library-container').style.display = 'none';
-    $('#empty-state').style.display = '';
+    const projectName = document.getElementById('project-filter').value;
+    if (!projectName) {
+        // 选了"全部项目"，恢复显示所有用例库
+        currentLibraryId = null;
+        currentLibrary = null;
+        $('#library-container').style.display = 'none';
+        $('#empty-state').style.display = '';
+        renderLibrarySelect();
+        return;
+    }
     renderLibrarySelect();
+
+    // 自动获取或创建该项目的用例库
+    fetch('/api/v1/testcase-libraries/by-project', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({project_name: projectName, owner: currentUser ? (currentUser.display_name || currentUser.username) : 'system'})
+    }).then(r => r.json()).then(lib => {
+        // 如果是新建的，刷新列表
+        if (!libraries.find(l => l.id === lib.id)) {
+            libraries.push(lib);
+            renderLibrarySelect();
+        }
+        // 自动选中该用例库
+        $('#library-select').value = lib.id;
+        switchLibrary();
+    }).catch(e => {
+        console.error('auto get/create library:', e);
+    });
+}
 }
 
 async function switchLibrary() {
