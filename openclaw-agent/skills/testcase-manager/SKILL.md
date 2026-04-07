@@ -16,26 +16,26 @@
 
 **每条用例必须包含以下固定字段，提交到 Hub 时严格按此格式。**
 
-### 必填字段
+### 必填字段（按顺序填写）
 
-| 字段 | 类型 | 说明 | 示例 |
-|------|------|------|------|
-| `title` | string | 用例名称 | "登录成功后跳转到首页" |
-| `priority` | enum | 优先级：`P0`（最高）/ `P1`（高）/ `P2`（中）/ `P3`（低） | "P1" |
-| `type` | enum | 用例类型：`functional`（功能）/ `interface`（接口）/ `performance`（性能）/ `security`（安全） | "functional" |
-| `content.steps` | string[] | 操作步骤，每步一条，数组格式 | ["打开登录页面", "输入用户名和密码", "点击登录按钮"] |
-| `content.expected_results` | string[] | 预期结果，与步骤一一对应 | ["登录页面正常显示", "输入框正常输入", "成功跳转到首页"] |
+| 字段（key） | 必填 | 中文名 | 类型 | 可选值（中文 → key） | 示例 |
+|-------------|------|--------|------|---------------------|------|
+| `title` | ✅ 必填 | 用例名称 | string（≤255字符） | — | "登录成功后跳转到首页" |
+| `content.module_name` | ✅ 必填 | 所属模块 | string | 外围系统 / 核心单局 / 商业化 / 客户端性能 / 服务器专项 / 其他专项 | "外围系统" |
+| `priority` | ✅ 必填 | 优先级 | enum | 最高=`P0` / 高=`P1` / 中=`P2` / 低=`P3` | "P1" |
+| `type` | ✅ 必填 | 用例类型 | enum | 功能测试=`functional` / 接口测试=`interface` / 性能测试=`performance` / 安全测试=`security` | "functional" |
+| `content.preconditions` | ✅ 必填 | 前置条件 | string | — | "用户已注册且账号未被封禁" |
+| `content.steps` | ✅ 必填 | 操作步骤 | string[] | 每步一条，数组格式 | ["打开登录页面", "输入用户名和密码"] |
+| `content.expected_results` | ✅ 必填 | 预期结果 | string[] | 与操作步骤一一对应 | ["登录页面正常显示", "成功跳转到首页"] |
 
 ### 选填字段
 
-| 字段 | 类型 | 说明 | 示例 |
-|------|------|------|------|
-| `content.preconditions` | string | 前置条件 | "用户已注册且账号未被封禁" |
-| `content.module_name` | string | 所属模块（一级分类） | "外围系统" |
-| `content.status` | enum | 用例状态：`normal`（正常）/ `pending`（待定）/ `deprecated`（废弃） | "normal" |
-| `content.notes` | string | 备注 | "需在 WiFi 环境下测试" |
-| `tags` | string[] | 标签列表 | ["回归", "冒烟"] |
-| `case_id` | string | 用例编号（不传则自动生成 TC_001） | "TC_042" |
+| 字段（key） | 必填 | 中文名 | 类型 | 可选值（中文 → key） | 示例 |
+|-------------|------|--------|------|---------------------|------|
+| `content.status` | 选填 | 用例状态 | enum | 正常=`normal` / 待定=`pending` / 废弃=`deprecated` | "normal" |
+| `tags` | 选填 | 标签 | string[] | 自定义标签，如：回归、冒烟、核心流程 | ["冒烟", "核心流程"] |
+| `content.notes` | 选填 | 备注 | string | — | "需在 WiFi 环境下测试" |
+| `case_id` | 选填 | 用例编号 | string | 不传则自动生成 TC_001 格式 | "TC_042" |
 
 ### 完整用例 JSON 示例
 

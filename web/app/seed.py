@@ -177,16 +177,20 @@ STANDARD_SKILLS = [
 
 ## 用例格式规范（必读）
 
-每条用例必须包含：
+必填字段（按顺序）：
 - title: 用例名称（必填，≤255字符）
-- priority: P0/P1/P2/P3
-- type: functional/interface/performance/security
-- content.steps: 操作步骤（字符串数组）
-- content.expected_results: 预期结果（字符串数组，与steps一一对应）
-- content.preconditions: 前置条件（选填）
-- content.module_name: 所属模块（外围系统/核心单局/商业化/客户端性能/服务器专项/其他专项）
-- content.status: normal/pending/deprecated
-- tags: 标签数组
+- content.module_name: 所属模块（必填：外围系统/核心单局/商业化/客户端性能/服务器专项/其他专项）
+- priority: 优先级（必填：最高=P0 / 高=P1 / 中=P2 / 低=P3）
+- type: 用例类型（必填：功能测试=functional / 接口测试=interface / 性能测试=performance / 安全测试=security）
+- content.preconditions: 前置条件（必填）
+- content.steps: 操作步骤（必填，字符串数组，每步一条）
+- content.expected_results: 预期结果（必填，字符串数组，与步骤一一对应）
+
+选填字段：
+- content.status: 用例状态（正常=normal / 待定=pending / 废弃=deprecated）
+- tags: 标签（字符串数组，如：回归、冒烟、核心流程）
+- content.notes: 备注
+- case_id: 用例编号（不传自动生成 TC_001）
 
 ## 核心能力
 
