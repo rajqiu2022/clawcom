@@ -63,10 +63,6 @@
                         </select>
                     </div>
                     <div class="form-group">
-                        <label class="form-label">上报时间</label>
-                        <input class="form-input" name="report_schedule" id="f-schedule">
-                    </div>
-                    <div class="form-group">
                         <label class="form-label">状态</label>
                         <input class="form-input" id="f-status" disabled>
                     </div>
@@ -287,7 +283,6 @@ async function loadClaw() {
         // 加载模块列表
         await loadModulesForDetail(matchedProjectId || null);
 
-        $('#f-schedule').value = clawData.report_schedule || '15:00,21:00';
         $('#f-status').value = clawData.status || 'offline';
         $('#f-resp').value = clawData.responsibilities || '';
     } catch (err) {

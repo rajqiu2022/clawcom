@@ -123,12 +123,6 @@
                 <label class="form-label">负责内容</label>
                 <textarea class="form-textarea" name="responsibilities" placeholder="描述这个 OpenClaw 负责什么..."></textarea>
             </div>
-            <div class="two-col">
-                <div class="form-group">
-                    <label class="form-label">上报时间</label>
-                    <input class="form-input" name="report_schedule" value="15:00,21:00" placeholder="如：15:00,21:00">
-                </div>
-            </div>
             <input type="hidden" name="connection_mode" value="polling">
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
@@ -178,6 +172,29 @@
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeRegenerateConfirm()">取消</button>
             <button class="btn btn-danger" onclick="doRegenerateToken()">确认重新生成</button>
+        </div>
+    </div>
+</div>
+
+<!-- 注册成功弹窗 -->
+<div class="modal-overlay" id="register-success-modal">
+    <div class="modal" style="max-width:640px">
+        <h2 class="modal-title">✅ OpenClaw 注册成功</h2>
+        <p style="color:var(--text-secondary);margin-bottom:12px">
+            <strong id="reg-claw-name"></strong> 已创建，标准 Skills 和 Rules 已自动分配。
+        </p>
+        <div style="margin-bottom:16px">
+            <label class="form-label">📋 注册 Skill 链接（发给 OpenClaw 使用者，保存为 SKILL.md 即可接入）</label>
+            <div style="background:var(--bg-primary);border:1px solid var(--accent);border-radius:8px;padding:12px;position:relative;margin-top:6px">
+                <code id="reg-skill-url" style="word-break:break-all;font-size:0.88rem;color:var(--accent)"></code>
+                <button class="btn btn-primary btn-sm" onclick="copyRegSkillUrl()"
+                        style="position:absolute;top:8px;right:8px;font-size:0.78rem">复制链接</button>
+            </div>
+        </div>
+        <div id="reg-install-summary" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:16px"></div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeRegSuccessModal()">关闭</button>
+            <button class="btn btn-primary" id="reg-goto-detail" onclick="">查看详情</button>
         </div>
     </div>
 </div>
@@ -785,6 +802,23 @@ document.getElementById('create-modal').addEventListener('click', e => {
     if (e.target === document.getElementById('create-modal')) closeCreateModal();
 });
 
+function closeRegSuccessModal() {
+    document.getElementById('register-success-modal').classList.remove('active');
+}
+document.getElementById('register-success-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('register-success-modal')) closeRegSuccessModal();
+});
+function copyRegSkillUrl() {
+    const url = document.getElementById('reg-skill-url').textContent;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(() => showToast('链接已复制', 'success')).catch(() => showToast('复制失败', 'error'));
+    } else {
+        const el = document.createElement('textarea'); el.value = url;
+        document.body.appendChild(el); el.select(); document.execCommand('copy');
+        document.body.removeChild(el); showToast('链接已复制', 'success');
+    }
+}
+
 document.getElementById('create-form').addEventListener('submit', async e => {
     e.preventDefault();
     const form = new FormData(e.target);
@@ -796,19 +830,25 @@ document.getElementById('create-form').addEventListener('submit', async e => {
         const result = await API.createClaw(data);
         closeCreateModal();
         e.target.reset();
-
-        if (result.has_token) {
-            // 创建成功后显示 token
-            document.getElementById('token-modal-title').textContent = `🔑 "${data.name}" 创建成功`;
-            document.getElementById('token-modal-hint').innerHTML = '以下是该 OpenClaw 的 API Token，请复制保存。';
-            document.getElementById('token-display').textContent = result.api_token_preview;
-            document.getElementById('token-env-hint').textContent = result.api_token_preview;
-            document.getElementById('token-modal').classList.add('active');
-        } else {
-            showToast(`OpenClaw "${data.name}" 创建成功！`, 'success');
-        }
-
         loadClaws();
+
+        // 弹出注册成功弹窗，显示注册 Skill 链接
+        const clawId = result.id;
+        const skillUrl = `${location.origin}/api/v1/openclaws/${clawId}/registration-skill`;
+        document.getElementById('reg-claw-name').textContent = data.name;
+        document.getElementById('reg-skill-url').textContent = skillUrl;
+        document.getElementById('reg-goto-detail').onclick = () => location.href = '/openclaws/' + clawId;
+
+        // 显示自动安装摘要
+        const ai = result.auto_installed || {};
+        const parts = [];
+        if (ai.skills && ai.skills.length) parts.push(`${ai.skills.length} 个 Skills`);
+        if (ai.rules && ai.rules.length) parts.push(`${ai.rules.length} 个 Rules`);
+        if (result.init_tasks) parts.push(`${result.init_tasks} 个初始化任务`);
+        document.getElementById('reg-install-summary').textContent =
+            parts.length ? `已自动安装：${parts.join('、')}` : '';
+
+        document.getElementById('register-success-modal').classList.add('active');
     } catch (err) {
         showToast('创建失败: ' + err.message, 'error');
     }

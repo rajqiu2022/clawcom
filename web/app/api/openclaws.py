@@ -165,41 +165,63 @@ def create_openclaw():
     # === 自动安装：标准包 + is_standard 双机制 ===
 
     # 1) 通过激活的标准包下发
-    from app.models import StandardPack
-    from app.api.packs import _apply_pack_to_claw
-    active_packs = StandardPack.query.filter_by(is_active=True).all()
-    for pack in active_packs:
-        _apply_pack_to_claw(pack, claw)
+    try:
+        from app.models import StandardPack
+        from app.api.packs import _apply_pack_to_claw
+        active_packs = StandardPack.query.filter_by(is_active=True).all()
+        for pack in active_packs:
+            try:
+                _apply_pack_to_claw(pack, claw)
+            except Exception as pack_err:
+                import logging
+                logging.getLogger(__name__).warning(
+                    'Pack %s apply failed for claw %d: %s', pack.name, claw.id, pack_err)
+                db.session.rollback()
+    except Exception:
+        pass
 
     # 2) 兼容旧逻辑：is_standard=True 但不在任何标准包内的，也自动安装
-    standard_skills = Skill.query.filter_by(is_standard=True).all()
-    for skill in standard_skills:
-        if skill.name == 'registration-skill':
-            continue
-        existing = OpenClawSkill.query.filter_by(
-            openclaw_id=claw.id, skill_id=skill.id
-        ).first()
-        if not existing:
-            db.session.add(OpenClawSkill(
-                openclaw_id=claw.id, skill_id=skill.id, enabled=True
-            ))
+    try:
+        standard_skills = Skill.query.filter_by(is_standard=True).all()
+        for skill in standard_skills:
+            if skill.name == 'registration-skill':
+                continue
+            existing = OpenClawSkill.query.filter_by(
+                openclaw_id=claw.id, skill_id=skill.id
+            ).first()
+            if not existing:
+                db.session.add(OpenClawSkill(
+                    openclaw_id=claw.id, skill_id=skill.id, enabled=True
+                ))
 
-    standard_rules = Rule.query.filter_by(is_standard=True).all()
-    for rule in standard_rules:
-        existing = OpenClawRule.query.filter_by(
-            openclaw_id=claw.id, rule_id=rule.id
-        ).first()
-        if not existing:
-            db.session.add(OpenClawRule(
-                openclaw_id=claw.id, rule_id=rule.id, enabled=True
-            ))
+        standard_rules = Rule.query.filter_by(is_standard=True).all()
+        for rule in standard_rules:
+            existing = OpenClawRule.query.filter_by(
+                openclaw_id=claw.id, rule_id=rule.id
+            ).first()
+            if not existing:
+                db.session.add(OpenClawRule(
+                    openclaw_id=claw.id, rule_id=rule.id, enabled=True
+                ))
 
-    db.session.commit()
+        db.session.commit()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            'Standard install failed for claw %d: %s', claw.id, e)
+        db.session.rollback()
 
     # === 下发初始化验证任务（不阻塞注册） ===
-    from app.seed import create_init_tasks_for_claw
-    init_task_count = create_init_tasks_for_claw(claw.id)
-    db.session.commit()
+    try:
+        from app.seed import create_init_tasks_for_claw
+        init_task_count = create_init_tasks_for_claw(claw.id)
+        db.session.commit()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            'Init tasks failed for claw %d: %s', claw.id, e)
+        init_task_count = 0
+        db.session.rollback()
 
     # 返回 Token 预览（不返回完整明文）
     result = claw.to_dict()

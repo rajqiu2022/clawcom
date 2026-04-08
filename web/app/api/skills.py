@@ -54,7 +54,7 @@ def list_skills():
     if not user or user.role not in ('super_admin', 'admin'):
         query = query.filter(Skill.scope != 'admin')
 
-    skills = query.order_by(Skill.category, Skill.name).all()
+    skills = query.order_by(Skill.created_at.desc()).all()
     result = []
     for s in skills:
         d = s.to_dict()
