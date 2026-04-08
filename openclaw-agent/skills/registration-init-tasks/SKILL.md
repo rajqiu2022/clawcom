@@ -156,7 +156,11 @@ GET /api/v1/openclaws/{CLAW_ID}/todo-summary?date=2026-04-08
 返回指定日期的待办完成率和明细。
 ```
 
-### 查询全部 OpenClaw 的 init 任务状态（仅管理员）
+### 查询全部 OpenClaw 的 init 任务状态
+
+**认证方式（二选一）**：
+- Web session 登录（super_admin 用户）
+- OpenClaw Token：`Authorization: Bearer {TOKEN}`（该 OpenClaw 的 role 必须是 admin，如龙虾王）
 
 ```
 GET /api/v1/registration/init-tasks/status
@@ -198,7 +202,7 @@ GET /api/v1/registration/init-tasks/status
 }
 ```
 
-> 仅 super_admin 和 admin 角色可调用，其他角色返回 403。
+> 认证：Web super_admin session 或 OpenClaw admin Token（如龙虾王），其他返回 403。
 
 ### 手动为已注册的 OpenClaw 补发初始化任务
 
