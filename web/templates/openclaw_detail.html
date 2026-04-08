@@ -105,6 +105,12 @@
     <div class="modal" style="max-width:560px">
         <h2 class="modal-title" id="todo-modal-title">新建待办</h2>
         <form id="todo-form">
+            <div class="form-group" id="todo-target-group" style="display:none">
+                <label class="form-label">目标龙虾</label>
+                <select class="form-input" id="todo-target-claw">
+                    <option value="">当前龙虾</option>
+                </select>
+            </div>
             <div class="form-group">
                 <label class="form-label">标题 *</label>
                 <input class="form-input" name="title" id="todo-title" required placeholder="如：查看KM文章深度学习总结">
@@ -338,8 +344,11 @@ async function loadInstalledRules() {
         list.innerHTML = ruleList.map(r => `
             <div style="padding:14px 0;border-bottom:1px solid var(--border)">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-                    <span style="font-weight:600">${r.display_name}</span>
-                    <span class="tag tag-blue" style="font-size:0.75rem">${r.name}</span>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <span style="font-weight:600">${r.display_name}</span>
+                        <span class="tag tag-blue" style="font-size:0.75rem">${r.name}</span>
+                    </div>
+                    <button class="btn btn-sm btn-ghost" style="color:var(--red);font-size:0.75rem" onclick="uninstallRule(${r.id})">移除</button>
                 </div>
                 ${r.description ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:8px">${r.description}</div>` : ''}
                 ${r.content_template ? `<details><summary style="font-size:0.82rem;color:var(--accent);cursor:pointer">查看规范内容</summary>
@@ -348,6 +357,17 @@ async function loadInstalledRules() {
             </div>
         `).join('');
     } catch(e) { showToast('加载规范失败:'+e.message,'error'); }
+}
+
+async function uninstallRule(ruleId) {
+    if (!await customConfirm('确定要移除此工作规范吗？')) return;
+    try {
+        await API.request('DELETE', `/openclaws/${CLAW_ID}/rules/${ruleId}`);
+        showToast('已移除', 'success');
+        loadInstalledRules();
+    } catch (err) {
+        showToast('移除失败: ' + err.message, 'error');
+    }
 }
 
 async function loadSkills() {
@@ -370,7 +390,10 @@ async function loadSkills() {
                             ${(s.used_by || []).map(u => `<span class="tag tag-blue">${u}</span>`).join('')}
                         </div>
                         ${installed
-                            ? `<span class="tag tag-green">✓ 已生效</span>`
+                            ? `<div style="display:flex;gap:6px;align-items:center">
+                                <span class="tag tag-green">✓ 已生效</span>
+                                <button class="btn btn-sm btn-ghost" style="color:var(--red);font-size:0.75rem" onclick="uninstallSkill(${s.id})">移除</button>
+                              </div>`
                             : `<button class="btn btn-sm btn-primary" onclick="installSkill(${s.id})">分配</button>`
                         }
                     </div>
@@ -645,11 +668,24 @@ async function toggleTodo(todoId, isDone) {
     } catch(e) { showToast('操作失败','error'); }
 }
 
-function showCreateTodo() {
+async function showCreateTodo() {
     editingTodoId = null;
     $('#todo-modal-title').textContent = '新建待办';
     $('#todo-form').reset();
     $('#todo-day-group').style.display = 'none';
+
+    // 加载所有龙虾列表供选择目标
+    try {
+        const claws = await API.listClaws();
+        const sel = $('#todo-target-claw');
+        sel.innerHTML = `<option value="${CLAW_ID}">当前：${clawData.name}</option>` +
+            claws.filter(c => c.id !== CLAW_ID && c.status !== 'deleted')
+                 .map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+        $('#todo-target-group').style.display = 'block';
+    } catch(e) {
+        $('#todo-target-group').style.display = 'none';
+    }
+
     $('#todo-modal').classList.add('active');
 }
 function closeTodoModal() { $('#todo-modal').classList.remove('active'); }
@@ -707,9 +743,12 @@ $('#todo-form').addEventListener('submit', async e => {
     if (['weekly','monthly'].includes(data.schedule_type))
         data.schedule_day = parseInt($('#todo-day').value);
     try {
-        const url = editingTodoId ? `/api/v1/openclaws/${CLAW_ID}/todos/${editingTodoId}` : `/api/v1/openclaws/${CLAW_ID}/todos`;
+        const targetClaw = editingTodoId ? CLAW_ID : (parseInt($('#todo-target-claw').value) || CLAW_ID);
+        const url = editingTodoId ? `/api/v1/openclaws/${CLAW_ID}/todos/${editingTodoId}` : `/api/v1/openclaws/${targetClaw}/todos`;
+        if (!editingTodoId) data.created_by = clawData.name;
         await fetch(url, {method:editingTodoId?'PUT':'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
-        showToast(editingTodoId?'已更新':'已创建','success');
+        const targetName = targetClaw !== CLAW_ID ? '（已分配给其他龙虾）' : '';
+        showToast(editingTodoId?'已更新':`已创建${targetName}`,'success');
         closeTodoModal(); loadTodos();
     } catch(e) { showToast('保存失败','error'); }
 });
