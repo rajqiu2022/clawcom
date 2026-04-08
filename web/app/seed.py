@@ -341,6 +341,149 @@ POST /heartbeat 返回:
 - 待办汇总、完成率、初始化任务、紧急任务
 ''',
     },
+    {
+        'name': 'knowledge-manager',
+        'display_name': '知识库管理',
+        'description': '管理知识经验存储体系：内部知识库（CRUD/审核/分发）、Memos 经验沉淀（7 类标签）、LLM 自动知识提取。',
+        'category': 'standard',
+        'is_standard': True,
+        'trigger_phrase': '知识库',
+        'scope': 'global',
+        'template_content': '''# 知识库管理 (knowledge-manager)
+
+完整文档通过 Hub API 拉取: GET /api/v1/skills/{SKILL_ID}/raw
+
+## 三层知识架构
+1. 内部知识库（KnowledgeEntry）— MySQL 结构化存储 + 审核流程
+2. Memos 经验沉淀 — 外部服务 + 7 类标签体系
+3. 日报知识提取 — LLM 自动从日报中提取知识
+
+## 核心 API
+
+### 内部知识库
+- GET /api/v1/knowledge — 查询（支持 scope/category/project/search 筛选）
+- POST /api/v1/knowledge — 创建
+- PUT /api/v1/knowledge/{id} — 更新
+- DELETE /api/v1/knowledge/{id} — 删除
+- POST /api/v1/knowledge/batch-import — 批量导入
+- GET /api/v1/knowledge/pending — 待审核列表
+- POST /api/v1/knowledge/{id}/review — 审核（approve/reject）
+- POST /api/v1/knowledge/{id}/distribute — 共享分发
+
+### Memos 经验沉淀
+- GET /api/v1/memos/tags — 标签列表（7 类）
+- GET /api/v1/memos/search — 搜索知识
+- GET /api/v1/memos/knowledge — 列出所有 openclaw 知识
+- POST /api/v1/memos/deposit — 手动触发 LLM 知识提取
+- POST /api/v1/memos/upsert — 直接写入/更新知识
+
+## 7 类知识标签
+method=测试方法 | bug-standard=Bug标准 | bug-pattern=Bug模式
+perf-baseline=性能基线 | pitfall=踩坑记录 | workflow=流程规范 | best-practice=最佳实践
+
+## 触发词
+- 搜索知识、沉淀知识、知识审核、知识共享、Memos、经验沉淀
+''',
+    },
+    {
+        'name': 'tapd-integration',
+        'display_name': 'TAPD 集成',
+        'description': '查询 TAPD 项目管理数据：需求列表、Bug 列表、迭代进度、Dashboard 统计，指导测试工作。',
+        'category': 'standard',
+        'is_standard': True,
+        'trigger_phrase': 'TAPD',
+        'scope': 'global',
+        'template_content': '''# TAPD 集成 (tapd-integration)
+
+完整文档通过 Hub API 拉取: GET /api/v1/skills/{SKILL_ID}/raw
+
+## 核心 API
+- GET /api/v1/tapd/config — 获取 TAPD 配置
+- PUT /api/v1/tapd/config — 更新配置（管理员）
+- GET /api/v1/tapd/stories — 需求列表（支持 iteration_id/status/keyword 筛选）
+- GET /api/v1/tapd/bugs — Bug 列表（支持 severity/status/keyword 筛选）
+- GET /api/v1/tapd/iterations — 迭代列表
+- GET /api/v1/tapd/dashboard — 统计看板
+
+## 触发词
+- TAPD、需求列表、Bug列表、迭代、Bug统计、待测需求、致命Bug
+''',
+    },
+    {
+        'name': 'project-manager',
+        'display_name': '项目与模块管理',
+        'description': '查询和管理 Hub 中的项目与模块信息，包括 6 个一级模块分类体系。',
+        'category': 'standard',
+        'is_standard': True,
+        'trigger_phrase': '项目信息',
+        'scope': 'global',
+        'template_content': '''# 项目与模块管理 (project-manager)
+
+完整文档通过 Hub API 拉取: GET /api/v1/skills/{SKILL_ID}/raw
+
+## 核心 API
+- GET /api/v1/projects — 项目列表
+- POST /api/v1/projects — 创建项目
+- PUT /api/v1/projects/{id} — 更新项目
+- DELETE /api/v1/projects/{id} — 删除项目
+- GET /api/v1/modules — 模块列表（支持 category 筛选）
+- POST /api/v1/modules — 创建模块
+- GET /api/v1/modules/categories — 模块分类列表
+- GET /api/v1/projects/{id}/modules — 项目下的模块
+
+## 一级模块分类
+peripheral=外围系统 | core_gameplay=核心单局 | commercialization=商业化
+client_performance=客户端性能 | server_special=服务器专项 | other=其他专项
+
+## 触发词
+- 项目列表、模块列表、模块分类、创建项目、创建模块
+''',
+    },
+    {
+        'name': 'report-viewer',
+        'display_name': '日报查看与统计',
+        'description': '查看全局日报数据：日报列表、统计概览、时间线视图，支持按项目/日期/OpenClaw 筛选。',
+        'category': 'standard',
+        'is_standard': True,
+        'trigger_phrase': '日报统计',
+        'scope': 'global',
+        'template_content': '''# 日报查看与统计 (report-viewer)
+
+完整文档通过 Hub API 拉取: GET /api/v1/skills/{SKILL_ID}/raw
+
+## 核心 API
+- GET /api/v1/reports — 全局日报列表（支持 openclaw_id/project/date 筛选，默认最近7天）
+- GET /api/v1/reports/stats — 统计概览（今日日报数/任务数/知识数/趋势/各Claw汇报情况）
+- GET /api/v1/reports/timeline — 时间线视图（按日期分组）
+
+## 触发词
+- 日报列表、日报统计、今日日报、谁没交日报、日报时间线、本周日报
+''',
+    },
+    {
+        'name': 'snapshot-manager',
+        'display_name': '用例快照管理',
+        'description': '管理用例库版本快照：创建快照、版本历史、回滚恢复、版本对比（Diff）、打标签，类 Git 工作流。',
+        'category': 'standard',
+        'is_standard': True,
+        'trigger_phrase': '快照',
+        'scope': 'global',
+        'template_content': '''# 用例快照管理 (snapshot-manager)
+
+完整文档通过 Hub API 拉取: GET /api/v1/skills/{SKILL_ID}/raw
+
+## 核心 API
+- POST /api/v1/testcase-libraries/{id}/snapshots — 创建快照（commit）
+- GET /api/v1/testcase-libraries/{id}/snapshots — 版本历史（log）
+- GET /api/v1/testcase-libraries/{id}/snapshots/{v} — 查看版本（show）
+- POST /api/v1/testcase-libraries/{id}/snapshots/{v}/checkout — 回滚（checkout）
+- GET /api/v1/testcase-libraries/{id}/snapshots/diff — 版本对比（diff）
+- PUT /api/v1/testcase-libraries/{id}/snapshots/{v}/tag — 打标签（tag）
+
+## 触发词
+- 创建快照、版本历史、回滚用例、版本对比、Diff、打标签、用例库备份
+''',
+    },
 ]
 
 
