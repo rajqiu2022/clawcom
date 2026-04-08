@@ -156,6 +156,50 @@ GET /api/v1/openclaws/{CLAW_ID}/todo-summary?date=2026-04-08
 返回指定日期的待办完成率和明细。
 ```
 
+### 查询全部 OpenClaw 的 init 任务状态（仅管理员）
+
+```
+GET /api/v1/registration/init-tasks/status
+
+查询参数（可选）：
+  status=all          筛选：all（全部）/ pending（未完成）/ completed（已完成）
+
+返回示例：
+{
+  "summary": {
+    "total_claws": 3,
+    "total_tasks": 12,
+    "total_completed": 8,
+    "total_pending": 4
+  },
+  "claws": {
+    "龙虾王": {
+      "claw_id": 4,
+      "total": 4,
+      "completed": 4,
+      "tasks": [
+        {
+          "id": 1,
+          "title": "验证 Hub 通信",
+          "verification_target": "hub-heartbeat",
+          "status": "completed",
+          "completed_at": "2026-04-06T22:30:00",
+          "result_summary": "heartbeat 返回 200"
+        }
+      ]
+    },
+    "小游戏TM": {
+      "claw_id": 8,
+      "total": 4,
+      "completed": 0,
+      "tasks": [ ... ]
+    }
+  }
+}
+```
+
+> 仅 super_admin 和 admin 角色可调用，其他角色返回 403。
+
 ### 手动为已注册的 OpenClaw 补发初始化任务
 
 ```
