@@ -114,11 +114,11 @@ def get_all_init_tasks_status():
     from app.models import User, ClawTodo, ClawTodoLog
     from datetime import date as d
 
-    # 权限检查：仅 super_admin / admin
+    # 权限检查：仅 super_admin（龙虾王）
     uid = flask_session.get('user_id')
     user = User.query.get(uid) if uid else None
-    if not user or user.role not in ('super_admin', 'admin'):
-        return jsonify({'error': '仅管理员可查询'}), 403
+    if not user or user.role != 'super_admin':
+        return jsonify({'error': '仅超级管理员可查询'}), 403
 
     status_filter = request.args.get('status', 'all')
 
