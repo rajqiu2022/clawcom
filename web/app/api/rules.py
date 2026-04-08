@@ -283,6 +283,19 @@ def update_claw_rules(claw_id):
     return jsonify({'message': f'Rules 已分配', 'rule_ids': rule_ids})
 
 
+@api_bp.route('/openclaws/<int:claw_id>/rules/<int:rule_id>', methods=['DELETE'])
+def uninstall_claw_rule(claw_id, rule_id):
+    """移除 OpenClaw 的某条 Rule"""
+    link = OpenClawRule.query.filter_by(
+        openclaw_id=claw_id, rule_id=rule_id
+    ).first_or_404()
+
+    rule_name = link.rule.display_name if link.rule else str(rule_id)
+    link.enabled = False
+    db.session.commit()
+    return jsonify({'message': f'已移除规范「{rule_name}」'})
+
+
 @api_bp.route('/openclaws/<int:claw_id>/rules/preview', methods=['POST'])
 def preview_rules_merge(claw_id):
     """
