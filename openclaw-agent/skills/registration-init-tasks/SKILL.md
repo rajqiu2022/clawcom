@@ -115,12 +115,45 @@ Header:
 返回：{ "message": "已更新 N 个初始化任务", "count": N }
 ```
 
+### 查看某个 OpenClaw 的全部待办任务
+
+```
+GET /api/v1/openclaws/{CLAW_ID}/todos
+
+查询参数（均可选）：
+  category=init          按类别筛选：routine / init / onboard
+  urgency=interrupt      按紧急度筛选：interrupt / flexible / background / periodic / retry
+  enabled_only=true      是否只返回启用的（默认 true，设为 false 可看到已完成的 once 类任务）
+
+返回该 OpenClaw 的全部待办任务列表（含今日执行状态）。
+```
+
 ### 查看某个 OpenClaw 的初始化任务完成情况
 
 ```
 GET /api/v1/openclaws/{CLAW_ID}/todos?category=init
 
 返回该 OpenClaw 的所有 init 类任务及今日状态。
+```
+
+### 查看已完成的待办记录（最近3天/50条）
+
+```
+GET /api/v1/openclaws/{CLAW_ID}/todos/completed
+
+查询参数（均可选）：
+  days=3        回溯天数（默认 3）
+  limit=50      最大条数（默认 50）
+
+返回按完成时间倒序的执行记录列表，包含已完成、已跳过、重试失败的记录。
+```
+
+### 待办完成汇总（按日期）
+
+```
+GET /api/v1/openclaws/{CLAW_ID}/todo-summary?date=2026-04-08
+
+返回指定日期的待办完成率和明细。
 ```
 
 ### 手动为已注册的 OpenClaw 补发初始化任务
