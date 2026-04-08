@@ -103,9 +103,11 @@ def send_init_tasks(claw_id):
 
 @api_bp.route('/registration/init-tasks/status', methods=['GET'])
 def get_all_init_tasks_status():
-    """查询系统上所有 OpenClaw 的 init 类待办任务（仅管理员）
+    """查询系统上所有 OpenClaw 的 init 类待办任务
 
-    返回按 OpenClaw 分组的 init 任务列表及完成状态。
+    认证方式（二选一）：
+      1. Web session 登录（super_admin 用户）
+      2. OpenClaw Token（Authorization: Bearer {TOKEN}，且该 OpenClaw 的 role=admin）
 
     查询参数：
       status: 筛选状态（pending/completed/all，默认 all）
@@ -114,11 +116,30 @@ def get_all_init_tasks_status():
     from app.models import User, ClawTodo, ClawTodoLog
     from datetime import date as d
 
-    # 权限检查：仅 super_admin（龙虾王）
+    # 权限检查：Web session super_admin 或 OpenClaw admin Token
+    authorized = False
+
+    # 方式1：Web session
     uid = flask_session.get('user_id')
-    user = User.query.get(uid) if uid else None
-    if not user or user.role != 'super_admin':
-        return jsonify({'error': '仅超级管理员可查询'}), 403
+    if uid:
+        user = User.query.get(uid)
+        if user and user.role == 'super_admin':
+            authorized = True
+
+    # 方式2：OpenClaw Token
+    if not authorized:
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            token = auth_header[7:]
+            # 遍历所有 admin role 的 OpenClaw 验证 token
+            admin_claws = OpenClawInstance.query.filter_by(role='admin').all()
+            for claw in admin_claws:
+                if claw.verify_token(token):
+                    authorized = True
+                    break
+
+    if not authorized:
+        return jsonify({'error': '仅超级管理员或管理员 OpenClaw 可查询'}), 403
 
     status_filter = request.args.get('status', 'all')
 
