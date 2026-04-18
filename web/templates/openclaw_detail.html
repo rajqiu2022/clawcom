@@ -1,11 +1,10 @@
 {% extends "base.html" %}
 {% block title %}OpenClaw 详情 - OpenClaw 管理系统{% endblock %}
 {% block nav_openclaws %}active{% endblock %}
-{% block page_title %}<span id="page-claw-name">OpenClaw 详情</span>{% endblock %}
+{% block page_title %}<a href="/openclaws" style="display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50%;background:var(--bg-hover);border:1px solid var(--border);color:var(--text-muted);text-decoration:none;font-size:1rem;margin-right:10px;vertical-align:middle;transition:all .15s" title="返回列表" onmouseover="this.style.background='var(--accent)';this.style.color='#fff';this.style.borderColor='var(--accent)'" onmouseout="this.style.background='var(--bg-hover)';this.style.color='var(--text-muted)';this.style.borderColor='var(--border)'">⬅</a><span id="page-claw-name">OpenClaw 详情</span>{% endblock %}
 
 {% block top_actions %}
-<button class="btn btn-ghost btn-sm" onclick="location.href='/openclaws'">← 返回列表</button>
-<button class="btn btn-danger btn-sm" onclick="deleteClaw()">删除</button>
+<button class="btn btn-danger btn-sm" id="btn-delete-claw" style="display:none" onclick="deleteClaw()">删除</button>
 {% endblock %}
 
 {% block content %}
@@ -64,7 +63,15 @@
                     </div>
                     <div class="form-group">
                         <label class="form-label">状态</label>
-                        <input class="form-input" id="f-status" disabled>
+                        <div style="display:flex;gap:6px;align-items:center">
+                            <input class="form-input" id="f-status" disabled style="flex:1">
+                            <select class="form-input" id="f-status-select" style="width:120px" onchange="onStatusChange(this.value)">
+                                <option value="工作">💻 工作</option>
+                                <option value="学习">📖 学习</option>
+                                <option value="摸鱼">🎮 摸鱼</option>
+                                <option value="休息">😴 休息</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -72,7 +79,7 @@
                 <label class="form-label">负责内容</label>
                 <textarea class="form-textarea" name="responsibilities" id="f-resp"></textarea>
             </div>
-            <button type="submit" class="btn btn-primary">保存修改</button>
+            <button type="submit" class="btn btn-primary" data-perm="edit">保存修改</button>
         </form>
     </div>
 </div>
@@ -84,18 +91,26 @@
             <h3 class="card-title">待办事项</h3>
             <div style="display:flex;gap:8px;align-items:center">
                 <span id="todo-stats" style="font-size:0.82rem;color:var(--text-muted)"></span>
-                <button class="btn btn-primary btn-sm" onclick="showCreateTodo()">+ 新建待办</button>
+                <button class="btn btn-primary btn-sm" data-perm="edit" onclick="showCreateTodo()">+ 新建待办</button>
             </div>
         </div>
-        <div id="todo-list"></div>
-        <!-- 已完成待办（最近3天） -->
-        <div id="todo-completed-section" style="margin-top:16px;display:none">
-            <div style="padding:8px 0;font-size:0.88rem;color:var(--text-muted);cursor:pointer;display:flex;align-items:center;gap:6px" onclick="toggleCompletedSection()">
-                <span id="completed-toggle-icon">▶</span>
-                <span>已完成 (<span id="completed-count">0</span>)</span>
-                <span style="font-size:0.75rem">最近3天</span>
-            </div>
-            <div id="todo-completed-list" style="display:none;opacity:0.7"></div>
+        <!-- 页签切换 -->
+        <div style="display:flex;gap:0;border-bottom:2px solid var(--border);margin-bottom:12px">
+            <button class="dashboard-subtab active" id="todo-subtab-today" onclick="switchTodoSubTab('today')">📌 今日待办</button>
+            <button class="dashboard-subtab" id="todo-subtab-submitted" onclick="switchTodoSubTab('submitted')">📝 待审核 <span id="detail-submitted-badge" class="tag tag-yellow" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
+            <button class="dashboard-subtab" id="todo-subtab-history" onclick="switchTodoSubTab('history')">📋 近3天记录</button>
+        </div>
+        <!-- 今日待办面板 -->
+        <div id="todo-panel-today">
+            <div id="todo-list"></div>
+        </div>
+        <!-- 待审核面板 -->
+        <div id="todo-panel-submitted" style="display:none">
+            <div id="todo-submitted-list"></div>
+        </div>
+        <!-- 近3天记录面板 -->
+        <div id="todo-panel-history" style="display:none">
+            <div id="todo-completed-list"></div>
         </div>
     </div>
 </div>
@@ -158,6 +173,17 @@
                 <button type="submit" class="btn btn-primary">保存</button>
             </div>
         </form>
+    </div>
+</div>
+
+<!-- 待办详情弹窗 -->
+<div class="modal-overlay" id="todo-detail-modal" onclick="if(event.target===this)this.classList.remove('active')">
+    <div class="modal" style="max-width:560px">
+        <div class="modal-title" id="todo-detail-modal-title">待办详情</div>
+        <div id="todo-detail-modal-body"></div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="$('#todo-detail-modal').classList.remove('active')">关闭</button>
+        </div>
     </div>
 </div>
 
@@ -243,6 +269,45 @@
 <script>
 const CLAW_ID = {{ claw_id }};
 let clawData = null;
+let canEditClaw = false;  // 当前用户是否有权编辑此 claw
+
+async function loadPermissions() {
+    try {
+        const me = await API.request('GET', '/auth/me');
+        const role = me.role || 'guest';
+        if (role === 'super_admin') {
+            canEditClaw = true;
+        } else if (role === 'admin') {
+            // admin 同项目可编辑（这里简化：等 clawData 加载后再判断）
+            canEditClaw = true;  // 先设 true，loadClaw 里精确判断
+        } else if (role === 'user') {
+            canEditClaw = (me.bound_claw_id === CLAW_ID);
+        } else {
+            canEditClaw = false;
+        }
+        // 超管和管理员可删除
+        if (role === 'super_admin' || role === 'admin') {
+            const delBtn = document.getElementById('btn-delete-claw');
+            if (delBtn) delBtn.style.display = '';
+        }
+    } catch(e) {
+        canEditClaw = false;
+    }
+    applyPermUI();
+}
+
+function applyPermUI() {
+    // 隐藏/显示所有写操作按钮
+    $$('[data-perm="edit"]').forEach(el => {
+        el.style.display = canEditClaw ? '' : 'none';
+    });
+    // 表单输入：只读模式
+    if (!canEditClaw) {
+        $$('#info-form input:not([disabled]), #info-form select:not([disabled]), #info-form textarea').forEach(el => {
+            el.disabled = true;
+        });
+    }
+}
 
 function switchTab(tab) {
     $$('.tab-item').forEach(t => t.classList.remove('active'));
@@ -290,6 +355,18 @@ async function loadClaw() {
         await loadModulesForDetail(matchedProjectId || null);
 
         $('#f-status').value = clawData.status || 'offline';
+        // 设置状态选择器
+        const statusSelect = document.getElementById('f-status-select');
+        if (statusSelect) {
+            const currentStatus = clawData.status || 'offline';
+            const validOptions = ['工作', '学习', '摸鱼', '休息'];
+            if (validOptions.includes(currentStatus)) {
+                statusSelect.value = currentStatus;
+            } else {
+                statusSelect.value = '休息'; // 默认
+            }
+            if (!canEditClaw) statusSelect.disabled = true;
+        }
         $('#f-resp').value = clawData.responsibilities || '';
     } catch (err) {
         showToast('加载失败: ' + err.message, 'error');
@@ -315,6 +392,18 @@ async function loadModulesForDetail(projectId) {
 
 function onProjectChangeDetail(projectId) {
     loadModulesForDetail(projectId);
+}
+
+async function onStatusChange(newStatus) {
+    if (!canEditClaw || !clawData) return;
+    try {
+        await API.updateClaw(CLAW_ID, { status: newStatus });
+        showToast(`状态已切换为 ${newStatus}`, 'success');
+        $('#f-status').value = newStatus;
+        clawData.status = newStatus;
+    } catch(e) {
+        showToast('切换状态失败: ' + e.message, 'error');
+    }
 }
 
 $('#info-form').addEventListener('submit', async e => {
@@ -348,7 +437,7 @@ async function loadInstalledRules() {
                         <span style="font-weight:600">${r.display_name}</span>
                         <span class="tag tag-blue" style="font-size:0.75rem">${r.name}</span>
                     </div>
-                    <button class="btn btn-sm btn-ghost" style="color:var(--red);font-size:0.75rem" onclick="uninstallRule(${r.id})">移除</button>
+                    ${canEditClaw ? `<button class="btn btn-sm btn-ghost" style="color:var(--red);font-size:0.75rem" onclick="uninstallRule(${r.id})">移除</button>` : ''}
                 </div>
                 ${r.description ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:8px">${r.description}</div>` : ''}
                 ${r.content_template ? `<details><summary style="font-size:0.82rem;color:var(--accent);cursor:pointer">查看规范内容</summary>
@@ -382,7 +471,7 @@ async function loadSkills() {
                 <div class="skill-card">
                     <div class="skill-card-header">
                         <span class="skill-name">${s.display_name}</span>
-                        <span class="tag ${s.category === 'standard' ? 'tag-accent' : 'tag-green'}">${s.category}</span>
+                        <span class="tag tag-blue" style="font-size:0.72rem">#${s.id}</span>
                     </div>
                     <div class="skill-desc">${s.description || ''}</div>
                     <div style="display:flex;justify-content:space-between;align-items:center">
@@ -392,9 +481,9 @@ async function loadSkills() {
                         ${installed
                             ? `<div style="display:flex;gap:6px;align-items:center">
                                 <span class="tag tag-green">✓ 已生效</span>
-                                <button class="btn btn-sm btn-ghost" style="color:var(--red);font-size:0.75rem" onclick="uninstallSkill(${s.id})">移除</button>
+                                ${canEditClaw ? `<button class="btn btn-sm btn-ghost" style="color:var(--red);font-size:0.75rem" onclick="uninstallSkill(${s.id})">移除</button>` : ''}
                               </div>`
-                            : `<button class="btn btn-sm btn-primary" onclick="installSkill(${s.id})">分配</button>`
+                            : (canEditClaw ? `<button class="btn btn-sm btn-primary" onclick="installSkill(${s.id})">分配</button>` : '')
                         }
                     </div>
                 </div>
@@ -450,7 +539,18 @@ async function loadReports() {
         function normalizeList(val) {
             if (Array.isArray(val)) return val;
             if (typeof val === 'string' && val.trim()) {
-                return val.replace(/\\n/g, '\n').split('\n').filter(l => l.trim()).map(l => l.trim());
+                let text = val.replace(/\\n/g, '\n');
+                // 尝试按换行分割
+                let lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+                if (lines.length > 1) return lines;
+                // 单行：先按分号分割
+                text = lines[0] || text;
+                const parts = text.split(/[;；]\s*/).map(s => s.trim()).filter(Boolean);
+                if (parts.length > 1) return parts;
+                // 按 "数字)" 分割（前面必须是空格或行首，避免误匹配日期）
+                const numbered = text.split(/(?:^|(?<=\s))(?=\d{1,2}[)）]\s*)/).map(s => s.trim()).filter(Boolean);
+                if (numbered.length > 1) return numbered;
+                return [text];
             }
             return [];
         }
@@ -565,6 +665,18 @@ async function submitSpecAsRule() {
 
 // ============== 待办管理 ==============
 let editingTodoId = null;
+function formatTime(dtStr) {
+    if (!dtStr) return '';
+    const d = new Date(dtStr);
+    const now = new Date();
+    const isToday = d.toDateString() === now.toDateString();
+    const mm = String(d.getMonth()+1).padStart(2,'0');
+    const dd = String(d.getDate()).padStart(2,'0');
+    const hh = String(d.getHours()).padStart(2,'0');
+    const mi = String(d.getMinutes()).padStart(2,'0');
+    if (isToday) return `${hh}:${mi}`;
+    return `${mm}-${dd} ${hh}:${mi}`;
+}
 const scheduleLabels = {daily:'每天',weekly:'每周',monthly:'每月',once:'一次性'};
 const dayNames = {1:'一',2:'二',3:'三',4:'四',5:'五',6:'六',7:'日'};
 const urgencyLabels = {
@@ -578,68 +690,129 @@ const urgencyLabels = {
 async function loadTodos() {
     try {
         const todos = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos`).then(r=>r.json());
+        window._detailAllTodos = todos;
         const list = $('#todo-list');
-        if (!todos.length) {
-            list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">暂无待办，点击右上角新建</div></div>';
-            $('#todo-stats').textContent = '';
-        } else {
-            const done = todos.filter(t=>t.today_status==='completed').length;
-            $('#todo-stats').textContent = `今日 ${done}/${todos.length} 完成`;
+        const pending = todos.filter(t => !t.today_status || t.today_status === 'pending');
+        const submitted = todos.filter(t => t.today_status === 'submitted');
+        const approved = todos.filter(t => t.today_status === 'approved' || t.today_status === 'completed');
+        window._detailSubmittedTodos = submitted;
 
-            list.innerHTML = todos.map(t => {
-                const isDone = t.today_status === 'completed';
-                let schedStr = scheduleLabels[t.schedule_type] || t.schedule_type;
-                if (t.schedule_type==='weekly' && t.schedule_day) schedStr += dayNames[t.schedule_day]||'';
-                if (t.schedule_type==='monthly' && t.schedule_day) schedStr += t.schedule_day+'号';
-                if (t.schedule_time) schedStr += ' ' + t.schedule_time;
-                else if (t.schedule_type==='daily') schedStr += '（不限时间）';
-                const urg = urgencyLabels[t.urgency_level] || urgencyLabels.flexible;
-                return `<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
-                    <div style="cursor:pointer;font-size:1.2rem" onclick="toggleTodo(${t.id},${isDone})">${isDone ? '✅' : '⬜'}</div>
-                    <div style="flex:1;min-width:0">
-                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                            <span style="font-weight:600;${isDone?'text-decoration:line-through;opacity:0.5':''}">${t.title}</span>
-                            <span class="tag" style="background:${urg.color};color:#fff;font-size:0.72rem">${urg.icon} ${urg.label}</span>
-                            <span style="font-size:0.78rem;color:var(--text-muted)">${schedStr}</span>
-                        </div>
-                        ${t.description ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px">${t.description}</div>` : ''}
-                        ${isDone && t.today_completed_at ? `<div style="font-size:0.75rem;color:var(--success);margin-top:2px">完成于 ${t.today_completed_at.substring(11,16)}</div>` : ''}
-                    </div>
-                    <div style="display:flex;gap:4px">
-                        <button class="btn btn-ghost" style="padding:2px 6px;font-size:0.78rem" onclick="editTodo(${t.id})">编辑</button>
-                        <button class="btn btn-ghost" style="padding:2px 6px;font-size:0.78rem;color:var(--red)" onclick="deleteTodo(${t.id})">删除</button>
-                    </div>
-                </div>`;
-            }).join('');
+        $('#todo-stats').textContent = `待完成 ${pending.length} / 已提交 ${submitted.length} / 已审核 ${approved.length}`;
+
+        // 待完成列表
+        if (!pending.length && !submitted.length && !approved.length) {
+            list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">📋</div><div class="empty-state-text">暂无待办，点击右上角新建</div></div>';
+        } else if (!pending.length) {
+            list.innerHTML = '<div style="padding:16px 0;text-align:center;color:var(--text-muted);font-size:0.88rem">🎉 今日待办全部提交！</div>';
+        } else {
+            list.innerHTML = pending.map(t => renderTodoItem(t)).join('');
         }
 
-        // 加载已完成列表
+        // 待审核列表
+        const submittedBadge = document.getElementById('detail-submitted-badge');
+        if (submittedBadge) {
+            if (submitted.length > 0) {
+                submittedBadge.style.display = '';
+                submittedBadge.textContent = submitted.length;
+            } else {
+                submittedBadge.style.display = 'none';
+            }
+        }
+        const submittedList = $('#todo-submitted-list');
+        if (submitted.length === 0) {
+            submittedList.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无待审核的提交</div></div>';
+        } else {
+            submittedList.innerHTML = submitted.map((t, i) => {
+                const summary = (t.result_summary || '').replace(/\\n/g, '\n');
+                const summaryShort = summary.length > 80 ? summary.substring(0, 80) + '...' : summary;
+                return `
+                <div onclick="showDetailTodoModal('submitted',${i})"
+                     style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s"
+                     onmouseenter="this.style.background='var(--bg-hover)'" onmouseleave="this.style.background='transparent'">
+                    <div style="font-size:1.2rem">📝</div>
+                    <div style="flex:1;min-width:0">
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                            <span style="font-weight:600">${t.title}</span>
+                            <span class="tag tag-yellow" style="font-size:0.72rem">已提交</span>
+                        </div>
+                        <div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px">
+                            🤖 ${t.created_by || clawData?.name || '未知'}
+                            ${t.today_completed_at ? ` · 提交于 ${t.today_completed_at.substring(11,16)}` : ''}
+                        </div>
+                        ${t.result_summary ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px;white-space:pre-line;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${summaryShort}</div>` : ''}
+                    </div>
+                    <button class="btn btn-primary btn-sm" style="font-size:0.78rem" onclick="event.stopPropagation();approveDetailTodo(${t.id})">✅ 审核通过</button>
+                </div>
+            `}).join('');
+        }
+
+        // 同步加载近3天记录
         loadCompletedTodos();
     } catch(e) { showToast('加载待办失败:'+e.message,'error'); }
+}
+
+function renderTodoItem(t) {
+    const isDone = t.today_status === 'submitted' || t.today_status === 'approved' || t.today_status === 'completed';
+    const isSubmitted = t.today_status === 'submitted';
+    const isApproved = t.today_status === 'approved' || t.today_status === 'completed';
+    let schedStr = scheduleLabels[t.schedule_type] || t.schedule_type;
+    if (t.schedule_type==='weekly' && t.schedule_day) schedStr += dayNames[t.schedule_day]||'';
+    if (t.schedule_type==='monthly' && t.schedule_day) schedStr += t.schedule_day+'号';
+    if (t.schedule_time) schedStr += ' ' + t.schedule_time;
+    else if (t.schedule_type==='daily') schedStr += '（不限时间）';
+    const urg = urgencyLabels[t.urgency_level] || urgencyLabels.flexible;
+    const statusIcon = isApproved ? '✅' : isSubmitted ? '📝' : '⬜';
+    const statusLabel = isApproved ? '<span class="tag tag-green" style="font-size:0.72rem">已审核</span>' : isSubmitted ? '<span class="tag tag-yellow" style="font-size:0.72rem">已提交</span>' : '';
+    const descShort = t.description ? (t.description.length > 80 ? t.description.substring(0, 80) + '...' : t.description) : '';
+    return `<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer"
+        onclick="showDetailTodoModal('pending',${t.id})">
+        <div style="cursor:${canEditClaw && !isDone?'pointer':'default'};font-size:1.2rem" ${canEditClaw && !isDone?`onclick="event.stopPropagation();toggleTodo(${t.id},${isDone})"`:``}>${statusIcon}</div>
+        <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span style="font-weight:600;${isDone?'text-decoration:line-through;opacity:0.5':''}">${t.title}</span>
+                <span class="tag" style="background:${urg.color};color:#fff;font-size:0.72rem">${urg.icon} ${urg.label}</span>
+                <span style="font-size:0.78rem;color:var(--text-muted)">${schedStr}</span>
+                ${statusLabel}
+            </div>
+            ${descShort ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px;white-space:pre-line;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${descShort.replace(/\\n/g, '\n')}</div>` : ''}
+            <div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px">
+                ${t.created_at ? `创建于 ${formatTime(t.created_at)}` : ''}
+                ${isDone && t.today_completed_at ? ` · 提交于 ${t.today_completed_at.substring(11,16)}` : ''}
+            </div>
+        </div>
+        ${canEditClaw ? `<div style="display:flex;gap:4px">
+            <button class="btn btn-ghost" style="padding:2px 6px;font-size:0.78rem" onclick="event.stopPropagation();editTodo(${t.id})">编辑</button>
+            <button class="btn btn-ghost" style="padding:2px 6px;font-size:0.78rem;color:var(--red)" onclick="event.stopPropagation();deleteTodo(${t.id})">删除</button>
+        </div>` : ''}
+    </div>`;
 }
 
 async function loadCompletedTodos() {
     try {
         const data = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/completed?days=3&limit=50`).then(r=>r.json());
-        const section = $('#todo-completed-section');
         const list = $('#todo-completed-list');
         if (!data.items || !data.items.length) {
-            section.style.display = 'none';
+            list.innerHTML = '<div style="padding:16px 0;text-align:center;color:var(--text-muted);font-size:0.88rem">近3天暂无执行记录</div>';
             return;
         }
-        section.style.display = 'block';
-        $('#completed-count').textContent = data.count;
+        const statusMap = {submitted:'📝 已提交', approved:'✅ 已审核', completed:'✅ 完成(旧)', skipped:'⏭️ 跳过', retry_failed:'❌ 重试失败', overdue:'⏰ 逾期'};
+        // 按日期分组展示
+        let lastDate = '';
         list.innerHTML = data.items.map(item => {
             const log = item.log;
             const todo = item.todo;
-            const statusMap = {completed:'✅ 完成', skipped:'⏭️ 跳过', retry_failed:'❌ 重试失败', overdue:'⏰ 逾期'};
-            const statusLabel = statusMap[log.status] || log.status;
-            return `<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+            let dateHeader = '';
+            if (log.log_date !== lastDate) {
+                lastDate = log.log_date;
+                const isToday = log.log_date === new Date().toISOString().slice(0,10);
+                dateHeader = `<div style="padding:8px 0 4px;font-size:0.82rem;font-weight:600;color:var(--text-secondary);border-top:1px solid var(--border);margin-top:8px">${isToday ? '📅 今天' : '📅 '+log.log_date}</div>`;
+            }
+            return `${dateHeader}<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
                 <span style="font-size:0.85rem;min-width:24px">${statusMap[log.status] ? statusMap[log.status].split(' ')[0] : '📋'}</span>
                 <div style="flex:1;min-width:0">
-                    <span style="font-size:0.88rem;text-decoration:line-through;opacity:0.6">${todo.title}</span>
-                    <span style="font-size:0.75rem;color:var(--text-muted);margin-left:8px">${log.log_date}</span>
-                    ${log.result_summary ? `<div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px">${log.result_summary}</div>` : ''}
+                    <span style="font-size:0.88rem;${log.status==='completed'?'text-decoration:line-through;opacity:0.6':''}">${todo.title}</span>
+                    <span style="font-size:0.72rem;color:var(--text-muted);margin-left:6px">${statusMap[log.status] || log.status}</span>
+                    ${log.result_summary ? `<div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px;white-space:pre-line;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${(log.result_summary||'').replace(/\\n/g, '\n')}</div>` : ''}
                 </div>
                 <span style="font-size:0.75rem;color:var(--text-muted)">${log.completed_at ? log.completed_at.substring(11,16) : ''}</span>
             </div>`;
@@ -647,23 +820,93 @@ async function loadCompletedTodos() {
     } catch(e) {}
 }
 
-function toggleCompletedSection() {
-    const list = $('#todo-completed-list');
-    const icon = $('#completed-toggle-icon');
-    if (list.style.display === 'none') {
-        list.style.display = 'block';
-        icon.textContent = '▼';
-    } else {
-        list.style.display = 'none';
-        icon.textContent = '▶';
+function switchTodoSubTab(sub) {
+    document.querySelectorAll('[id^="todo-subtab-"]').forEach(b => b.classList.remove('active'));
+    document.getElementById('todo-subtab-' + sub).classList.add('active');
+    document.getElementById('todo-panel-today').style.display = sub === 'today' ? '' : 'none';
+    document.getElementById('todo-panel-submitted').style.display = sub === 'submitted' ? '' : 'none';
+    document.getElementById('todo-panel-history').style.display = sub === 'history' ? '' : 'none';
+}
+
+function showDetailTodoModal(type, index) {
+    const modal = $('#todo-detail-modal');
+    const body = $('#todo-detail-modal-body');
+    const titleEl = $('#todo-detail-modal-title');
+    if (type === 'submitted') {
+        const todos = window._detailSubmittedTodos || [];
+        const t = todos[index];
+        if (!t) return;
+        const summary = (t.result_summary || '').replace(/\\n/g, '\n');
+        titleEl.textContent = t.title;
+        body.innerHTML = `
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+                <span class="tag tag-yellow" style="font-size:0.72rem">📝 已提交</span>
+            </div>
+            ${t.description ? `
+            <div style="margin-bottom:14px">
+                <div style="font-weight:600;font-size:0.85rem;margin-bottom:6px">📝 描述</div>
+                <div style="font-size:0.84rem;color:var(--text-secondary);line-height:1.6;white-space:pre-wrap;background:var(--bg-secondary);padding:10px 14px;border-radius:6px">${t.description.replace(/\\n/g, '\n')}</div>
+            </div>` : ''}
+            ${t.result_summary ? `
+            <div style="margin-bottom:14px">
+                <div style="font-weight:600;font-size:0.85rem;margin-bottom:6px">📋 提交结果</div>
+                <div style="font-size:0.84rem;color:var(--text-secondary);line-height:1.6;white-space:pre-wrap;background:var(--bg-secondary);padding:10px 14px;border-radius:6px">${summary}</div>
+            </div>` : ''}
+            <div style="font-size:0.78rem;color:var(--text-muted);display:flex;flex-direction:column;gap:4px">
+                <div>🤖 ${t.created_by || clawData?.name || '未知'}</div>
+                ${t.today_completed_at ? `<div>提交于 ${t.today_completed_at.substring(0,16)}</div>` : ''}
+            </div>
+            <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">
+                <button class="btn btn-primary btn-sm" onclick="approveDetailTodo(${t.id});$('#todo-detail-modal').classList.remove('active')">✅ 审核通过</button>
+            </div>
+        `;
+    } else if (type === 'pending') {
+        // 从全部待办中查找
+        const t = window._detailAllTodos ? window._detailAllTodos.find(x => x.id === index) : null;
+        if (!t) return;
+        const urg = urgencyLabels[t.urgency_level] || urgencyLabels.flexible;
+        let schedStr = scheduleLabels[t.schedule_type] || t.schedule_type;
+        if (t.schedule_type==='weekly' && t.schedule_day) schedStr += dayNames[t.schedule_day]||'';
+        if (t.schedule_type==='monthly' && t.schedule_day) schedStr += t.schedule_day+'号';
+        if (t.schedule_time) schedStr += ' ' + t.schedule_time;
+        else if (t.schedule_type==='daily') schedStr += '（不限时间）';
+        titleEl.textContent = t.title;
+        body.innerHTML = `
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+                <span class="tag" style="background:${urg.color};color:#fff;font-size:0.72rem">${urg.icon} ${urg.label}</span>
+                <span class="tag tag-accent" style="font-size:0.72rem">${t.task_category || 'routine'}</span>
+                <span class="tag tag-blue" style="font-size:0.72rem">⬜ 待完成</span>
+            </div>
+            ${t.description ? `
+            <div style="margin-bottom:14px">
+                <div style="font-weight:600;font-size:0.85rem;margin-bottom:6px">📝 描述</div>
+                <div style="font-size:0.84rem;color:var(--text-secondary);line-height:1.6;white-space:pre-wrap;background:var(--bg-secondary);padding:10px 14px;border-radius:6px">${t.description.replace(/\\n/g, '\n')}</div>
+            </div>` : ''}
+            <div style="font-size:0.78rem;color:var(--text-muted);display:flex;flex-direction:column;gap:4px">
+                <div>🤖 ${t.created_by || clawData?.name || '未知'}</div>
+                <div>🔁 ${schedStr}</div>
+                ${t.created_at ? `<div>创建于 ${formatTime(t.created_at)}</div>` : ''}
+            </div>
+        `;
     }
+    modal.classList.add('active');
+}
+
+async function approveDetailTodo(todoId) {
+    try {
+        await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${todoId}/approve`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+        });
+        showToast('审核通过', 'success');
+        loadTodos();
+    } catch(e) { showToast('审核失败: ' + e.message, 'error'); }
 }
 
 async function toggleTodo(todoId, isDone) {
     if (isDone) return;
-    if (!await customConfirm('确认标记此待办为已完成？')) return;
+    if (!await customConfirm('确认提交此待办？提交后需管理员审核通过才算完成。')) return;
     try {
-        await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${todoId}/complete`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+        await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${todoId}/complete`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"status":"submitted"}'});
         loadTodos();
     } catch(e) { showToast('操作失败','error'); }
 }
@@ -753,6 +996,6 @@ $('#todo-form').addEventListener('submit', async e => {
     } catch(e) { showToast('保存失败','error'); }
 });
 
-loadClaw();
+loadPermissions().then(() => loadClaw());
 </script>
 {% endblock %}

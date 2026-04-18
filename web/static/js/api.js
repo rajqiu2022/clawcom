@@ -41,6 +41,7 @@ const API = {
     // Skills
     listSkills() { return this.get('/skills'); },
     createSkill(data) { return this.post('/skills', data); },
+    updateSkill(id, data) { return this.put(`/skills/${id}`, data); },
     installSkill(clawId, skillId) {
         return this.post(`/openclaws/${clawId}/skills`, { skill_id: skillId });
     },
@@ -130,8 +131,14 @@ function timeAgo(dateStr) {
 }
 
 function statusDot(status) {
-    const colors = { online: '#22c55e', offline: '#94a3b8', busy: '#f59e0b' };
-    const labels = { online: '在线', offline: '离线', busy: '忙碌' };
+    const colors = {
+        '工作': '#22c55e', '学习': '#3b82f6', '摸鱼': '#f59e0b', '休息': '#94a3b8',
+        'online': '#22c55e', 'offline': '#94a3b8', 'busy': '#f59e0b'
+    };
+    const labels = {
+        '工作': '工作', '学习': '学习', '摸鱼': '摸鱼', '休息': '休息',
+        'online': '在线', 'offline': '离线', 'busy': '忙碌'
+    };
     return `<span class="status-dot" style="background:${colors[status] || '#94a3b8'}"
             title="${labels[status] || status}"></span>`;
 }
@@ -146,4 +153,87 @@ function showToast(msg, type = 'info') {
         toast.classList.remove('show');
         setTimeout(() => toast.remove(), 300);
     }, 3000);
+}
+
+/**
+ * 全局项目筛选初始化
+ *
+ * 在各页面加载项目列表后调用：initProjectFilter(selectEl, callback)
+ *   1. 如果用户只负责 1 个项目 → 自动选中，隐藏"全部项目"
+ *   2. 如果用户有多个项目 → 恢复上次选择（localStorage）
+ *   3. 选择变化时存入 localStorage，所有页面共享
+ */
+const _PROJECT_STORAGE_KEY = 'openclaw_last_project';
+
+function initProjectFilter(selectEl, onChange) {
+    if (!selectEl) return;
+
+    // 等 currentUser 加载完
+    const _apply = () => {
+        if (!currentUser) return;
+
+        const role = currentUser.role || 'user';
+        const managedNames = currentUser.managed_project_names || [];
+
+        // super_admin 或无项目限制：恢复上次选择
+        if (role === 'super_admin' || managedNames.length === 0) {
+            _restoreLastChoice(selectEl, onChange);
+            return;
+        }
+
+        // 只负责 1 个项目 → 自动选中
+        if (managedNames.length === 1) {
+            const target = managedNames[0];
+            const exists = Array.from(selectEl.options).some(o => o.value === target);
+            if (exists) {
+                selectEl.value = target;
+                _saveChoice(target);
+                if (onChange) onChange();
+                return;
+            }
+        }
+
+        // 多个项目 → 恢复上次选择
+        _restoreLastChoice(selectEl, onChange);
+    };
+
+    // 监听选择变化 → 存储
+    selectEl.addEventListener('change', () => {
+        _saveChoice(selectEl.value);
+    });
+
+    // 等 currentUser（base.html 异步加载）
+    if (typeof currentUser !== 'undefined' && currentUser) {
+        _apply();
+    } else {
+        // 轮询等待（最多 2 秒）
+        let tries = 0;
+        const timer = setInterval(() => {
+            tries++;
+            if ((typeof currentUser !== 'undefined' && currentUser) || tries > 20) {
+                clearInterval(timer);
+                _apply();
+            }
+        }, 100);
+    }
+}
+
+function _restoreLastChoice(selectEl, onChange) {
+    const saved = localStorage.getItem(_PROJECT_STORAGE_KEY);
+    if (saved) {
+        // 检查选项是否存在
+        const exists = Array.from(selectEl.options).some(o => o.value === saved);
+        if (exists) {
+            selectEl.value = saved;
+            if (onChange) onChange();
+        }
+    }
+}
+
+function _saveChoice(value) {
+    if (value) {
+        localStorage.setItem(_PROJECT_STORAGE_KEY, value);
+    } else {
+        localStorage.removeItem(_PROJECT_STORAGE_KEY);
+    }
 }

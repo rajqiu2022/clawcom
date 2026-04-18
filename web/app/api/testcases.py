@@ -11,6 +11,15 @@ from app.models import TestCaseLibrary, TestCase
 from app.api import api_bp
 
 
+def _require_admin_for_library(library):
+    """删除用例库需要管理员权限（admin 和 super_admin 同等权限）"""
+    from app.api.skills import _get_current_user
+    user = _get_current_user()
+    if not user or user.role not in ('super_admin', 'admin'):
+        return jsonify({'error': '只有管理员可以删除用例库'}), 403
+    return jsonify({'error': '只有管理员可以删除用例库'}), 403
+
+
 def generate_mindmap_node_id():
     """生成唯一的脑图节点ID"""
     return f"node_{uuid.uuid4().hex[:8]}"
@@ -180,8 +189,12 @@ def update_testcase_library(library_id):
 
 @api_bp.route('/testcase-libraries/<int:library_id>', methods=['DELETE'])
 def delete_testcase_library(library_id):
-    """删除用例库"""
+    """删除用例库 — 仅管理员"""
     library = TestCaseLibrary.query.get_or_404(library_id)
+
+    perm_err = _require_admin_for_library(library)
+    if perm_err:
+        return perm_err
 
     # 自动快照：删库前保存（最后的安全网）
     from app.api.snapshots import auto_snapshot
@@ -193,6 +206,223 @@ def delete_testcase_library(library_id):
     return jsonify({'message': f'用例库 "{library.name}" 已删除'})
 
 
+# ==================== 目录树 API ====================
+
+@api_bp.route('/testcase-libraries/<int:library_id>/modules', methods=['GET'])
+def get_library_modules(library_id):
+    """获取用例库的目录树结构
+
+    从所有用例的 module_path 字段自动构建目录树，无需单独建表。
+    返回格式：
+    [
+        {"name": "登录模块", "path": "登录模块", "count": 10, "children": [
+            {"name": "手机号登录", "path": "登录模块/手机号登录", "count": 5, "children": []}
+        ]},
+        {"name": "(未分类)", "path": "", "count": 3, "children": []}
+    ]
+    """
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    cases = library.cases.all()
+
+    # 统计每个路径的用例数（排除占位用例）
+    path_counts = {}
+    uncategorized = 0
+    for c in cases:
+        mp = (c.module_path or '').strip()
+        if not mp:
+            if not c.is_placeholder:
+                uncategorized += 1
+        else:
+            # 统计完整路径和所有祖先路径
+            parts = mp.split('/')
+            for i in range(len(parts)):
+                ancestor = '/'.join(parts[:i+1])
+                if ancestor not in path_counts:
+                    path_counts[ancestor] = 0
+            if not c.is_placeholder:
+                path_counts[mp] = path_counts.get(mp, 0) + 1
+
+    # 重新计算：每个节点的直接用例数 = 只属于该路径的用例（不含子路径，不含占位）
+    direct_counts = {}
+    for c in cases:
+        mp = (c.module_path or '').strip()
+        if mp and not c.is_placeholder:
+            direct_counts[mp] = direct_counts.get(mp, 0) + 1
+
+    # 构建树（包含空目录：即使 count=0 也要显示）
+    def build_tree(parent_path=''):
+        children = []
+        seen = set()
+        for path in sorted(path_counts.keys()):
+            if parent_path:
+                if not path.startswith(parent_path + '/'):
+                    continue
+                remaining = path[len(parent_path) + 1:]
+            else:
+                remaining = path
+
+            # 取第一层
+            top = remaining.split('/')[0]
+            if top in seen:
+                continue
+            seen.add(top)
+
+            child_path = f'{parent_path}/{top}' if parent_path else top
+            # 该节点下的总用例数（不含占位）
+            total = sum(direct_counts.get(p, 0) for p in direct_counts if p == child_path or p.startswith(child_path + '/'))
+            children.append({
+                'name': top,
+                'path': child_path,
+                'count': total,
+                'children': build_tree(child_path),
+            })
+        return children
+
+    tree = build_tree()
+
+    # 添加未分类
+    if uncategorized > 0:
+        tree.append({
+            'name': '(未分类)',
+            'path': '',
+            'count': uncategorized,
+            'children': [],
+        })
+
+    return jsonify(tree)
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/modules', methods=['POST'])
+def create_testcase_module(library_id):
+    """新增子目录
+
+    请求体：{
+        "parent_path": "A模块",        // 父目录路径，空字符串表示根目录
+        "name": "AA模块"               // 新目录名
+    }
+
+    实现方式：创建一个占位用例（is_placeholder=True），
+    module_path 设为 parent_path/name，使空目录能显示在目录树中。
+    当该目录下有真实用例时，占位用例会被自动清理。
+    """
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    data = request.get_json()
+
+    if not data or not data.get('name'):
+        return jsonify({'error': 'name 为必填项'}), 400
+
+    name = data['name'].strip()
+    parent_path = (data.get('parent_path') or '').strip()
+
+    # 校验名称：不能包含 / 和特殊字符
+    if '/' in name:
+        return jsonify({'error': '目录名不能包含 /'}), 400
+    if not name or name == '(未分类)':
+        return jsonify({'error': '目录名无效'}), 400
+
+    full_path = f'{parent_path}/{name}' if parent_path else name
+
+    # 检查同名目录是否已存在
+    existing = TestCase.query.filter_by(
+        library_id=library_id,
+        module_path=full_path,
+    ).first()
+    if existing:
+        return jsonify({'error': f'目录 "{full_path}" 已存在'}), 409
+
+    # 创建占位用例
+    placeholder = TestCase(
+        library_id=library_id,
+        case_id=f'_dir_{uuid.uuid4().hex[:6]}',
+        title=f'[目录] {name}',
+        priority='P2',
+        type='functional',
+        content={},
+        mindmap_node_id=generate_mindmap_node_id(),
+        module_path=full_path,
+        is_placeholder=True,
+        created_by=data.get('created_by', ''),
+    )
+    db.session.add(placeholder)
+    db.session.commit()
+
+    return jsonify({
+        'message': f'目录 "{full_path}" 已创建',
+        'path': full_path,
+    }), 201
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/modules', methods=['DELETE'])
+def delete_testcase_module(library_id):
+    """删除空目录（仅允许删除没有真实用例的目录）
+
+    请求体：{ "path": "A模块/AA模块" }
+
+    如果该目录下有真实用例，返回错误。
+    只删除占位用例。
+    """
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    data = request.get_json()
+    path = (data or {}).get('path', '').strip()
+    if not path:
+        return jsonify({'error': 'path 必填'}), 400
+
+    # 检查是否有真实用例（不含占位）
+    real_cases = TestCase.query.filter(
+        TestCase.library_id == library_id,
+        TestCase.is_placeholder != True,
+        db.or_(
+            TestCase.module_path == path,
+            TestCase.module_path.like(f'{path}/%')
+        )
+    ).count()
+
+    if real_cases > 0:
+        return jsonify({'error': f'该目录下有 {real_cases} 条真实用例，无法删除'}), 400
+
+    # 删除占位用例
+    placeholders = TestCase.query.filter(
+        TestCase.library_id == library_id,
+        TestCase.is_placeholder == True,
+        db.or_(
+            TestCase.module_path == path,
+            TestCase.module_path.like(f'{path}/%')
+        )
+    ).all()
+    for p in placeholders:
+        db.session.delete(p)
+
+    db.session.commit()
+    return jsonify({'message': f'目录 "{path}" 已删除'})
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/modules/rename', methods=['POST'])
+def rename_module(library_id):
+    """重命名目录（批量更新 module_path）"""
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    data = request.get_json()
+    old_path = data.get('old_path', '')
+    new_path = data.get('new_path', '')
+    if not old_path or not new_path:
+        return jsonify({'error': 'old_path 和 new_path 必填'}), 400
+
+    # 更新完全匹配的
+    cases = TestCase.query.filter_by(library_id=library_id, module_path=old_path).all()
+    for c in cases:
+        c.module_path = new_path
+
+    # 更新子路径
+    children = TestCase.query.filter(
+        TestCase.library_id == library_id,
+        TestCase.module_path.like(f'{old_path}/%')
+    ).all()
+    for c in children:
+        c.module_path = new_path + c.module_path[len(old_path):]
+
+    db.session.commit()
+    return jsonify({'message': f'已重命名 {len(cases) + len(children)} 条用例的目录'})
+
+
 # ==================== 脑图 API ====================
 
 @api_bp.route('/testcase-libraries/<int:library_id>/mindmap', methods=['GET'])
@@ -201,7 +431,7 @@ def get_library_mindmap(library_id):
     library = TestCaseLibrary.query.get_or_404(library_id)
 
     # 重新构建脑图
-    cases = library.cases.all()
+    cases = library.cases.filter(TestCase.is_placeholder != True).all()
     mindmap = build_mindmap_from_cases(cases)
 
     # 更新脑图结构到数据库
@@ -233,19 +463,39 @@ def update_library_mindmap(library_id):
 
 @api_bp.route('/testcase-libraries/<int:library_id>/cases', methods=['GET'])
 def list_library_cases(library_id):
-    """获取用例列表"""
+    """获取用例列表
+
+    查询参数 include_placeholders=true 时包含占位用例（用于目录树构建）
+    默认不含占位用例（用于用例列表展示）
+    """
     library = TestCaseLibrary.query.get_or_404(library_id)
 
     priority = request.args.get('priority')
     case_type = request.args.get('type')
     search = request.args.get('search')
+    module_path = request.args.get('module_path')
+    include_placeholders = request.args.get('include_placeholders', 'false').lower() == 'true'
 
     query = library.cases
+
+    # 默认过滤占位用例（除非显式请求包含）
+    if not include_placeholders:
+        query = query.filter(TestCase.is_placeholder != True)
 
     if priority:
         query = query.filter_by(priority=priority)
     if case_type:
         query = query.filter_by(type=case_type)
+    if module_path is not None:
+        if module_path == '':
+            # 未分类：module_path 为空或 NULL
+            query = query.filter(db.or_(TestCase.module_path == '', TestCase.module_path == None))
+        else:
+            # 精确匹配或前缀匹配（包含子目录）
+            query = query.filter(db.or_(
+                TestCase.module_path == module_path,
+                TestCase.module_path.like(f'{module_path}/%')
+            ))
     if search:
         query = query.filter(TestCase.title.ilike(f'%{search}%'))
 
@@ -263,7 +513,7 @@ def create_case(library_id):
         return jsonify({'error': 'title 为必填项'}), 400
 
     # 生成用例编号
-    case_count = library.cases.count()
+    case_count = library.cases.filter(TestCase.is_placeholder != True).count()
     case_id = data.get('case_id', f"TC_{case_count + 1:03d}")
 
     case = TestCase(
@@ -275,8 +525,22 @@ def create_case(library_id):
         content=data.get('content', {}),
         mindmap_node_id=generate_mindmap_node_id(),
         tags=data.get('tags', []),
+        module_path=data.get('module_path', ''),
+        created_by=data.get('created_by', ''),
     )
     db.session.add(case)
+
+    # 自动清理同路径的占位用例（该目录下已有真实用例，占位不再需要）
+    mp = data.get('module_path', '').strip()
+    if mp:
+        placeholders = TestCase.query.filter_by(
+            library_id=library_id,
+            module_path=mp,
+            is_placeholder=True,
+        ).all()
+        for p in placeholders:
+            db.session.delete(p)
+
     db.session.commit()
 
     return jsonify(case.to_dict()), 201
@@ -297,10 +561,21 @@ def update_case(library_id, case_id):
     case = TestCase.query.filter_by(library_id=library_id, id=case_id).first_or_404()
     data = request.get_json()
 
-    updatable_fields = ['title', 'priority', 'type', 'content', 'tags']
+    updatable_fields = ['title', 'priority', 'type', 'content', 'tags', 'module_path', 'created_by']
     for field in updatable_fields:
         if field in data:
             setattr(case, field, data[field])
+
+    # 如果 module_path 变更，清理目标路径的占位用例
+    if 'module_path' in data and data['module_path'] and not case.is_placeholder:
+        mp = data['module_path'].strip()
+        placeholders = TestCase.query.filter_by(
+            library_id=library_id,
+            module_path=mp,
+            is_placeholder=True,
+        ).all()
+        for p in placeholders:
+            db.session.delete(p)
 
     db.session.commit()
     return jsonify(case.to_dict())
@@ -338,7 +613,7 @@ def batch_create_cases(library_id):
         return jsonify({'error': 'cases 为必填项'}), 400
 
     created_cases = []
-    base_count = library.cases.count()
+    base_count = library.cases.filter(TestCase.is_placeholder != True).count()
 
     for i, case_data in enumerate(data['cases']):
         case = TestCase(
@@ -399,7 +674,7 @@ def export_cases_yaml(library_id):
     """导出用例为 YAML 格式"""
     from flask import Response
     library = TestCaseLibrary.query.get_or_404(library_id)
-    cases = library.cases.order_by(TestCase.priority, TestCase.case_id).all()
+    cases = library.cases.filter(TestCase.is_placeholder != True).order_by(TestCase.priority, TestCase.case_id).all()
 
     lines = [f"# 用例库: {library.name}",
              f"# 项目: {library.project_name or '未指定'}",
@@ -460,7 +735,7 @@ def import_cases_yaml(library_id):
     if not cases_data:
         return jsonify({'error': '未找到用例数据'}), 400
 
-    base_count = library.cases.count()
+    base_count = library.cases.filter(TestCase.is_placeholder != True).count()
     created = []
     for i, cd in enumerate(cases_data):
         steps = cd.get('steps', [])
@@ -496,7 +771,7 @@ def export_cases_xmind(library_id):
     import io
 
     library = TestCaseLibrary.query.get_or_404(library_id)
-    cases = library.cases.order_by(TestCase.priority, TestCase.case_id).all()
+    cases = library.cases.filter(TestCase.is_placeholder != True).order_by(TestCase.priority, TestCase.case_id).all()
 
     # 按优先级 → 类型分组构建 XMind 树
     groups = {}

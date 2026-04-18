@@ -119,6 +119,10 @@ def apply_pack(pack_id):
         installed_count += count
 
     db.session.commit()
+    # 通知所有 claw SSE 长连接立即推送
+    from app.api.agent_client import notify_claw
+    for claw in claws:
+        notify_claw(claw.id)
     return jsonify({
         'message': f'标准包 "{pack.display_name}" 已下发',
         'claw_count': len(claws),
@@ -142,6 +146,9 @@ def apply_all_active_packs():
         total += _apply_pack_to_claw(pack, claw)
 
     db.session.commit()
+    # 通知 SSE 长连接立即推送
+    from app.api.agent_client import notify_claw
+    notify_claw(claw.id)
     return jsonify({
         'message': f'已为 {claw.name} 下发 {len(active_packs)} 个标准包',
         'pack_count': len(active_packs),

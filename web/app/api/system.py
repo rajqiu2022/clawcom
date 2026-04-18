@@ -11,9 +11,9 @@ from sqlalchemy import text
 def get_system_config():
     """获取所有系统配置"""
     rows = db.session.execute(
-        text("SELECT config_key, config_value FROM system_config")
+        text("SELECT config_key, value FROM system_config")
     ).fetchall()
-    return jsonify({r.config_key: r.config_value for r in rows})
+    return jsonify({r.config_key: r.value for r in rows})
 
 
 @api_bp.route('/system/config', methods=['PUT'])
@@ -23,22 +23,19 @@ def update_system_config():
     if not data:
         return jsonify({'error': '数据为空'}), 400
 
-    conn = db.engine.connect()
-    for key, value in data.items():
-        # 兼容 MySQL 和 SQLite
-        existing = conn.execute(text(
-            "SELECT 1 FROM system_config WHERE config_key=:k"
-        ), {'k': key}).fetchone()
-        if existing:
-            conn.execute(text(
-                "UPDATE system_config SET config_value=:v, updated_at=CURRENT_TIMESTAMP WHERE config_key=:k"
-            ), {'k': key, 'v': value})
-        else:
-            conn.execute(text(
-                "INSERT INTO system_config (config_key, config_value, updated_at) VALUES (:k, :v, CURRENT_TIMESTAMP)"
-            ), {'k': key, 'v': value})
-    conn.commit()
-    conn.close()
+    with db.engine.begin() as conn:
+        for key, value in data.items():
+            existing = conn.execute(text(
+                "SELECT 1 FROM system_config WHERE config_key=:k"
+            ), {'k': key}).fetchone()
+            if existing:
+                conn.execute(text(
+                    "UPDATE system_config SET value=:v, updated_at=CURRENT_TIMESTAMP WHERE config_key=:k"
+                ), {'k': key, 'v': value})
+            else:
+                conn.execute(text(
+                    "INSERT INTO system_config (config_key, value, updated_at) VALUES (:k, :v, CURRENT_TIMESTAMP)"
+                ), {'k': key, 'v': value})
     return jsonify({'message': '配置已更新'})
 
 
@@ -56,7 +53,7 @@ def generate_spec():
 
     # 读取 LLM 配置
     rows = dict(db.session.execute(
-        text("SELECT config_key, config_value FROM system_config")
+        text("SELECT config_key, value FROM system_config")
     ).fetchall())
 
     provider = rows.get('llm_provider', 'doubao')
@@ -120,7 +117,7 @@ def llm_generate():
 
     # 读取 LLM 配置
     rows = dict(db.session.execute(
-        text("SELECT config_key, config_value FROM system_config")
+        text("SELECT config_key, value FROM system_config")
     ).fetchall())
 
     provider = rows.get('llm_provider', 'doubao')
@@ -292,3 +289,47 @@ def _call_deepseek(prompt, model, api_key):
     resp.raise_for_status()
     data = resp.json()
     return data['choices'][0]['message']['content']
+
+
+@api_bp.route('/system/cleanup-chat', methods=['POST'])
+def cleanup_chat():
+    """清理过期聊天记录（3天前）和过期上传图片"""
+    import os
+    import shutil
+    from datetime import datetime, timedelta
+    from flask import current_app
+    from app.models import ClawMessage
+
+    days = 3
+    cutoff = datetime.now() - timedelta(days=days)
+
+    old_chat = ClawMessage.query.filter(
+        ClawMessage.msg_type == 'chat',
+        ClawMessage.created_at < cutoff
+    ).all()
+    chat_deleted = len(old_chat)
+    for msg in old_chat:
+        db.session.delete(msg)
+    db.session.commit()
+
+    uploads_dir = os.path.join(current_app.static_folder, 'uploads')
+    images_deleted = 0
+    dirs_deleted = 0
+    if os.path.exists(uploads_dir):
+        cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
+        for dirname in os.listdir(uploads_dir):
+            if len(dirname) == 8 and dirname.isdigit() and dirname < cutoff_date:
+                dir_path = os.path.join(uploads_dir, dirname)
+                if os.path.isdir(dir_path):
+                    file_count = len(os.listdir(dir_path))
+                    shutil.rmtree(dir_path)
+                    images_deleted += file_count
+                    dirs_deleted += 1
+
+    return jsonify({
+        'message': '清理完成',
+        'chat_messages_deleted': chat_deleted,
+        'image_files_deleted': images_deleted,
+        'image_dirs_deleted': dirs_deleted,
+        'cutoff_days': days,
+    })

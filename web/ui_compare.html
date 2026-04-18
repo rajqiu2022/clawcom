@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw UI 新旧对比</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1a2e; color: #eee; font-family: 'DM Sans', -apple-system, sans-serif; padding: 30px; }
+        h1 { text-align: center; margin-bottom: 30px; font-size: 1.5rem; }
+        .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1200px; margin: 0 auto; }
+        .panel { border-radius: 14px; overflow: hidden; }
+        .panel-label { padding: 10px 16px; font-weight: 700; font-size: 0.9rem; letter-spacing: 0.04em; }
+        .old .panel-label { background: #2d2d3f; color: #9aa0b0; }
+        .new .panel-label { background: #252838; color: #5b5ff0; }
+        .panel-body { padding: 20px; }
+        .old .panel-body { background: #0f1117; }
+        .new .panel-body { background: #0c0e14; }
+
+        /* Shared mock styles */
+        .mock-sidebar { width: 100%; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+        .old .mock-sidebar { background: #1a1d27; border: 1px solid #2e3140; }
+        .new .mock-sidebar { background: #12141c; border: 1px solid #252838; }
+        .mock-logo { display: flex; align-items: center; gap: 8px; font-size: 1.1rem; font-weight: 700; margin-bottom: 4px; }
+        .mock-subtitle { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+        .old .mock-subtitle { color: #6b7080; }
+        .new .mock-subtitle { color: #5c6178; }
+        .mock-nav { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
+        .mock-nav-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 6px; font-size: 0.85rem; position: relative; }
+        .old .mock-nav-item { color: #9aa0b0; }
+        .new .mock-nav-item { color: #8b91a8; font-weight: 500; }
+        .mock-nav-item.active { font-weight: 600; }
+        .old .mock-nav-item.active { background: rgba(108,92,231,0.15); color: #6c5ce7; }
+        .new .mock-nav-item.active { background: rgba(91,95,240,0.12); color: #5b5ff0; border-radius: 8px; }
+        .new .mock-nav-item.active::before {
+            content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+            width: 3px; height: 16px; background: #5b5ff0; border-radius: 0 3px 3px 0;
+        }
+        .mock-nav-item:hover { background: rgba(255,255,255,0.05); }
+
+        .mock-card { padding: 16px; border-radius: 10px; margin-bottom: 10px; transition: transform 0.2s; }
+        .old .mock-card { background: #21242f; border: 1px solid #2e3140; }
+        .new .mock-card { background: #181b25; border: 1px solid #252838; }
+        .new .mock-card:hover { border-color: #5b5ff0; transform: translateY(-2px); box-shadow: 0 4px 16px rgba(0,0,0,0.2); }
+        .mock-card-title { font-size: 0.95rem; font-weight: 600; margin-bottom: 6px; }
+        .mock-card-desc { font-size: 0.8rem; }
+        .old .mock-card-desc { color: #9aa0b0; }
+        .new .mock-card-desc { color: #8b91a8; }
+
+        .mock-btn { display: inline-block; padding: 8px 18px; border-radius: 6px; font-size: 0.85rem; font-weight: 500; cursor: pointer; margin: 4px; }
+        .old .mock-btn.primary { background: #6c5ce7; color: #fff; border-radius: 6px; }
+        .new .mock-btn.primary { background: #5b5ff0; color: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(91,95,240,0.2); }
+        .new .mock-btn.primary:hover { background: #6e72ff; box-shadow: 0 2px 8px rgba(91,95,240,0.35); transform: translateY(-1px); }
+        .old .mock-btn.ghost { background: transparent; color: #9aa0b0; border: 1px solid #2e3140; border-radius: 6px; }
+        .new .mock-btn.ghost { background: transparent; color: #8b91a8; border: 1px solid #252838; border-radius: 8px; }
+        .new .mock-btn.ghost:hover { border-color: #2f3348; color: #edf0f7; }
+
+        .mock-tag { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem; font-weight: 500; margin: 2px; }
+        .old .mock-tag.green { background: rgba(34,197,94,0.15); color: #22c55e; }
+        .new .mock-tag.green { background: rgba(45,212,160,0.12); color: #2dd4a0; }
+        .old .mock-tag.blue { background: rgba(59,130,246,0.15); color: #3b82f6; }
+        .new .mock-tag.blue { background: rgba(77,166,255,0.12); color: #4da6ff; }
+        .old .mock-tag.red { background: rgba(239,68,68,0.15); color: #ef4444; }
+        .new .mock-tag.red { background: rgba(240,96,96,0.12); color: #f06060; }
+        .old .mock-tag.yellow { background: rgba(245,158,11,0.15); color: #f59e0b; }
+        .new .mock-tag.yellow { background: rgba(245,183,49,0.12); color: #f5b731; }
+
+        .mock-stat { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 6px; margin: 3px; }
+        .old .mock-stat { background: #21242f; border: 1px solid #2e3140; }
+        .new .mock-stat { background: #181b25; border: 1px solid #252838; border-radius: 8px; }
+        .stat-val { font-size: 1.1rem; font-weight: 700; }
+        .stat-lbl { font-size: 0.7rem; }
+        .old .stat-lbl { color: #6b7080; }
+        .new .stat-lbl { color: #5c6178; text-transform: uppercase; letter-spacing: 0.04em; }
+
+        .mock-input { padding: 9px 12px; border-radius: 6px; font-size: 0.9rem; width: 200px; outline: none; }
+        .old .mock-input { background: #2a2d3a; border: 1px solid #2e3140; color: #e8eaed; border-radius: 6px; }
+        .new .mock-input { background: #1e2130; border: 1px solid #252838; color: #edf0f7; border-radius: 8px; font-family: inherit; }
+        .mock-input:focus { border-color: #5b5ff0; }
+        .new .mock-input:focus { box-shadow: 0 0 0 3px rgba(91,95,240,0.12); }
+
+        .mock-modal { padding: 20px; border-radius: 10px; max-width: 320px; }
+        .old .mock-modal { background: #21242f; border: 1px solid #2e3140; }
+        .new .mock-modal { background: #181b25; border: 1px solid #252838; border-radius: 14px; box-shadow: 0 8px 30px rgba(0,0,0,0.35); }
+        .mock-modal-title { font-size: 1rem; font-weight: 600; margin-bottom: 8px; }
+        .mock-modal-body { font-size: 0.85rem; margin-bottom: 14px; }
+        .old .mock-modal-body { color: #9aa0b0; }
+        .new .mock-modal-body { color: #8b91a8; }
+
+        .section-label { font-size: 0.78rem; font-weight: 600; color: #888; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+    </style>
+</head>
+<body>
+    <h1>🦞 OpenClaw UI 新旧对比</h1>
+    <div class="compare">
+        <!-- OLD -->
+        <div class="panel old">
+            <div class="panel-label">⬅ 旧版 (v5.0)</div>
+            <div class="panel-body">
+                <div class="section-label">侧边栏</div>
+                <div class="mock-sidebar">
+                    <div class="mock-logo">🦞 OpenClaw</div>
+                    <div class="mock-subtitle">团队管理系统</div>
+                    <div class="mock-nav">
+                        <div class="mock-nav-item active">📊 Dashboard</div>
+                        <div class="mock-nav-item">🦞 龙虾管理</div>
+                        <div class="mock-nav-item">📋 日报中心</div>
+                    </div>
+                </div>
+
+                <div class="section-label">统计条</div>
+                <div>
+                    <div class="mock-stat"><span class="stat-val" style="color:#22c55e">12</span><span class="stat-lbl">在线</span></div>
+                    <div class="mock-stat"><span class="stat-val" style="color:#3b82f6">28</span><span class="stat-lbl">总数</span></div>
+                </div>
+
+                <div class="section-label">卡片</div>
+                <div class="mock-card">
+                    <div class="mock-card-title">测试龙虾 #1</div>
+                    <div class="mock-card-desc">在线运行中 · v2.1.0</div>
+                </div>
+
+                <div class="section-label">标签</div>
+                <div>
+                    <span class="mock-tag green">在线</span>
+                    <span class="mock-tag blue">运行中</span>
+                    <span class="mock-tag yellow">待审核</span>
+                    <span class="mock-tag red">异常</span>
+                </div>
+
+                <div class="section-label">按钮</div>
+                <div>
+                    <span class="mock-btn primary">主按钮</span>
+                    <span class="mock-btn ghost">次要按钮</span>
+                </div>
+
+                <div class="section-label">输入框</div>
+                <input class="mock-input" placeholder="搜索...">
+
+                <div class="section-label">弹窗</div>
+                <div class="mock-modal">
+                    <div class="mock-modal-title">确认删除？</div>
+                    <div class="mock-modal-body">此操作不可撤销</div>
+                    <span class="mock-btn primary">确认</span>
+                    <span class="mock-btn ghost">取消</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- NEW -->
+        <div class="panel new">
+            <div class="panel-label">➡ 新版 (v5.1)</div>
+            <div class="panel-body">
+                <div class="section-label">侧边栏</div>
+                <div class="mock-sidebar">
+                    <div class="mock-logo">🦞 OpenClaw</div>
+                    <div class="mock-subtitle">Team Management System</div>
+                    <div class="mock-nav">
+                        <div class="mock-nav-item active">📊 Dashboard</div>
+                        <div class="mock-nav-item">🦞 龙虾管理</div>
+                        <div class="mock-nav-item">📋 日报中心</div>
+                    </div>
+                </div>
+
+                <div class="section-label">统计条</div>
+                <div>
+                    <div class="mock-stat"><span class="stat-val" style="color:#2dd4a0">12</span><span class="stat-lbl">Online</span></div>
+                    <div class="mock-stat"><span class="stat-val" style="color:#4da6ff">28</span><span class="stat-lbl">Total</span></div>
+                </div>
+
+                <div class="section-label">卡片</div>
+                <div class="mock-card">
+                    <div class="mock-card-title">测试龙虾 #1</div>
+                    <div class="mock-card-desc">在线运行中 · v2.1.0</div>
+                </div>
+
+                <div class="section-label">标签</div>
+                <div>
+                    <span class="mock-tag green">在线</span>
+                    <span class="mock-tag blue">运行中</span>
+                    <span class="mock-tag yellow">待审核</span>
+                    <span class="mock-tag red">异常</span>
+                </div>
+
+                <div class="section-label">按钮</div>
+                <div>
+                    <span class="mock-btn primary">主按钮</span>
+                    <span class="mock-btn ghost">次要按钮</span>
+                </div>
+
+                <div class="section-label">输入框</div>
+                <input class="mock-input" placeholder="搜索...">
+
+                <div class="section-label">弹窗</div>
+                <div class="mock-modal">
+                    <div class="mock-modal-title">确认删除？</div>
+                    <div class="mock-modal-body">此操作不可撤销</div>
+                    <span class="mock-btn primary">确认</span>
+                    <span class="mock-btn ghost">取消</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -9,9 +9,20 @@
     <div class="card">
         <div class="card-header">
             <h3 class="card-title">项目管理</h3>
-            <button class="btn btn-primary btn-sm" onclick="openProjectModal()">+ 新增</button>
+            <button class="btn btn-primary btn-sm" onclick="openProjectModal()">+ 新增项目</button>
         </div>
         <div id="projects-list">
+            <div class="loading"><span class="spinner"></span></div>
+        </div>
+    </div>
+
+    <!-- 模块管理（独立于项目） -->
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">模块管理</h3>
+            <button class="btn btn-primary btn-sm" onclick="openModuleModal()">+ 新增模块</button>
+        </div>
+        <div id="modules-list">
             <div class="loading"><span class="spinner"></span></div>
         </div>
     </div>
@@ -24,6 +35,7 @@
         <div class="form-group">
             <label class="form-label">模型供应商</label>
             <select class="form-input" id="llm-provider" onchange="onProviderChange()">
+                <option value="openai_compatible">OpenAI 兼容格式 (通用)</option>
                 <option value="doubao">火山引擎 - 豆包 (Doubao)</option>
                 <option value="ernie">百度 - 文心一言 (ERNIE)</option>
                 <option value="tongyi">阿里 - 通义千问 (Tongyi)</option>
@@ -33,11 +45,11 @@
         </div>
         <div class="form-group">
             <label class="form-label">模型名称</label>
-            <input class="form-input" id="llm-model" placeholder="如：doubao-pro-32k 或 ernie-bot-4">
+            <input class="form-input" id="llm-model" placeholder="如：kimi-k2.5">
         </div>
         <div class="form-group" id="llm-base-group">
             <label class="form-label">API Base URL</label>
-            <input class="form-input" id="llm-api-base" placeholder="https://ark.cn-beijing.volces.com/api/v3">
+            <input class="form-input" id="llm-api-base" placeholder="https://...">
         </div>
         <div class="form-group">
             <label class="form-label">API Key</label>
@@ -48,6 +60,25 @@
             <button class="btn btn-ghost btn-sm" onclick="testLLM()">测试连接</button>
         </div>
         <div id="llm-test-result" style="margin-top:8px;font-size:0.85rem"></div>
+    </div>
+
+    <!-- TAPD 配置 -->
+    <div class="card">
+        <div class="card-header">
+            <h3 class="card-title">TAPD 连接</h3>
+        </div>
+        <div class="form-group">
+            <label class="form-label">API User</label>
+            <input class="form-input" id="tapd-api-user" placeholder="TAPD 应用 API Account">
+        </div>
+        <div class="form-group">
+            <label class="form-label">API Password</label>
+            <input class="form-input" type="password" id="tapd-api-password" placeholder="TAPD 应用 API Password">
+        </div>
+        <div style="display:flex;gap:8px;margin-top:4px">
+            <button class="btn btn-primary btn-sm" onclick="saveTAPDConfig()">保存配置</button>
+        </div>
+        <div id="tapd-status" style="margin-top:8px;font-size:0.85rem"></div>
     </div>
 
     <!-- Memos 配置 -->
@@ -81,7 +112,7 @@
             </div>
             <div class="form-group">
                 <label class="form-label">TAPD Workspace ID</label>
-                <input class="form-input" name="tapd_workspace_id" id="project-tapd-id" placeholder="如：67459320（在 TAPD URL 中可见）">
+                <input class="form-input" name="tapd_workspace_id" id="project-tapd-id" placeholder="如：67459320">
             </div>
             <div class="form-group">
                 <label class="form-label">项目描述</label>
@@ -94,19 +125,35 @@
         </form>
     </div>
 </div>
-<!-- 添加模块弹窗 -->
+
+<!-- 新建/编辑模块弹窗 -->
 <div class="modal-overlay" id="module-modal">
-    <div class="modal" style="max-width:400px">
-        <h2 class="modal-title" id="module-modal-title">添加模块</h2>
+    <div class="modal" style="max-width:450px">
+        <h2 class="modal-title" id="module-modal-title">新增模块</h2>
         <form id="module-form">
-            <input type="hidden" id="module-project-id">
+            <input type="hidden" id="module-edit-id">
             <div class="form-group">
                 <label class="form-label">模块名称 *</label>
                 <input class="form-input" id="module-name" placeholder="如：登录模块" required>
             </div>
+            <div class="form-group">
+                <label class="form-label">模块分类 *</label>
+                <select class="form-input" id="module-category">
+                    <option value="peripheral">外围系统</option>
+                    <option value="core_gameplay">核心单局</option>
+                    <option value="commercialization">商业化</option>
+                    <option value="client_performance">客户端性能</option>
+                    <option value="server_special">服务器专项</option>
+                    <option value="other">其他专项</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">描述</label>
+                <textarea class="form-textarea" id="module-desc" placeholder="可选..."></textarea>
+            </div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeModuleModal()">取消</button>
-                <button type="submit" class="btn btn-primary">添加</button>
+                <button type="submit" class="btn btn-primary">保存</button>
             </div>
         </form>
     </div>
@@ -115,59 +162,68 @@
 
 {% block scripts %}
 <script>
+const MODULE_CATEGORY_LABELS = {
+    'peripheral': '外围系统',
+    'core_gameplay': '核心单局',
+    'commercialization': '商业化',
+    'client_performance': '客户端性能',
+    'server_special': '服务器专项',
+    'other': '其他专项',
+};
+const MODULE_CATEGORY_COLORS = {
+    'peripheral': '#3498db',
+    'core_gameplay': '#e74c3c',
+    'commercialization': '#f39c12',
+    'client_performance': '#9b59b6',
+    'server_special': '#1abc9c',
+    'other': '#95a5a6',
+};
+
+// ==================== 项目管理 ====================
+
 async function loadProjects() {
     try {
         const projects = await API.listProjects();
         const list = $('#projects-list');
-
         if (projects.length === 0) {
             list.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无项目</div></div>';
             return;
         }
-
         list.innerHTML = projects.map(p => `
-            <div style="padding:12px 0;border-bottom:1px solid var(--border)">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <div style="padding:10px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+                <div>
                     <div style="font-weight:600">${p.name}</div>
-                    <div style="display:flex;gap:6px">
-                        <button class="btn btn-ghost btn-sm" onclick="editProject(${p.id}, '${p.name.replace(/'/g, "\\'")}', '${p.tapd_workspace_id || ''}', '${(p.description || '').replace(/'/g, "\\'")}')">编辑</button>
-                    </div>
+                    ${p.tapd_workspace_id ? `<div style="font-size:0.78rem;color:var(--accent)">TAPD: ${p.tapd_workspace_id}</div>` : ''}
+                    ${p.description ? `<div style="font-size:0.82rem;color:var(--text-muted)">${p.description}</div>` : ''}
                 </div>
-                ${p.tapd_workspace_id ? `<div style="font-size:0.82rem;color:var(--accent);margin-bottom:6px">TAPD: ${p.tapd_workspace_id}</div>` : '<div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:6px">未绑定 TAPD</div>'}
-                ${p.description ? `<div style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:8px">${p.description}</div>` : ''}
-                <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
-                    ${(p.modules || []).map(m => `<span class="tag tag-accent">${m.name}</span>`).join('')}
-                    <button class="btn btn-ghost btn-sm" onclick="addModule(${p.id}, '${p.name.replace(/'/g, "\\'")}')">+ 模块</button>
+                <div style="display:flex;gap:6px">
+                    <button class="btn btn-ghost btn-sm" onclick='editProject(${JSON.stringify(p).replace(/'/g,"&#39;")})'>编辑</button>
+                    <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="deleteProject(${p.id})">删除</button>
                 </div>
             </div>
         `).join('');
     } catch (err) {
-        showToast('加载失败: ' + err.message, 'error');
+        showToast('加载项目失败: ' + err.message, 'error');
     }
 }
 
-function openProjectModal(editData) {
-    if (editData) {
-        $('#project-modal-title').textContent = '编辑项目';
-        $('#project-edit-id').value = editData.id;
-        $('#project-name').value = editData.name;
-        $('#project-tapd-id').value = editData.tapd_workspace_id || '';
-        $('#project-desc').value = editData.description || '';
-    } else {
-        $('#project-modal-title').textContent = '新增项目';
-        $('#project-edit-id').value = '';
-        $('#project-form').reset();
-    }
+function openProjectModal() {
+    $('#project-modal-title').textContent = '新增项目';
+    $('#project-edit-id').value = '';
+    $('#project-form').reset();
     $('#project-modal').classList.add('active');
 }
 
-function closeProjectModal() {
-    $('#project-modal').classList.remove('active');
+function editProject(p) {
+    $('#project-modal-title').textContent = '编辑项目';
+    $('#project-edit-id').value = p.id;
+    $('#project-name').value = p.name;
+    $('#project-tapd-id').value = p.tapd_workspace_id || '';
+    $('#project-desc').value = p.description || '';
+    $('#project-modal').classList.add('active');
 }
 
-function editProject(id, name, tapdId, desc) {
-    openProjectModal({ id, name, tapd_workspace_id: tapdId, description: desc });
-}
+function closeProjectModal() { $('#project-modal').classList.remove('active'); }
 
 $('#project-modal').addEventListener('click', e => {
     if (e.target === $('#project-modal')) closeProjectModal();
@@ -179,7 +235,6 @@ $('#project-form').addEventListener('submit', async e => {
     const data = Object.fromEntries(form);
     const editId = data.id;
     delete data.id;
-
     try {
         if (editId) {
             await API.updateProject(editId, data);
@@ -195,17 +250,75 @@ $('#project-form').addEventListener('submit', async e => {
     }
 });
 
-async function addModule(projectId, projectName) {
-    $('#module-modal-title').textContent = `为 "${projectName}" 添加模块`;
-    $('#module-project-id').value = projectId;
-    $('#module-name').value = '';
-    $('#module-modal').classList.add('active');
-    $('#module-name').focus();
+async function deleteProject(id) {
+    if (!await customConfirm('确定删除这个项目？')) return;
+    try {
+        await API.request('DELETE', `/projects/${id}`);
+        showToast('项目已删除', 'success');
+        loadProjects();
+    } catch (err) {
+        showToast('删除失败: ' + err.message, 'error');
+    }
 }
 
-function closeModuleModal() {
-    $('#module-modal').classList.remove('active');
+// ==================== 模块管理 ====================
+
+async function loadModules() {
+    try {
+        const modules = await API.request('GET', '/modules');
+        const list = $('#modules-list');
+        if (modules.length === 0) {
+            list.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无模块</div></div>';
+            return;
+        }
+        // 按分类分组
+        const grouped = {};
+        for (const cat of Object.keys(MODULE_CATEGORY_LABELS)) {
+            grouped[cat] = modules.filter(m => (m.category || 'other') === cat);
+        }
+        let html = '';
+        for (const [cat, mods] of Object.entries(grouped)) {
+            if (mods.length === 0) continue;
+            const color = MODULE_CATEGORY_COLORS[cat] || '#95a5a6';
+            html += `<div style="margin-top:10px">
+                <div style="font-size:0.82rem;font-weight:600;color:${color};margin-bottom:6px;display:flex;align-items:center;gap:6px">
+                    <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color}"></span>
+                    ${MODULE_CATEGORY_LABELS[cat]}（${mods.length}）
+                </div>
+                <div style="display:flex;flex-wrap:wrap;gap:6px">
+                    ${mods.map(m => `
+                        <span class="tag" style="background:${color}22;color:${color};border:1px solid ${color}44;cursor:pointer;padding:4px 10px" onclick='editModule(${JSON.stringify(m).replace(/'/g,"&#39;")})'>
+                            ${m.name}
+                        </span>
+                    `).join('')}
+                </div>
+            </div>`;
+        }
+        list.innerHTML = html;
+    } catch (err) {
+        showToast('加载模块失败: ' + err.message, 'error');
+    }
 }
+
+function openModuleModal() {
+    $('#module-modal-title').textContent = '新增模块';
+    $('#module-edit-id').value = '';
+    $('#module-name').value = '';
+    $('#module-desc').value = '';
+    $('#module-category').value = 'other';
+    $('#module-modal').classList.add('active');
+}
+
+function editModule(m) {
+    $('#module-modal-title').textContent = '编辑模块';
+    $('#module-edit-id').value = m.id;
+    $('#module-name').value = m.name;
+    $('#module-desc').value = m.description || '';
+    $('#module-category').value = m.category || 'other';
+    $('#module-modal').classList.add('active');
+}
+
+function closeModuleModal() { $('#module-modal').classList.remove('active'); }
 
 $('#module-modal').addEventListener('click', e => {
     if (e.target === $('#module-modal')) closeModuleModal();
@@ -213,22 +326,59 @@ $('#module-modal').addEventListener('click', e => {
 
 $('#module-form').addEventListener('submit', async e => {
     e.preventDefault();
-    const projectId = $('#module-project-id').value;
-    const name = $('#module-name').value.trim();
-    if (!name) return;
-
+    const editId = $('#module-edit-id').value;
+    const data = {
+        name: $('#module-name').value.trim(),
+        category: $('#module-category').value,
+        description: $('#module-desc').value.trim(),
+    };
+    if (!data.name) return;
     try {
-        await API.createModule(projectId, { name });
-        showToast('模块添加成功', 'success');
+        if (editId) {
+            await API.request('PUT', `/modules/${editId}`, data);
+            showToast('模块更新成功', 'success');
+        } else {
+            await API.request('POST', '/modules', data);
+            showToast('模块创建成功', 'success');
+        }
         closeModuleModal();
-        loadProjects();
+        loadModules();
     } catch (err) {
-        showToast('添加失败: ' + err.message, 'error');
+        showToast('操作失败: ' + err.message, 'error');
     }
 });
 
-// --- 大模型配置 ---
+// ==================== TAPD 配置 ====================
+
+async function loadTAPDConfig() {
+    try {
+        const cfg = await API.get('/tapd/config');
+        if (cfg.configured) {
+            $('#tapd-status').innerHTML = '<span style="color:var(--green)">✅ 已连接</span>';
+        }
+    } catch (e) {}
+}
+
+async function saveTAPDConfig() {
+    const user = $('#tapd-api-user').value.trim();
+    const pass = $('#tapd-api-password').value.trim();
+    if (!user || !pass) {
+        showToast('请填写完整凭证', 'error');
+        return;
+    }
+    try {
+        await API.put('/tapd/config', { tapd_api_user: user, tapd_api_password: pass });
+        showToast('TAPD 配置已保存', 'success');
+        loadTAPDConfig();
+    } catch (err) {
+        showToast('保存失败: ' + err.message, 'error');
+    }
+}
+
+// ==================== 大模型配置 ====================
+
 const PROVIDER_BASE_URLS = {
+    'openai_compatible': '',
     'doubao': 'https://ark.cn-beijing.volces.com/api/v3',
     'ernie': 'https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop',
     'tongyi': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
@@ -236,6 +386,7 @@ const PROVIDER_BASE_URLS = {
     'deepseek': 'https://api.deepseek.com/v1',
 };
 const PROVIDER_MODELS = {
+    'openai_compatible': '',
     'doubao': 'doubao-pro-32k',
     'ernie': 'ernie-bot-4',
     'tongyi': 'qwen-turbo',
@@ -246,10 +397,7 @@ const PROVIDER_MODELS = {
 async function loadLLMConfig() {
     try {
         const cfg = await API.getSystemConfig();
-        if (cfg.llm_provider) {
-            $('#llm-provider').value = cfg.llm_provider;
-            onProviderChange();
-        }
+        if (cfg.llm_provider) { $('#llm-provider').value = cfg.llm_provider; }
         if (cfg.llm_model) $('#llm-model').value = cfg.llm_model;
         if (cfg.llm_api_base) $('#llm-api-base').value = cfg.llm_api_base;
         if (cfg.llm_api_key) $('#llm-api-key').value = cfg.llm_api_key;
@@ -260,13 +408,15 @@ async function loadLLMConfig() {
 
 function onProviderChange() {
     const provider = $('#llm-provider').value;
-    const baseUrl = PROVIDER_BASE_URLS[provider] || '';
-    const defaultModel = PROVIDER_MODELS[provider] || '';
-    if (!$('#llm-api-base').value) {
-        $('#llm-api-base').value = baseUrl;
-    }
-    if (!$('#llm-model').value) {
-        $('#llm-model').value = defaultModel;
+    if (provider !== 'openai_compatible') {
+        const baseUrl = PROVIDER_BASE_URLS[provider] || '';
+        const defaultModel = PROVIDER_MODELS[provider] || '';
+        if (!$('#llm-api-base').value || Object.values(PROVIDER_BASE_URLS).includes($('#llm-api-base').value)) {
+            $('#llm-api-base').value = baseUrl;
+        }
+        if (!$('#llm-model').value || Object.values(PROVIDER_MODELS).includes($('#llm-model').value)) {
+            $('#llm-model').value = defaultModel;
+        }
     }
 }
 
@@ -286,40 +436,34 @@ async function saveLLMConfig() {
 }
 
 async function testLLM() {
-    const resultEl = $('#llm-test-result');
-    resultEl.textContent = '测试中...';
-    resultEl.style.color = 'var(--text-secondary)';
-
-    // 保存当前配置再测试
+    const el = $('#llm-test-result');
+    el.textContent = '测试中（请稍候）...';
+    el.style.color = 'var(--text-secondary)';
     await saveLLMConfig();
-
-    const testPrompt = '请回复"LLM 连接正常"，只需要回复这句话。';
     try {
-        const resp = await fetch('/api/v1/system/llm/generate-spec', {
+        const resp = await fetch('/api/v1/system/llm/test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                description: testPrompt,
-                project_name: '测试项目',
-                module_name: '测试模块',
-                claw_role: 'test_member'
-            })
+            body: JSON.stringify({})
         });
         const json = await resp.json();
         if (resp.ok) {
-            resultEl.textContent = '✅ LLM 连接成功！响应：' + json.spec.trim().substring(0, 50);
-            resultEl.style.color = 'var(--success)';
+            el.textContent = '✅ LLM 连接成功！模型: ' + (json.model || '') + ' | 回复: ' + (json.reply || '');
+            el.style.color = 'var(--success)';
         } else {
-            resultEl.textContent = '❌ ' + (json.error || '未知错误');
-            resultEl.style.color = 'var(--danger)';
+            el.textContent = '❌ ' + (json.error || '未知错误');
+            el.style.color = 'var(--danger)';
         }
     } catch (err) {
-        resultEl.textContent = '❌ 网络错误: ' + err.message;
-        resultEl.style.color = 'var(--danger)';
+        el.textContent = '❌ 网络错误: ' + err.message;
+        el.style.color = 'var(--danger)';
     }
 }
 
-loadLLMConfig();
+// ==================== 初始化 ====================
 loadProjects();
+loadModules();
+loadLLMConfig();
+loadTAPDConfig();
 </script>
 {% endblock %}

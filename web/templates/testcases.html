@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{% block title %}AI 用例库 - OpenClaw 管理系统{% endblock %}
-{% block page_title %}AI 用例库{% endblock %}
+{% block title %}用例库 - OpenClaw 管理系统{% endblock %}
+{% block page_title %}用例库{% endblock %}
 {% block nav_testcases %}active{% endblock %}
 
 {% block top_actions %}
@@ -8,391 +8,302 @@
     <select class="form-select" id="project-filter" onchange="onProjectFilterChange()" style="min-width:160px">
         <option value="">全部项目</option>
     </select>
-    <select class="form-select" id="library-select" onchange="switchLibrary()" style="min-width:220px">
-        <option value="">-- 选择用例库 --</option>
-    </select>
-    <button class="btn btn-primary" onclick="openCreateLibraryModal()" style="white-space:nowrap;padding:6px 14px;font-size:0.82rem">+ 新建用例库</button>
-    <button class="btn btn-ghost tc-ai-btn" onclick="openAIGenerateModal()" style="white-space:nowrap;padding:6px 14px;font-size:0.82rem">
-        🤖 AI 生成用例
-    </button>
+    <button class="btn btn-ghost" onclick="openAIGenerateModal()" style="font-size:0.82rem">🤖 AI 生成</button>
 </div>
 {% endblock %}
 
 {% block head %}
 <style>
-/* ===== 用例库专属样式 ===== */
-.tc-ai-btn { color: var(--accent) !important; border-color: var(--accent) !important; }
-.tc-ai-btn:hover { background: var(--accent-dim) !important; }
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
 
-/* 用例库信息头 */
-.tc-lib-header {
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 16px 20px;
-    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
-    margin-bottom: 16px;
+/* ===== 整体布局 ===== */
+.tc-layout { display: flex; gap: 0; min-height: calc(100vh - 120px); }
+
+/* 左侧目录 */
+.tc-sidebar {
+    width: 250px; min-width: 220px; border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; background: var(--bg-card); border-radius: var(--radius) 0 0 var(--radius);
 }
-.tc-lib-meta h3 { margin: 0; font-size: 1.1rem; color: var(--text-primary); }
-.tc-lib-meta p { margin: 4px 0 0; color: var(--text-muted); font-size: 0.88rem; }
-.tc-lib-actions { display: flex; gap: 8px; align-items: center; }
+.tc-sidebar-header { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.tc-sidebar-tree { flex: 1; overflow-y: auto; padding: 6px 0; }
+.tc-sidebar-footer { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; }
+
+.tc-tree-lib {
+    font-weight: 600; font-size: 0.86rem; padding: 7px 12px; cursor: pointer;
+    display: flex; align-items: center; gap: 6px; color: var(--text-primary);
+}
+.tc-tree-lib:hover { background: var(--bg-hover); }
+.tc-tree-lib .tc-tree-arrow { font-size: 0.7rem; color: var(--text-muted); transition: transform 0.15s; width: 12px; }
+.tc-tree-lib .tc-tree-arrow.open { transform: rotate(90deg); }
+.tc-tree-lib .tc-tree-cnt { margin-left: auto; font-size: 0.7rem; color: var(--text-muted); background: var(--bg-secondary); padding: 1px 6px; border-radius: 8px; }
+.tc-tree-lib .tc-tree-add { font-size: 0.78rem; color: var(--accent); cursor: pointer; opacity: 0; transition: opacity 0.15s; margin-left: 4px; padding: 0 4px; border-radius: 4px; }
+.tc-tree-lib:hover .tc-tree-add { opacity: 1; }
+.tc-tree-lib .tc-tree-add:hover { background: var(--accent-dim); }
+
+.tc-tree-dir {
+    display: flex; align-items: center; gap: 6px; padding: 5px 12px 5px 28px;
+    cursor: pointer; font-size: 0.82rem; color: var(--text-secondary); border-left: 2px solid transparent;
+}
+.tc-tree-dir:hover { background: var(--bg-hover); }
+.tc-tree-dir.active { background: var(--accent-dim); border-left-color: var(--accent); color: var(--text-primary); font-weight: 500; }
+.tc-tree-dir .tc-tree-cnt { margin-left: auto; font-size: 0.68rem; color: var(--text-muted); background: var(--bg-secondary); padding: 1px 5px; border-radius: 8px; }
+.tc-tree-dir .tc-tree-add { font-size: 0.78rem; color: var(--accent); cursor: pointer; opacity: 0; transition: opacity 0.15s; margin-left: 4px; padding: 0 4px; border-radius: 4px; }
+.tc-tree-dir:hover .tc-tree-add { opacity: 1; }
+.tc-tree-dir .tc-tree-add:hover { background: var(--accent-dim); }
+.tc-tree-dir .tc-tree-del { font-size: 0.78rem; color: var(--red); cursor: pointer; opacity: 0; transition: opacity 0.15s; margin-left: 2px; padding: 0 4px; border-radius: 4px; }
+.tc-tree-dir:hover .tc-tree-del { opacity: 1; }
+.tc-tree-dir .tc-tree-del:hover { background: var(--red-dim, rgba(239,68,68,0.12)); }
+.tc-tree-dir .tc-tree-arrow { font-size: 0.65rem; color: var(--text-muted); transition: transform 0.15s; width: 12px; flex-shrink: 0; }
+.tc-tree-dir .tc-tree-arrow.open { transform: rotate(90deg); }
+.tc-tree-sub { padding-left: 14px; }
+.tc-tree-sub.collapsed { display: none; }
+
+/* 右侧主区 */
+.tc-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
 /* Tab 栏 */
-.tc-tabs {
-    display: flex; gap: 0; margin-bottom: 16px;
-    background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 4px; overflow: hidden;
+.tc-tab-bar {
+    display: flex; gap: 0; border-bottom: 2px solid var(--border);
+    background: var(--bg-card); padding: 0 8px; overflow-x: auto;
+    border-radius: 0 var(--radius) 0 0;
 }
-.tc-tab {
-    flex: 1; text-align: center; padding: 10px 16px;
-    cursor: pointer; font-size: 0.92rem; font-weight: 500;
-    color: var(--text-secondary); border-radius: var(--radius-sm);
-    transition: all 0.2s ease;
+.tc-tab-btn {
+    padding: 8px 16px; font-size: 0.82rem; cursor: pointer; white-space: nowrap;
+    border-bottom: 2px solid transparent; margin-bottom: -2px;
+    color: var(--text-secondary); display: flex; align-items: center; gap: 6px;
+    transition: all 0.15s;
 }
-.tc-tab:hover { color: var(--text-primary); background: var(--bg-hover); }
-.tc-tab.active {
-    color: #fff; background: var(--accent);
-    box-shadow: 0 2px 6px rgba(108, 92, 231, 0.3);
+.tc-tab-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
+.tc-tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+.tc-tab-close { font-size: 0.7rem; color: var(--text-muted); margin-left: 4px; padding: 2px; border-radius: 4px; }
+.tc-tab-close:hover { background: var(--bg-hover); color: var(--red); }
+
+/* Tab 内容 */
+.tc-tab-content { flex: 1; overflow-y: auto; overflow-x: hidden; }
+.tc-tab-panel { display: none; padding: 16px; min-height: 400px; }
+.tc-tab-panel.active { display: block; }
+
+/* ===== 用例列表 — 重新设计 ===== */
+.tc-list-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 16px; padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+}
+.tc-list-breadcrumb {
+    font-family: 'Noto Sans SC', sans-serif;
+    font-size: 0.92rem; font-weight: 600; color: var(--text-primary);
+    display: flex; align-items: center; gap: 6px;
+}
+.tc-list-breadcrumb::before {
+    content: ''; display: inline-block; width: 3px; height: 16px;
+    background: var(--accent); border-radius: 2px; margin-right: 4px;
+}
+.tc-list-meta {
+    display: flex; gap: 10px; align-items: center;
 }
 
-/* ===== 脑图树状可视化 ===== */
-.tc-tree { padding: 20px; }
-.tc-tree-group {
-    margin-bottom: 24px;
-    border-left: 3px solid var(--border);
-    padding-left: 0;
-}
-.tc-tree-group-header {
-    display: flex; align-items: center; gap: 10px;
-    padding: 8px 16px; margin-bottom: 8px;
-    cursor: pointer; user-select: none;
-}
-.tc-tree-group-header:hover { background: var(--bg-hover); border-radius: var(--radius-sm); }
-.tc-priority-badge {
-    display: inline-flex; align-items: center; justify-content: center;
-    min-width: 36px; padding: 2px 10px; border-radius: 12px;
-    font-size: 0.82rem; font-weight: 700; color: #fff;
-}
-.tc-priority-badge.p0 { background: var(--red); }
-.tc-priority-badge.p1 { background: var(--yellow); color: #111; }
-.tc-priority-badge.p2 { background: var(--blue); }
-.tc-priority-badge.p3 { background: var(--text-muted); }
-.tc-tree-count { color: var(--text-muted); font-size: 0.82rem; }
-.tc-tree-toggle { color: var(--text-muted); font-size: 0.8rem; transition: transform 0.2s; }
-.tc-tree-toggle.collapsed { transform: rotate(-90deg); }
+/* 卡片式列表 */
+.tc-case-list { display: flex; flex-direction: column; gap: 6px; }
 
-.tc-tree-branch { padding-left: 16px; }
-.tc-tree-type-label {
-    display: flex; align-items: center; gap: 8px;
-    padding: 6px 12px; margin-bottom: 4px;
-    font-size: 0.85rem; font-weight: 600; color: var(--text-secondary);
-}
-.tc-tree-type-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    background: var(--accent); flex-shrink: 0;
-}
-
-.tc-tree-cases { padding-left: 14px; }
-.tc-tree-case {
-    display: flex; align-items: center; gap: 10px;
-    padding: 8px 14px; margin: 2px 0;
-    border-radius: var(--radius-sm);
-    cursor: pointer; transition: all 0.15s ease;
-    border-left: 2px solid transparent;
-}
-.tc-tree-case:hover {
-    background: var(--bg-hover);
-    border-left-color: var(--accent);
-}
-.tc-tree-case-id {
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    font-size: 0.78rem; color: var(--text-muted);
-    min-width: 56px;
-}
-.tc-tree-case-title {
-    flex: 1; font-size: 0.9rem; color: var(--text-primary);
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.tc-tree-case-tags { display: flex; gap: 4px; flex-shrink: 0; }
-.tc-tree-case-tag {
-    font-size: 0.7rem; padding: 1px 7px; border-radius: 8px;
-    background: var(--accent-dim); color: var(--accent);
-}
-
-/* ===== AI Chat 视图 ===== */
-.tc-chat-wrap {
-    display: flex; gap: 16px; height: 500px;
-}
-.tc-chat-area {
-    flex: 1; display: flex; flex-direction: column;
-}
-.tc-chat-messages {
-    flex: 1; overflow-y: auto;
-    border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 16px; margin-bottom: 12px;
-    background: var(--bg-secondary);
-}
-.tc-chat-empty {
-    text-align: center; color: var(--text-muted); padding: 60px 20px;
-}
-.tc-chat-empty .icon { font-size: 2.5rem; margin-bottom: 12px; }
-.tc-chat-empty .hint { font-size: 0.82rem; margin-top: 6px; color: var(--text-muted); }
-.tc-chat-input-row { display: flex; gap: 8px; }
-
-.tc-msg-user, .tc-msg-ai, .tc-msg-err {
-    display: flex; margin-bottom: 12px;
-}
-.tc-msg-user { justify-content: flex-end; }
-.tc-msg-ai, .tc-msg-err { justify-content: flex-start; }
-.tc-msg-user .tc-msg-bubble {
-    background: var(--accent); color: #fff;
-    padding: 8px 14px; border-radius: 12px 12px 4px 12px; max-width: 70%;
-}
-.tc-msg-ai .tc-msg-bubble {
-    background: var(--bg-card); color: var(--text-primary);
+.tc-case-card {
+    display: grid;
+    grid-template-columns: 56px 1fr 56px 72px 110px 48px;
+    align-items: center; gap: 0;
+    padding: 8px 16px;
+    background: var(--bg-card);
     border: 1px solid var(--border);
-    padding: 8px 14px; border-radius: 12px 12px 12px 4px; max-width: 70%;
-    white-space: pre-wrap; line-height: 1.5;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+    cursor: default;
 }
-.tc-msg-err .tc-msg-bubble {
-    background: var(--red-dim); color: var(--red);
-    padding: 8px 14px; border-radius: 12px 12px 12px 4px;
+.tc-case-card:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent-dim), 0 2px 12px rgba(108,92,231,0.08);
+    transform: translateY(-1px);
 }
 
-/* ===== 用例详情弹窗 ===== */
+.tc-case-id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.75rem; color: var(--text-muted);
+    letter-spacing: 0.02em;
+}
+
+.tc-case-title {
+    font-family: 'Noto Sans SC', sans-serif;
+    font-size: 0.88rem; color: var(--accent);
+    font-weight: 500; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    max-width: 100%;
+    transition: color 0.15s;
+    padding-right: 12px;
+}
+.tc-case-title:hover { color: var(--accent-hover); text-decoration: underline; }
+
+.tc-case-prio { text-align: center; }
+
+.tc-case-author {
+    font-size: 0.78rem; color: var(--text-secondary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.tc-case-time {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem; color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.tc-case-actions {
+    text-align: center; white-space: nowrap;
+    display: flex; gap: 2px; justify-content: center;
+}
+
+/* 列表表头 */
+.tc-list-head {
+    display: grid;
+    grid-template-columns: 56px 1fr 56px 72px 110px 48px;
+    padding: 6px 16px;
+    font-size: 0.72rem; font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+}
+.tc-list-head span:nth-child(3),
+.tc-list-head span:nth-child(6) { text-align: center; }
+
+/* 分页 */
+.tc-pagination {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px 0; margin-top: 12px;
+    border-top: 1px solid var(--border);
+    font-size: 0.82rem; color: var(--text-muted);
+}
+.tc-pagination-info { display: flex; align-items: center; gap: 8px; }
+.tc-pagination-pages { display: flex; align-items: center; gap: 4px; }
+.tc-page-btn {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 10px; cursor: pointer;
+    font-size: 0.8rem; color: var(--text-secondary);
+    transition: all 0.15s;
+}
+.tc-page-btn:hover { background: var(--bg-hover); border-color: var(--accent); }
+.tc-page-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tc-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.tc-page-size-select {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 8px; font-size: 0.78rem;
+    color: var(--text-secondary); cursor: pointer;
+}
+
+/* 空状态 */
+.tc-list-empty {
+    text-align: center; padding: 60px 20px; color: var(--text-muted);
+    font-family: 'Noto Sans SC', sans-serif;
+}
+.tc-list-empty-icon { font-size: 2.4rem; margin-bottom: 12px; opacity: 0.5; }
+.tc-list-empty-text { font-size: 0.9rem; }
+
+/* 优先级标签 — 精致版 */
+.prio-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 28px; padding: 2px 8px; border-radius: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem; font-weight: 700; color: #fff;
+    letter-spacing: 0.04em;
+}
+.prio-badge.p0 { background: linear-gradient(135deg, #ef4444, #dc2626); box-shadow: 0 1px 4px rgba(239,68,68,0.3); }
+.prio-badge.p1 { background: linear-gradient(135deg, #f59e0b, #d97706); color: #1a1a1a; box-shadow: 0 1px 4px rgba(245,158,11,0.3); }
+.prio-badge.p2 { background: linear-gradient(135deg, #3b82f6, #2563eb); box-shadow: 0 1px 4px rgba(59,130,246,0.3); }
+.prio-badge.p3 { background: linear-gradient(135deg, #6b7280, #4b5563); box-shadow: 0 1px 4px rgba(107,114,128,0.3); }
+
+/* 用例脑图（单条用例） */
+.case-mm-canvas { position: relative; display: inline-block; min-width: 100%; }
+.case-mm-canvas svg { position: absolute; top: 0; left: 0; pointer-events: none; overflow: visible; }
+.case-mm-canvas svg path { fill: none; stroke-width: 2; stroke-linecap: round; }
+.case-mm-node {
+    position: absolute; white-space: nowrap; border-radius: 10px; padding: 8px 16px;
+    font-size: 0.84rem; display: inline-flex; align-items: center; gap: 6px;
+    transition: box-shadow 0.15s;
+}
+.case-mm-node:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+.case-mm-root {
+    background: var(--accent); color: #fff; font-weight: 700; font-size: 0.95rem;
+    border-radius: 20px; padding: 12px 24px; box-shadow: 0 4px 16px rgba(99,102,241,0.3);
+}
+.case-mm-section {
+    background: var(--bg-card); border: 2px solid var(--border); font-weight: 600;
+    color: var(--text-primary); border-radius: 14px; padding: 8px 18px;
+}
+.case-mm-leaf {
+    background: var(--bg-secondary); border: 1px solid var(--border); font-weight: 400;
+    color: var(--text-secondary); border-radius: 8px; padding: 5px 14px; font-size: 0.8rem;
+    white-space: normal; max-width: 380px;
+}
+.case-mm-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.7rem;
+    font-weight: 700; color: #fff; margin-left: 6px;
+}
+.case-mm-badge.p0 { background: #ef4444; }
+.case-mm-badge.p1 { background: #f59e0b; }
+.case-mm-badge.p2 { background: #3b82f6; }
+.case-mm-badge.p3 { background: #6b7280; }
+
+/* 用例详情弹窗 */
 .tc-detail-overlay {
     position: fixed; inset: 0; z-index: 1000;
     background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
     display: none; align-items: center; justify-content: center;
 }
 .tc-detail-overlay.active { display: flex; }
-.tc-detail-panel {
-    background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: var(--radius); width: 640px; max-width: 92vw;
-    max-height: 85vh; overflow-y: auto;
-    box-shadow: 0 12px 40px rgba(0,0,0,0.5);
-    animation: tc-slide-up 0.25s ease;
-}
-@keyframes tc-slide-up {
-    from { transform: translateY(20px); opacity: 0; }
-    to { transform: translateY(0); opacity: 1; }
-}
-.tc-detail-header {
-    display: flex; justify-content: space-between; align-items: flex-start;
-    padding: 20px 24px 16px; border-bottom: 1px solid var(--border);
-}
-.tc-detail-header h2 { font-size: 1.1rem; margin: 0; color: var(--text-primary); }
-.tc-detail-close {
-    background: none; border: none; color: var(--text-muted);
-    font-size: 1.3rem; cursor: pointer; padding: 4px;
-}
-.tc-detail-close:hover { color: var(--text-primary); }
-.tc-detail-body { padding: 20px 24px; }
-.tc-detail-row {
-    margin-bottom: 16px;
-}
-.tc-detail-label {
-    font-size: 0.78rem; font-weight: 600; color: var(--text-muted);
-    text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;
-}
-.tc-detail-value {
-    font-size: 0.92rem; color: var(--text-primary); line-height: 1.6;
-}
-.tc-detail-value ol { padding-left: 20px; margin: 0; }
-.tc-detail-value ol li { margin-bottom: 4px; }
-.tc-detail-meta {
-    display: flex; gap: 12px; flex-wrap: wrap; padding: 16px 24px;
-    border-top: 1px solid var(--border);
-}
-.tc-detail-meta-item {
-    display: flex; align-items: center; gap: 6px;
-    font-size: 0.82rem; color: var(--text-secondary);
-}
 
-/* ===== 空状态 ===== */
-.tc-empty-state {
-    text-align: center; padding: 80px 20px;
+/* 操作按钮精致版 */
+.tc-act-btn {
+    background: none; border: none; cursor: pointer;
+    padding: 3px 6px; border-radius: 4px; font-size: 0.82rem;
+    transition: all 0.15s;
 }
-.tc-empty-icon { font-size: 4rem; margin-bottom: 16px; opacity: 0.5; }
-.tc-empty-title { font-size: 1.1rem; color: var(--text-secondary); margin-bottom: 8px; }
-.tc-empty-hint { font-size: 0.88rem; color: var(--text-muted); }
-.tc-empty-actions { margin-top: 24px; display: flex; gap: 12px; justify-content: center; }
-
-/* ===== 列表视图多选 ===== */
-.tc-list-toolbar {
-    display: flex; gap: 10px; align-items: center;
-    margin-bottom: 12px; flex-wrap: wrap;
-}
-.tc-batch-bar {
-    display: none; align-items: center; gap: 10px;
-    padding: 8px 14px; margin-bottom: 12px;
-    background: var(--accent-dim); border: 1px solid var(--accent);
-    border-radius: var(--radius-sm); font-size: 0.88rem; color: var(--accent);
-}
-.tc-batch-bar.active { display: flex; }
+.tc-act-btn:hover { background: var(--bg-secondary); }
+.tc-act-btn.del { color: var(--red); }
+.tc-act-btn.del:hover { background: var(--red-dim); }
 </style>
 {% endblock %}
 
 {% block content %}
-<div id="library-container" style="display:none">
-    <!-- 用例库信息头 -->
-    <div class="tc-lib-header">
-        <div class="tc-lib-meta">
-            <h3 id="library-name"></h3>
-            <p id="library-desc"></p>
+<div class="tc-layout">
+    <!-- 左侧目录树 -->
+    <div class="tc-sidebar">
+        <div class="tc-sidebar-header">
+            <input type="text" class="form-input" id="tree-search" placeholder="🔍 搜索..." style="font-size:0.82rem;padding:5px 10px" oninput="renderTree()">
         </div>
-        <div class="tc-lib-actions">
-            <span class="tag tag-blue" id="case-count">0 个用例</span>
-            <button class="btn btn-ghost" onclick="exportYAML()" title="导出 YAML">📝 YAML</button>
-            <button class="btn btn-ghost" onclick="exportXMind()" title="导出 XMind">🧠 XMind</button>
-            <button class="btn btn-ghost" onclick="editLibrary()" title="编辑用例库">✏️ 编辑</button>
-            <button class="btn btn-ghost" onclick="deleteLibrary()" title="删除用例库" style="color:var(--red)">🗑️ 删除</button>
+        <div class="tc-sidebar-tree" id="sidebar-tree"></div>
+        <div class="tc-sidebar-footer">
+            <button class="btn btn-primary btn-sm" onclick="openCreateLibraryModal()" style="flex:1;font-size:0.78rem">+ 新建用例库</button>
         </div>
     </div>
-
-    <!-- 标签页 -->
-    <div class="tc-tabs">
-        <div class="tc-tab active" data-tab="mindmap" onclick="switchTab('mindmap')">🌲 脑图</div>
-        <div class="tc-tab" data-tab="list" onclick="switchTab('list')">📄 列表</div>
-        <div class="tc-tab" data-tab="chat" onclick="switchTab('chat')">🤖 AI 对话</div>
-    </div>
-
-    <!-- 脑图视图 -->
-    <div id="mindmap-view" class="panel">
-        <div id="mindmap-container" style="min-height:400px;overflow:auto">
-            <div class="loading"><span class="spinner"></span></div>
+    <!-- 右侧 Tab 区 -->
+    <div class="tc-main">
+        <div class="tc-tab-bar" id="tab-bar">
+            <div class="tc-tab-btn active" data-tab="list" onclick="activateTab('list')">📋 用例列表</div>
         </div>
-    </div>
-
-    <!-- 列表视图 -->
-    <div id="list-view" class="panel" style="display:none">
-        <div class="tc-list-toolbar">
-            <input class="form-input" id="case-search" placeholder="搜索用例..." oninput="filterCases()" style="max-width:260px">
-            <select class="form-select" id="priority-filter" onchange="filterCases()" style="width:120px">
-                <option value="">全部优先级</option>
-                <option value="P0">P0</option>
-                <option value="P1">P1</option>
-                <option value="P2">P2</option>
-                <option value="P3">P3</option>
-            </select>
-            <select class="form-select" id="type-filter" onchange="filterCases()" style="width:140px">
-                <option value="">全部类型</option>
-                <option value="functional">功能测试</option>
-                <option value="interface">接口测试</option>
-                <option value="performance">性能测试</option>
-                <option value="security">安全测试</option>
-            </select>
-            <button class="btn btn-primary" onclick="openCaseModal()" style="margin-left:auto">+ 添加用例</button>
-        </div>
-        <!-- 批量操作栏 -->
-        <div class="tc-batch-bar" id="batch-bar">
-            <span id="batch-count">已选 0 项</span>
-            <button class="btn btn-ghost" style="color:var(--red);padding:4px 10px" onclick="batchDelete()">批量删除</button>
-            <button class="btn btn-ghost" style="padding:4px 10px" onclick="clearSelection()">取消选择</button>
-        </div>
-        <div id="cases-table-container">
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th style="width:36px"><input type="checkbox" id="select-all" onchange="toggleSelectAll()"></th>
-                        <th>编号</th>
-                        <th>用例标题</th>
-                        <th>优先级</th>
-                        <th>类型</th>
-                        <th>标签</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody id="cases-tbody"></tbody>
-            </table>
-        </div>
-    </div>
-
-    <!-- AI 对话视图 -->
-    <div id="chat-view" class="panel" style="display:none">
-        <div class="tc-chat-wrap">
-            <div class="tc-chat-area">
-                <div class="tc-chat-messages" id="chat-messages">
-                    <div class="tc-chat-empty">
-                        <div class="icon">🤖</div>
-                        <div>输入你的需求，AI 会帮你管理用例库</div>
-                        <div class="hint">支持：添加用例、修改用例、查询用例、生成脑图结构</div>
+        <div class="tc-tab-content" id="tab-content">
+            <!-- 用例列表 panel（始终存在） -->
+            <div class="tc-tab-panel active" id="panel-list">
+                <div class="tc-list-header">
+                    <div class="tc-list-breadcrumb" id="list-breadcrumb">全部用例</div>
+                    <div class="tc-list-meta">
+                        <span id="list-count" style="font-size:0.82rem;color:var(--text-muted)"></span>
+                        <button class="btn btn-primary btn-sm" onclick="openCaseModal()" style="font-size:0.82rem">+ 新建用例</button>
                     </div>
                 </div>
-                <div class="tc-chat-input-row">
-                    <input class="form-input" id="chat-input" placeholder="描述你想生成的用例，如：登录功能的边界测试..." onkeydown="if(event.key==='Enter')sendChat()">
-                    <button class="btn btn-primary" onclick="sendChat()">发送</button>
+                <div class="tc-list-head">
+                    <span>ID</span><span>用例名称</span><span>优先级</span><span>创建人</span><span>更新时间</span><span>操作</span>
                 </div>
+                <div class="tc-case-list" id="case-list"></div>
+                <div class="tc-pagination" id="pagination"></div>
             </div>
         </div>
-    </div>
-</div>
-
-<!-- 空状态 -->
-<div id="empty-state" class="tc-empty-state">
-    <div class="tc-empty-icon">📋</div>
-    <div class="tc-empty-title">选择一个用例库，或创建新的</div>
-    <div class="tc-empty-hint">用例库支持脑图可视化、AI 智能生成、批量管理</div>
-    <div class="tc-empty-actions">
-        <button class="btn btn-primary" onclick="openCreateLibraryModal()">+ 新建用例库</button>
-    </div>
-</div>
-
-<!-- 用例详情弹窗 -->
-<div class="tc-detail-overlay" id="case-detail-overlay" onclick="if(event.target===this)closeCaseDetail()">
-    <div class="tc-detail-panel">
-        <div class="tc-detail-header">
-            <div>
-                <h2 id="detail-title"></h2>
-                <div style="display:flex;gap:8px;margin-top:8px" id="detail-badges"></div>
-            </div>
-            <button class="tc-detail-close" onclick="closeCaseDetail()">&times;</button>
-        </div>
-        <div class="tc-detail-body">
-            <div class="tc-detail-row" id="detail-preconditions-row">
-                <div class="tc-detail-label">前置条件</div>
-                <div class="tc-detail-value" id="detail-preconditions"></div>
-            </div>
-            <div class="tc-detail-row" id="detail-steps-row">
-                <div class="tc-detail-label">测试步骤</div>
-                <div class="tc-detail-value" id="detail-steps"></div>
-            </div>
-            <div class="tc-detail-row" id="detail-results-row">
-                <div class="tc-detail-label">预期结果</div>
-                <div class="tc-detail-value" id="detail-results"></div>
-            </div>
-        </div>
-        <div class="tc-detail-meta" id="detail-meta"></div>
-    </div>
-</div>
-
-<!-- 新建/编辑用例库弹窗 -->
-<div class="modal-overlay" id="library-modal">
-    <div class="modal" style="max-width:500px">
-        <h2 class="modal-title" id="library-modal-title">新建用例库</h2>
-        <form id="library-form">
-            <input type="hidden" id="library-edit-id">
-            <div class="form-group">
-                <label class="form-label">用例库名称（项目） *</label>
-                <input class="form-input" name="name" id="library-name-input" placeholder="如：QQ飞车用例库" required>
-            </div>
-            <div class="form-group">
-                <label class="form-label">所属项目 *</label>
-                <select class="form-select" name="project_name" id="library-project-input" required>
-                    <option value="">-- 选择项目 --</option>
-                </select>
-            </div>
-            <div class="form-group">
-                <label class="form-label">描述</label>
-                <textarea class="form-textarea" name="description" id="library-desc-input" placeholder="用例库描述..."></textarea>
-            </div>
-            <div class="form-group">
-                <label class="form-label">负责人</label>
-                <input class="form-input" name="owner" id="library-owner-input" placeholder="负责人">
-            </div>
-            <div class="modal-actions">
-                <button type="button" class="btn btn-ghost" onclick="closeLibraryModal()">取消</button>
-                <button type="submit" class="btn btn-primary">保存</button>
-            </div>
-        </form>
     </div>
 </div>
 
@@ -404,10 +315,9 @@
             <input type="hidden" id="case-edit-id">
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
                 <div class="form-group">
-                    <label class="form-label">用例目录（模块） *</label>
-                    <select class="form-select" name="module_name" id="case-module-input" required>
-                        <option value="">-- 选择模块 --</option>
-                    </select>
+                    <label class="form-label">所属目录</label>
+                    <input class="form-input" name="module_path" id="case-module-input" placeholder="如：登录模块/手机号登录" list="module-path-options">
+                    <datalist id="module-path-options"></datalist>
                 </div>
                 <div class="form-group">
                     <label class="form-label">优先级 *</label>
@@ -432,15 +342,15 @@
             </div>
             <div class="form-group">
                 <label class="form-label">前置条件</label>
-                <textarea class="form-textarea" name="preconditions" id="case-pre-input" style="min-height:60px" placeholder="执行用例的前置条件..."></textarea>
+                <textarea class="form-textarea" name="preconditions" id="case-pre-input" style="min-height:60px" placeholder="前置条件..."></textarea>
             </div>
             <div class="form-group">
                 <label class="form-label">操作步骤 *</label>
-                <textarea class="form-textarea" name="steps" id="case-steps-input" style="min-height:120px;font-family:'SF Mono','Fira Code',monospace;font-size:0.88rem" placeholder="每行一个步骤，如：&#10;1. 打开登录页面&#10;2. 输入用户名和密码&#10;3. 点击登录按钮" required></textarea>
+                <textarea class="form-textarea" name="steps" id="case-steps-input" style="min-height:100px;font-family:monospace;font-size:0.88rem" placeholder="每行一个步骤" required></textarea>
             </div>
             <div class="form-group">
                 <label class="form-label">预期结果 *</label>
-                <textarea class="form-textarea" name="expected_results" id="case-results-input" style="min-height:120px;font-family:'SF Mono','Fira Code',monospace;font-size:0.88rem" placeholder="每行一个预期结果，如：&#10;1. 登录页面正常显示&#10;2. 输入框正常输入&#10;3. 成功跳转到首页" required></textarea>
+                <textarea class="form-textarea" name="expected_results" id="case-results-input" style="min-height:100px;font-family:monospace;font-size:0.88rem" placeholder="每行一个预期结果" required></textarea>
             </div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeCaseModal()">取消</button>
@@ -450,698 +360,761 @@
     </div>
 </div>
 
-<!-- AI 生成用例弹窗 -->
-<div class="modal-overlay" id="ai-generate-modal">
-    <div class="modal" style="max-width:600px">
-        <h2 class="modal-title">🤖 AI 批量生成用例</h2>
-        <form id="ai-generate-form">
-            <div class="form-group">
-                <label class="form-label">需求描述 *</label>
-                <textarea class="form-textarea" name="requirement" rows="4" placeholder="描述你的需求，如：用户登录功能，包括正常登录、密码错误、账号锁定等场景"></textarea>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-                <div class="form-group">
-                    <label class="form-label">生成数量</label>
-                    <input class="form-input" name="count" type="number" value="10" min="1" max="100">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">用例类型</label>
-                    <select class="form-select" name="type">
-                        <option value="functional">功能测试</option>
-                        <option value="interface">接口测试</option>
-                        <option value="performance">性能测试</option>
-                        <option value="security">安全测试</option>
-                    </select>
-                </div>
+<!-- 新建用例库弹窗 -->
+<div class="modal-overlay" id="library-modal">
+    <div class="modal" style="max-width:480px">
+        <h2 class="modal-title" id="lib-modal-title">新建用例库</h2>
+        <form id="library-form">
+            <input type="hidden" id="lib-edit-id">
+            <div class="form-group"><label class="form-label">用例库名称 *</label><input class="form-input" id="lib-name-input" required></div>
+            <div class="form-group"><label class="form-label">描述</label><textarea class="form-textarea" id="lib-desc-input" style="min-height:60px"></textarea></div>
+            <div style="display:flex;gap:10px">
+                <div class="form-group" style="flex:1"><label class="form-label">所属项目</label><select class="form-select" id="lib-project-input"><option value="">无</option></select></div>
+                <div class="form-group" style="flex:1"><label class="form-label">负责人</label><input class="form-input" id="lib-owner-input" placeholder="负责人"></div>
             </div>
             <div class="modal-actions">
-                <button type="button" class="btn btn-ghost" onclick="closeAIGenerateModal()">取消</button>
-                <button type="submit" class="btn btn-primary tc-ai-btn">🤖 生成</button>
+                <button type="button" class="btn btn-ghost" onclick="closeLibraryModal()">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
             </div>
         </form>
+    </div>
+</div>
+
+<!-- AI 生成弹窗 -->
+<div class="modal-overlay" id="ai-modal">
+    <div class="modal" style="max-width:560px">
+        <h2 class="modal-title">🤖 AI 生成用例</h2>
+        <form id="ai-form">
+            <div class="form-group"><label class="form-label">目标用例库</label><select class="form-select" id="ai-lib-select"></select></div>
+            <div class="form-group"><label class="form-label">需求描述 *</label><textarea class="form-textarea" id="ai-prompt-input" style="min-height:120px" placeholder="描述要测试的功能..." required></textarea></div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="$('#ai-modal').classList.remove('active')">取消</button>
+                <button type="submit" class="btn btn-primary">🤖 生成</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 新增子目录弹窗 -->
+<div class="modal-overlay" id="subdir-modal">
+    <div class="modal" style="max-width:400px">
+        <h2 class="modal-title">📁 新增子目录</h2>
+        <form id="subdir-form">
+            <div class="form-group">
+                <label class="form-label">父目录</label>
+                <div id="subdir-parent-label" style="font-size:0.88rem;color:var(--text-secondary);padding:6px 0"></div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">目录名称 *</label>
+                <input class="form-input" id="subdir-name-input" placeholder="输入目录名称" required autofocus>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeSubdirModal()">取消</button>
+                <button type="submit" class="btn btn-primary">创建</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 删除目录确认弹窗 -->
+<div class="modal-overlay" id="del-dir-modal">
+    <div class="modal" style="max-width:400px">
+        <h2 class="modal-title">🗑️ 删除目录</h2>
+        <div style="padding:12px 0;font-size:0.9rem;color:var(--text-secondary)">
+            确定删除目录「<strong id="del-dir-name" style="color:var(--text-primary)"></strong>」？<br>
+            <span style="font-size:0.82rem;color:var(--text-muted);margin-top:6px;display:inline-block">仅允许删除没有用例的空目录</span>
+        </div>
+        <div class="modal-actions">
+            <button type="button" class="btn btn-ghost" onclick="closeDelDirModal()">取消</button>
+            <button type="button" class="btn btn-primary" style="background:var(--red)" onclick="confirmDelDir()">删除</button>
+        </div>
     </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-let libraries = [];
-let currentLibraryId = null;
-let currentLibrary = null;
-let currentTab = 'mindmap';
-let allCases = [];
-let selectedCaseIds = new Set();
+// ==================== 状态 ====================
+let allLibraries = [];
+let selectedLibId = null;
+let selectedPath = null;  // null=全部, 'xxx/yyy'=某目录
+let casesCache = {};      // libId → cases[]
+let collapsedDirs = new Set(); // 存储折叠的目录路径 "libId:path"
+let collapsedLibs = new Set(); // 存储折叠的用例库 ID
+let openTabs = [];        // [{id, title, type:'case', caseData}]
+const MAX_TABS = 5;
 
-const TYPE_LABELS = { functional: '功能', interface: '接口', performance: '性能', security: '安全' };
-const PRIORITY_CLASSES = { P0: 'p0', P1: 'p1', P2: 'p2', P3: 'p3' };
+// 分页
+let currentPage = 1;
+let pageSize = 20;
 
-// ==================== 用例库列表 ====================
-async function loadLibraries() {
+const PRIO_CLS = { P0:'p0', P1:'p1', P2:'p2', P3:'p3' };
+function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// ==================== 初始化 ====================
+async function init() {
     try {
-        libraries = await API.request('GET', '/testcase-libraries');
         const projects = await API.listProjects();
-        console.log('projects loaded:', projects.length, 'libraries:', libraries.length);
-        const projectSel = document.getElementById('project-filter');
-        projectSel.innerHTML = '<option value="">全部项目</option>' +
-            projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
-        renderLibrarySelect();
-    } catch (err) {
-        console.error('loadLibraries error:', err);
-        showToast('加载用例库失败: ' + err.message, 'error');
+        const sel = $('#project-filter');
+        sel.innerHTML = '<option value="">全部项目</option>' + projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+        initProjectFilter(sel, loadTree);
+    } catch(e) {}
+    await loadTree();
+    // 从 URL 参数或 Flask 模板变量读取初始用例库 ID
+    const urlLibId = {{ initial_lib_id | default('null') }};
+    if (urlLibId) {
+        selectNode(urlLibId, null);
     }
 }
 
-function renderLibrarySelect() {
-    const projectFilter = document.getElementById('project-filter').value;
-    const select = $('#library-select');
-
-    const filtered = projectFilter
-        ? libraries.filter(lib => lib.project_name === projectFilter)
-        : libraries;
-    select.innerHTML = '<option value="">-- 选择用例库 --</option>' +
-        filtered.map(lib => `<option value="${lib.id}" ${lib.id === currentLibraryId ? 'selected' : ''}>${lib.name} (${lib.case_count || 0})</option>`).join('');
-}
-
-function onProjectFilterChange() {
-    const projectName = document.getElementById('project-filter').value;
-    if (!projectName) {
-        // 选了"全部项目"，恢复显示所有用例库
-        currentLibraryId = null;
-        currentLibrary = null;
-        $('#library-container').style.display = 'none';
-        $('#empty-state').style.display = '';
-        renderLibrarySelect();
-        return;
-    }
-    renderLibrarySelect();
-
-    // 自动获取或创建该项目的用例库
-    fetch('/api/v1/testcase-libraries/by-project', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({project_name: projectName, owner: currentUser ? (currentUser.display_name || currentUser.username) : 'system'})
-    }).then(r => r.json()).then(lib => {
-        // 如果是新建的，刷新列表
-        if (!libraries.find(l => l.id === lib.id)) {
-            libraries.push(lib);
-            renderLibrarySelect();
+async function loadTree() {
+    const project = $('#project-filter').value;
+    const params = project ? `?project_name=${encodeURIComponent(project)}` : '';
+    try {
+        allLibraries = await API.request('GET', `/testcase-libraries${params}`);
+        // 加载每个库的用例（包含占位用例，用于构建目录树）
+        for (const lib of allLibraries) {
+            if (!casesCache[lib.id]) {
+                casesCache[lib.id] = await API.request('GET', `/testcase-libraries/${lib.id}/cases?include_placeholders=true`);
+            }
         }
-        // 自动选中该用例库
-        $('#library-select').value = lib.id;
-        switchLibrary();
-    }).catch(e => {
-        console.error('auto get/create library:', e);
-    });
+        renderTree();
+        renderListTab();
+    } catch(e) { showToast('加载失败: ' + e.message, 'error'); }
 }
 
-async function switchLibrary() {
-    const id = parseInt($('#library-select').value);
-    if (!id) {
-        currentLibraryId = null;
-        currentLibrary = null;
-        $('#library-container').style.display = 'none';
-        $('#empty-state').style.display = '';
+function onProjectFilterChange() { casesCache = {}; loadTree(); }
+
+// ==================== 左侧目录树 ====================
+function renderTree() {
+    const el = $('#sidebar-tree');
+    const search = ($('#tree-search').value || '').toLowerCase();
+
+    if (!allLibraries.length) {
+        el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:0.85rem">暂无用例库</div>';
         return;
     }
 
-    try {
-        currentLibrary = await API.request('GET', `/testcase-libraries/${id}`);
-        currentLibraryId = id;
+    let html = '';
+    allLibraries.forEach(lib => {
+        const cases = casesCache[lib.id] || [];
+        const isLibSel = selectedLibId === lib.id && selectedPath === null;
 
-        $('#library-name').textContent = currentLibrary.name;
-        $('#library-desc').textContent = currentLibrary.description || '暂无描述';
-        $('#case-count').textContent = `${currentLibrary.case_count} 个用例`;
+        // 构建目录树
+        const dirs = {};
+        let uncatCount = 0;
+        cases.forEach(c => {
+            const mp = (c.module_path || '').trim();
+            if (!mp) {
+                if (!c.is_placeholder) uncatCount++;
+                return;
+            }
+            const parts = mp.split('/');
+            let node = dirs;
+            parts.forEach(p => { if (!node[p]) node[p] = { _count: 0, _children: {} }; node = node[p]._children; });
+            // 累加计数（占位用例不计入）
+            if (!c.is_placeholder) {
+                let n = dirs;
+                parts.forEach(p => { n[p]._count++; n = n[p]._children; });
+            }
+        });
 
-        $('#library-container').style.display = '';
-        $('#empty-state').style.display = 'none';
+        if (search && !lib.name.toLowerCase().includes(search)) return;
 
-        loadCases();
-    } catch (err) {
-        showToast('加载用例库详情失败: ' + err.message, 'error');
-    }
-}
+        const libCollapsed = collapsedLibs.has(lib.id);
 
-async function loadCases() {
-    if (!currentLibraryId) return;
-    try {
-        allCases = await API.request('GET', `/testcase-libraries/${currentLibraryId}/cases`);
-        selectedCaseIds.clear();
-        updateBatchBar();
-        renderMindmap();
-        renderCasesTable();
-    } catch (err) {
-        showToast('加载用例失败: ' + err.message, 'error');
-    }
-}
+        html += `<div class="tc-tree-lib${isLibSel ? ' active' : ''}" onclick="selectNode(${lib.id}, null)" style="color:${isLibSel ? 'var(--accent)' : ''}">
+            <span class="tc-tree-arrow${libCollapsed ? '' : ' open'}" onclick="event.stopPropagation();toggleLib(${lib.id})">›</span> ${libCollapsed ? '📁' : '📂'} ${escHtml(lib.name)}
+            <span class="tc-tree-cnt">${cases.length}</span>
+            <span class="tc-tree-add" onclick="event.stopPropagation();openSubdirModal(${lib.id}, '')" title="新增子目录">+</span>
+        </div>`;
 
-// ==================== 脑图渲染（树状结构） ====================
-function renderMindmap() {
-    const container = $('#mindmap-container');
-
-    if (allCases.length === 0) {
-        container.innerHTML = `
-            <div class="tc-empty-state" style="padding:60px 20px">
-                <div class="tc-empty-icon">🌲</div>
-                <div class="tc-empty-title">暂无用例</div>
-                <div class="tc-empty-hint">点击「+ 添加用例」或「🤖 AI 生成用例」开始</div>
-            </div>`;
-        return;
-    }
-
-    // 按优先级 → 类型 分组
-    const groups = { P0: {}, P1: {}, P2: {}, P3: {} };
-    allCases.forEach(c => {
-        const p = c.priority || 'P2';
-        const t = c.type || 'functional';
-        if (!groups[p]) groups[p] = {};
-        if (!groups[p][t]) groups[p][t] = [];
-        groups[p][t].push(c);
-    });
-
-    let html = '<div class="tc-tree">';
-
-    for (const [priority, types] of Object.entries(groups)) {
-        const totalInPriority = Object.values(types).reduce((sum, arr) => sum + arr.length, 0);
-        if (totalInPriority === 0) continue;
-
-        html += `
-        <div class="tc-tree-group" style="border-left-color:var(--${priority === 'P0' ? 'red' : priority === 'P1' ? 'yellow' : priority === 'P2' ? 'blue' : 'text-muted'})">
-            <div class="tc-tree-group-header" onclick="toggleGroup(this)">
-                <span class="tc-tree-toggle">▼</span>
-                <span class="tc-priority-badge ${PRIORITY_CLASSES[priority]}">${priority}</span>
-                <span class="tc-tree-count">${totalInPriority} 个用例</span>
-            </div>
-            <div class="tc-tree-branch">`;
-
-        for (const [type, cases] of Object.entries(types)) {
-            html += `
-                <div class="tc-tree-type-label">
-                    <span class="tc-tree-type-dot"></span>
-                    ${TYPE_LABELS[type] || type}测试 (${cases.length})
-                </div>
-                <div class="tc-tree-cases">`;
-
-            cases.forEach(c => {
-                const tagsHtml = (c.tags || []).slice(0, 3).map(t =>
-                    `<span class="tc-tree-case-tag">${t}</span>`
-                ).join('');
-
-                html += `
-                    <div class="tc-tree-case" onclick="viewCase(${c.id})">
-                        <span class="tc-tree-case-id">${c.case_id || '-'}</span>
-                        <span class="tc-tree-case-title">${c.title}</span>
-                        <span class="tc-tree-case-tags">${tagsHtml}</span>
-                    </div>`;
-            });
-
-            html += '</div>';
+        function renderDir(tree, parentPath, depth) {
+            let h = '';
+            for (const [name, node] of Object.entries(tree).sort((a,b) => a[0].localeCompare(b[0]))) {
+                const path = parentPath ? parentPath + '/' + name : name;
+                const isActive = selectedLibId === lib.id && selectedPath === path;
+                const indent = 28 + depth * 14;
+                const hasKids = Object.keys(node._children).length > 0;
+                const collapsedKey = lib.id + ':' + path;
+                const isCollapsed = collapsedDirs.has(collapsedKey);
+                if (search && !name.toLowerCase().includes(search)) continue;
+                h += `<div class="tc-tree-dir${isActive ? ' active' : ''}" style="padding-left:${indent}px" onclick="selectNode(${lib.id}, '${path.replace(/'/g, "\\'")}')">
+                    ${hasKids ? `<span class="tc-tree-arrow${isCollapsed ? '' : ' open'}" onclick="event.stopPropagation();toggleDir('${collapsedKey.replace(/'/g, "\\'")}')">›</span>` : '<span style="width:12px;flex-shrink:0"></span>'} ${hasKids ? (isCollapsed ? '📁' : '📂') : '📄'} ${escHtml(name)} <span class="tc-tree-cnt">${node._count}</span>
+                    <span class="tc-tree-add" onclick="event.stopPropagation();openSubdirModal(${lib.id}, '${path.replace(/'/g, "\\'")}')" title="新增子目录">+</span>
+                    <span class="tc-tree-del" onclick="event.stopPropagation();openDelDirModal(${lib.id}, '${path.replace(/'/g, "\\'")}', '${name.replace(/'/g, "\\'")}')" title="删除目录">×</span>
+                </div>`;
+                if (hasKids) h += `<div class="tc-tree-sub${isCollapsed ? ' collapsed' : ''}">` + renderDir(node._children, path, depth + 1) + '</div>';
+            }
+            return h;
         }
 
-        html += '</div></div>';
-    }
+        html += `<div class="tc-tree-sub${libCollapsed ? ' collapsed' : ''}">` + renderDir(dirs, '', 0) + '</div>';
+    });
 
-    html += '</div>';
-    container.innerHTML = html;
+    el.innerHTML = html;
 }
 
-function toggleGroup(header) {
-    const toggle = header.querySelector('.tc-tree-toggle');
-    const branch = header.nextElementSibling;
-    if (branch.style.display === 'none') {
-        branch.style.display = '';
-        toggle.classList.remove('collapsed');
+function toggleDir(key) {
+    if (collapsedDirs.has(key)) collapsedDirs.delete(key);
+    else collapsedDirs.add(key);
+    renderTree();
+}
+
+function toggleLib(libId) {
+    if (collapsedLibs.has(libId)) collapsedLibs.delete(libId);
+    else collapsedLibs.add(libId);
+    renderTree();
+}
+
+function selectNode(libId, path) {
+    selectedLibId = libId;
+    selectedPath = path;
+    currentPage = 1;
+    renderTree();
+    renderListTab();
+    activateTab('list');
+    // 更新 URL（不刷新页面）
+    const newUrl = libId ? `/testcases/${libId}` : '/testcases';
+    history.replaceState(null, '', newUrl);
+}
+
+// ==================== 新增子目录（自定义弹框） ====================
+let _subdirLibId = null;
+let _subdirParentPath = '';
+
+function openSubdirModal(libId, parentPath) {
+    _subdirLibId = libId;
+    _subdirParentPath = parentPath;
+    const parentLabel = parentPath ? parentPath.split('/').pop() : '根目录';
+    $('#subdir-parent-label').textContent = parentLabel;
+    $('#subdir-name-input').value = '';
+    $('#subdir-modal').classList.add('active');
+    setTimeout(() => $('#subdir-name-input').focus(), 100);
+}
+
+function closeSubdirModal() {
+    $('#subdir-modal').classList.remove('active');
+}
+
+$('#subdir-modal').addEventListener('click', e => { if (e.target === $('#subdir-modal')) closeSubdirModal(); });
+
+$('#subdir-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const name = $('#subdir-name-input').value.trim();
+    if (!name) return;
+    if (name.includes('/')) {
+        showToast('目录名不能包含 /', 'error');
+        return;
+    }
+    try {
+        await API.request('POST', `/testcase-libraries/${_subdirLibId}/modules`, {
+            parent_path: _subdirParentPath,
+            name: name,
+        });
+        showToast(`目录「${name}」已创建`, 'success');
+        closeSubdirModal();
+        casesCache[_subdirLibId] = await API.request('GET', `/testcase-libraries/${_subdirLibId}/cases?include_placeholders=true`);
+        renderTree();
+    } catch(err) {
+        showToast('创建目录失败: ' + err.message, 'error');
+    }
+});
+
+// ==================== 删除目录（自定义弹框） ====================
+let _delDirLibId = null;
+let _delDirPath = '';
+
+function openDelDirModal(libId, path, name) {
+    _delDirLibId = libId;
+    _delDirPath = path;
+    $('#del-dir-name').textContent = name;
+    $('#del-dir-modal').classList.add('active');
+}
+
+function closeDelDirModal() {
+    $('#del-dir-modal').classList.remove('active');
+}
+
+$('#del-dir-modal').addEventListener('click', e => { if (e.target === $('#del-dir-modal')) closeDelDirModal(); });
+
+async function confirmDelDir() {
+    try {
+        await API.request('DELETE', `/testcase-libraries/${_delDirLibId}/modules`, { path: _delDirPath });
+        showToast('目录已删除', 'success');
+        closeDelDirModal();
+        casesCache[_delDirLibId] = await API.request('GET', `/testcase-libraries/${_delDirLibId}/cases?include_placeholders=true`);
+        // 如果当前选中的是被删除的目录或其子目录，回到根目录
+        if (selectedPath && (selectedPath === _delDirPath || selectedPath.startsWith(_delDirPath + '/'))) {
+            selectedPath = null;
+        }
+        renderTree();
+        renderListTab();
+    } catch(err) {
+        showToast('删除目录失败: ' + err.message, 'error');
+    }
+}
+
+// ==================== 右侧 Tab 管理 ====================
+function activateTab(tabId) {
+    $$('#tab-bar .tc-tab-btn').forEach(b => b.classList.remove('active'));
+    const btn = $(`#tab-bar [data-tab="${tabId}"]`);
+    if (btn) btn.classList.add('active');
+    $$('#tab-content .tc-tab-panel').forEach(p => p.classList.remove('active'));
+    const panel = $(`#panel-${tabId}`);
+    if (panel) panel.classList.add('active');
+}
+
+function openCaseTab(caseData) {
+    const tabId = 'case-' + caseData.id;
+
+    // 已打开则激活
+    if (openTabs.find(t => t.id === tabId)) {
+        activateTab(tabId);
+        return;
+    }
+
+    // 超过上限，关闭最旧的
+    if (openTabs.length >= MAX_TABS) {
+        closeTab(openTabs[0].id);
+    }
+
+    openTabs.push({ id: tabId, title: caseData.title, caseData });
+
+    // 添加 tab 按钮
+    const btn = document.createElement('div');
+    btn.className = 'tc-tab-btn';
+    btn.dataset.tab = tabId;
+    btn.onclick = () => activateTab(tabId);
+    const shortTitle = caseData.title.length > 12 ? caseData.title.substring(0, 12) + '...' : caseData.title;
+    btn.innerHTML = `🧠 ${escHtml(shortTitle)} <span class="tc-tab-close" onclick="event.stopPropagation();closeTab('${tabId}')">&times;</span>`;
+    $('#tab-bar').appendChild(btn);
+
+    // 添加 panel
+    const panel = document.createElement('div');
+    panel.className = 'tc-tab-panel';
+    panel.id = 'panel-' + tabId;
+    panel.innerHTML = renderCaseMindmap(caseData);
+    $('#tab-content').appendChild(panel);
+
+    activateTab(tabId);
+}
+
+function closeTab(tabId) {
+    openTabs = openTabs.filter(t => t.id !== tabId);
+    const btn = $(`#tab-bar [data-tab="${tabId}"]`);
+    if (btn) btn.remove();
+    const panel = $(`#panel-${tabId}`);
+    if (panel) panel.remove();
+    activateTab('list');
+}
+
+// ==================== 用例列表 Tab ====================
+function getFilteredCases() {
+    let cases = [];
+    if (selectedLibId) {
+        cases = (casesCache[selectedLibId] || []).filter(c => !c.is_placeholder);
+        if (selectedPath !== null) {
+            if (selectedPath === '') {
+                cases = cases.filter(c => !(c.module_path || '').trim());
+            } else {
+                cases = cases.filter(c => {
+                    const mp = (c.module_path || '').trim();
+                    return mp === selectedPath || mp.startsWith(selectedPath + '/');
+                });
+            }
+        }
     } else {
-        branch.style.display = 'none';
-        toggle.classList.add('collapsed');
+        for (const lib of allLibraries) {
+            (casesCache[lib.id] || []).filter(c => !c.is_placeholder).forEach(c => cases.push({...c, _libName: lib.name}));
+        }
     }
-}
-
-// ==================== 列表渲染 ====================
-function renderCasesTable() {
-    const tbody = $('#cases-tbody');
-    const cases = filteredCases();
-
-    if (cases.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-muted)">暂无用例</td></tr>';
-        return;
-    }
-
-    tbody.innerHTML = cases.map(c => `
-        <tr>
-            <td><input type="checkbox" class="case-cb" value="${c.id}" ${selectedCaseIds.has(c.id) ? 'checked' : ''} onchange="toggleCaseSelect(${c.id}, this.checked)"></td>
-            <td><code style="font-size:0.82rem;color:var(--text-muted)">${c.case_id || '-'}</code></td>
-            <td style="cursor:pointer" onclick="viewCase(${c.id})">${c.title}</td>
-            <td><span class="tc-priority-badge ${PRIORITY_CLASSES[c.priority]}" style="font-size:0.75rem;padding:1px 8px">${c.priority || '-'}</span></td>
-            <td style="color:var(--text-secondary)">${TYPE_LABELS[c.type] || c.type}</td>
-            <td>${(c.tags || []).map(t => `<span class="tc-tree-case-tag">${t}</span>`).join(' ')}</td>
-            <td>
-                <button class="btn btn-ghost" style="padding:4px 8px" onclick="viewCase(${c.id})">查看</button>
-                <button class="btn btn-ghost" style="padding:4px 8px" onclick="editCase(${c.id})">编辑</button>
-                <button class="btn btn-ghost" style="padding:4px 8px;color:var(--red)" onclick="deleteCase(${c.id})">删除</button>
-            </td>
-        </tr>
-    `).join('');
-}
-
-function filteredCases() {
-    let cases = allCases;
-    const search = ($('#case-search').value || '').toLowerCase();
-    const priority = $('#priority-filter').value;
-    const type = $('#type-filter').value;
-
-    if (search) cases = cases.filter(c => (c.title || '').toLowerCase().includes(search) || (c.case_id || '').toLowerCase().includes(search));
-    if (priority) cases = cases.filter(c => c.priority === priority);
-    if (type) cases = cases.filter(c => c.type === type);
     return cases;
 }
 
-function filterCases() { renderCasesTable(); }
+function renderListTab() {
+    const listEl = $('#case-list');
+    const cases = getFilteredCases();
 
-// ==================== 批量操作 ====================
-function toggleCaseSelect(id, checked) {
-    if (checked) selectedCaseIds.add(id);
-    else selectedCaseIds.delete(id);
-    updateBatchBar();
-}
-
-function toggleSelectAll() {
-    const checked = $('#select-all').checked;
-    const cases = filteredCases();
-    if (checked) cases.forEach(c => selectedCaseIds.add(c.id));
-    else selectedCaseIds.clear();
-    renderCasesTable();
-    updateBatchBar();
-}
-
-function clearSelection() {
-    selectedCaseIds.clear();
-    $('#select-all').checked = false;
-    renderCasesTable();
-    updateBatchBar();
-}
-
-function updateBatchBar() {
-    const bar = $('#batch-bar');
-    if (selectedCaseIds.size > 0) {
-        bar.classList.add('active');
-        $('#batch-count').textContent = `已选 ${selectedCaseIds.size} 项`;
-    } else {
-        bar.classList.remove('active');
+    const lib = allLibraries.find(l => l.id === selectedLibId);
+    let bc = '全部用例';
+    if (lib) {
+        bc = lib.name;
+        if (selectedPath === '') bc += ' › 未分类';
+        else if (selectedPath) bc += ' › ' + selectedPath.replace(/\//g, ' › ');
     }
-}
+    $('#list-breadcrumb').textContent = bc;
+    $('#list-count').textContent = cases.length + ' 条';
 
-async function batchDelete() {
-    if (!confirm(`确定要删除选中的 ${selectedCaseIds.size} 个用例吗？`)) return;
-    try {
-        await API.request('DELETE', `/testcase-libraries/${currentLibraryId}/cases/batch`, {
-            case_ids: Array.from(selectedCaseIds)
-        });
-        showToast(`已删除 ${selectedCaseIds.size} 个用例`, 'success');
-        selectedCaseIds.clear();
-        loadCases();
-    } catch (err) {
-        showToast('批量删除失败: ' + err.message, 'error');
-    }
-}
+    // 分页计算
+    const totalPages = Math.max(1, Math.ceil(cases.length / pageSize));
+    if (currentPage > totalPages) currentPage = totalPages;
+    const start = (currentPage - 1) * pageSize;
+    const pageCases = cases.slice(start, start + pageSize);
 
-// ==================== Tab 切换 ====================
-function switchTab(tab) {
-    currentTab = tab;
-    $$('.tc-tab').forEach(t => t.classList.remove('active'));
-    $(`.tc-tab[data-tab="${tab}"]`).classList.add('active');
-
-    $('#mindmap-view').style.display = tab === 'mindmap' ? '' : 'none';
-    $('#list-view').style.display = tab === 'list' ? '' : 'none';
-    $('#chat-view').style.display = tab === 'chat' ? '' : 'none';
-}
-
-// ==================== 用例详情弹窗 ====================
-function viewCase(id) {
-    const c = allCases.find(x => x.id === id);
-    if (!c) return;
-
-    const content = c.content || {};
-    const overlay = $('#case-detail-overlay');
-
-    $('#detail-title').textContent = c.title;
-    $('#detail-badges').innerHTML = `
-        <span class="tc-priority-badge ${PRIORITY_CLASSES[c.priority]}" style="font-size:0.78rem;padding:2px 10px">${c.priority}</span>
-        <span class="tag" style="font-size:0.78rem">${TYPE_LABELS[c.type] || c.type}</span>
-        ${(c.tags || []).map(t => `<span class="tc-tree-case-tag" style="font-size:0.78rem">${t}</span>`).join('')}
-    `;
-
-    // 前置条件
-    const preRow = $('#detail-preconditions-row');
-    if (content.preconditions) {
-        preRow.style.display = '';
-        $('#detail-preconditions').textContent = content.preconditions;
-    } else {
-        preRow.style.display = 'none';
-    }
-
-    // 步骤
-    const stepsRow = $('#detail-steps-row');
-    const steps = content.steps || [];
-    if (steps.length > 0) {
-        stepsRow.style.display = '';
-        $('#detail-steps').innerHTML = '<ol>' + steps.map(s => `<li>${escHtml(s)}</li>`).join('') + '</ol>';
-    } else {
-        stepsRow.style.display = 'none';
-    }
-
-    // 预期结果
-    const resRow = $('#detail-results-row');
-    const results = content.expected_results || [];
-    if (results.length > 0) {
-        resRow.style.display = '';
-        $('#detail-results').innerHTML = '<ol>' + results.map(s => `<li>${escHtml(s)}</li>`).join('') + '</ol>';
-    } else {
-        resRow.style.display = 'none';
-    }
-
-    // 元信息
-    $('#detail-meta').innerHTML = `
-        <div class="tc-detail-meta-item">📌 编号：<strong>${c.case_id || '-'}</strong></div>
-        <div class="tc-detail-meta-item">📅 创建：${c.created_at || '-'}</div>
-        ${c.ai_generated ? '<div class="tc-detail-meta-item">🤖 AI 生成</div>' : ''}
-    `;
-
-    overlay.classList.add('active');
-}
-
-function closeCaseDetail() { $('#case-detail-overlay').classList.remove('active'); }
-
-function escHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
-}
-
-// ==================== 用例库 CRUD ====================
-let libProjects = [];
-
-async function loadLibProjectList() {
-    try {
-        libProjects = await API.listProjects();
-        const sel = $('#library-project-input');
-        const current = sel.value;
-        sel.innerHTML = '<option value="">-- 选择项目 --</option>' +
-            libProjects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
-        if (current) sel.value = current;
-    } catch(e) { console.error('loadLibProjectList error:', e); }
-}
-
-async function onLibProjectChange() {
-    const projectName = $('#library-project-input').value;
-    const moduleSel = $('#library-module-input');
-    if (!moduleSel) return;
-    if (!projectName) {
-        moduleSel.innerHTML = '<option value="">-- 先选择项目 --</option>';
+    if (!cases.length) {
+        listEl.innerHTML = `<div class="tc-list-empty"><div class="tc-list-empty-icon">🧪</div><div class="tc-list-empty-text">暂无用例</div></div>`;
+        $('#pagination').innerHTML = '';
         return;
     }
-    const project = libProjects.find(p => p.name === projectName);
-    if (project && project.modules) {
-        moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>' +
-            project.modules.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
-    } else {
-        // 通过 API 获取模块
-        try {
-            const modules = await API.getProjectModules(project ? project.id : null);
-            moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>' +
-                modules.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
-        } catch(e) {
-            moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>';
-        }
+
+    listEl.innerHTML = pageCases.map(c => `
+        <div class="tc-case-card">
+            <span class="tc-case-id">${c.case_id || '-'}</span>
+            <span class="tc-case-title" onclick="openCaseTab(allCaseById(${c.id}))" title="${escHtml(c.title)}">${escHtml(c.title)}</span>
+            <span class="tc-case-prio"><span class="prio-badge ${PRIO_CLS[c.priority]}">${c.priority || '-'}</span></span>
+            <span class="tc-case-author">${c.created_by || '-'}</span>
+            <span class="tc-case-time">${c.updated_at ? c.updated_at.substring(0,16).replace('T',' ') : '-'}</span>
+            <span class="tc-case-actions">
+                <button class="tc-act-btn" onclick="editCase(${c.id})" title="编辑">✏️</button>
+                <button class="tc-act-btn del" onclick="deleteCase(${c.id}, ${c.library_id})" title="删除">🗑️</button>
+            </span>
+        </div>
+    `).join('');
+
+    // 分页控件
+    renderPagination(cases.length, totalPages);
+}
+
+function renderPagination(total, totalPages) {
+    const el = $('#pagination');
+    if (total <= pageSize) { el.innerHTML = ''; return; }
+
+    const start = (currentPage - 1) * pageSize + 1;
+    const end = Math.min(currentPage * pageSize, total);
+
+    let pagesHtml = '';
+    // 上一页
+    pagesHtml += `<button class="tc-page-btn" onclick="goPage(${currentPage - 1})" ${currentPage <= 1 ? 'disabled' : ''}>‹</button>`;
+    // 页码
+    const maxShow = 5;
+    let pStart = Math.max(1, currentPage - Math.floor(maxShow / 2));
+    let pEnd = Math.min(totalPages, pStart + maxShow - 1);
+    if (pEnd - pStart < maxShow - 1) pStart = Math.max(1, pEnd - maxShow + 1);
+    if (pStart > 1) pagesHtml += `<button class="tc-page-btn" onclick="goPage(1)">1</button>`;
+    if (pStart > 2) pagesHtml += `<span style="padding:0 4px;color:var(--text-muted)">…</span>`;
+    for (let i = pStart; i <= pEnd; i++) {
+        pagesHtml += `<button class="tc-page-btn${i === currentPage ? ' active' : ''}" onclick="goPage(${i})">${i}</button>`;
     }
+    if (pEnd < totalPages - 1) pagesHtml += `<span style="padding:0 4px;color:var(--text-muted)">…</span>`;
+    if (pEnd < totalPages) pagesHtml += `<button class="tc-page-btn" onclick="goPage(${totalPages})">${totalPages}</button>`;
+    // 下一页
+    pagesHtml += `<button class="tc-page-btn" onclick="goPage(${currentPage + 1})" ${currentPage >= totalPages ? 'disabled' : ''}>›</button>`;
+
+    el.innerHTML = `
+        <div class="tc-pagination-info">
+            <span>${start}-${end} / ${total} 条</span>
+            <select class="tc-page-size-select" onchange="changePageSize(this.value)">
+                <option value="20" ${pageSize === 20 ? 'selected' : ''}>20条/页</option>
+                <option value="50" ${pageSize === 50 ? 'selected' : ''}>50条/页</option>
+                <option value="100" ${pageSize === 100 ? 'selected' : ''}>100条/页</option>
+            </select>
+        </div>
+        <div class="tc-pagination-pages">${pagesHtml}</div>
+    `;
 }
 
-async function openCreateLibraryModal() {
-    $('#library-edit-id').value = '';
-    $('#library-modal-title').textContent = '新建用例库';
-    $('#library-form').reset();
-    await loadLibProjectList();
-    $('#library-modal').classList.add('active');
+function goPage(page) {
+    currentPage = page;
+    renderListTab();
+    // 滚动到列表顶部
+    const panel = $('#panel-list');
+    if (panel) panel.scrollTop = 0;
 }
 
-function closeLibraryModal() { $('#library-modal').classList.remove('active'); }
-
-async function editLibrary() {
-    if (!currentLibrary) return;
-    $('#library-edit-id').value = currentLibrary.id;
-    $('#library-modal-title').textContent = '编辑用例库';
-    $('#library-name-input').value = currentLibrary.name;
-    $('#library-desc-input').value = currentLibrary.description || '';
-    await loadLibProjectList();
-    $('#library-project-input').value = currentLibrary.project_name || '';
-    $('#library-owner-input').value = currentLibrary.owner || '';
-    $('#library-modal').classList.add('active');
+function changePageSize(size) {
+    pageSize = parseInt(size);
+    currentPage = 1;
+    renderListTab();
 }
 
-async function deleteLibrary() {
-    if (!currentLibraryId || !currentLibrary) return;
-    if (!confirm(`确定要删除用例库「${currentLibrary.name}」及其所有用例吗？此操作不可撤销！`)) return;
-    try {
-        await API.request('DELETE', `/testcase-libraries/${currentLibraryId}`);
-        showToast('用例库已删除', 'success');
-        currentLibraryId = null;
-        currentLibrary = null;
-        $('#library-container').style.display = 'none';
-        $('#empty-state').style.display = '';
-        loadLibraries();
-    } catch (err) {
-        showToast('删除失败: ' + err.message, 'error');
+function allCaseById(id) {
+    for (const libId in casesCache) {
+        const c = casesCache[libId].find(x => x.id === id);
+        if (c) return c;
     }
+    return null;
 }
 
-function exportYAML() {
-    if (!currentLibraryId) return;
-    window.open(`/api/v1/testcase-libraries/${currentLibraryId}/export/yaml`, '_blank');
-}
+// ==================== 用例脑图（单条用例） ====================
+function renderCaseMindmap(c) {
+    const content = c.content || {};
+    const preconditions = content.preconditions || '';
+    const steps = Array.isArray(content.steps) ? content.steps : [];
+    const results = Array.isArray(content.expected_results) ? content.expected_results : [];
 
-function exportXMind() {
-    if (!currentLibraryId) return;
-    const a = document.createElement('a');
-    a.href = `/api/v1/testcase-libraries/${currentLibraryId}/export/xmind`;
-    a.download = `testcases-${currentLibraryId}.xmind`;
-    a.click();
-}
+    // 布局参数
+    const PAD = 40;
+    const H_GAP = 160;
+    const V_GAP = 10;
+    const NODE_H = 34;
 
-$('#library-modal').addEventListener('click', e => {
-    if (e.target === $('#library-modal')) closeLibraryModal();
-});
+    let nodes = [];
+    let edges = [];
+    let nid = 0;
 
-$('#library-form').addEventListener('submit', async e => {
-    e.preventDefault();
-    const form = new FormData(e.target);
-    const data = Object.fromEntries(form);
-    const editId = $('#library-edit-id').value;
-    const btn = e.target.querySelector('button[type="submit"]');
-    btn.disabled = true;
+    // Root: 标题 + 优先级
+    const rootW = c.title.length * 14 + 100;
+    const rootId = nid++;
+    const sections = [];
+    if (preconditions) sections.push({ label: '📋 前提条件', items: [preconditions] });
+    if (steps.length) sections.push({ label: '🔧 操作步骤', items: steps });
+    if (results.length) sections.push({ label: '✅ 预期结果', items: results });
 
-    try {
-        if (editId) {
-            await API.request('PUT', `/testcase-libraries/${editId}`, data);
-            showToast('用例库已更新', 'success');
+    // 计算总高度
+    let totalH = 0;
+    sections.forEach(s => { totalH += NODE_H + V_GAP + s.items.length * (NODE_H + V_GAP); });
+    if (totalH > 0) totalH -= V_GAP;
+    totalH = Math.max(totalH, NODE_H);
+
+    const rootH = 46;
+    const rootX = PAD;
+    const rootY = PAD + totalH / 2 - rootH / 2;
+    nodes.push({ id: rootId, x: rootX, y: rootY, w: Math.min(rootW, 400), h: rootH, type: 'root', text: c.title, priority: c.priority, caseId: c.case_id });
+
+    // 二级节点
+    let curY = PAD;
+    const secX = rootX + Math.min(rootW, 400) + H_GAP;
+
+    sections.forEach(sec => {
+        const secH = sec.items.length * (NODE_H + V_GAP) - V_GAP;
+        const secId = nid++;
+        const secW = sec.label.length * 14 + 40;
+        const secY = curY + secH / 2 - NODE_H / 2;
+        nodes.push({ id: secId, x: secX, y: secY, w: Math.min(secW, 200), h: NODE_H, type: 'section', text: sec.label });
+        edges.push({ from: rootId, to: secId, color: 'var(--accent)' });
+
+        // 三级节点（叶子）
+        const leafX = secX + Math.min(secW, 200) + H_GAP * 0.8;
+        let leafY = curY;
+        sec.items.forEach((item, i) => {
+            const leafId = nid++;
+            const txt = typeof item === 'string' ? item : JSON.stringify(item);
+            const displayTxt = txt.length > 60 ? txt.substring(0, 60) + '...' : txt;
+            const leafW = Math.min(displayTxt.length * 12 + 30, 380);
+            nodes.push({ id: leafId, x: leafX, y: leafY, w: leafW, h: NODE_H, type: 'leaf', text: `${i + 1}. ${txt}` });
+            edges.push({ from: secId, to: leafId, color: 'var(--border)' });
+            leafY += NODE_H + V_GAP;
+        });
+
+        curY += secH + V_GAP * 3;
+    });
+
+    // 画布尺寸
+    let maxX = 0, maxY = 0;
+    nodes.forEach(n => { maxX = Math.max(maxX, n.x + n.w); maxY = Math.max(maxY, n.y + n.h); });
+    const canvasW = maxX + PAD;
+    const canvasH = maxY + PAD;
+
+    // HTML
+    let nodesHtml = '';
+    nodes.forEach(n => {
+        if (n.type === 'root') {
+            nodesHtml += `<div class="case-mm-node case-mm-root" style="left:${n.x}px;top:${n.y}px">
+                ${escHtml(n.text)} <span class="case-mm-badge ${PRIO_CLS[n.priority]}">${n.priority}</span>
+                <span style="font-size:0.75rem;opacity:0.7;margin-left:4px">${n.caseId || ''}</span>
+            </div>`;
+        } else if (n.type === 'section') {
+            nodesHtml += `<div class="case-mm-node case-mm-section" style="left:${n.x}px;top:${n.y}px">${n.text}</div>`;
         } else {
-            await API.request('POST', '/testcase-libraries', data);
-            showToast('用例库创建成功', 'success');
+            nodesHtml += `<div class="case-mm-node case-mm-leaf" style="left:${n.x}px;top:${n.y}px;width:${n.w}px">${escHtml(n.text)}</div>`;
         }
-        closeLibraryModal();
-        await loadLibraries();
-        if (editId) switchLibrary();
-    } catch (err) {
-        showToast('保存失败: ' + err.message, 'error');
-    } finally {
-        btn.disabled = false;
-    }
+    });
+
+    let pathsHtml = '';
+    edges.forEach(e => {
+        const from = nodes.find(n => n.id === e.from);
+        const to = nodes.find(n => n.id === e.to);
+        if (!from || !to) return;
+        const x1 = from.x + from.w, y1 = from.y + from.h / 2;
+        const x2 = to.x, y2 = to.y + to.h / 2;
+        const cx = (x1 + x2) / 2;
+        pathsHtml += `<path d="M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}" stroke="${e.color}" />`;
+    });
+
+    return `<div style="overflow:hidden;cursor:grab;min-height:400px;position:relative;border:1px solid var(--border);border-radius:8px" onmousedown="mmDragStart(event,this)" oncontextmenu="return false">
+        <div class="case-mm-canvas" style="width:${canvasW}px;height:${canvasH}px;transform:translate(0px,0px);transform-origin:0 0">
+            <svg width="${canvasW}" height="${canvasH}">${pathsHtml}</svg>
+            ${nodesHtml}
+        </div>
+    </div>`;
+}
+
+// 脑图画布拖拽
+let _mmDrag = null;
+function mmDragStart(e, el) {
+    e.preventDefault();
+    const canvas = el.querySelector('.case-mm-canvas');
+    const style = canvas.style.transform || 'translate(0px,0px)';
+    const match = style.match(/translate\((-?\d+(?:\.\d+)?)px,\s*(-?\d+(?:\.\d+)?)px\)/);
+    const ox = match ? parseFloat(match[1]) : 0;
+    const oy = match ? parseFloat(match[2]) : 0;
+    _mmDrag = { el, canvas, sx: e.clientX, sy: e.clientY, ox, oy, moved: false };
+    el.style.cursor = 'grabbing';
+}
+document.addEventListener('mousemove', e => {
+    if (!_mmDrag) return;
+    const dx = e.clientX - _mmDrag.sx, dy = e.clientY - _mmDrag.sy;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) _mmDrag.moved = true;
+    _mmDrag.canvas.style.transform = `translate(${_mmDrag.ox + dx}px, ${_mmDrag.oy + dy}px)`;
+});
+document.addEventListener('mouseup', () => {
+    if (_mmDrag) { _mmDrag.el.style.cursor = 'grab'; _mmDrag = null; }
 });
 
 // ==================== 用例 CRUD ====================
-async function openCaseModal() {
-    if (!currentLibraryId) { showToast('请先选择用例库', 'error'); return; }
+function openCaseModal() {
+    if (!selectedLibId && allLibraries.length > 0) selectedLibId = allLibraries[0].id;
+    if (!selectedLibId) { showToast('请先创建用例库', 'error'); return; }
     $('#case-edit-id').value = '';
     $('#case-modal-title').textContent = '添加用例';
     $('#case-form').reset();
-    // 加载当前项目的模块列表
-    await loadCaseModules();
+    if (selectedPath && selectedPath !== '') $('#case-module-input').value = selectedPath;
+    loadModuleOptions();
     $('#case-modal').classList.add('active');
 }
+function closeCaseModal() { $('#case-modal').classList.remove('active'); }
+$('#case-modal').addEventListener('click', e => { if (e.target === $('#case-modal')) closeCaseModal(); });
 
-async function loadCaseModules() {
-    const moduleSel = $('#case-module-input');
-    if (!currentLibrary || !currentLibrary.project_name) {
-        moduleSel.innerHTML = '<option value="">-- 无项目 --</option>';
-        return;
-    }
-    try {
-        const project = libProjects.find(p => p.name === currentLibrary.project_name);
-        if (project && project.modules && project.modules.length) {
-            moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>' +
-                project.modules.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
-        } else if (project) {
-            const modules = await API.getProjectModules(project.id);
-            moduleSel.innerHTML = '<option value="">-- 选择模块 --</option>' +
-                modules.map(m => `<option value="${m.name}">${m.name}</option>`).join('');
-        }
-    } catch(e) { moduleSel.innerHTML = '<option value="">加载失败</option>'; }
+function loadModuleOptions() {
+    if (!selectedLibId) return;
+    const cases = casesCache[selectedLibId] || [];
+    const paths = new Set();
+    cases.forEach(c => { if (c.module_path) paths.add(c.module_path); });
+    $('#module-path-options').innerHTML = Array.from(paths).sort().map(p => `<option value="${p}">`).join('');
 }
 
-function closeCaseModal() { $('#case-modal').classList.remove('active'); }
-
 async function editCase(id) {
-    const c = allCases.find(x => x.id === id);
+    const c = allCaseById(id);
     if (!c) return;
-
+    selectedLibId = c.library_id;
     $('#case-edit-id').value = c.id;
     $('#case-modal-title').textContent = '编辑用例';
-    await loadCaseModules();
-
+    loadModuleOptions();
     const content = c.content || {};
-    $('#case-module-input').value = content.module_name || c.tags?.[0] || '';
+    $('#case-module-input').value = c.module_path || '';
     $('#case-title-input').value = c.title;
     $('#case-priority-input').value = c.priority || 'P1';
     $('#case-status-input').value = content.status || 'normal';
     $('#case-pre-input').value = content.preconditions || '';
-    $('#case-steps-input').value = Array.isArray(content.steps) ? content.steps.join('\n') : (content.steps || '');
-    $('#case-results-input').value = Array.isArray(content.expected_results) ? content.expected_results.join('\n') : (content.expected_results || '');
-
+    $('#case-steps-input').value = Array.isArray(content.steps) ? content.steps.join('\n') : '';
+    $('#case-results-input').value = Array.isArray(content.expected_results) ? content.expected_results.join('\n') : '';
     $('#case-modal').classList.add('active');
 }
-
-$('#case-modal').addEventListener('click', e => {
-    if (e.target === $('#case-modal')) closeCaseModal();
-});
 
 $('#case-form').addEventListener('submit', async e => {
     e.preventDefault();
     const form = new FormData(e.target);
     const data = Object.fromEntries(form);
-
     const steps = (data.steps || '').split('\n').map(s => s.trim()).filter(Boolean);
     const expected_results = (data.expected_results || '').split('\n').map(s => s.trim()).filter(Boolean);
-
     const payload = {
         title: data.title,
         priority: data.priority,
         type: 'functional',
-        content: {
-            module_name: data.module_name,
-            status: data.status,
-            preconditions: data.preconditions,
-            steps,
-            expected_results,
-        },
-        tags: data.module_name ? [data.module_name] : [],
+        module_path: (data.module_path || '').trim(),
+        content: { status: data.status, preconditions: data.preconditions, steps, expected_results },
+        tags: data.module_path ? [data.module_path.split('/').pop()] : [],
     };
-
     const editId = $('#case-edit-id').value;
-    const btn = e.target.querySelector('button[type="submit"]');
-    btn.disabled = true;
-
     try {
         if (editId) {
-            await API.request('PUT', `/testcase-libraries/${currentLibraryId}/cases/${editId}`, payload);
-            showToast('用例已更新', 'success');
+            await API.request('PUT', `/testcase-libraries/${selectedLibId}/cases/${editId}`, payload);
+            showToast('已更新', 'success');
         } else {
-            await API.request('POST', `/testcase-libraries/${currentLibraryId}/cases`, payload);
-            showToast('用例已添加', 'success');
+            await API.request('POST', `/testcase-libraries/${selectedLibId}/cases`, payload);
+            showToast('已创建', 'success');
         }
         closeCaseModal();
-        loadCases();
-    } catch (err) {
-        showToast('保存失败: ' + err.message, 'error');
-    } finally {
-        btn.disabled = false;
-    }
+        casesCache[selectedLibId] = await API.request('GET', `/testcase-libraries/${selectedLibId}/cases?include_placeholders=true`);
+        renderTree();
+        renderListTab();
+    } catch(err) { showToast('保存失败: ' + err.message, 'error'); }
 });
 
-async function deleteCase(id) {
-    if (!await customConfirm('确定要删除这个用例吗？')) return;
+async function deleteCase(id, libId) {
+    if (!await customConfirm('确定删除此用例？')) return;
     try {
-        await API.request('DELETE', `/testcase-libraries/${currentLibraryId}/cases/${id}`);
-        showToast('用例已删除', 'success');
-        loadCases();
-    } catch (err) {
-        showToast('删除失败: ' + err.message, 'error');
-    }
+        await API.request('DELETE', `/testcase-libraries/${libId}/cases/${id}`);
+        showToast('已删除', 'success');
+        casesCache[libId] = await API.request('GET', `/testcase-libraries/${libId}/cases?include_placeholders=true`);
+        // 关闭该用例的 tab
+        closeTab('case-' + id);
+        renderTree();
+        renderListTab();
+    } catch(err) { showToast('删除失败: ' + err.message, 'error'); }
 }
 
-// ==================== AI 对话 ====================
-async function sendChat() {
-    const input = $('#chat-input');
-    const message = input.value.trim();
-    if (!message) return;
+// ==================== 用例库 CRUD ====================
+function openCreateLibraryModal() {
+    $('#lib-edit-id').value = '';
+    $('#lib-modal-title').textContent = '新建用例库';
+    $('#library-form').reset();
+    fillLibProjects();
+    $('#library-modal').classList.add('active');
+}
+function closeLibraryModal() { $('#library-modal').classList.remove('active'); }
+$('#library-modal').addEventListener('click', e => { if (e.target === $('#library-modal')) closeLibraryModal(); });
 
-    const el = $('#chat-messages');
-
-    // 清除空状态
-    const emptyHint = el.querySelector('.tc-chat-empty');
-    if (emptyHint) emptyHint.remove();
-
-    el.innerHTML += `<div class="tc-msg-user"><div class="tc-msg-bubble">${escHtml(message)}</div></div>`;
-    input.value = '';
-    el.scrollTop = el.scrollHeight;
-
+async function fillLibProjects() {
     try {
-        const result = await API.request('POST', '/ai/testcases/chat', {
-            library_id: currentLibraryId,
-            message: message
-        });
-
-        let responseText = result.response || JSON.stringify(result, null, 2);
-        if (result.cases_updated) {
-            responseText += `\n\n✅ 已更新 ${result.cases_updated} 个用例`;
-            loadCases();
-        }
-
-        el.innerHTML += `<div class="tc-msg-ai"><div class="tc-msg-bubble">${escHtml(responseText)}</div></div>`;
-    } catch (err) {
-        el.innerHTML += `<div class="tc-msg-err"><div class="tc-msg-bubble">错误: ${escHtml(err.message)}</div></div>`;
-    }
-
-    el.scrollTop = el.scrollHeight;
+        const projects = await API.listProjects();
+        $('#lib-project-input').innerHTML = '<option value="">无</option>' + projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+    } catch(e) {}
 }
 
-// ==================== AI 生成用例 ====================
-function openAIGenerateModal() {
-    if (!currentLibraryId) {
-        showToast('请先选择用例库', 'error');
-        return;
-    }
-    $('#ai-generate-form').reset();
-    $('#ai-generate-modal').classList.add('active');
-}
-
-function closeAIGenerateModal() { $('#ai-generate-modal').classList.remove('active'); }
-
-$('#ai-generate-modal').addEventListener('click', e => {
-    if (e.target === $('#ai-generate-modal')) closeAIGenerateModal();
-});
-
-$('#ai-generate-form').addEventListener('submit', async e => {
+$('#library-form').addEventListener('submit', async e => {
     e.preventDefault();
-    const form = new FormData(e.target);
-    const data = Object.fromEntries(form);
-    data.library_id = currentLibraryId;
-
-    const btn = e.target.querySelector('button[type="submit"]');
-    btn.disabled = true;
-    btn.textContent = '⏳ 生成中...';
-
+    const payload = {
+        name: $('#lib-name-input').value.trim(),
+        description: $('#lib-desc-input').value.trim(),
+        project_name: $('#lib-project-input').value || null,
+        owner: $('#lib-owner-input').value.trim() || null,
+    };
     try {
-        const result = await API.request('POST', '/ai/testcases/generate', data);
-        showToast(result.message || '用例生成成功', 'success');
-        closeAIGenerateModal();
-        loadCases();
-    } catch (err) {
-        showToast('生成失败: ' + err.message, 'error');
-    } finally {
-        btn.disabled = false;
-        btn.textContent = '🤖 生成';
-    }
+        const editId = $('#lib-edit-id').value;
+        if (editId) {
+            await API.request('PUT', `/testcase-libraries/${editId}`, payload);
+        } else {
+            await API.request('POST', '/testcase-libraries', payload);
+        }
+        showToast(editId ? '已更新' : '已创建', 'success');
+        closeLibraryModal();
+        casesCache = {};
+        loadTree();
+    } catch(err) { showToast('失败: ' + err.message, 'error'); }
 });
 
-// ==================== 初始化 ====================
-loadLibraries();
+// ==================== AI 生成 ====================
+function openAIGenerateModal() {
+    const sel = $('#ai-lib-select');
+    sel.innerHTML = allLibraries.map(l => `<option value="${l.id}"${l.id === selectedLibId ? ' selected' : ''}>${l.name}</option>`).join('');
+    $('#ai-modal').classList.add('active');
+}
+
+$('#ai-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const libId = $('#ai-lib-select').value;
+    const prompt = $('#ai-prompt-input').value.trim();
+    if (!prompt) return;
+    showToast('AI 正在生成用例...', 'info');
+    try {
+        const res = await API.request('POST', '/ai/testcases/chat', {
+            library_id: parseInt(libId), message: prompt, action: 'generate'
+        });
+        if (res.cases && res.cases.length) {
+            await API.request('POST', `/testcase-libraries/${libId}/cases/batch`, { cases: res.cases });
+            showToast(`已生成 ${res.cases.length} 条用例`, 'success');
+            casesCache[libId] = await API.request('GET', `/testcase-libraries/${libId}/cases?include_placeholders=true`);
+            renderTree();
+            renderListTab();
+        } else {
+            showToast(res.reply || '未生成用例', 'info');
+        }
+        $('#ai-modal').classList.remove('active');
+    } catch(err) { showToast('AI 生成失败: ' + err.message, 'error'); }
+});
+
+init();
 </script>
 {% endblock %}

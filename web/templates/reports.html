@@ -165,6 +165,25 @@ async function loadStats() {
     }
 }
 
+// 兼容 tasks_completed/knowledge_recorded：可能是 JSON 数组或换行字符串
+function toList(val) {
+    if (!val) return [];
+    if (Array.isArray(val)) return val.map(String).filter(s => s.trim());
+    if (typeof val === 'string') {
+        let lines = val.split('\n').map(l => l.trim()).filter(Boolean);
+        if (lines.length > 1) return lines;
+        // 单行：按分号分割
+        const text = lines[0] || val;
+        const parts = text.split(/[;；]\s*/).map(s => s.trim()).filter(Boolean);
+        if (parts.length > 1) return parts;
+        // 按 "数字)" 分割（前面必须是空格或行首，避免匹配日期 2026）
+        const numbered = text.split(/(?:^|(?<=\s))(?=\d{1,2}[)）]\s*)/).map(s => s.trim()).filter(Boolean);
+        if (numbered.length > 1) return numbered;
+        return [text];
+    }
+    return [];
+}
+
 async function loadTimeline() {
     try {
         const dateVal = document.querySelector('#filter-date').value || new Date().toISOString().slice(0,10);
@@ -185,7 +204,7 @@ async function loadTimeline() {
                     ${t.openclaw_avatar || '🤖'} ${t.openclaw_name} · ${t.report_time}
                 </div>
                 <div style="font-size:0.85rem;color:var(--text-secondary)">
-                    ${t.ai_summary || `完成 ${(t.tasks_completed || '').split('\n').filter(l=>l.trim()).length} 个任务，记录 ${(t.knowledge_recorded || '').split('\n').filter(l=>l.trim()).length} 条知识`}
+                    ${t.ai_summary || `完成 ${toList(t.tasks_completed).length} 个任务，记录 ${toList(t.knowledge_recorded).length} 条知识`}
                 </div>
             </div>
         `).join('')}</div>`;
@@ -249,8 +268,8 @@ async function loadReports() {
                                 </div>
                             </div>
                             <div style="display:flex;gap:8px">
-                                <span class="tag tag-blue">🎯 ${((r.tasks_completed || '').split('\n').filter(l=>l.trim())).length} 任务</span>
-                                <span class="tag tag-green">📝 ${((r.knowledge_recorded || '').split('\n').filter(l=>l.trim())).length} 知识</span>
+                                <span class="tag tag-blue">🎯 ${toList(r.tasks_completed).length} 任务</span>
+                                <span class="tag tag-green">📝 ${toList(r.knowledge_recorded).length} 知识</span>
                             </div>
                         </div>
                         ${r.ai_summary 
@@ -286,8 +305,8 @@ function showReportDetail(id, report) {
         
         <div style="margin-bottom:16px">
             <div style="font-weight:600;margin-bottom:8px;color:var(--text-primary)">🎯 完成任务</div>
-            ${(report.tasks_completed || '').split('\n').filter(l=>l.trim()).length > 0 
-                ? `<ul class="detail-list">${(report.tasks_completed || '').split('\n').filter(l=>l.trim()).map(t => 
+            ${toList(report.tasks_completed).length > 0 
+                ? `<ul class="detail-list">${toList(report.tasks_completed).map(t => 
                     `<li>${t}</li>`
                 ).join('')}</ul>`
                 : '<div style="color:var(--text-muted);font-size:0.85rem">无</div>'}
@@ -295,8 +314,8 @@ function showReportDetail(id, report) {
 
         <div style="margin-bottom:16px">
             <div style="font-weight:600;margin-bottom:8px;color:var(--text-primary)">📝 新增知识</div>
-            ${(report.knowledge_recorded || '').split('\n').filter(l=>l.trim()).length > 0 
-                ? `<ul class="detail-list">${(report.knowledge_recorded || '').split('\n').filter(l=>l.trim()).map(k => 
+            ${toList(report.knowledge_recorded).length > 0 
+                ? `<ul class="detail-list">${toList(report.knowledge_recorded).map(k => 
                     `<li>${k}</li>`
                 ).join('')}</ul>`
                 : '<div style="color:var(--text-muted);font-size:0.85rem">无</div>'}
@@ -304,8 +323,8 @@ function showReportDetail(id, report) {
 
         <div style="margin-bottom:16px">
             <div style="font-weight:600;margin-bottom:8px;color:var(--text-primary)">💡 经验分享</div>
-            ${(report.experience_shared || []).length > 0 
-                ? `<ul class="detail-list">${(report.experience_shared || []).map(e => 
+            ${toList(report.experience_shared).length > 0 
+                ? `<ul class="detail-list">${toList(report.experience_shared).map(e => 
                     `<li>${typeof e === 'string' ? e : (e.title || e.name || JSON.stringify(e))}</li>`
                 ).join('')}</ul>`
                 : '<div style="color:var(--text-muted);font-size:0.85rem">无</div>'}
@@ -330,6 +349,7 @@ async function initPage() {
         const projectSel = document.querySelector('#filter-project');
         projectSel.innerHTML = '<option value="">全部项目</option>' +
             projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+        initProjectFilter(projectSel, typeof onProjectFilterChange === 'function' ? onProjectFilterChange : null);
     } catch (err) { console.error(err); }
 
     // 加载 OpenClaw 筛选列表

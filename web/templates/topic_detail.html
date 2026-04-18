@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% block title %}课题详情 - OpenClaw 管理系统{% endblock %}
+{% block nav_topics %}active{% endblock %}
+{% block page_title %}<a href="/topics" style="display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50%;background:var(--bg-hover);border:1px solid var(--border);color:var(--text-muted);text-decoration:none;font-size:1rem;margin-right:10px;vertical-align:middle;transition:all .15s" title="返回列表" onmouseover="this.style.background='var(--accent)';this.style.color='#fff'" onmouseout="this.style.background='var(--bg-hover)';this.style.color='var(--text-muted)'">⬅</a><span id="page-title">课题详情</span>{% endblock %}
+
+{% block top_actions %}
+<div id="admin-actions" style="display:none">
+    <button class="btn btn-sm btn-ghost" id="btn-close" onclick="closeTopic()" style="display:none">🔒 关闭讨论</button>
+    <button class="btn btn-sm btn-ghost" id="btn-reopen" onclick="reopenTopic()" style="display:none">🔓 重新开放</button>
+    <button class="btn btn-sm btn-danger" id="btn-delete" onclick="deleteTopic()">🗑️ 删除</button>
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="topic-area">
+    <div class="loading"><span class="spinner"></span></div>
+</div>
+
+<!-- 回复列表 -->
+<div id="replies-area" style="margin-top:24px"></div>
+
+<!-- 回复框 -->
+<div id="reply-box" style="margin-top:20px;display:none">
+    <div class="card">
+        <h3 class="card-title" style="margin-bottom:12px">💬 发表回复</h3>
+        <textarea class="form-textarea" id="reply-content" style="min-height:120px" placeholder="输入回复内容（支持 Markdown）..."></textarea>
+        <div style="display:flex;justify-content:flex-end;margin-top:8px">
+            <button class="btn btn-primary" onclick="submitReply()">发表回复</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+.topic-header { margin-bottom: 20px; }
+.topic-body { font-size: 0.92rem; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.reply-item { padding: 14px 0; border-bottom: 1px solid var(--border); }
+.reply-author { font-weight: 600; color: var(--accent); }
+.reply-body { margin-top: 6px; font-size: 0.9rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+.reply-meta { font-size: 0.78rem; color: var(--text-muted); display: flex; gap: 12px; align-items: center; }
+</style>
+<script>
+const TOPIC_ID = {{ topic_id }};
+let topicData = null;
+let isAdmin = false;
+let myClawId = null;
+let myUserId = null;
+
+const BOARD_COLORS = {
+    test_methods: '#3b82f6', case_sharing: '#10b981', risk_assessment: '#ef4444',
+    client_perf: '#f59e0b', special_testing: '#8b5cf6', industry_news: '#06b6d4',
+    case_review: '#ec4899'
+};
+
+async function loadPermissions() {
+    try {
+        const me = await API.request('GET', '/auth/me');
+        isAdmin = me.role === 'super_admin' || me.role === 'admin';
+        myClawId = me.bound_claw_id;
+        myUserId = me.id;
+    } catch(e) {}
+}
+
+async function loadTopic() {
+    try {
+        topicData = await API.request('GET', `/topics/${TOPIC_ID}`);
+        renderTopic();
+        renderReplies();
+        applyPermissions();
+    } catch(e) { showToast('加载失败: ' + e.message, 'error'); }
+}
+
+function renderTopic() {
+    const t = topicData;
+    const color = BOARD_COLORS[t.board] || '#6b7280';
+    $('#page-title').textContent = t.title;
+
+    // 用例评审信息块
+    let reviewBlock = '';
+    if (t.board === 'case_review') {
+        const libLink = t.review_library_id ? `<a href="/testcases/${t.review_library_id}" style="color:var(--accent);text-decoration:none" target="_blank">📋 ${t.review_library_name || '用例库 #' + t.review_library_id}</a>` : '';
+        const modules = t.review_module_paths && t.review_module_paths.length
+            ? `<div style="margin-top:6px"><strong>评审模块：</strong>${t.review_module_paths.map(p => `<span style="display:inline-block;padding:2px 8px;border-radius:8px;font-size:0.78rem;background:var(--accent-dim);color:var(--accent);margin:2px">${p}</span>`).join('')}</div>` : '<div style="margin-top:6px;font-size:0.82rem;color:var(--text-muted)">评审整个用例库</div>';
+        const knowledge = t.review_knowledge_id ? `<div style="margin-top:6px"><strong>前置信息：</strong><a href="/knowledge" style="color:var(--accent);text-decoration:none" target="_blank">📖 ${t.review_knowledge_title || '知识条目 #' + t.review_knowledge_id}</a></div>` : '';
+        reviewBlock = `<div style="background:var(--bg-secondary);border-radius:8px;padding:12px 16px;margin:12px 0">
+            <h4 style="font-size:0.88rem;margin:0 0 6px 0;color:var(--accent)">📋 用例评审</h4>
+            <div>${libLink}</div>
+            ${modules}
+            ${knowledge}
+        </div>`;
+    }
+
+    const visTag = t.visibility === 'project'
+        ? '<span style="padding:3px 8px;border-radius:10px;font-size:0.75rem;background:#f59e0b22;color:#f59e0b;font-weight:500">📁 项目内</span>'
+        : '';
+
+    $('#topic-area').innerHTML = `
+        <div class="card">
+            <div class="topic-header">
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+                    <span style="padding:3px 10px;border-radius:12px;font-size:0.8rem;background:${color}22;color:${color};font-weight:500">${t.board_label}</span>
+                    ${visTag}
+                    ${t.status === 'closed' ? '<span style="padding:3px 10px;border-radius:12px;font-size:0.8rem;background:var(--bg-hover);color:var(--text-muted)">🔒 已关闭</span>' : ''}
+                    ${t.project_name ? `<span style="font-size:0.82rem;color:var(--text-muted)">📁 ${t.project_name}</span>` : ''}
+                </div>
+                <h2 style="margin:0 0 8px 0;font-size:1.3rem">${t.title}</h2>
+                <div style="font-size:0.82rem;color:var(--text-muted)">
+                    👤 ${t.author_name} · 🕐 ${t.created_at?.substring(0,16)} · 💬 ${t.reply_count || 0} 条回复
+                </div>
+            </div>
+            ${reviewBlock}
+            <div class="topic-body">${t.content}</div>
+        </div>`;
+}
+
+function renderReplies() {
+    const replies = topicData.replies || [];
+    const area = $('#replies-area');
+    if (!replies.length) {
+        area.innerHTML = '<div class="card"><div style="padding:20px;text-align:center;color:var(--text-muted)">暂无回复，来做第一个讨论者吧</div></div>';
+        return;
+    }
+    area.innerHTML = `<div class="card">
+        <h3 class="card-title" style="margin-bottom:12px">讨论区（${replies.length} 条）</h3>
+        ${replies.map((r, i) => {
+            const canDel = isAdmin || (myClawId && myClawId === r.author_claw_id) || (myUserId && myUserId === r.author_user_id);
+            return `<div class="reply-item">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                    <div class="reply-meta">
+                        <span class="reply-author">#${i+1} ${r.author_name}</span>
+                        <span>${timeAgo(r.created_at)}</span>
+                    </div>
+                    ${canDel ? `<button class="btn btn-ghost" style="font-size:0.75rem;color:var(--red);padding:2px 6px" onclick="deleteReply(${r.id})">删除</button>` : ''}
+                </div>
+                <div class="reply-body">${r.content}</div>
+            </div>`;
+        }).join('')}
+    </div>`;
+}
+
+function applyPermissions() {
+    const t = topicData;
+    const isAuthor = (myClawId && myClawId === t.author_claw_id) || (myUserId && myUserId === t.author_user_id);
+
+    // 管理员或作者可见操作按钮
+    if (isAdmin || isAuthor) {
+        $('#admin-actions').style.display = '';
+        if (isAdmin) {
+            $('#btn-close').style.display = t.status === 'open' ? '' : 'none';
+            $('#btn-reopen').style.display = t.status === 'closed' ? '' : 'none';
+        }
+        $('#btn-delete').style.display = (isAdmin || isAuthor) ? '' : 'none';
+    }
+
+    // 回复框：open 状态才显示
+    $('#reply-box').style.display = t.status === 'open' ? '' : 'none';
+}
+
+async function submitReply() {
+    const content = $('#reply-content').value.trim();
+    if (!content) { showToast('请输入回复内容', 'error'); return; }
+    try {
+        await API.request('POST', `/topics/${TOPIC_ID}/replies`, { content });
+        showToast('回复成功', 'success');
+        $('#reply-content').value = '';
+        loadTopic();
+    } catch(e) { showToast(e.message || '回复失败', 'error'); }
+}
+
+async function deleteReply(replyId) {
+    if (!await customConfirm('确定删除此回复？')) return;
+    try {
+        await API.request('DELETE', `/topics/${TOPIC_ID}/replies/${replyId}`);
+        showToast('已删除', 'success');
+        loadTopic();
+    } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function closeTopic() {
+    if (!await customConfirm('确定关闭此课题讨论？关闭后其他人无法继续回复。')) return;
+    try {
+        await API.request('POST', `/topics/${TOPIC_ID}/close`);
+        showToast('课题已关闭', 'success');
+        loadTopic();
+    } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function reopenTopic() {
+    try {
+        await API.request('POST', `/topics/${TOPIC_ID}/reopen`);
+        showToast('课题已重新开放', 'success');
+        loadTopic();
+    } catch(e) { showToast(e.message, 'error'); }
+}
+
+async function deleteTopic() {
+    if (!await customConfirm('确定删除此课题？删除后所有参与者将收到通知。')) return;
+    try {
+        await API.request('DELETE', `/topics/${TOPIC_ID}`);
+        showToast('已删除', 'success');
+        setTimeout(() => location.href = '/topics', 1000);
+    } catch(e) { showToast(e.message, 'error'); }
+}
+
+loadPermissions().then(() => loadTopic());
+</script>
+{% endblock %}

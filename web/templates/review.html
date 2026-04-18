@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}评审中心 - OpenClaw 管理系统{% endblock %}
+{% block nav_review %}active{% endblock %}
+{% block page_title %}📋 评审中心{% endblock %}
+
+{% block content %}
+<div class="tab-bar">
+    <div class="tab-item active" data-tab="rules" onclick="switchTab('rules')">Rules <span id="count-rules" class="tag tag-yellow" style="margin-left:4px">0</span></div>
+    <div class="tab-item" data-tab="skills" onclick="switchTab('skills')">Skills <span id="count-skills" class="tag tag-yellow" style="margin-left:4px">0</span></div>
+    <div class="tab-item" data-tab="knowledge" onclick="switchTab('knowledge')">知识条目 <span id="count-knowledge" class="tag tag-yellow" style="margin-left:4px">0</span></div>
+</div>
+
+<div id="tab-rules" class="tab-content">
+    <div id="rules-list"><div class="loading"><span class="spinner"></span></div></div>
+</div>
+<div id="tab-skills" class="tab-content" style="display:none">
+    <div id="skills-list"><div class="loading"><span class="spinner"></span></div></div>
+</div>
+<div id="tab-knowledge" class="tab-content" style="display:none">
+    <div id="knowledge-list"><div class="loading"><span class="spinner"></span></div></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentTab = 'rules';
+
+function switchTab(tab) {
+    currentTab = tab;
+    $$('.tab-item').forEach(t => t.classList.remove('active'));
+    $(`.tab-item[data-tab="${tab}"]`).classList.add('active');
+    $$('.tab-content').forEach(c => c.style.display = 'none');
+    $(`#tab-${tab}`).style.display = '';
+}
+
+function renderReviewCard(item, type) {
+    return `
+    <div class="skill-card" style="margin-bottom:12px">
+        <div class="skill-card-header">
+            <span class="skill-name">${item.display_name || item.title || item.name}</span>
+            <span class="tag tag-yellow">待评审</span>
+            ${item.category ? `<span class="tag tag-accent">${item.category}</span>` : ''}
+        </div>
+        <div class="skill-desc">${item.description || ''}</div>
+        <div style="margin-top:8px;font-size:0.82rem;color:var(--text-muted)">
+            提交人: ${item.created_by || 'system'} · ${item.created_at ? timeAgo(item.created_at) : ''}
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px">
+            <button class="btn btn-primary btn-sm" onclick="reviewAction('${type}', ${item.id}, 'approved')">✅ 通过</button>
+            <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="reviewAction('${type}', ${item.id}, 'rejected')">❌ 废弃</button>
+        </div>
+    </div>`;
+}
+
+async function loadPendingItems() {
+    try {
+        const [rules, skills, knowledge] = await Promise.all([
+            API.request('GET', '/rules?include_admin=true&review_status=pending'),
+            API.request('GET', '/skills?review_status=pending'),
+            API.request('GET', '/knowledge?status=pending_review').catch(() => []),
+        ]);
+
+        const pendingRules = Array.isArray(rules) ? rules.filter(r => r.review_status === 'pending') : [];
+        const pendingSkills = Array.isArray(skills) ? skills.filter(s => s.review_status === 'pending') : [];
+        const pendingKnowledge = Array.isArray(knowledge) ? knowledge.filter(k => k.status === 'pending_review') : [];
+
+        $('#count-rules').textContent = pendingRules.length;
+        $('#count-skills').textContent = pendingSkills.length;
+        $('#count-knowledge').textContent = pendingKnowledge.length;
+
+        $('#rules-list').innerHTML = pendingRules.length
+            ? pendingRules.map(r => renderReviewCard(r, 'rule')).join('')
+            : '<div class="empty-state"><div class="empty-state-text">暂无待评审的 Rules</div></div>';
+
+        $('#skills-list').innerHTML = pendingSkills.length
+            ? pendingSkills.map(s => renderReviewCard(s, 'skill')).join('')
+            : '<div class="empty-state"><div class="empty-state-text">暂无待评审的 Skills</div></div>';
+
+        $('#knowledge-list').innerHTML = pendingKnowledge.length
+            ? pendingKnowledge.map(k => renderReviewCard(k, 'knowledge')).join('')
+            : '<div class="empty-state"><div class="empty-state-text">暂无待评审的知识条目</div></div>';
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+async function reviewAction(type, id, status) {
+    try {
+        if (type === 'rule') {
+            await API.request('PUT', `/rules/${id}`, { review_status: status });
+        } else if (type === 'skill') {
+            await API.request('PUT', `/skills/${id}`, { review_status: status });
+        } else if (type === 'knowledge') {
+            const action = status === 'approved' ? 'approved' : 'rejected';
+            await API.post(`/knowledge/${id}/review`, { action, notes: '' });
+        }
+        showToast(status === 'approved' ? '已通过' : '已废弃', 'success');
+        loadPendingItems();
+    } catch (err) {
+        showToast('操作失败: ' + err.message, 'error');
+    }
+}
+
+// 权限检查：等 currentUser 异步加载完成后再判断
+function checkReviewPermission() {
+    if (!currentUser || (currentUser.role !== 'super_admin' && currentUser.role !== 'admin')) {
+        document.querySelector('.tab-bar').style.display = 'none';
+        $$('.tab-content').forEach(c => c.style.display = 'none');
+        const msg = document.createElement('div');
+        msg.className = 'empty-state';
+        msg.style.padding = '60px 20px';
+        msg.innerHTML = '<div class="empty-state-icon">🔒</div><div class="empty-state-text">仅管理员可访问评审中心</div>';
+        document.querySelector('.content-area').appendChild(msg);
+    } else {
+        loadPendingItems();
+    }
+}
+
+// 轮询等待 currentUser 加载（base.html 中异步获取）
+if (currentUser) {
+    checkReviewPermission();
+} else {
+    const _check = setInterval(() => {
+        if (currentUser) { clearInterval(_check); checkReviewPermission(); }
+    }, 100);
+    setTimeout(() => clearInterval(_check), 10000);
+}
+</script>
+{% endblock %}

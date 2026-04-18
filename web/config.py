@@ -24,6 +24,11 @@ class Config:
         SQLALCHEMY_DATABASE_URI = 'sqlite:///openclaw.db'
 
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # 连接池配置：SSE长连接 + 多worker下默认5+10容易耗尽
+    SQLALCHEMY_POOL_SIZE = 20
+    SQLALCHEMY_POOL_RECYCLE = 3600  # 1小时回收连接，避免MySQL gone away
+    SQLALCHEMY_POOL_PRE_PING = True  # 连接前检测可用性
+    SQLALCHEMY_MAX_OVERFLOW = 30  # 超出pool_size后最多再创建30个连接
 
     # Memos
     MEMOS_URL = os.getenv('MEMOS_URL', 'http://9.134.11.169:5230')

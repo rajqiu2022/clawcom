@@ -19,6 +19,8 @@
     <div class="tab-item" data-tab="global" onclick="filterRules('global')">通用</div>
     <div class="tab-item" data-tab="admin" onclick="filterRules('admin')">管理员</div>
     <div class="tab-item" data-tab="scoped" onclick="filterRules('scoped')">指定范围</div>
+    <div class="tab-item" data-tab="pending" onclick="filterRules('pending')" style="color:var(--yellow,#f59e0b);display:none" id="tab-pending">&#x23F3; 待审核</div>
+    <div class="tab-item" data-tab="revise" onclick="filterRules('revise')" style="color:var(--orange,#f97316);display:none" id="tab-revise">&#x1F4DD; 待修改</div>
 </div>
 
 <div class="skill-grid" id="rules-grid">
@@ -119,11 +121,12 @@
 <!-- Rule 内容预览弹窗 -->
 <div class="modal-overlay" id="preview-modal">
     <div class="modal" style="max-width:800px;max-height:80vh;display:flex;flex-direction:column">
-        <h2 class="modal-title">Rule 内容预览</h2>
+        <h2 class="modal-title" id="preview-title">Rule 内容预览</h2>
         <div style="flex:1;overflow-y:auto;padding:10px 0">
+            <div id="preview-meta" style="margin-bottom:10px"></div>
             <pre id="preview-content" style="white-space:pre-wrap;font-size:0.9rem;line-height:1.6"></pre>
         </div>
-        <div class="modal-actions">
+        <div class="modal-actions" id="preview-actions">
             <button class="btn btn-ghost" onclick="closePreviewModal()">关闭</button>
         </div>
     </div>
@@ -138,15 +141,42 @@ let allModules = [];
 
 function _canEditRule(r) {
     if (!currentUser) return false;
-    if (currentUser.role === 'super_admin') return true;
+    if (currentUser.role === 'super_admin' || currentUser.role === 'admin') return true;
     if (r.created_by === currentUser.username) return true;
-    if (currentUser.role === 'admin') {
-        const managed = currentUser.managed_projects || [];
-        const resPrj = r.applicable_projects || [];
-        if (managed.length && resPrj.length && resPrj.some(p => managed.includes(p))) return true;
-    }
+    if (currentUser.bound_claw_name && r.created_by === currentUser.bound_claw_name) return true;
     return false;
 }
+function _canDeleteRule(r) {
+    if (!currentUser) return false;
+    if (currentUser.role === 'super_admin' || currentUser.role === 'admin') return true;
+    if (r.created_by === currentUser.username) return true;
+    if (currentUser.bound_claw_name && r.created_by === currentUser.bound_claw_name) return true;
+    return false;
+}
+
+function _isAdmin() {
+    return currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'admin');
+}
+
+function reviewStatusTag(r) {
+    if (!r.review_status || r.review_status === 'approved') return '';
+    if (r.review_status === 'pending') return '<span class="tag" style="background:#f59e0b;color:#fff;font-weight:600">待审核</span>';
+    if (r.review_status === 'revise') return '<span class="tag" style="background:#f97316;color:#fff;font-weight:600">待修改</span>';
+    if (r.review_status === 'rejected') return '<span class="tag" style="background:#6b7280;color:#fff;font-weight:600">已废弃</span>';
+    return '';
+}
+
+async function changeRuleCategory(ruleId, newCategory) {
+    try {
+        await API.request('PUT', `/rules/${ruleId}`, { category: newCategory });
+        const r = allRules.find(x => x.id === ruleId);
+        if (r) r.category = newCategory;
+        renderRules();
+    } catch (err) {
+        showToast('分类更新失败: ' + err.message, 'error');
+    }
+}
+
 let currentFilter = 'all';
 
 async function loadRules() {
@@ -231,8 +261,13 @@ function scopeTag(r) {
 }
 
 function categoryTag(r) {
-    const map = { standard: ['tag-accent', '标准'], custom: ['tag-green', '自定义'], ai_generated: ['tag-orange', 'AI生成'] };
-    const [cls, label] = map[r.category] || ['tag-blue', r.category];
+    const map = {
+        standard: ['tag-accent', '通用'], hub_system: ['tag-blue', 'Hub系统'],
+        project: ['tag-green', '项目'], business_test: ['tag-orange', '业务测试'],
+        special_test: ['tag-red', '专项测试'], evolved: ['tag-purple', '自动进化'],
+        custom: ['tag-green', '自定义'], ai_generated: ['tag-orange', 'AI生成']
+    };
+    const [cls, label] = map[r.category] || ['tag-blue', r.category || '通用'];
     return `<span class="tag ${cls}">${label}</span>`;
 }
 
@@ -242,6 +277,8 @@ function renderRules() {
     else if (currentFilter === 'global') filtered = filtered.filter(r => r.scope === 'global');
     else if (currentFilter === 'admin') filtered = filtered.filter(r => r.scope === 'admin');
     else if (currentFilter === 'scoped') filtered = filtered.filter(r => r.scope === 'scoped' || r.scope === 'project' || r.scope === 'module');
+    else if (currentFilter === 'pending') filtered = filtered.filter(r => r.review_status === 'pending');
+    else if (currentFilter === 'revise') filtered = filtered.filter(r => r.review_status === 'revise');
 
     const grid = $('#rules-grid');
     if (filtered.length === 0) {
@@ -253,9 +290,22 @@ function renderRules() {
         <div class="skill-card" onclick="previewRule(${r.id})">
             <div class="skill-card-header">
                 <span class="skill-name">${r.display_name}</span>
+                <span style="font-size:0.72rem;color:var(--text-muted);margin-left:6px">#${r.id}</span>
                 ${categoryTag(r)}
+                ${reviewStatusTag(r)}
             </div>
+            ${_canEditRule(r) ? `<div style="margin-top:6px" onclick="event.stopPropagation()">
+                <select class="form-select" style="width:100%;padding:3px 8px;font-size:0.75rem;height:26px;border-radius:4px" onchange="changeRuleCategory(${r.id},this.value)">
+                    <option value="standard" ${r.category==='standard'?'selected':''}>通用</option>
+                    <option value="hub_system" ${r.category==='hub_system'?'selected':''}>Hub系统</option>
+                    <option value="project" ${r.category==='project'?'selected':''}>项目</option>
+                    <option value="business_test" ${r.category==='business_test'?'selected':''}>业务测试</option>
+                    <option value="special_test" ${r.category==='special_test'?'selected':''}>专项测试</option>
+                    <option value="evolved" ${r.category==='evolved'?'selected':''}>自动进化</option>
+                </select>
+            </div>` : ''}
             <div style="margin-top:4px">${scopeTag(r)}</div>
+            ${r.review_comment ? `<div style="margin-top:4px;font-size:0.78rem;color:var(--orange,#f97316);padding:4px 8px;background:rgba(249,115,22,0.08);border-radius:4px">📝 审核意见: ${escapeHtml(r.review_comment)}</div>` : ''}
             <div class="skill-desc">${r.description || ''}</div>
             <div style="margin-top:8px;font-size:0.78rem;color:var(--text-muted);display:flex;justify-content:space-between;align-items:center">
                 <span>${r.created_by || 'system'} · ${r.created_at ? timeAgo(r.created_at) : ''}</span>
@@ -263,10 +313,12 @@ function renderRules() {
             </div>
             <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
                 <span style="font-size:0.78rem;color:var(--text-muted)">${r.name}</span>
-                <div style="display:flex;gap:8px">
-                    ${_canEditRule(r) ? `<button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#e67e22;color:#fff;border:none;border-radius:4px" onclick="event.stopPropagation();openAssignRuleModal(${r.id})">分配</button>` : ''}
-                    ${_canEditRule(r) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="event.stopPropagation();editRule(${r.id})">编辑</button>
-                    <button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem;color:var(--red)" onclick="event.stopPropagation();deleteRule(${r.id})">删除</button>` : ''}
+                <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end" onclick="event.stopPropagation()">
+                    ${r.review_status === 'pending' && _isAdmin() ? `<button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#22c55e;color:#fff;border:none;border-radius:4px" onclick="reviewRule(${r.id},'approved')">通过</button><button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#f97316;color:#fff;border:none;border-radius:4px" onclick="reviewRule(${r.id},'revise')">打回</button><button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#6b7280;color:#fff;border:none;border-radius:4px" onclick="reviewRule(${r.id},'rejected')">废弃</button>` : ''}
+                    ${r.review_status === 'revise' && _isAdmin() ? `<button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#22c55e;color:#fff;border:none;border-radius:4px" onclick="reviewRule(${r.id},'approved')">通过</button><button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#6b7280;color:#fff;border:none;border-radius:4px" onclick="reviewRule(${r.id},'rejected')">废弃</button>` : ''}
+                    ${_canEditRule(r) && r.review_status === 'approved' ? `<button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#e67e22;color:#fff;border:none;border-radius:4px" onclick="openAssignRuleModal(${r.id})">分配</button>` : ''}
+                    ${(r.review_status === 'approved' || r.review_status === 'revise') && _canEditRule(r) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="editRule(${r.id})">编辑</button>` : ''}
+                    ${r.review_status !== 'pending' && _canDeleteRule(r) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem;color:var(--red)" onclick="deleteRule(${r.id})">删除</button>` : ''}
                 </div>
             </div>
         </div>
@@ -352,6 +404,10 @@ $('#create-form').addEventListener('submit', async e => {
 
     data.is_standard = $('#rule-is-standard').checked;
     delete data.edit_id;
+    // 创建时自动填入作者
+    if (!editId && (!data.created_by || !data.created_by.trim())) {
+        data.created_by = currentUser ? (currentUser.bound_claw_name || currentUser.display_name || currentUser.username) : 'system';
+    }
 
     try {
         if (editId) {
@@ -377,15 +433,12 @@ async function deleteRule(id) {
         `确定要删除规范「${name}」吗？` +
         (usedBy > 0 ? `<br><br><span style="color:var(--red)">⚠️ 当前有 ${usedBy} 个 OpenClaw 正在使用此规范</span>` : '') +
         `<br><br><span style="font-size:0.82rem;color:var(--text-muted)">` +
-        `删除后系统会通知相关 OpenClaw，但不保证能完全清除已同步到本地的副本。<br>` +
-        `建议删除前先与对应的 OpenClaw 确认。</span>`
+        `删除后规范将被隐藏，OpenClaw 无法搜索安装。<br>安装关联将被禁用（非删除）。</span>`
     )) return;
-
-    if (!await customConfirm('⚠️ 二次确认：此操作不可撤销，确定删除？')) return;
 
     try {
         await API.request('DELETE', `/rules/${id}`);
-        showToast('Rule 已删除，已通知相关 OpenClaw 同步', 'success');
+        showToast('Rule 已删除（隐藏），OpenClaw 将无法搜索安装', 'success');
         loadRules();
     } catch (err) {
         showToast('删除失败: ' + err.message, 'error');
@@ -395,7 +448,27 @@ async function deleteRule(id) {
 function previewRule(id) {
     const rule = allRules.find(r => r.id === id);
     if (!rule) return;
+    $('#preview-title').textContent = rule.display_name;
     $('#preview-content').textContent = rule.content_template || rule.description || '(无内容)';
+    // 显示审核状态和意见
+    let metaHtml = '';
+    if (rule.review_status === 'pending') {
+        metaHtml += '<div style="color:var(--yellow,#f59e0b);font-size:0.85rem;padding:6px 10px;background:rgba(245,158,11,0.08);border-radius:4px;margin-bottom:8px">⏳ 此 Rule 待管理员审核，审核通过后才能进入市场</div>';
+    } else if (rule.review_status === 'revise') {
+        metaHtml += '<div style="color:var(--orange,#f97316);font-size:0.85rem;padding:6px 10px;background:rgba(249,115,22,0.08);border-radius:4px;margin-bottom:8px">📝 此 Rule 需要修改后重新提交，修改后将自动重新进入待评审状态</div>';
+    }
+    if (rule.review_comment) {
+        metaHtml += `<div style="color:var(--orange,#f97316);font-size:0.82rem;padding:4px 10px;background:rgba(249,115,22,0.08);border-radius:4px;margin-bottom:8px">审核意见: ${escapeHtml(rule.review_comment)}</div>`;
+    }
+    $('#preview-meta').innerHTML = metaHtml;
+    // 审核按钮
+    const canReview = _isAdmin() && (rule.review_status === 'pending' || rule.review_status === 'revise');
+    const canEdit = _canEditRule(rule) && rule.review_status !== 'pending';
+    $('#preview-actions').innerHTML = `
+        <button class="btn btn-ghost" onclick="closePreviewModal()">关闭</button>
+        ${canReview ? `<button class="btn" style="background:#22c55e;color:#fff" onclick="closePreviewModal();reviewRule(${rule.id},'approved')">通过</button><button class="btn" style="background:#f97316;color:#fff" onclick="closePreviewModal();reviewRule(${rule.id},'revise')">打回</button><button class="btn" style="background:#6b7280;color:#fff" onclick="closePreviewModal();reviewRule(${rule.id},'rejected')">废弃</button>` : ''}
+        ${canReview ? '' : canEdit ? `<button class="btn btn-primary" onclick="closePreviewModal();editRule(${rule.id})">编辑</button>` : ''}
+    `;
     $('#preview-modal').classList.add('active');
 }
 function closePreviewModal() { $('#preview-modal').classList.remove('active'); }
@@ -436,6 +509,48 @@ $('#ai-generate-form').addEventListener('submit', async e => {
 
 loadRules();
 
+// 待审核/待修改标签仅管理员可见
+if (_isAdmin()) {
+    const tabPending = document.getElementById('tab-pending');
+    const tabRevise = document.getElementById('tab-revise');
+    if (tabPending) tabPending.style.display = '';
+    if (tabRevise) tabRevise.style.display = '';
+}
+
+// 审核操作（调用专用审核接口，支持通过/打回/废弃+审核意见）
+async function reviewRule(id, status) {
+    const statusLabels = { approved: '通过', revise: '打回待修改', rejected: '废弃' };
+    const statusLabel = statusLabels[status] || status;
+    const r = allRules.find(x => x.id === id);
+    const name = r ? r.display_name : 'Rule';
+    
+    // 打回或废弃时，弹出审核意见输入框
+    let reviewComment = '';
+    if (status === 'revise' || status === 'rejected') {
+        reviewComment = await customPrompt(`请输入审核意见（${statusLabel} Rule「${name}」）：`, r ? (r.review_comment || '') : '');
+        if (reviewComment === null) return; // 用户取消
+    } else {
+        if (!await customConfirm(`确定要${statusLabel} Rule「${name}」吗？`)) return;
+    }
+    
+    try {
+        await API.request('POST', `/rules/${id}/review`, { review_status: status, review_comment: reviewComment || '' });
+        showToast(`Rule 已${statusLabel}`, 'success');
+        loadRules();
+    } catch (err) {
+        if (err.message && err.message.includes('403')) {
+            showToast('只有管理员可以审核 Rule', 'error');
+        } else {
+            showToast('操作失败: ' + err.message, 'error');
+        }
+    }
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
 // ========== 分配到 OpenClaw ==========
 let assignRuleId = null;
 
@@ -449,13 +564,11 @@ async function openAssignRuleModal(ruleId) {
 
     $('#assign-claw-list').innerHTML = claws.map(c => {
         const isInstalled = installed.includes(c.name);
-        return `<label style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:6px;cursor:pointer;border:1px solid var(--border);${isInstalled ? 'background:var(--bg-success,#f0fff4)' : ''}">
-            <input type="checkbox" value="${c.id}" data-name="${c.name}" ${isInstalled ? 'checked disabled' : ''}>
-            <span style="flex:1">
-                <strong>${c.name}</strong>
-                <span style="font-size:0.82rem;color:var(--text-muted);margin-left:6px">${c.role_title || c.role || ''}</span>
-            </span>
-            ${isInstalled ? '<span class="tag tag-green" style="font-size:0.75rem">已安装</span>' : ''}
+        return `<label style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:6px;cursor:pointer;border:1px solid ${isInstalled ? 'var(--green,#22c55e)' : 'var(--border)'};background:${isInstalled ? 'rgba(34,197,94,0.08)' : 'var(--bg-card,transparent)'};transition:all .15s">
+            <input type="checkbox" value="${c.id}" data-name="${c.name}" ${isInstalled ? 'checked disabled' : ''} style="width:16px;height:16px;accent-color:var(--accent)">
+            <span style="width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:0.78rem;font-weight:600;flex-shrink:0">${(c.avatar || c.name[0])}</span>
+            <span style="flex:1;font-size:0.88rem;font-weight:500">${c.name}<span style="font-size:0.78rem;color:var(--text-muted);margin-left:6px;font-weight:400">${c.role_title || c.role || ''}</span></span>
+            ${isInstalled ? '<span class="tag tag-green" style="font-size:0.72rem;padding:2px 8px">已安装</span>' : ''}
         </label>`;
     }).join('');
 
@@ -495,7 +608,7 @@ async function submitAssignRule() {
         </div>
         <div style="padding:16px;max-height:400px;overflow-y:auto">
             <div style="margin-bottom:12px;font-size:0.88rem;color:var(--text-muted)">选择要安装此 Rule 的 OpenClaw（已安装的不可取消勾选）：</div>
-            <div id="assign-claw-list" style="display:flex;flex-direction:column;gap:8px"></div>
+            <div id="assign-claw-list" style="display:flex;flex-direction:column;gap:6px"></div>
         </div>
         <div class="modal-actions" style="padding:12px 16px;border-top:1px solid var(--border)">
             <button class="btn btn-ghost" onclick="closeAssignModal()">取消</button>

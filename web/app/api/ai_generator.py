@@ -21,9 +21,10 @@ def call_llm(prompt, system_prompt=None, model=None):
     from sqlalchemy import text
 
     try:
-        rows = dict(db.session.execute(
+        result = db.session.execute(
             text("SELECT config_key, config_value FROM system_config")
-        ).fetchall())
+        ).fetchall()
+        rows = {r[0]: r[1] for r in result}
 
         provider = rows.get('llm_provider', 'doubao')
         llm_model = model or rows.get('llm_model', 'doubao-pro-32k')
@@ -104,12 +105,12 @@ def generate_rule():
     description = data['description']
     scope = data.get('scope', 'global')
 
-    # 生成 name
+    # 生成 name (only ASCII characters, ensure uniqueness)
     name = data.get('name')
     if not name:
-        # 从描述中提取关键词生成 name
-        name = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fa5]', '_', description)[:50]
-        name = f"rule_{name.lower()}"
+        import time
+        slug = re.sub(r'[^a-zA-Z0-9]', '_', description)[:30].strip('_')
+        name = f"rule_{slug.lower()}_{int(time.time())}"
 
     # 调用 AI 生成
     prompt = f"""请为以下需求生成一个 OpenClaw 工作规范：
@@ -133,8 +134,12 @@ def generate_rule():
         scope=scope,
         content_template=content,
     )
-    db.session.add(rule)
-    db.session.commit()
+    try:
+        db.session.add(rule)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Rule 保存失败: {str(e)}'}), 500
 
     return jsonify({
         'id': rule.id,
@@ -197,11 +202,12 @@ def generate_skill():
     description = data['description']
     scope = data.get('scope', 'global')
 
-    # 生成 name
+    # 生成 name (only ASCII characters, ensure uniqueness)
     name = data.get('name')
     if not name:
-        name = re.sub(r'[^a-zA-Z0-9\u4e00-\u9fa5]', '_', description)[:50]
-        name = f"skill_{name.lower()}"
+        import time
+        slug = re.sub(r'[^a-zA-Z0-9]', '_', description)[:30].strip('_')
+        name = f"skill_{slug.lower()}_{int(time.time())}"
 
     # 调用 AI 生成
     prompt = f"""请为以下需求生成一个 OpenClaw 技能：
@@ -225,8 +231,12 @@ def generate_skill():
         scope=scope,
         template_content=content,
     )
-    db.session.add(skill)
-    db.session.commit()
+    try:
+        db.session.add(skill)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Skill 保存失败: {str(e)}'}), 500
 
     return jsonify({
         'id': skill.id,

@@ -87,7 +87,7 @@ def heartbeat(agent_id, agent=None):
     if agent.id != agent_id:
         return jsonify({'error': '无权操作'}), 403
 
-    agent.last_heartbeat = datetime.utcnow()
+    agent.last_activity = datetime.now()
     agent.status = 'online'
     db.session.commit()
 
@@ -146,12 +146,12 @@ def send_message(agent=None):
     ).first()
 
     if conv:
-        conv.last_message_at = datetime.utcnow()
+        conv.last_message_at = datetime.now()
     else:
         conv = Conversation(
             agent_a_id=agent.id,
             agent_b_id=receiver_id,
-            last_message_at=datetime.utcnow(),
+            last_message_at=datetime.now(),
         )
         db.session.add(conv)
 
@@ -193,7 +193,7 @@ def mark_read(msg_id, agent=None):
         return jsonify({'error': '无权操作'}), 403
 
     msg.status = 'read'
-    msg.read_at = datetime.utcnow()
+    msg.read_at = datetime.now()
     db.session.commit()
 
     return jsonify({'message': '已标记为已读'})
@@ -274,16 +274,23 @@ def get_stats(agent=None):
 
 @agent_hub_bp.route('/web/stats', methods=['GET'])
 def web_stats():
-    """Web 管理端 - 通信中心统计概览"""
-    total_agents = Agent.query.count()
-    online_agents = Agent.query.filter_by(status='online').count()
+    """Web 管理端 - 通信中心统计概览（以 OpenClawInstance 为准）"""
+    from app.api.skills import _get_current_user
+    user = _get_current_user()
+    claw_query = OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted')
+    if not user or user.role not in ('super_admin', 'admin'):
+        claw_query = claw_query.filter(OpenClawInstance.role != 'admin')
+    claws = claw_query.all()
+
+    online_count = sum(1 for c in claws if c.status in ('工作', '学习', '摸鱼', 'online'))
+
     total_messages = Message.query.count()
     total_conversations = Conversation.query.count()
     unread_messages = Message.query.filter_by(status='unread').count()
 
     return jsonify({
-        'total_agents': total_agents,
-        'online_agents': online_agents,
+        'total_agents': len(claws),
+        'online_agents': online_count,
         'total_messages': total_messages,
         'total_conversations': total_conversations,
         'unread_messages': unread_messages,
@@ -292,12 +299,35 @@ def web_stats():
 
 @agent_hub_bp.route('/web/agents', methods=['GET'])
 def web_list_agents():
-    """Web 管理端 - Agent 列表（含在线状态）"""
-    agents = Agent.query.order_by(Agent.status.desc(), Agent.name).all()
+    """Web 管理端 - Agent 列表（以 OpenClawInstance 为准）"""
+    from app.api.skills import _get_current_user
+    user = _get_current_user()
+    claw_query = OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted')
+    if not user or user.role not in ('super_admin', 'admin'):
+        claw_query = claw_query.filter(OpenClawInstance.role != 'admin')
+    claws = claw_query.order_by(OpenClawInstance.name).all()
+
+    result = []
+    online_count = 0
+    for c in claws:
+        is_online = c.status in ('工作', '学习', '摸鱼', 'online')
+        result.append({
+            'id': c.id,
+            'name': c.name,
+            'agent_key': c.project_name or '',
+            'role': c.role or 'module_owner',
+            'project_name': c.project_name or '',
+            'module_name': c.module_name or '',
+            'status': 'online' if is_online else 'offline',
+            'last_activity': str(c.last_activity) if c.last_activity else None,
+        })
+        if is_online:
+            online_count += 1
+
     return jsonify({
-        'agents': [a.to_dict() for a in agents],
-        'total': len(agents),
-        'online': sum(1 for a in agents if a.status == 'online'),
+        'agents': result,
+        'total': len(claws),
+        'online': online_count,
     })
 
 
@@ -427,7 +457,7 @@ def web_mark_read(msg_id):
     """Web 管理端 - 标记消息已读"""
     msg = Message.query.get_or_404(msg_id)
     msg.status = 'read'
-    msg.read_at = datetime.utcnow()
+    msg.read_at = datetime.now()
     db.session.commit()
     return jsonify({'message': '已标记为已读'})
 
@@ -473,6 +503,81 @@ def web_list_claw_messages():
     })
 
 
+def _schedule_ai_replies(claws, user_content, sender_name):
+    """为聊天消息生成AI回复（同步执行，避免 gevent 环境下异步协程被回收）
+
+    gevent worker 下 spawn/spawn_later/threading 在请求结束后都无法执行，
+    因此改为在请求上下文内同步调用 LLM 并写入回复。
+    """
+    from sqlalchemy import text
+
+    claw_ids = [c.id for c in claws]
+    current_app.logger.info(f"[AI_REPLY] 开始生成AI回复: claw_ids={claw_ids}, sender={sender_name}")
+
+    try:
+        # 读取LLM配置
+        rows = dict(db.session.execute(
+            text("SELECT config_key, value FROM system_config")
+        ).fetchall())
+        api_key = rows.get('llm_api_key', '')
+        if not api_key:
+            current_app.logger.info("[AI_REPLY] LLM API Key 未配置，跳过自动回复")
+            return
+
+        provider = rows.get('llm_provider', 'doubao')
+        model = rows.get('llm_model', 'doubao-pro-32k')
+        api_base = rows.get('llm_api_base', 'https://ark.cn-beijing.volces.com/api/v3')
+        current_app.logger.info(f"[AI_REPLY] LLM 配置: provider={provider}, model={model}")
+
+        for cid in claw_ids:
+            try:
+                claw = OpenClawInstance.query.get(cid)
+                if not claw:
+                    continue
+                # 构造角色感知的prompt
+                claw_name = claw.name
+                claw_role = claw.role or 'module_owner'
+                claw_module = claw.module_name or ''
+                claw_project = claw.project_name or ''
+
+                prompt = f"""你是 {claw_name}，一个游戏测试AI助手（OpenClaw）。
+你的角色：{claw_role}
+所属项目：{claw_project or '未指定'}
+负责模块：{claw_module or '未指定'}
+
+用户「{sender_name}」对你说：{user_content}
+
+请简短回复（2-3句话），体现你的角色特点。用中文回复。"""
+
+                reply_content = _call_llm_system(prompt, provider, model, api_key, api_base)
+
+                # 写入回复消息
+                reply_msg = ClawMessage(
+                    claw_id=claw.id,
+                    sender_name=claw_name,
+                    content=reply_content,
+                    msg_type='chat',
+                    direction='from_claw',
+                    status='delivered',
+                    delivered_at=datetime.now(),
+                )
+                db.session.add(reply_msg)
+                db.session.commit()
+                current_app.logger.info(f"[AI_REPLY] 已为 {claw_name} 生成自动回复")
+            except Exception as e:
+                current_app.logger.error(f"[AI_REPLY] 生成 claw_id={cid} 回复失败: {e}")
+                db.session.rollback()
+
+    except Exception as e:
+        current_app.logger.error(f"[AI_REPLY] AI回复异常: {e}")
+
+
+def _call_llm_system(prompt, provider, model, api_key, api_base):
+    """调用 system.py 的 LLM 接口"""
+    from app.api.system import _call_llm
+    return _call_llm(prompt, provider, model, api_base, api_key)
+
+
 @agent_hub_bp.route('/web/broadcast', methods=['POST'])
 def web_broadcast():
     """Web 管理端 - 广播消息（支持 Agent 和 OpenClaw）
@@ -481,12 +586,25 @@ def web_broadcast():
     - target_claw_ids: 指定发送给哪些 OpenClaw
     - target_agent_ids: 指定发送给哪些 Agent
     - 如果都为空，默认发送给所有在线 OpenClaw
+
+    支持 Bearer Token 认证（admin claw 等同超级管理员权限）
     """
     data = request.get_json()
     content = data.get('content')
 
     if not content:
         return jsonify({'error': '内容不能为空'}), 400
+
+    # 识别发送者：Web session 或 Bearer Token
+    sender_name = 'Web Admin'
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        token = auth_header[7:]
+        from app.models import OpenClawInstance as _OCI
+        for _claw in _OCI.query.filter(_OCI.status != 'deleted').all():
+            if _claw.verify_token(token):
+                sender_name = _claw.name
+                break
 
     target_agent_ids = data.get('target_agent_ids', [])
     target_claw_ids = data.get('target_claw_ids', [])
@@ -495,45 +613,56 @@ def web_broadcast():
     # 确保 target_claw_ids 是整数列表（JSON 反序列化后可能是字符串）
     if target_claw_ids:
         target_claw_ids = [int(x) for x in target_claw_ids]
-    import sys
-    sys.stderr.write(f"[DEBUG] web_broadcast called: target_claw_ids={target_claw_ids}, target_agent_ids={target_agent_ids}, msg_type={msg_type}\n")
-    sys.stderr.flush()
-    current_app.logger.warning(f"[WEB_BROADCAST] target_claw_ids={target_claw_ids}, target_agent_ids={target_agent_ids}, msg_type={msg_type}")
 
     sent_agents = 0
     sent_claws = 0
 
     # 发送给 OpenClaw（通信中心主要使用场景）
     offline_claws = []
+    chat_claws = []  # 需要AI自动回复的claw列表
+    notified_claw_ids = []  # 需要通知 SSE 即时推送的 claw_id 列表
     if target_claw_ids:
         # 指定发送给某些 OpenClaw（必须在线才能接收）
         claws = OpenClawInstance.query.filter(OpenClawInstance.id.in_(target_claw_ids)).all()
         for claw in claws:
-            if claw.status != 'online':
+            if claw.status not in ('工作', '学习', '摸鱼', 'online'):
                 offline_claws.append(claw.name)
                 continue
             claw_msg = ClawMessage(
                 claw_id=claw.id,
-                sender_name='Web Admin',
+                sender_name=sender_name,
                 content=content,
                 msg_type=msg_type,
+                direction='to_claw',
+                status='pending',  # 先设pending，SSE推送到客户端后再改delivered
             )
             db.session.add(claw_msg)
             sent_claws += 1
+            notified_claw_ids.append(claw.id)
+            # 聊天类消息需要AI自动回复
+            if msg_type in ('chat', 'text', 'broadcast'):
+                chat_claws.append(claw)
         if offline_claws:
             current_app.logger.warning(f"以下 OpenClaw 不在线，消息已跳过: {offline_claws}")
     elif not target_agent_ids:
         # 全员通知（默认发送给所有在线 OpenClaw）
-        online_claws = OpenClawInstance.query.filter_by(status='online').all()
+        online_claws = OpenClawInstance.query.filter(
+            OpenClawInstance.status.in_(['工作', '学习', '摸鱼', 'online'])
+        ).all()
         for claw in online_claws:
             claw_msg = ClawMessage(
                 claw_id=claw.id,
-                sender_name='Web Admin',
+                sender_name=sender_name,
                 content=content,
                 msg_type=msg_type,
+                direction='to_claw',
+                status='pending',  # 先设pending，SSE推送到客户端后再改delivered
             )
             db.session.add(claw_msg)
             sent_claws += 1
+            notified_claw_ids.append(claw.id)
+            if msg_type in ('chat', 'text', 'broadcast'):
+                chat_claws.append(claw)
 
     # 发送给 Agent（如果有指定）
     if target_agent_ids:
@@ -549,7 +678,37 @@ def web_broadcast():
             db.session.add(msg)
             sent_agents += 1
 
+    # 任务委派：同时创建待办任务
+    delegate_claw_ids = set()
+    if msg_type == 'task_delegate' and notified_claw_ids:
+        from app.models import ClawTodo
+        delegate_claws = OpenClawInstance.query.filter(
+            OpenClawInstance.id.in_(notified_claw_ids),
+            OpenClawInstance.status.in_(['工作', '学习', '摸鱼', 'online'])
+        ).all()
+        for claw in delegate_claws:
+            todo = ClawTodo(
+                openclaw_id=claw.id,
+                title=content[:200] if content else '任务委派',
+                description=content,
+                schedule_type='once',
+                urgency_level='flexible',
+                enabled=True,
+                created_by=sender_name,
+            )
+            db.session.add(todo)
+            delegate_claw_ids.add(claw.id)
+            current_app.logger.info(f"[TASK_DELEGATE] 已为 OpenClaw {claw.name} 创建待办: {content[:50]}")
+
     db.session.commit()
+
+    # 通知所有收到消息的 claw SSE 长连接立即推送
+    from app.api.agent_client import notify_claw, notify_claw_todo
+    for cid in notified_claw_ids:
+        if cid in delegate_claw_ids:
+            notify_claw_todo(cid)  # 收到待办委派的 claw，触发待办列表即时推送
+        else:
+            notify_claw(cid)
 
     parts = []
     if sent_claws > 0:

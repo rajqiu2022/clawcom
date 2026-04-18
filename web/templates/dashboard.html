@@ -10,44 +10,21 @@
 {% endblock %}
 
 {% block content %}
-<!-- 核心统计卡片 -->
-<div class="stats-grid dashboard-stats" id="stats-grid">
-    <div class="stat-card green">
-        <div class="stat-value" id="stat-online">-</div>
-        <div class="stat-label">在线 OpenClaw</div>
-    </div>
-    <div class="stat-card blue">
-        <div class="stat-value" id="stat-tasks">-</div>
-        <div class="stat-label">今日完成任务</div>
-    </div>
-    <div class="stat-card accent">
-        <div class="stat-value" id="stat-knowledge">-</div>
-        <div class="stat-label">知识库条目</div>
-    </div>
-    <div class="stat-card yellow">
-        <div class="stat-value" id="stat-pending">-</div>
-        <div class="stat-label">待审核知识</div>
-    </div>
+<!-- 核心统计（紧凑横排） -->
+<div class="dash-stats-bar" id="stats-grid">
+    <div class="dash-stat green"><span class="dash-stat-val" id="stat-online">-</span><span class="dash-stat-lbl">在线</span></div>
+    <div class="dash-stat blue"><span class="dash-stat-val" id="stat-tasks">-</span><span class="dash-stat-lbl">今日任务</span></div>
+    <div class="dash-stat accent"><span class="dash-stat-val" id="stat-knowledge">-</span><span class="dash-stat-lbl">知识库</span></div>
+    <div class="dash-stat yellow"><span class="dash-stat-val" id="stat-pending">-</span><span class="dash-stat-lbl">待审核</span></div>
 </div>
 
-<!-- 辅助统计 -->
-<div class="quick-stats" id="quick-stats">
-    <div class="quick-stat-item">
-        <span class="quick-stat-icon">📋</span>
-        <span class="quick-stat-text"><strong id="qs-reported">0/0</strong> 今日已汇报</span>
-    </div>
-    <div class="quick-stat-item">
-        <span class="quick-stat-icon">🧩</span>
-        <span class="quick-stat-text"><strong id="qs-skills">0</strong> 技能 · <strong id="qs-evolved">0</strong> 进化</span>
-    </div>
-    <div class="quick-stat-item">
-        <span class="quick-stat-icon">📡</span>
-        <span class="quick-stat-text"><strong id="qs-agents">0</strong> Agent · <strong id="qs-unread">0</strong> 未读</span>
-    </div>
-    <div class="quick-stat-item">
-        <span class="quick-stat-icon">🔗</span>
-        <span class="quick-stat-text"><strong id="qs-tapd">0</strong> TAPD 项目</span>
-    </div>
+<!-- 辅助统计（紧凑） -->
+<div class="dash-stats-bar secondary" id="quick-stats">
+    <div class="dash-stat"><span class="dash-stat-val" style="color:var(--green)" id="qs-reported">0/0</span><span class="dash-stat-lbl">已汇报</span></div>
+    <div class="dash-stat"><span class="dash-stat-val" style="color:var(--accent)" id="qs-skills">0</span><span class="dash-stat-lbl">技能</span></div>
+    <div class="dash-stat"><span class="dash-stat-val" style="color:var(--blue)" id="qs-evolved">0</span><span class="dash-stat-lbl">进化</span></div>
+    <div class="dash-stat"><span class="dash-stat-val" style="color:var(--accent)" id="qs-agents">0</span><span class="dash-stat-lbl">Agent</span></div>
+    <div class="dash-stat"><span class="dash-stat-val" style="color:var(--yellow)" id="qs-unread">0</span><span class="dash-stat-lbl">未读</span></div>
 </div>
 
 <!-- 团队 OpenClaw -->
@@ -61,23 +38,105 @@
     </div>
 </div>
 
-<!-- 双栏：知识趋势 + 今日知识 -->
-<div class="two-col">
-    <div class="card">
-        <div class="card-header">
-            <h3 class="card-title">知识库增长（近30天）</h3>
-        </div>
-        <div id="trend-chart" style="height:200px;display:flex;align-items:flex-end;gap:3px;padding-top:10px;">
-            <div class="loading"><span class="spinner"></span></div>
+<!-- 页签：信息汇总 / 任务动态 -->
+<div class="section dashboard-tabs-section">
+    <div style="display:flex;gap:0;border-bottom:2px solid var(--border);margin-bottom:16px">
+        <button id="tab-summary" class="dashboard-tab active" onclick="switchDashTab('summary')">📊 信息汇总</button>
+        <button id="tab-activity" class="dashboard-tab" onclick="switchDashTab('activity')">📋 任务动态</button>
+        <button id="tab-reports" class="dashboard-tab" onclick="switchDashTab('reports')">📋 日报中心</button>
+    </div>
+
+    <!-- 信息汇总（原有内容） -->
+    <div id="panel-summary">
+        <div class="two-col">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">知识库增长（近30天）</h3>
+                </div>
+                <div id="trend-chart" style="height:200px;display:flex;align-items:flex-end;gap:3px;padding-top:10px;">
+                    <div class="loading"><span class="spinner"></span></div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">今日知识新增</h3>
+                </div>
+                <div id="category-stats">
+                    <div class="loading"><span class="spinner"></span></div>
+                </div>
+            </div>
         </div>
     </div>
-    <div class="card">
-        <div class="card-header">
-            <h3 class="card-title">今日知识新增</h3>
+
+    <!-- 任务动态（子页签） -->
+    <div id="panel-activity" style="display:none">
+        <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px">
+            <button id="subtab-todos" class="dashboard-subtab active" onclick="switchActivitySubTab('todos')">📌 今日待办</button>
+            <button id="subtab-submitted" class="dashboard-subtab" onclick="switchActivitySubTab('submitted')">📝 待审核 <span id="submitted-count-badge" class="tag tag-yellow" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
+            <button id="subtab-done" class="dashboard-subtab" onclick="switchActivitySubTab('done')">✅ 近3天记录</button>
         </div>
-        <div id="category-stats">
-            <div class="loading"><span class="spinner"></span></div>
+        <div id="subpanel-todos">
+            <div id="upcoming-todos-list">
+                <div class="loading"><span class="spinner"></span> 加载中...</div>
+            </div>
         </div>
+        <div id="subpanel-submitted" style="display:none">
+            <div id="submitted-todos-list">
+                <div class="loading"><span class="spinner"></span> 加载中...</div>
+            </div>
+        </div>
+        <div id="subpanel-done" style="display:none">
+            <div id="recent-approved-list">
+                <div class="loading"><span class="spinner"></span> 加载中...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 日报中心（独立顶级面板） -->
+    <div id="panel-reports" style="display:none">
+        <!-- 日报筛选 -->
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap">
+            <input type="date" id="report-filter-date" class="form-input" style="width:150px;font-size:0.82rem;height:32px">
+            <select id="report-filter-claw" class="form-select" style="width:160px;font-size:0.82rem;height:32px">
+                <option value="">全部 OpenClaw</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" onclick="loadDashReports()">🔄 刷新</button>
+        </div>
+        <!-- 汇报进度 -->
+        <div class="card" style="margin-bottom:14px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                <strong style="font-size:0.85rem">今日汇报进度</strong>
+                <span class="tag tag-accent" id="dash-progress-label">-</span>
+            </div>
+            <div class="report-progress-bar">
+                <div class="progress-track">
+                    <div class="progress-fill" id="dash-progress-fill" style="width:0%"></div>
+                </div>
+            </div>
+            <div id="dash-claw-report-grid" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+        <!-- 日报列表 -->
+        <div id="dash-reports-list">
+            <div class="loading"><span class="spinner"></span> 加载中...</div>
+        </div>
+        <!-- 日报详情弹窗 -->
+        <div class="modal-overlay" id="dash-report-modal" onclick="if(event.target===this)this.classList.remove('active')">
+            <div class="modal" style="max-width:640px">
+                <div class="modal-title" id="dash-modal-title">日报详情</div>
+                <div id="dash-modal-body"></div>
+                <div class="modal-actions">
+                    <button class="btn btn-ghost" onclick="$('#dash-report-modal').classList.remove('active')">关闭</button>
+                </div>
+            </div>
+        </div>
+
+    <!-- 任务详情弹窗 -->
+    <div class="modal-overlay" id="dash-task-modal" onclick="if(event.target===this)this.classList.remove('active')">
+        <div class="modal" style="max-width:560px">
+            <div class="modal-title" id="dash-task-modal-title">任务详情</div>
+            <div id="dash-task-modal-body"></div>
+        </div>
+    </div>
     </div>
 </div>
 
@@ -85,10 +144,6 @@
 <div class="section" style="margin-top:24px">
     <h2 class="section-title">快捷入口</h2>
     <div class="quick-links">
-        <a href="/reports" class="quick-link-card">
-            <span class="quick-link-icon">📋</span>
-            <span class="quick-link-label">日报中心</span>
-        </a>
         <a href="/skills" class="quick-link-card">
             <span class="quick-link-icon">🧩</span>
             <span class="quick-link-label">Skills 市场</span>
@@ -101,10 +156,6 @@
             <span class="quick-link-icon">📡</span>
             <span class="quick-link-label">OpenClaw 通信中心</span>
         </a>
-        <a href="/tapd" class="quick-link-card">
-            <span class="quick-link-icon">🔗</span>
-            <span class="quick-link-label">TAPD 集成</span>
-        </a>
         <a href="/settings" class="quick-link-card">
             <span class="quick-link-icon">⚙️</span>
             <span class="quick-link-label">系统设置</span>
@@ -116,6 +167,7 @@
 {% block scripts %}
 <script>
 let dashboardData = null;
+let _focusedClawId = null;  // 记录当前焦点卡片的ID，刷新后恢复
 
 async function loadDashboard() {
     try {
@@ -127,6 +179,7 @@ async function loadDashboard() {
         projectSel.innerHTML = '<option value="">全部项目</option>' +
             projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
 
+        initProjectFilter(projectSel, applyDashboardFilters);
         applyDashboardFilters();
     } catch (err) {
         console.error('Dashboard load error:', err);
@@ -145,17 +198,28 @@ function applyDashboardFilters() {
         : dashboardData.claws;
 
     // 核心统计（根据过滤后的数据）
-    const onlineClaws = filteredClaws.filter(c => c.status === 'online').length;
+    const onlineClaws = filteredClaws.filter(c => ['工作','学习','摸鱼','online'].includes(c.status)).length;
     const totalClaws = filteredClaws.length;
     const todayReported = filteredClaws.filter(c => c.reported_today).length;
     const todayTasks = filteredClaws.reduce((sum, c) => sum + (c.today_tasks || 0), 0);
 
     $('#stat-online').textContent = `${onlineClaws}/${totalClaws}`;
     $('#stat-tasks').textContent = todayTasks;
+    $('#stat-knowledge').textContent = dashboardData.total_knowledge || 0;
+    $('#stat-pending').textContent = dashboardData.pending_review || 0;
     $('#qs-reported').textContent = `${todayReported}/${totalClaws}`;
+    $('#qs-skills').textContent = `${dashboardData.total_skills || 0}`;
+    $('#qs-evolved').textContent = `${dashboardData.evolved_skills || 0}`;
+    $('#qs-agents').textContent = `${dashboardData.online_agents || 0}/${dashboardData.total_agents || 0}`;
+    $('#qs-unread').textContent = `${dashboardData.unread_messages || 0}`;
 
     // OpenClaw 卡片
     const grid = $('#claw-grid');
+
+    // 刷新前保存焦点卡片ID（用户hover或点击过的卡片）
+    const activeCard = grid.querySelector('.claw-card.focused');
+    _focusedClawId = activeCard ? parseInt(activeCard.dataset.id) : _focusedClawId;
+
     if (filteredClaws.length === 0) {
         grid.innerHTML = `
             <div class="empty-state" style="grid-column:1/-1">
@@ -165,7 +229,9 @@ function applyDashboardFilters() {
             </div>`;
     } else {
         grid.innerHTML = filteredClaws.map(c => `
-            <div class="claw-card" onclick="location.href='/openclaws/${c.id}'">
+            <div class="claw-card${_focusedClawId === c.id ? ' focused' : ''}"
+                 data-id="${c.id}" onclick="location.href='/openclaws/${c.id}'"
+                 onmouseenter="this.classList.add('focused'); _focusedClawId=${c.id}">
                 <div class="claw-card-header">
                     <div class="claw-avatar">${c.avatar || '🤖'}</div>
                     <div class="claw-info">
@@ -180,9 +246,9 @@ function applyDashboardFilters() {
                         : '<span class="tag tag-yellow" style="font-size:0.72rem">⏳ 待汇报</span>'}
                 </div>
                 <div class="claw-meta">
-                    <span class="tag tag-blue">今日 ${c.today_tasks} 个任务</span>
-                    ${c.last_heartbeat
-                        ? `<span class="tag tag-accent">${timeAgo(c.last_heartbeat)}</span>`
+                    <span class="tag tag-blue">待办 ${c.today_tasks} · 已完成 ${c.today_completed || 0}</span>
+                    ${c.last_activity
+                        ? `<span class="tag tag-accent">${timeAgo(c.last_activity)}</span>`
                         : '<span class="tag tag-yellow">从未上线</span>'}
                 </div>
                 ${c.today_summary
@@ -219,6 +285,395 @@ function applyDashboardFilters() {
             </div>
         `).join('');
     }
+
+    // ===== 任务动态渲染 =====
+    renderUpcomingTodos();
+    renderSubmittedTodos();
+    renderRecentApproved();
+}
+
+// 页签切换
+function switchDashTab(tab) {
+    document.querySelectorAll('.dashboard-tab').forEach(b => b.classList.remove('active'));
+    document.getElementById('tab-' + tab).classList.add('active');
+    ['summary', 'activity', 'reports'].forEach(k => {
+        document.getElementById('panel-' + k).style.display = k === tab ? '' : 'none';
+    });
+    if (tab === 'reports' && !window._dashReportsLoaded) {
+        initDashReports();
+    }
+}
+
+function switchActivitySubTab(sub) {
+    document.querySelectorAll('.dashboard-subtab').forEach(b => b.classList.remove('active'));
+    document.getElementById('subtab-' + sub).classList.add('active');
+    ['todos', 'submitted', 'done'].forEach(k => {
+        document.getElementById('subpanel-' + k).style.display = k === sub ? '' : 'none';
+    });
+}
+
+function taskCategoryTag(cat) {
+    const map = {
+        learning: ['tag-green', '学习'], discussion: ['tag-blue', '课题讨论'],
+        testing: ['tag-orange', '测试'], task: ['tag-accent', '任务'],
+    };
+    const [cls, label] = map[cat] || ['tag-accent', cat];
+    return `<span class="tag ${cls}" style="font-size:0.7rem">${label}</span>`;
+}
+
+function urgencyLabel(level) {
+    const map = { interrupt: '⚡中断', flexible: '📋弹性', background: '🔄后台', periodic: '🔁周期', retry: '🔁重试' };
+    return map[level] || level;
+}
+
+function priorityBadge(pri) {
+    if (pri === 'P0') return '<span class="tag tag-red" style="font-size:0.68rem">P0 紧急</span>';
+    if (pri === 'P1') return '<span class="tag tag-yellow" style="font-size:0.68rem">P1 高优</span>';
+    return '<span class="tag tag-blue" style="font-size:0.68rem">' + pri + '</span>';
+}
+
+function renderUpcomingTodos() {
+    const el = $('#upcoming-todos-list');
+    const todos = dashboardData.upcoming_todos || [];
+    if (todos.length === 0) {
+        el.innerHTML = '<div class="empty-state"><div class="empty-state-text">今日暂无待办</div></div>';
+        return;
+    }
+    function fmtTime(dtStr) {
+        if (!dtStr) return '';
+        const d = new Date(dtStr);
+        const now = new Date();
+        const isToday = d.toDateString() === now.toDateString();
+        const mm = String(d.getMonth()+1).padStart(2,'0');
+        const dd = String(d.getDate()).padStart(2,'0');
+        const hh = String(d.getHours()).padStart(2,'0');
+        const mi = String(d.getMinutes()).padStart(2,'0');
+        return isToday ? `${hh}:${mi}` : `${mm}-${dd} ${hh}:${mi}`;
+    }
+    el.innerHTML = todos.map((todo, i) => `
+        <div onclick="showTaskDetail('todo',${i})"
+             style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bg-secondary);border-radius:8px;margin-bottom:6px;cursor:pointer;border-left:3px solid var(--accent);transition:background .15s"
+             onmouseenter="this.style.background='var(--bg-hover)'" onmouseleave="this.style.background='var(--bg-secondary)'">
+            <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                    <strong style="font-size:0.84rem">${todo.title}</strong>
+                    ${priorityBadge(todo.priority)}
+                    ${urgencyLabel(todo.urgency_level)}
+                </div>
+                <div style="font-size:0.75rem;color:var(--text-muted);margin-top:3px">
+                    🤖 ${todo.openclaw_name}
+                    ${todo.schedule_time ? `· ⏰ ${todo.schedule_time}` : ''}
+                    ${todo.schedule_type !== 'daily' ? `· 周期:${todo.schedule_type}` : ''}
+                    ${todo.created_at ? `· 创建于 ${fmtTime(todo.created_at)}` : ''}
+                </div>
+            </div>
+            <span class="tag tag-yellow" style="font-size:0.7rem;white-space:nowrap">待完成</span>
+        </div>
+    `).join('');
+}
+
+function renderSubmittedTodos() {
+    const el = $('#submitted-todos-list');
+    const todos = dashboardData.submitted_todos || [];
+    const badge = document.getElementById('submitted-count-badge');
+    if (badge) {
+        if (todos.length > 0) {
+            badge.style.display = '';
+            badge.textContent = todos.length;
+        } else {
+            badge.style.display = 'none';
+        }
+    }
+    if (todos.length === 0) {
+        el.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无待审核的提交</div></div>';
+        return;
+    }
+    el.innerHTML = todos.map((todo, i) => {
+        const summary = (todo.result_summary || '').replace(/\\n/g, '\n');
+        const summaryShort = summary.length > 80 ? summary.substring(0, 80) + '...' : summary;
+        return `
+        <div onclick="showTaskDetail('submitted',${i})"
+             style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bg-secondary);border-radius:8px;margin-bottom:6px;border-left:3px solid var(--yellow);cursor:pointer;transition:background .15s"
+             onmouseenter="this.style.background='var(--bg-hover)'" onmouseleave="this.style.background='var(--bg-secondary)'">
+            <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                    <strong style="font-size:0.84rem">${todo.title}</strong>
+                    ${priorityBadge(todo.priority)}
+                    <span class="tag tag-yellow" style="font-size:0.68rem">📝 已提交</span>
+                </div>
+                <div style="font-size:0.75rem;color:var(--text-muted);margin-top:3px">
+                    🤖 ${todo.openclaw_name}
+                    ${todo.today_completed_at ? `· 提交于 ${todo.today_completed_at.substring(11,16)}` : ''}
+                </div>
+                ${todo.result_summary ? `<div style="font-size:0.78rem;color:var(--text-secondary);margin-top:3px;white-space:pre-line;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${summaryShort}</div>` : ''}
+            </div>
+            <button class="btn btn-primary btn-sm" style="font-size:0.75rem;white-space:nowrap" onclick="event.stopPropagation();approveDashTodo(${todo.openclaw_id},${todo.id},this)">✅ 审核通过</button>
+        </div>
+    `}).join('');
+}
+
+async function approveDashTodo(clawId, todoId, btn) {
+    btn.disabled = true;
+    btn.textContent = '审核中...';
+    try {
+        await API.request('POST', `/openclaws/${clawId}/todos/${todoId}/approve`);
+        showToast('审核通过', 'success');
+        loadDashboard();
+    } catch(e) {
+        showToast('审核失败: ' + e.message, 'error');
+        btn.disabled = false;
+        btn.textContent = '✅ 审核通过';
+    }
+}
+
+async function approveDashTodoFromModal(clawId, todoId, btn) {
+    btn.disabled = true;
+    btn.textContent = '审核中...';
+    try {
+        await API.request('POST', `/openclaws/${clawId}/todos/${todoId}/approve`);
+        showToast('审核通过', 'success');
+        $('#dash-task-modal').classList.remove('active');
+        loadDashboard();
+    } catch(e) {
+        showToast('审核失败: ' + e.message, 'error');
+        btn.disabled = false;
+        btn.textContent = '✅ 审核通过';
+    }
+}
+
+function renderRecentApproved() {
+    const el = $('#recent-approved-list');
+    const items = dashboardData.recent_approved || [];
+    if (items.length === 0) {
+        el.innerHTML = '<div class="empty-state"><div class="empty-state-text">近3天暂无审核通过的记录</div></div>';
+        return;
+    }
+    el.innerHTML = items.map(item => `
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bg-secondary);border-radius:8px;margin-bottom:6px;border-left:3px solid var(--green)">
+            <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                    <strong style="font-size:0.84rem">${item.title}</strong>
+                    <span class="tag tag-green" style="font-size:0.68rem">✅ 已审核</span>
+                </div>
+                <div style="font-size:0.75rem;color:var(--text-muted);margin-top:3px">
+                    🤖 ${item.openclaw_name}
+                    · 📅 ${item.log_date}
+                    ${item.completed_at ? `· ${item.completed_at.substring(11,16)}` : ''}
+                </div>
+                ${item.result_summary ? `<div style="font-size:0.78rem;color:var(--text-secondary);margin-top:3px">${item.result_summary}</div>` : ''}
+            </div>
+        </div>
+    `).join('');
+}
+
+// ==================== 日报中心（嵌入Dashboard） ====================
+function _mdRender(text) {
+    if (!text) return '';
+    let html = String(text);
+    // 转义HTML特殊字符（先处理，防止XSS）
+    html = html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // 处理Markdown格式
+    // ### 标题 -> 加粗
+    html = html.replace(/^#{1,3}\s+(.+)/gm, '<strong>$1</strong>');
+    // **加粗**
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    // *斜体*
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    // \n 换行 -> <br>
+    html = html.replace(/\n/g, '<br>');
+    return html;
+}
+
+function _toList(val) {
+    if (!val) return [];
+    if (Array.isArray(val)) return val.map(String).filter(s => s.trim());
+    if (typeof val === 'string') {
+        let lines = val.split('\n').map(l => l.trim()).filter(Boolean);
+        if (lines.length > 1) return lines;
+        const text = lines[0] || val;
+        // 按分号分割
+        const parts = text.split(/[;；]\s*/).map(s => s.trim()).filter(Boolean);
+        if (parts.length > 1) return parts;
+        // 按 "数字)" 分割（1-2位数字，前面是空格或行首）
+        const numbered = text.split(/(?:^|(?<=\s))(?=\d{1,2}[)）]\s*)/).map(s => s.trim()).filter(Boolean);
+        if (numbered.length > 1) return numbered;
+        return [text];
+    }
+    return [];
+}
+
+async function initDashReports() {
+    window._dashReportsLoaded = true;
+    const today = new Date().toISOString().slice(0, 10);
+    $('#report-filter-date').value = today;
+    try {
+        const claws = await API.listClaws();
+        const sel = $('#report-filter-claw');
+        sel.innerHTML = '<option value="">全部 OpenClaw</option>' +
+            claws.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+    } catch(e) {}
+    loadDashReports();
+}
+
+async function loadDashReports() {
+    const dateVal = $('#report-filter-date').value || new Date().toISOString().slice(0,10);
+    const clawId = $('#report-filter-claw').value;
+    const projectFilter = document.getElementById('filter-project').value;
+
+    // 加载统计
+    try {
+        const qs = projectFilter ? `?project=${encodeURIComponent(projectFilter)}` : '';
+        const stats = await API.get(`/reports/stats${qs}`);
+        const pct = stats.total_claws > 0
+            ? Math.round((stats.today_reported_claws / stats.total_claws) * 100) : 0;
+        $('#dash-progress-fill').style.width = pct + '%';
+        $('#dash-progress-label').textContent = `${stats.today_reported_claws}/${stats.total_claws} (${pct}%)`;
+        const grid = $('#dash-claw-report-grid');
+        grid.innerHTML = (stats.claw_status || []).map(c => `
+            <div style="display:flex;align-items:center;gap:4px;padding:4px 8px;background:var(--bg-secondary);border-radius:4px;font-size:0.75rem">
+                <span>${c.avatar || '🤖'}</span>
+                <span style="font-weight:500">${c.name}</span>
+                ${c.reported
+                    ? '<span class="tag tag-green" style="font-size:0.65rem;padding:1px 4px">✅</span>'
+                    : '<span class="tag tag-yellow" style="font-size:0.65rem;padding:1px 4px">⏳</span>'}
+            </div>
+        `).join('');
+    } catch(e) { console.error(e); }
+
+    // 加载日报列表
+    try {
+        let params = [];
+        if (projectFilter) params.push(`project=${encodeURIComponent(projectFilter)}`);
+        if (dateVal) { params.push(`start_date=${dateVal}`); params.push(`end_date=${dateVal}`); }
+        if (clawId) params.push(`openclaw_id=${clawId}`);
+        const qStr = params.length > 0 ? '?' + params.join('&') : '';
+        const reports = await API.get(`/reports${qStr}`);
+        const el = $('#dash-reports-list');
+        if (reports.length === 0) {
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无日报数据</div></div>';
+            return;
+        }
+        const groups = {};
+        for (const r of reports) { (groups[r.report_date] || (groups[r.report_date] = [])).push(r); }
+        el.innerHTML = Object.entries(groups).map(([dateKey, items]) => `
+            <div style="margin-bottom:14px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                    <span style="font-weight:600;font-size:0.85rem">📅 ${dateKey}</span>
+                    <span class="tag tag-accent" style="font-size:0.7rem">${items.length} 条</span>
+                </div>
+                ${items.map(r => `
+                    <div onclick="showDashReport(${JSON.stringify(r).replace(/"/g, '&quot;')})"
+                         style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--bg-secondary);border-radius:8px;margin-bottom:5px;cursor:pointer;border-left:3px solid var(--accent);transition:background .15s"
+                         onmouseenter="this.style.background='var(--bg-hover)'" onmouseleave="this.style.background='var(--bg-secondary)'">
+                        <span style="font-size:1.2rem">${r.openclaw_avatar || '🤖'}</span>
+                        <div style="flex:1;min-width:0">
+                            <div style="font-weight:600;font-size:0.85rem">${r.openclaw_name} <span style="font-weight:400;color:var(--text-muted);font-size:0.75rem">${r.report_time}</span></div>
+                            ${r.ai_summary ? `<div style="font-size:0.78rem;color:var(--text-secondary);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${r.ai_summary}</div>` : ''}
+                        </div>
+                        <div style="display:flex;gap:6px;flex-shrink:0">
+                            <span class="tag tag-blue" style="font-size:0.68rem">🎯 ${_toList(r.tasks_completed).length}</span>
+                            <span class="tag tag-green" style="font-size:0.68rem">📝 ${_toList(r.knowledge_recorded).length}</span>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        `).join('');
+    } catch(e) {
+        console.error(e);
+        $('#dash-reports-list').innerHTML = '<div class="empty-state"><div class="empty-state-text">加载失败</div></div>';
+    }
+}
+
+function showDashReport(report) {
+    if (typeof report === 'string') report = JSON.parse(report);
+    const modal = $('#dash-report-modal');
+    $('#dash-modal-title').textContent = `${report.openclaw_name} · ${report.report_date} ${report.report_time}`;
+    $('#dash-modal-body').innerHTML = `
+        ${report.ai_summary ? `
+        <div style="margin-bottom:14px;padding:12px;background:var(--accent-dim);border-radius:var(--radius-sm);border-left:3px solid var(--accent)">
+            <div style="font-size:0.8rem;font-weight:600;color:var(--accent);margin-bottom:4px">💡 AI 摘要</div>
+            <div style="font-size:0.85rem;color:var(--text-secondary);line-height:1.5">${_mdRender(report.ai_summary)}</div>
+        </div>` : ''}
+        <div style="margin-bottom:12px">
+            <div style="font-weight:600;margin-bottom:6px">🎯 完成任务</div>
+            ${_toList(report.tasks_completed).length > 0
+                ? `<ul style="margin:0;padding-left:20px">${_toList(report.tasks_completed).map(t => `<li style="font-size:0.85rem;margin-bottom:3px">${_mdRender(t)}</li>`).join('')}</ul>`
+                : '<div style="color:var(--text-muted);font-size:0.82rem">无</div>'}
+        </div>
+        <div style="margin-bottom:12px">
+            <div style="font-weight:600;margin-bottom:6px">📝 新增知识</div>
+            ${_toList(report.knowledge_recorded).length > 0
+                ? `<ul style="margin:0;padding-left:20px">${_toList(report.knowledge_recorded).map(k => `<li style="font-size:0.85rem;margin-bottom:3px">${_mdRender(k)}</li>`).join('')}</ul>`
+                : '<div style="color:var(--text-muted);font-size:0.82rem">无</div>'}
+        </div>
+        <div>
+            <div style="font-weight:600;margin-bottom:6px">💡 经验分享</div>
+            ${_toList(report.experience_shared).length > 0
+                ? `<ul style="margin:0;padding-left:20px">${_toList(report.experience_shared).map(e => `<li style="font-size:0.85rem;margin-bottom:3px">${_mdRender(typeof e === 'string' ? e : (e.title || e.name || JSON.stringify(e)))}</li>`).join('')}</ul>`
+                : '<div style="color:var(--text-muted);font-size:0.82rem">无</div>'}
+        </div>
+    `;
+    modal.classList.add('active');
+}
+
+function showTaskDetail(type, index) {
+    const modal = $('#dash-task-modal');
+    const body = $('#dash-task-modal-body');
+    const titleEl = $('#dash-task-modal-title');
+
+    if (type === 'todo') {
+        const todo = (dashboardData.upcoming_todos || [])[index];
+        if (!todo) return;
+        titleEl.textContent = todo.title;
+        body.innerHTML = `
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+                ${priorityBadge(todo.priority)}
+                ${urgencyLabel(todo.urgency_level)}
+                <span class="tag tag-accent" style="font-size:0.68rem">${todo.task_category}</span>
+                <span class="tag tag-yellow" style="font-size:0.68rem">待完成</span>
+            </div>
+            ${todo.description ? `
+            <div style="margin-bottom:14px">
+                <div style="font-weight:600;font-size:0.85rem;margin-bottom:6px">📝 描述</div>
+                <div style="font-size:0.84rem;color:var(--text-secondary);line-height:1.6;white-space:pre-wrap;background:var(--bg-secondary);padding:10px 14px;border-radius:6px">${todo.description}</div>
+            </div>` : ''}
+            <div style="font-size:0.78rem;color:var(--text-muted);display:flex;flex-direction:column;gap:4px">
+                <div>🤖 ${todo.openclaw_name}</div>
+                ${todo.schedule_time ? `<div>⏰ ${todo.schedule_time}</div>` : ''}
+                <div>🔁 ${todo.schedule_type === 'daily' ? '每天' : todo.schedule_type === 'weekly' ? '每周' : todo.schedule_type === 'monthly' ? '每月' : todo.schedule_type === 'once' ? '一次性' : todo.schedule_type}</div>
+            </div>
+        `;
+    } else if (type === 'submitted') {
+        const todo = (dashboardData.submitted_todos || [])[index];
+        if (!todo) return;
+        const summary = (todo.result_summary || '').replace(/\\n/g, '\n');
+        titleEl.textContent = todo.title;
+        body.innerHTML = `
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+                ${priorityBadge(todo.priority)}
+                <span class="tag tag-yellow" style="font-size:0.68rem">📝 已提交</span>
+            </div>
+            ${todo.description ? `
+            <div style="margin-bottom:14px">
+                <div style="font-weight:600;font-size:0.85rem;margin-bottom:6px">📝 描述</div>
+                <div style="font-size:0.84rem;color:var(--text-secondary);line-height:1.6;white-space:pre-wrap;background:var(--bg-secondary);padding:10px 14px;border-radius:6px">${todo.description.replace(/\\n/g, '\n')}</div>
+            </div>` : ''}
+            ${todo.result_summary ? `
+            <div style="margin-bottom:14px">
+                <div style="font-weight:600;font-size:0.85rem;margin-bottom:6px">📋 提交结果</div>
+                <div style="font-size:0.84rem;color:var(--text-secondary);line-height:1.6;white-space:pre-wrap;background:var(--bg-secondary);padding:10px 14px;border-radius:6px">${summary}</div>
+            </div>` : ''}
+            <div style="font-size:0.78rem;color:var(--text-muted);display:flex;flex-direction:column;gap:4px">
+                <div>🤖 ${todo.openclaw_name}</div>
+                ${todo.today_completed_at ? `<div>提交于 ${todo.today_completed_at.substring(0,16)}</div>` : ''}
+            </div>
+            <div class="modal-actions" style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
+                <button class="btn btn-ghost" onclick="$('#dash-task-modal').classList.remove('active')">关闭</button>
+                <button class="btn btn-primary" onclick="approveDashTodoFromModal(${todo.openclaw_id},${todo.id},this)">✅ 审核通过</button>
+            </div>
+        `;
+    }
+    modal.classList.add('active');
 }
 
 loadDashboard();

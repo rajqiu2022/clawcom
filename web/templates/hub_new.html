@@ -300,15 +300,17 @@ async function loadConversations() {
 
 async function loadMessages() {
     try {
-        const res = await fetch(`${HUB_API}/messages`);
+        const res = await fetch(`${HUB_API}/claw-messages?limit=50`);
         const data = await res.json();
         const msgs = data.messages || [];
-        document.getElementById('msgCount').textContent = data.count || 0;
+        document.getElementById('msgCount').textContent = msgs.length;
         const list = document.getElementById('inboxList');
         if (msgs.length === 0) { list.innerHTML = '<div class="empty-state">暂无消息</div>'; return; }
-        const labels = { text: '', task_delegate: '任务委派', knowledge_share: '知识共享', request_help: '请求帮助', broadcast: '广播' };
+        const labels = { text: '', chat: '', task_delegate: '任务委派', knowledge_share: '知识共享', request_help: '请求帮助', broadcast: '广播', notification: '通知', sync_todo: '待办同步' };
         list.innerHTML = msgs.map(m => {
-            return `<div class="inbox-item" data-id="${m.id}"><div style="display:flex;justify-content:space-between;align-items:center"><div class="msg-sender">${m.sender_name || '管理员'} &#x2192; ${m.receiver_name || '?'}</div><span class="msg-time">${timeAgo(m.created_at)}</span></div><div class="msg-content">${m.content.substring(0, 60)}${m.content.length > 60 ? '...' : ''}</div>${labels[m.msg_type] ? `<span class="tag tag-blue" style="margin-top:4px">${labels[m.msg_type]}</span>` : ''}</div>`;
+            const dir = m.direction === 'from_claw' ? '←' : '→';
+            const clawName = m.claw_name || '?';
+            return `<div class="inbox-item" data-id="${m.id}"><div style="display:flex;justify-content:space-between;align-items:center"><div class="msg-sender">${dir} ${clawName}</div><span class="msg-time">${timeAgo(m.created_at)}</span></div><div class="msg-content">${m.content.substring(0, 80)}${m.content.length > 80 ? '...' : ''}</div>${labels[m.msg_type] ? `<span class="tag tag-blue" style="margin-top:4px">${labels[m.msg_type]}</span>` : ''}</div>`;
         }).join('');
     } catch (e) { console.error('加载消息失败:', e); }
 }
@@ -320,10 +322,21 @@ function selectReceiver(item) {
     document.getElementById('composeRecipient').innerHTML = `<span class="recipient-label">发送给:</span> <strong>${selectedReceiver.name}</strong>`;
     document.getElementById('sendBtn').disabled = false;
     document.getElementById('messageInput').focus();
+    // 同时打开聊天面板
+    viewConversation({ dataset: { clawId: item.dataset.id, clawName: item.dataset.name } });
 }
 
 async function viewConversation(item) {
-    const agentAId = parseInt(item.dataset.agentA), agentBId = parseInt(item.dataset.agentB);
+    // item 可以是 DOM 元素（从会话列表点击）或模拟对象（从聊天面板重载）
+    let clawId, clawName;
+    if (item.dataset && item.dataset.clawId) {
+        clawId = parseInt(item.dataset.clawId);
+        clawName = item.dataset.clawName || '';
+    } else {
+        // 旧的 Agent 会话模式，忽略
+        return;
+    }
+    
     const panel = document.getElementById('chatPanel');
     panel.style.display = 'flex';
     panel.style.flexDirection = 'column';
@@ -331,18 +344,24 @@ async function viewConversation(item) {
     panel.style.minHeight = '0';
     
     try {
-        const res = await fetch(`${HUB_API}/messages?agent_id=${agentAId}`);
+        // 查询该 claw 的所有消息（to_claw + from_claw）
+        const res = await fetch(`${HUB_API}/claw-messages?claw_id=${clawId}&limit=100`);
         const data = await res.json();
-        const msgs = (data.messages || []).filter(m => (m.sender_id === agentAId && m.receiver_id === agentBId) || (m.sender_id === agentBId && m.receiver_id === agentAId));
-        const conv = conversationsData.find(c => c.agent_a_id === agentAId && c.agent_b_id === agentBId);
-        document.getElementById('chatTitle').textContent = conv ? `${conv.agent_a_name} &#x2194; ${conv.agent_b_name}` : '对话详情';
+        const msgs = (data.messages || []).reverse(); // 按时间正序显示
+        
+        document.getElementById('chatTitle').textContent = clawName ? `与 ${clawName} 的对话` : '对话详情';
         const chatBox = document.getElementById('chatMessages');
-        chatBox.innerHTML = msgs.map(m => `<div class="chat-msg ${m.sender_id === 0 ? 'chat-msg-sent' : 'chat-msg-recv'}"><div class="chat-msg-sender">${m.sender_name || '管理员'}</div><div class="chat-msg-content">${m.content}</div><div class="chat-msg-time">${timeAgo(m.created_at)}</div></div>`).join('');
-        if (msgs.length === 0) chatBox.innerHTML = '<div class="empty-state" style="padding:20px">暂无消息</div>';
+        chatBox.innerHTML = msgs.map(m => {
+            const isSent = m.direction === 'to_claw';
+            const sender = isSent ? (m.sender_name || '我') : (m.claw_name || m.sender_name || 'OpenClaw');
+            return `<div class="chat-msg ${isSent ? 'chat-msg-sent' : 'chat-msg-recv'}"><div class="chat-msg-sender">${sender}</div><div class="chat-msg-content">${m.content}</div><div class="chat-msg-time">${timeAgo(m.created_at)}</div></div>`;
+        }).join('');
+        if (msgs.length === 0) chatBox.innerHTML = '<div class="empty-state" style="padding:20px">暂无消息，发送一条吧</div>';
         chatBox.scrollTop = chatBox.scrollHeight;
-        data.messages.filter(m => m.status === 'unread').forEach(m => fetch(`${HUB_API}/messages/${m.id}/read`, { method: 'PUT' }));
-        panel.dataset.agentAId = agentAId;
-        panel.dataset.agentBId = agentBId;
+        
+        // 保存 claw 信息供发送消息用
+        panel.dataset.clawId = clawId;
+        panel.dataset.clawName = clawName;
     } catch (e) { console.error('加载对话失败:', e); }
 }
 
@@ -350,13 +369,14 @@ function closeChat() { document.getElementById('chatPanel').style.display = 'non
 
 async function sendChatMessage() {
     const panel = document.getElementById('chatPanel');
-    const agentBId = parseInt(panel.dataset.agentBId);
+    const clawId = parseInt(panel.dataset.clawId);
     const content = document.getElementById('chatInput').value.trim();
-    if (!content || !agentBId) return;
+    if (!content || !clawId) return;
     try {
-        await fetch(`${HUB_API}/broadcast`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, target_agent_ids: [parseInt(panel.dataset.agentAId), agentBId] }) });
+        await fetch(`${HUB_API}/broadcast`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, msg_type: 'chat', target_claw_ids: [clawId] }) });
         document.getElementById('chatInput').value = '';
-        viewConversation({ dataset: panel.dataset });
+        // 重新加载该 claw 的对话
+        viewConversation({ dataset: { clawId: clawId, clawName: panel.dataset.clawName || '' } });
         loadMessages(); loadStats();
     } catch (e) { showToast('发送失败', 'error'); }
 }
@@ -364,7 +384,7 @@ async function sendChatMessage() {
 async function sendDirectMessage() {
     if (!selectedReceiver || !messageInput.value.trim()) return;
     try {
-        await fetch(`${HUB_API}/broadcast`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: messageInput.value.trim(), msg_type: document.getElementById('msgType').value, target_agent_ids: [selectedReceiver.id] }) });
+        await fetch(`${HUB_API}/broadcast`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: messageInput.value.trim(), msg_type: document.getElementById('msgType').value, target_claw_ids: [selectedReceiver.id] }) });
         messageInput.value = '';
         loadMessages(); loadStats(); loadConversations();
         showToast('消息已发送', 'success');
@@ -377,14 +397,14 @@ async function showAgentDetail(agentId) {
         const data = await (await fetch(`${HUB_API}/agents`)).json();
         const agent = data.agents.find(a => a.id === agentId);
         if (!agent) return;
-        document.getElementById('agentDetailContent').innerHTML = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px"><div><span style="color:var(--text-muted)">名称:</span> <strong>${agent.name}</strong></div><div><span style="color:var(--text-muted)">Key:</span> ${agent.agent_key}</div><div><span style="color:var(--text-muted)">角色:</span> ${agent.role}</div><div><span style="color:var(--text-muted)">状态:</span> ${agent.status}</div><div><span style="color:var(--text-muted)">项目:</span> ${agent.project_name || '-'}</div><div><span style="color:var(--text-muted)">模块:</span> ${agent.module_name || '-'}</div></div><div style="font-size:0.82rem;color:var(--text-muted)">注册: ${timeAgo(agent.created_at)} | 最后心跳: ${timeAgo(agent.last_heartbeat)}</div>`;
+        document.getElementById('agentDetailContent').innerHTML = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px"><div><span style="color:var(--text-muted)">名称:</span> <strong>${agent.name}</strong></div><div><span style="color:var(--text-muted)">Key:</span> ${agent.agent_key}</div><div><span style="color:var(--text-muted)">角色:</span> ${agent.role}</div><div><span style="color:var(--text-muted)">状态:</span> ${agent.status}</div><div><span style="color:var(--text-muted)">项目:</span> ${agent.project_name || '-'}</div><div><span style="color:var(--text-muted)">模块:</span> ${agent.module_name || '-'}</div></div><div style="font-size:0.82rem;color:var(--text-muted)">注册: ${timeAgo(agent.created_at)} | 最后活动: ${timeAgo(agent.last_activity)}</div>`;
         document.getElementById('agent-detail-modal').classList.add('active');
     } catch (e) { showToast('加载失败', 'error'); }
 }
 
 async function deleteCurrentAgent() {
     if (!viewingAgentId) return;
-    if (!confirm('确定删除此 Agent？关联的消息将一并删除。')) return;
+    if (!await customConfirm('确定删除此 Agent？关联的消息将一并删除。')) return;
     try {
         await fetch(`${HUB_API}/agents/${viewingAgentId}`, { method: 'DELETE' });
         showToast('已删除', 'success');

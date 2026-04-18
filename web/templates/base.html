@@ -4,7 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}OpenClaw 管理系统{% endblock %}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=20260417">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦞</text></svg>">
+    <style>body{background:var(--bg-primary,#0c0e14);}</style>
     {% block head %}{% endblock %}
 </head>
 <body>
@@ -16,56 +21,102 @@
                     <span class="logo-icon">🦞</span>
                     <span class="logo-text">OpenClaw</span>
                 </div>
-                <div class="logo-subtitle">团队管理系统</div>
+                <div class="logo-subtitle">Team Management System</div>
             </div>
             <nav class="sidebar-nav">
                 <a href="/" class="nav-item {% block nav_dashboard %}{% endblock %}">
                     <span class="nav-icon">📊</span>
                     <span>Dashboard</span>
                 </a>
-                <a href="/openclaws" class="nav-item {% block nav_openclaws %}{% endblock %}">
-                    <span class="nav-icon">🤖</span>
-                    <span>OpenClaw 管理</span>
+                <a href="/office" id="nav-office-link" class="nav-item {% block nav_office %}{% endblock %}" style="display:none">
+                    <span class="nav-icon">🏢</span>
+                    <span>像素办公室</span>
                 </a>
-                <a href="/skills" class="nav-item {% block nav_skills %}{% endblock %}">
-                    <span class="nav-icon">🧩</span>
-                    <span>Skills 市场</span>
-                </a>
-                <a href="/rules" class="nav-item {% block nav_rules %}{% endblock %}">
-                    <span class="nav-icon">📐</span>
-                    <span>工作规范</span>
-                </a>
-                <a href="/testcases" class="nav-item {% block nav_testcases %}{% endblock %}">
-                    <span class="nav-icon">🧪</span>
-                    <span>用例库</span>
-                </a>
-                <a href="/reports" class="nav-item {% block nav_reports %}{% endblock %}">
-                    <span class="nav-icon">📋</span>
-                    <span>日报中心</span>
-                </a>
-                <a href="/knowledge" class="nav-item {% block nav_knowledge %}{% endblock %}">
-                    <span class="nav-icon">📚</span>
-                    <span>知识库</span>
-                </a>
-                <a href="/hub" class="nav-item {% block nav_hub %}{% endblock %}">
-                    <span class="nav-icon">📡</span>
-                    <span>OpenClaw 通信中心</span>
-                </a>
-                <a href="/tapd" class="nav-item {% block nav_tapd %}{% endblock %}">
-                    <span class="nav-icon">🔗</span>
-                    <span>TAPD 集成</span>
-                </a>
-                <a href="/settings" class="nav-item {% block nav_settings %}{% endblock %}">
-                    <span class="nav-icon">⚙️</span>
-                    <span>系统设置</span>
-                </a>
-                <a href="/audit-logs" class="nav-item {% block nav_audit %}{% endblock %}">
-                    <span class="nav-icon">📝</span>
-                    <span>操作日志</span>
-                </a>
+
+                <!-- Hub 管理 -->
+                <div class="nav-group">
+                    <div class="nav-group-title" onclick="toggleNavGroup(this)">
+                        <span>🤖 Hub 管理</span>
+                        <span class="nav-group-arrow">›</span>
+                    </div>
+                    <div class="nav-group-items">
+                        <a href="/openclaws" class="nav-item nav-sub {% block nav_openclaws %}{% endblock %}">
+                            <span class="nav-icon">🤖</span>
+                            <span>OpenClaw 管理</span>
+                        </a>
+                        <a href="/skills" class="nav-item nav-sub {% block nav_skills %}{% endblock %}">
+                            <span class="nav-icon">🧩</span>
+                            <span>Skills 市场</span>
+                        </a>
+                        <a href="/rules" class="nav-item nav-sub {% block nav_rules %}{% endblock %}">
+                            <span class="nav-icon">📐</span>
+                            <span>工作规范</span>
+                        </a>
+                        <a href="/hub" class="nav-item nav-sub {% block nav_hub %}{% endblock %}" id="nav-hub-link" style="display:none">
+                            <span class="nav-icon">📡</span>
+                            <span>通信中心</span>
+                        </a>
+                        <a href="/review" class="nav-item nav-sub {% block nav_review %}{% endblock %}" id="nav-review-link" style="display:none">
+                            <span class="nav-icon">📋</span>
+                            <span>评审中心</span>
+                        </a>
+                    </div>
+                </div>
+
+                <!-- 项目管理 -->
+                <div class="nav-group">
+                    <div class="nav-group-title" onclick="toggleNavGroup(this)">
+                        <span>📁 项目管理</span>
+                        <span class="nav-group-arrow">›</span>
+                    </div>
+                    <div class="nav-group-items">
+                        <a href="/testcases" class="nav-item nav-sub {% block nav_testcases %}{% endblock %}">
+                            <span class="nav-icon">🧪</span>
+                            <span>用例库</span>
+                        </a>
+                        <a href="/testplans" class="nav-item nav-sub {% block nav_testplans %}{% endblock %}">
+                            <span class="nav-icon">📅</span>
+                            <span>测试计划</span>
+                        </a>
+                        <a href="/knowledge" class="nav-item nav-sub {% block nav_knowledge %}{% endblock %}">
+                            <span class="nav-icon">📚</span>
+                            <span>知识库</span>
+                        </a>
+                        <a href="/topics" class="nav-item nav-sub {% block nav_topics %}{% endblock %}">
+                            <span class="nav-icon">💬</span>
+                            <span>课题讨论</span>
+                        </a>
+                    </div>
+                </div>
+
+                <!-- 系统管理 -->
+                <div class="nav-group">
+                    <div class="nav-group-title" onclick="toggleNavGroup(this)">
+                        <span>⚙️ 系统管理</span>
+                        <span class="nav-group-arrow">›</span>
+                    </div>
+                    <div class="nav-group-items">
+                        <a href="/settings" class="nav-item nav-sub {% block nav_settings %}{% endblock %}" id="nav-settings-link" style="display:none">
+                            <span class="nav-icon">⚙️</span>
+                            <span>系统设置</span>
+                        </a>
+                        <a href="/audit-logs" class="nav-item nav-sub {% block nav_audit %}{% endblock %}" id="nav-audit-link" style="display:none">
+                            <span class="nav-icon">📝</span>
+                            <span>操作日志</span>
+                        </a>
+                        <a href="/users" class="nav-item nav-sub {% block nav_users %}{% endblock %}" id="nav-users-link" style="display:none">
+                            <span class="nav-icon">👥</span>
+                            <span>用户管理</span>
+                        </a>
+                    </div>
+                </div>
             </nav>
             <div class="sidebar-footer">
-                <div class="version">v5.0.0-dev</div>
+                <div id="user-info" style="padding:12px 16px;font-size:0.82rem;color:var(--text-muted);display:flex;justify-content:space-between;align-items:center">
+                    <span id="user-display"></span>
+                    <a href="#" onclick="doLogout()" style="color:var(--red);font-size:0.78rem;text-decoration:none;opacity:0.7;transition:opacity 0.15s" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">登出</a>
+                </div>
+                <div class="version">v5.1.0</div>
             </div>
         </aside>
 
@@ -83,7 +134,142 @@
         </main>
     </div>
 
-    <script src="{{ url_for('static', filename='js/api.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/api.js') }}?v=20260402"></script>
+    <script>
+    // 菜单分组折叠
+    function toggleNavGroup(titleEl) {
+        const group = titleEl.parentElement;
+        group.classList.toggle('open');
+    }
+    // 自动展开包含当前页 active 的分组
+    document.querySelectorAll('.nav-group').forEach(g => {
+        if (g.querySelector('.nav-item.active')) g.classList.add('open');
+    });
+
+    // 全局：加载当前用户信息
+    let currentUser = null;
+    let perms = {};  // 全局权限对象
+    (async function() {
+        try {
+            currentUser = await API.get('/auth/me');
+            perms = currentUser.permissions || {};
+            const el = document.getElementById('user-display');
+            if (el && currentUser) {
+                const badges = {super_admin:' 🛡️', admin:' 📋', user:'', guest:' 👁️'};
+                el.textContent = (currentUser.display_name || currentUser.username) + (badges[currentUser.role] || '');
+            }
+            // 根据权限显示菜单
+            function showNav(id, flag) { const e = document.getElementById(id); if (e && flag) e.style.display = ''; }
+            showNav('nav-hub-link', perms.nav_hub);
+            showNav('nav-settings-link', perms.nav_settings);
+            showNav('nav-audit-link', perms.nav_audit_logs);
+            showNav('nav-users-link', perms.nav_users);
+            showNav('nav-office-link', currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'admin'));
+            showNav('nav-review-link', currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'admin'));
+            // 访客提示
+            if (currentUser && currentUser.role === 'guest') {
+                const bar = document.createElement('div');
+                bar.style.cssText = 'background:#fef3cd;color:#856404;text-align:center;padding:6px;font-size:0.82rem;border-bottom:1px solid #ffc107';
+                bar.textContent = '👁️ 访客模式 — 仅可查看，无法操作。如需权限请联系管理员。';
+                document.querySelector('.main-content')?.prepend(bar);
+            }
+        } catch(e) {
+            // 未登录，跳转到登录页
+            if (window.location.pathname !== '/login') {
+                window.location.href = '/login';
+            }
+        }
+    })();
+    async function doLogout() {
+        await fetch('/api/v1/auth/logout', {method:'POST'});
+        window.location.href = '/login';
+    }
+
+    // 自定义确认弹窗（替代浏览器 confirm）
+    function customConfirm(msg) {
+        return new Promise(resolve => {
+            const overlay = document.createElement('div');
+            overlay.className = 'modal-overlay active';
+            overlay.style.zIndex = '9999';
+            overlay.innerHTML = `
+                <div class="modal" style="max-width:400px;text-align:center">
+                    <div style="font-size:1.5rem;margin-bottom:12px">⚠️</div>
+                    <div style="font-size:0.95rem;margin-bottom:20px;color:var(--text-primary)">${msg}</div>
+                    <div style="display:flex;gap:12px;justify-content:center">
+                        <button class="btn btn-ghost" id="_cf_cancel">取消</button>
+                        <button class="btn btn-primary" style="background:var(--red)" id="_cf_ok">确定</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+            overlay.querySelector('#_cf_ok').onclick = () => { overlay.remove(); resolve(true); };
+            overlay.querySelector('#_cf_cancel').onclick = () => { overlay.remove(); resolve(false); };
+            overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
+        });
+    }
+
+    // 全局 Toast 提示（替代 alert）
+    function showToast(msg, type) {
+        type = type || 'info';
+        const colors = {success:'#22c55e',error:'#ef4444',info:'var(--accent)',warning:'#eab308'};
+        const icons = {success:'✓',error:'✕',info:'ℹ',warning:'⚠'};
+        const t = document.createElement('div');
+        t.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);z-index:10000;padding:10px 20px;border-radius:8px;font-size:0.88rem;color:#fff;box-shadow:0 4px 20px rgba(0,0,0,0.3);display:flex;align-items:center;gap:8px;opacity:0;transition:opacity .3s;max-width:500px';
+        t.style.background = colors[type] || colors.info;
+        t.innerHTML = `<span style="font-size:1.1rem">${icons[type]||icons.info}</span><span>${msg}</span>`;
+        document.body.appendChild(t);
+        requestAnimationFrame(() => t.style.opacity = '1');
+        setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3000);
+    }
+
+    // 自定义 alert 弹窗（替代浏览器原生 alert）
+    function customAlert(msg, type) {
+        return new Promise(resolve => {
+            const colors = {success:'var(--green,#22c55e)',error:'var(--red,#ef4444)',info:'var(--accent)',warning:'var(--yellow,#eab308)'};
+            const icons = {success:'✅',error:'❌',info:'💬',warning:'⚠️'};
+            type = type || 'info';
+            const overlay = document.createElement('div');
+            overlay.className = 'modal-overlay active';
+            overlay.style.zIndex = '9999';
+            overlay.innerHTML = `
+                <div class="modal" style="max-width:380px;text-align:center">
+                    <div style="font-size:1.5rem;margin-bottom:10px">${icons[type]||icons.info}</div>
+                    <div style="font-size:0.92rem;color:var(--text-primary);margin-bottom:18px;line-height:1.5">${msg}</div>
+                    <button class="btn btn-primary" id="_alert_ok" style="min-width:80px">确定</button>
+                </div>`;
+            document.body.appendChild(overlay);
+            const close = () => { overlay.remove(); resolve(); };
+            overlay.querySelector('#_alert_ok').onclick = close;
+            overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+        });
+    }
+
+    // 自定义输入弹窗（替代浏览器 prompt）
+    function customPrompt(msg, defaultVal) {
+        return new Promise(resolve => {
+            const overlay = document.createElement('div');
+            overlay.className = 'modal-overlay active';
+            overlay.style.zIndex = '9999';
+            overlay.innerHTML = `
+                <div class="modal" style="max-width:440px">
+                    <div style="font-size:1.2rem;margin-bottom:12px">📝</div>
+                    <div style="font-size:0.92rem;color:var(--text-primary);margin-bottom:14px;line-height:1.5">${msg}</div>
+                    <textarea id="_prompt_input" style="width:100%;min-height:80px;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:0.88rem;background:var(--bg-secondary);color:var(--text-primary);resize:vertical;font-family:inherit">${defaultVal || ''}</textarea>
+                    <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:14px">
+                        <button class="btn btn-ghost" id="_prompt_cancel">取消</button>
+                        <button class="btn btn-primary" id="_prompt_ok">确定</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+            const input = overlay.querySelector('#_prompt_input');
+            input.focus();
+            input.select();
+            overlay.querySelector('#_prompt_ok').onclick = () => { overlay.remove(); resolve(input.value); };
+            overlay.querySelector('#_prompt_cancel').onclick = () => { overlay.remove(); resolve(null); };
+            overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(null); } });
+            input.addEventListener('keydown', e => { if (e.key === 'Enter' && e.ctrlKey) { overlay.remove(); resolve(input.value); } });
+        });
+    }
+    </script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -1,0 +1,983 @@
+{% extends "base.html" %}
+{% block title %}像素办公室 - OpenClaw 管理系统{% endblock %}
+{% block nav_office %}active{% endblock %}
+{% block page_title %}像素办公室{% endblock %}
+
+{% block top_actions %}
+<select id="filter-project" class="form-select" style="min-width:140px;font-size:0.85rem" onchange="loadOffice()">
+    <option value="">全部项目</option>
+</select>
+<button class="btn btn-ghost btn-sm" onclick="loadOffice()">🔄 刷新</button>
+{% endblock %}
+
+{% block content %}
+<style>
+@font-face {
+    font-family: 'ArkPixel';
+    src: url('/static/office/fonts/ark-pixel-12px-proportional-zh_cn.ttf.woff2') format('woff2');
+    font-weight: normal;
+    font-style: normal;
+}
+.office-wrap {
+    max-width: 1320px;
+    margin: 0 auto;
+}
+
+/* 统计面板 */
+.office-stats {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 14px;
+    flex-wrap: wrap;
+}
+.stat-card {
+    flex: 1;
+    min-width: 110px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.stat-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+.stat-card.active { border-color: var(--accent); background: rgba(99,102,241,0.1); }
+.stat-num { font-size: 1.5rem; font-weight: 700; }
+.stat-lbl { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+.stat-work .stat-num { color: #22c55e; }
+.stat-study .stat-num { color: #3b82f6; }
+.stat-slack .stat-num { color: #f59e0b; }
+.stat-rest .stat-num { color: #94a3b8; }
+.stat-offline .stat-num { color: #64748b; }
+
+/* Phaser 游戏容器 */
+.office-game-wrap {
+    position: relative;
+    width: 100%;
+    max-width: 1280px;
+    margin: 0 auto;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 4px solid #3a2a5a;
+    box-shadow: 0 0 20px rgba(100,71,125,0.3);
+    background: #1a1a2e;
+}
+#game-container {
+    width: 1280px;
+    height: 720px;
+    max-width: 100%;
+    image-rendering: pixelated;
+    overflow: hidden;
+}
+#game-container canvas {
+    width: 100% !important;
+    height: 100% !important;
+    image-rendering: pixelated;
+    object-fit: contain;
+}
+
+/* 加载覆盖层 */
+#office-loading-overlay {
+    position: absolute;
+    inset: 0;
+    background: #1a1a2e;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    z-index: 100;
+    transition: opacity 0.5s ease;
+}
+#office-loading-overlay.fade-out {
+    opacity: 0;
+    pointer-events: none;
+}
+#office-loading-text {
+    color: #ffd700;
+    font-family: 'ArkPixel', monospace;
+    font-size: 16px;
+    margin-bottom: 16px;
+}
+#office-loading-bar-wrap {
+    width: 280px;
+    height: 16px;
+    background: #333;
+    border: 2px solid #555;
+    border-radius: 4px;
+    overflow: hidden;
+}
+#office-loading-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #e94560, #ffd700);
+    width: 0%;
+    transition: width 0.3s ease;
+}
+
+/* 状态文字 */
+#office-status-text {
+    position: absolute;
+    bottom: 12px;
+    left: 12px;
+    color: #eee;
+    font-size: 13px;
+    background: rgba(0,0,0,0.7);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-family: 'ArkPixel', monospace;
+    z-index: 30;
+    pointer-events: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: calc(100% - 24px);
+}
+
+/* 角色列表 */
+.char-list {
+    margin-top: 16px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 8px;
+}
+.char-list-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.char-list-item:hover { border-color: var(--accent); background: var(--bg-hover); }
+.char-list-avatar {
+    width: 36px; height: 36px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem; flex-shrink: 0;
+    background: var(--bg-primary); border: 2px solid var(--border);
+}
+.char-list-info { flex: 1; min-width: 0; }
+.char-list-name { font-weight: 600; font-size: 0.86rem; display: flex; align-items: center; gap: 6px; }
+.char-list-role { font-size: 0.74rem; color: var(--text-muted); }
+.status-tag {
+    display: inline-flex; align-items: center; gap: 3px;
+    padding: 1px 7px; border-radius: 5px; font-size: 0.7rem; font-weight: 600;
+}
+.tag-工作 { background: rgba(34,197,94,0.15); color: #22c55e; }
+.tag-学习 { background: rgba(59,130,246,0.15); color: #3b82f6; }
+.tag-摸鱼 { background: rgba(245,158,11,0.15); color: #f59e0b; }
+.tag-休息 { background: rgba(148,163,184,0.15); color: #94a3b8; }
+.tag-offline { background: rgba(71,85,105,0.15); color: #64748b; }
+
+/* 弹窗 */
+.status-picker { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.status-pick-btn {
+    padding: 6px 14px; border-radius: 8px; border: 2px solid transparent;
+    font-size: 0.82rem; font-weight: 600; cursor: pointer; transition: all 0.15s;
+    background: var(--bg-secondary); color: var(--text-primary);
+}
+.status-pick-btn:hover { transform: translateY(-1px); }
+.status-pick-btn.active { border-color: currentColor; }
+.status-pick-btn.pick-工作 { color: #22c55e; }
+.status-pick-btn.pick-学习 { color: #3b82f6; }
+.status-pick-btn.pick-摸鱼 { color: #f59e0b; }
+.status-pick-btn.pick-休息 { color: #94a3b8; }
+</style>
+
+<!-- 统计卡片 -->
+<div class="office-stats" id="office-stats"></div>
+
+<!-- Phaser 办公室 -->
+<div class="office-game-wrap">
+    <div id="game-container"></div>
+    <div id="office-loading-overlay">
+        <div id="office-loading-text">正在加载像素办公室... 0%</div>
+        <div id="office-loading-bar-wrap">
+            <div id="office-loading-bar"></div>
+        </div>
+    </div>
+    <div id="office-status-text"></div>
+</div>
+
+<!-- 状态切换弹窗 -->
+<div class="modal-overlay" id="status-modal">
+    <div class="modal" style="max-width:400px">
+        <h2 class="modal-title" id="status-modal-title">切换状态</h2>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">选择当前状态，角色会自动移动到对应区域</p>
+        <div class="status-picker" id="status-picker"></div>
+        <div class="modal-actions" style="margin-top:16px">
+            <button class="btn btn-ghost" onclick="closeStatusModal()">关闭</button>
+        </div>
+    </div>
+</div>
+
+<!-- 角色详情弹窗 -->
+<div class="modal-overlay" id="char-detail-modal">
+    <div class="modal" style="max-width:480px">
+        <h2 class="modal-title" id="detail-modal-title">角色详情</h2>
+        <div id="detail-modal-body"></div>
+        <div class="modal-actions">
+            <button class="btn btn-primary" onclick="openStatusModalFromDetail()">切换状态</button>
+            <button class="btn btn-ghost" onclick="closeCharDetail()">关闭</button>
+        </div>
+    </div>
+</div>
+
+<!-- 角色列表 -->
+<div style="margin-top:20px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="font-size:1rem;font-weight:600">全部角色</h3>
+        <span id="char-count" style="font-size:0.82rem;color:var(--text-muted)"></span>
+    </div>
+    <div class="char-list" id="char-list"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+<script>
+// ========== 常量与配置 ==========
+const STATIC_BASE = '/static/office/';
+const CANVAS_W = 1280, CANVAS_H = 720;
+
+const STATUS_MAP = {
+    '工作': { state: 'writing', emoji: '💻', label: '工作中', color: '#22c55e', colorDark: '#16a34a' },
+    '学习': { state: 'researching', emoji: '📖', label: '学习中', color: '#3b82f6', colorDark: '#2563eb' },
+    '摸鱼': { state: 'idle', emoji: '🎮', label: '摸鱼中', color: '#f59e0b', colorDark: '#d97706' },
+    '休息': { state: 'idle', emoji: '😴', label: '休息中', color: '#94a3b8', colorDark: '#64748b' },
+    'online': { state: 'writing', emoji: '💻', label: '在线', color: '#22c55e', colorDark: '#16a34a' },
+    'offline': { state: 'idle', emoji: '⚫', label: '离线', color: '#475569', colorDark: '#334155' },
+    'busy': { state: 'idle', emoji: '🎮', label: '忙碌', color: '#f59e0b', colorDark: '#d97706' },
+};
+
+// 状态 → 办公区域映射 (与 Star Office UI 一致)
+const STATE_AREA_MAP = {
+    '工作': 'writing',
+    '学习': 'researching',
+    '摸鱼': 'breakroom',
+    '休息': 'breakroom',
+    'online': 'writing',
+    'offline': 'breakroom',
+    'busy': 'breakroom',
+};
+
+// 区域位置 (多人时错开)
+const AREA_POSITIONS = {
+    breakroom: [
+        { x: 620, y: 180 }, { x: 560, y: 220 }, { x: 680, y: 210 },
+        { x: 540, y: 170 }, { x: 700, y: 240 }, { x: 600, y: 250 },
+        { x: 650, y: 160 }, { x: 580, y: 200 }
+    ],
+    writing: [
+        { x: 320, y: 330 }, { x: 260, y: 370 }, { x: 380, y: 300 },
+        { x: 300, y: 280 }, { x: 360, y: 360 }, { x: 240, y: 310 },
+        { x: 340, y: 260 }, { x: 280, y: 350 }
+    ],
+    researching: [
+        { x: 440, y: 330 }, { x: 420, y: 280 }, { x: 480, y: 350 },
+        { x: 460, y: 260 }, { x: 500, y: 310 }, { x: 400, y: 300 }
+    ],
+    error: [
+        { x: 1066, y: 260 }, { x: 1020, y: 220 }, { x: 1100, y: 230 }
+    ]
+};
+
+// 布局配置 (复用 Star Office UI 的布局逻辑)
+const LAYOUT = {
+    game: { width: 1280, height: 720 },
+    areas: {
+        door: { x: 640, y: 550 },
+        writing: { x: 320, y: 360 },
+        researching: { x: 440, y: 340 },
+        error: { x: 1066, y: 180 },
+        breakroom: { x: 640, y: 360 }
+    },
+    furniture: {
+        sofa: { x: 670, y: 144, origin: { x: 0, y: 0 }, depth: 10 },
+        desk: { x: 218, y: 417, origin: { x: 0.5, y: 0.5 }, depth: 1000 },
+        flower: { x: 310, y: 390, origin: { x: 0.5, y: 0.5 }, depth: 1100, scale: 0.8 },
+        starWorking: { x: 217, y: 333, origin: { x: 0.5, y: 0.5 }, depth: 900, scale: 1.32 },
+        plants: [
+            { x: 565, y: 178, depth: 5 },
+            { x: 230, y: 185, depth: 5 },
+            { x: 977, y: 496, depth: 5 }
+        ],
+        poster: { x: 252, y: 66, depth: 4 },
+        coffeeMachine: { x: 659, y: 397, origin: { x: 0.5, y: 0.5 }, depth: 99 },
+        serverroom: { x: 1021, y: 142, origin: { x: 0.5, y: 0.5 }, depth: 2 },
+        errorBug: { x: 1007, y: 221, origin: { x: 0.5, y: 0.5 }, depth: 50, scale: 0.9, pingPong: { leftX: 1007, rightX: 1111, speed: 0.6 } },
+        syncAnim: { x: 1157, y: 592, origin: { x: 0.5, y: 0.5 }, depth: 40 },
+        cat: { x: 94, y: 557, origin: { x: 0.5, y: 0.5 }, depth: 2000 }
+    },
+    plaque: { x: 640, y: 720 - 36, width: 420, height: 44 },
+    totalAssets: 16
+};
+
+let officeData = [];
+let selectedClawId = null;
+let game = null;
+let agents = {}; // clawId -> phaser container
+let areaSlotCounters = {}; // area -> next slot index
+
+// ========== Phaser 场景 ==========
+class OfficeScene extends Phaser.Scene {
+    constructor() {
+        super({ key: 'OfficeScene' });
+        this.lastBubbleTime = 0;
+        this.lastCatBubbleTime = 0;
+        this.bubble = null;
+        this.catBubble = null;
+        this.errorBug = null;
+        this.errorBugDir = 1;
+        this.starWorking = null;
+        this.serverroom = null;
+        this.syncAnimSprite = null;
+        this.soil = null;
+    }
+
+    preload() {
+        const loadingText = document.getElementById('office-loading-text');
+        const loadingBar = document.getElementById('office-loading-bar');
+
+        this.load.on('progress', (value) => {
+            const pct = Math.min(100, Math.round(value * 100));
+            if (loadingText) loadingText.textContent = `正在加载像素办公室... ${pct}%`;
+            if (loadingBar) loadingBar.style.width = pct + '%';
+        });
+
+        this.load.on('complete', () => {
+            const overlay = document.getElementById('office-loading-overlay');
+            if (overlay) {
+                overlay.classList.add('fade-out');
+                setTimeout(() => overlay.style.display = 'none', 600);
+            }
+        });
+
+        // 加载美术资源 (使用实际文件名)
+        this.load.image('office_bg', STATIC_BASE + 'office_bg_small.webp');
+        this.load.spritesheet('star_idle', STATIC_BASE + 'star-idle-v5.png', { frameWidth: 128, frameHeight: 128 });
+        this.load.spritesheet('star_working', STATIC_BASE + 'star-working-spritesheet-grid.webp', { frameWidth: 230, frameHeight: 144 });
+        this.load.image('sofa_idle', STATIC_BASE + 'sofa-idle-v3.png');
+        this.load.spritesheet('sofa_busy', STATIC_BASE + 'sofa-idle-v3.png', { frameWidth: 256, frameHeight: 256 });
+        this.load.spritesheet('plants', STATIC_BASE + 'plants-spritesheet.webp', { frameWidth: 160, frameHeight: 160 });
+        this.load.spritesheet('posters', STATIC_BASE + 'posters-spritesheet.webp', { frameWidth: 160, frameHeight: 160 });
+        this.load.spritesheet('coffee_machine', STATIC_BASE + 'coffee-machine-v3-grid.webp', { frameWidth: 230, frameHeight: 230 });
+        this.load.spritesheet('serverroom', STATIC_BASE + 'serverroom-spritesheet.webp', { frameWidth: 180, frameHeight: 251 });
+        this.load.spritesheet('error_bug', STATIC_BASE + 'error-bug-spritesheet-grid.webp', { frameWidth: 180, frameHeight: 180 });
+        this.load.spritesheet('cats', STATIC_BASE + 'cats-spritesheet.webp', { frameWidth: 160, frameHeight: 160 });
+        this.load.image('desk_v2', STATIC_BASE + 'desk-v3.webp');
+        this.load.spritesheet('flowers', STATIC_BASE + 'flowers-bloom-v2.webp', { frameWidth: 65, frameHeight: 65 });
+        this.load.spritesheet('sync_anim', STATIC_BASE + 'sync-animation-v3-grid.webp', { frameWidth: 256, frameHeight: 256 });
+        this.load.image('memo_bg', STATIC_BASE + 'memo-bg.webp');
+
+        // guest 角色（用于多 agent 渲染）
+        for (let i = 1; i <= 6; i++) {
+            this.load.image(`guest_role_${i}`, STATIC_BASE + `guest_role_${i}.png`);
+        }
+    }
+
+    create() {
+        game = this;
+
+        // 背景图
+        this.add.image(640, 360, 'office_bg');
+
+        // === 沙发 ===
+        const sofa = this.add.sprite(
+            LAYOUT.furniture.sofa.x, LAYOUT.furniture.sofa.y, 'sofa_idle'
+        ).setOrigin(LAYOUT.furniture.sofa.origin.x, LAYOUT.furniture.sofa.origin.y);
+        sofa.setDepth(LAYOUT.furniture.sofa.depth);
+        this.sofa = sofa;
+
+        // === 植物 ===
+        const plantFrameCount = 16;
+        for (let i = 0; i < LAYOUT.furniture.plants.length; i++) {
+            const p = LAYOUT.furniture.plants[i];
+            const frame = Math.floor(Math.random() * plantFrameCount);
+            const plant = this.add.sprite(p.x, p.y, 'plants', frame).setOrigin(0.5);
+            plant.setDepth(p.depth);
+            plant.setInteractive({ useHandCursor: true });
+            plant.on('pointerdown', () => {
+                plant.setFrame(Math.floor(Math.random() * plantFrameCount));
+            });
+        }
+
+        // === 海报 ===
+        const posterFrameCount = 32;
+        const poster = this.add.sprite(LAYOUT.furniture.poster.x, LAYOUT.furniture.poster.y, 'posters', Math.floor(Math.random() * posterFrameCount)).setOrigin(0.5);
+        poster.setDepth(LAYOUT.furniture.poster.depth);
+        poster.setInteractive({ useHandCursor: true });
+        poster.on('pointerdown', () => {
+            poster.setFrame(Math.floor(Math.random() * posterFrameCount));
+        });
+
+        // === 小猫 ===
+        const catFrameCount = 16;
+        const cat = this.add.sprite(LAYOUT.furniture.cat.x, LAYOUT.furniture.cat.y, 'cats', Math.floor(Math.random() * catFrameCount)).setOrigin(LAYOUT.furniture.cat.origin.x, LAYOUT.furniture.cat.origin.y);
+        cat.setDepth(LAYOUT.furniture.cat.depth);
+        cat.setInteractive({ useHandCursor: true });
+        this.catSprite = cat;
+        cat.on('pointerdown', () => {
+            cat.setFrame(Math.floor(Math.random() * catFrameCount));
+        });
+
+        // === 咖啡机 ===
+        try {
+            this.anims.create({
+                key: 'coffee_machine',
+                frames: this.anims.generateFrameNumbers('coffee_machine', { start: 0, end: 95 }),
+                frameRate: 12.5,
+                repeat: -1
+            });
+            const coffeeMachine = this.add.sprite(
+                LAYOUT.furniture.coffeeMachine.x, LAYOUT.furniture.coffeeMachine.y, 'coffee_machine'
+            ).setOrigin(LAYOUT.furniture.coffeeMachine.origin.x, LAYOUT.furniture.coffeeMachine.origin.y);
+            coffeeMachine.setDepth(LAYOUT.furniture.coffeeMachine.depth);
+            coffeeMachine.anims.play('coffee_machine', true);
+        } catch(e) { console.warn('咖啡机动画创建失败:', e); }
+
+        // === 服务器区 ===
+        try {
+            this.anims.create({
+                key: 'serverroom_on',
+                frames: this.anims.generateFrameNumbers('serverroom', { start: 0, end: 39 }),
+                frameRate: 6,
+                repeat: -1
+            });
+            this.serverroom = this.add.sprite(
+                LAYOUT.furniture.serverroom.x, LAYOUT.furniture.serverroom.y, 'serverroom', 0
+            ).setOrigin(LAYOUT.furniture.serverroom.origin.x, LAYOUT.furniture.serverroom.origin.y);
+            this.serverroom.setDepth(LAYOUT.furniture.serverroom.depth);
+            this.serverroom.anims.stop();
+        } catch(e) { console.warn('服务器区动画创建失败:', e); }
+
+        // === 办公桌 ===
+        const desk = this.add.image(
+            LAYOUT.furniture.desk.x, LAYOUT.furniture.desk.y, 'desk_v2'
+        ).setOrigin(LAYOUT.furniture.desk.origin.x, LAYOUT.furniture.desk.origin.y);
+        desk.setDepth(LAYOUT.furniture.desk.depth);
+
+        // === 花盆 ===
+        try {
+            const flowerFrameCount = 16;
+            const flower = this.add.sprite(
+                LAYOUT.furniture.flower.x, LAYOUT.furniture.flower.y, 'flowers',
+                Math.floor(Math.random() * flowerFrameCount)
+            ).setOrigin(LAYOUT.furniture.flower.origin.x, LAYOUT.furniture.flower.origin.y);
+            flower.setScale(LAYOUT.furniture.flower.scale || 1);
+            flower.setDepth(LAYOUT.furniture.flower.depth);
+            flower.setInteractive({ useHandCursor: true });
+            flower.on('pointerdown', () => {
+                flower.setFrame(Math.floor(Math.random() * flowerFrameCount));
+            });
+        } catch(e) {}
+
+        // === Star 工作动画 (用于"工作"状态的角色) ===
+        try {
+            this.anims.create({
+                key: 'star_working',
+                frames: this.anims.generateFrameNumbers('star_working', { start: 0, end: 191 }),
+                frameRate: 12,
+                repeat: -1
+            });
+        } catch(e) { console.warn('star_working 动画创建失败:', e); }
+
+        // === 错误 bug ===
+        try {
+            this.anims.create({
+                key: 'error_bug',
+                frames: this.anims.generateFrameNumbers('error_bug', { start: 0, end: 95 }),
+                frameRate: 12,
+                repeat: -1
+            });
+            this.errorBug = this.add.sprite(
+                LAYOUT.furniture.errorBug.x, LAYOUT.furniture.errorBug.y, 'error_bug', 0
+            ).setOrigin(LAYOUT.furniture.errorBug.origin.x, LAYOUT.furniture.errorBug.origin.y);
+            this.errorBug.setDepth(LAYOUT.furniture.errorBug.depth);
+            this.errorBug.setVisible(false);
+            this.errorBug.setScale(LAYOUT.furniture.errorBug.scale);
+            this.errorBug.anims.play('error_bug', true);
+        } catch(e) {}
+
+        // === 同步动画 ===
+        try {
+            this.anims.create({
+                key: 'sync_anim',
+                frames: this.anims.generateFrameNumbers('sync_anim', { start: 1, end: 52 }),
+                frameRate: 12,
+                repeat: -1
+            });
+            this.syncAnimSprite = this.add.sprite(
+                LAYOUT.furniture.syncAnim.x, LAYOUT.furniture.syncAnim.y, 'sync_anim', 0
+            ).setOrigin(LAYOUT.furniture.syncAnim.origin.x, LAYOUT.furniture.syncAnim.origin.y);
+            this.syncAnimSprite.setDepth(LAYOUT.furniture.syncAnim.depth);
+            this.syncAnimSprite.anims.stop();
+        } catch(e) {}
+
+        // === 牌匾 ===
+        const plaqueX = LAYOUT.plaque.x;
+        const plaqueY = LAYOUT.plaque.y;
+        const plaqueBg = this.add.rectangle(plaqueX, plaqueY, LAYOUT.plaque.width, LAYOUT.plaque.height, 0x5d4037);
+        plaqueBg.setStrokeStyle(3, 0x3e2723);
+        this.add.text(plaqueX, plaqueY, 'OpenClaw 像素办公室', {
+            fontFamily: 'ArkPixel, monospace', fontSize: '18px', fill: '#ffd700', fontWeight: 'bold',
+            stroke: '#000', strokeThickness: 2
+        }).setOrigin(0.5);
+        this.add.text(plaqueX - 190, plaqueY, '🦞', { fontFamily: 'ArkPixel, monospace', fontSize: '20px' }).setOrigin(0.5);
+        this.add.text(plaqueX + 190, plaqueY, '🦞', { fontFamily: 'ArkPixel, monospace', fontSize: '20px' }).setOrigin(0.5);
+
+        // 状态文字
+        this.statusTextEl = document.getElementById('office-status-text');
+
+        // 点击事件
+        this.input.on('gameobjectdown', (pointer, gameObject) => {
+            if (gameObject._clawId) {
+                openCharDetail(gameObject._clawId);
+            }
+        });
+
+        // 初始加载
+        loadOffice();
+    }
+
+    update(time) {
+        // 气泡定时器
+        if (time - this.lastBubbleTime > 8000) {
+            this.showRandomBubble();
+            this.lastBubbleTime = time;
+        }
+        if (time - this.lastCatBubbleTime > 18000 && this.catBubble) {
+            this.showCatBubble();
+            this.lastCatBubbleTime = time;
+        }
+
+        // 错误 bug 往返移动
+        if (this.errorBug && this.errorBug.visible) {
+            const speed = LAYOUT.furniture.errorBug.pingPong.speed;
+            this.errorBug.x += speed * this.errorBugDir;
+            if (this.errorBug.x >= LAYOUT.furniture.errorBug.pingPong.rightX) {
+                this.errorBug.x = LAYOUT.furniture.errorBug.pingPong.rightX;
+                this.errorBugDir = -1;
+            } else if (this.errorBug.x <= LAYOUT.furniture.errorBug.pingPong.leftX) {
+                this.errorBug.x = LAYOUT.furniture.errorBug.pingPong.leftX;
+                this.errorBugDir = 1;
+            }
+        }
+
+        // 移动所有 agent 到目标位置 (平滑过渡)
+        for (const id in agents) {
+            const container = agents[id];
+            if (!container || !container.active) continue;
+            const tx = container._targetX || container.x;
+            const ty = container._targetY || container.y;
+            const dx = tx - container.x;
+            const dy = ty - container.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > 2) {
+                const speed = 1.4;
+                container.x += (dx / dist) * speed;
+                container.y += (dy / dist) * speed;
+                // 走路微晃
+                container.y += Math.sin(time / 200) * 0.8;
+            }
+        }
+    }
+
+    showRandomBubble() {
+        if (this.bubble) { this.bubble.destroy(); this.bubble = null; }
+        // 只给在工作的 agent 显示气泡
+        const workingIds = Object.keys(agents).filter(id => {
+            const c = agents[id];
+            return c._status === '工作' || c._status === '学习';
+        });
+        if (workingIds.length === 0) return;
+
+        const id = workingIds[Math.floor(Math.random() * workingIds.length)];
+        const agent = agents[id];
+        if (!agent || !agent.active) return;
+
+        const texts = [
+            '专注模式：勿扰', '先把关键路径跑通', '把复杂变简单',
+            '写到一半，先保存', '今天的进度，明天的底气', '稳住，能赢',
+            '我在挖证据链', '让我把信息熬成结论', '找到了：关键在这里'
+        ];
+        const text = texts[Math.floor(Math.random() * texts.length)];
+        const bubbleY = agent.y - 70;
+        const bg = this.add.rectangle(agent.x, bubbleY, text.length * 10 + 20, 28, 0xffffff, 0.95);
+        bg.setStrokeStyle(2, 0x000000);
+        const txt = this.add.text(agent.x, bubbleY, text, { fontFamily: 'ArkPixel, monospace', fontSize: '12px', fill: '#000', align: 'center' }).setOrigin(0.5);
+        this.bubble = this.add.container(0, 0, [bg, txt]);
+        this.bubble.setDepth(1200);
+        setTimeout(() => { if (this.bubble) { this.bubble.destroy(); this.bubble = null; } }, 3000);
+    }
+
+    showCatBubble() {
+        if (!this.catSprite) return;
+        if (this.catBubble) { this.catBubble.destroy(); this.catBubble = null; }
+        const texts = ['喵~', '咕噜咕噜…', '尾巴摇一摇', '晒太阳最开心', '我是办公室的吉祥物', '伸个懒腰'];
+        const text = texts[Math.floor(Math.random() * texts.length)];
+        const anchorX = this.catSprite.x;
+        const anchorY = this.catSprite.y - 60;
+        const bg = this.add.rectangle(anchorX, anchorY, text.length * 10 + 20, 24, 0xfffbeb, 0.95);
+        bg.setStrokeStyle(2, 0xd4a574);
+        const txt = this.add.text(anchorX, anchorY, text, { fontFamily: 'ArkPixel, monospace', fontSize: '11px', fill: '#8b6914', align: 'center' }).setOrigin(0.5);
+        this.catBubble = this.add.container(0, 0, [bg, txt]);
+        this.catBubble.setDepth(2100);
+        setTimeout(() => { if (this.catBubble) { this.catBubble.destroy(); this.catBubble = null; } }, 4000);
+    }
+
+    // 渲染/更新 agent
+    renderAgent(claw) {
+        const clawId = claw.id;
+        const name = claw.name || 'Agent';
+        const status = claw.status || 'offline';
+        const area = STATE_AREA_MAP[status] || 'breakroom';
+        const info = STATUS_MAP[status] || STATUS_MAP['offline'];
+
+        // 计算区域位置
+        const positions = AREA_POSITIONS[area] || AREA_POSITIONS.breakroom;
+        // 为每个 claw 分配稳定的位置 (基于 id 哈希)
+        const slotIdx = clawId % positions.length;
+        const pos = positions[slotIdx];
+
+        if (!agents[clawId]) {
+            // 创建新 agent 容器
+            const container = this.add.container(pos.x, pos.y);
+            container.setDepth(1200);
+
+            // 根据状态选择图标
+            const isWorking = (status === '工作' || status === 'online');
+            const isStudying = (status === '学习');
+
+            // 像素小人图标
+            let bodyIcon;
+            if (isWorking || isStudying) {
+                // 工作中/学习中显示 ⭐
+                bodyIcon = this.add.text(0, 0, '🦞', {
+                    fontFamily: 'ArkPixel, monospace', fontSize: '28px'
+                }).setOrigin(0.5);
+            } else if (status === '摸鱼') {
+                bodyIcon = this.add.text(0, 0, '🎮', {
+                    fontFamily: 'ArkPixel, monospace', fontSize: '28px'
+                }).setOrigin(0.5);
+            } else if (status === '休息') {
+                bodyIcon = this.add.text(0, 0, '💤', {
+                    fontFamily: 'ArkPixel, monospace', fontSize: '28px'
+                }).setOrigin(0.5);
+            } else {
+                bodyIcon = this.add.text(0, 0, '🦞', {
+                    fontFamily: 'ArkPixel, monospace', fontSize: '28px'
+                }).setOrigin(0.5);
+            }
+            bodyIcon.name = 'bodyIcon';
+
+            // 状态小点
+            let dotColor = 0x64748b;
+            if (status === '工作' || status === 'online') dotColor = 0x22c55e;
+            if (status === '学习') dotColor = 0x3b82f6;
+            if (status === '摸鱼' || status === 'busy') dotColor = 0xf59e0b;
+            if (status === '休息') dotColor = 0x94a3b8;
+            const statusDot = this.add.circle(20, -20, 5, dotColor);
+            statusDot.setStrokeStyle(2, 0x000000);
+            statusDot.name = 'statusDot';
+
+            // 名字标签
+            const nameColor = (status === 'offline') ? '#64748b' : (info.color || '#e2e8f0');
+            const nameTag = this.add.text(0, -36, name, {
+                fontFamily: 'ArkPixel, monospace', fontSize: '12px',
+                fill: nameColor, stroke: '#000', strokeThickness: 3,
+                backgroundColor: 'rgba(0,0,0,0.7)'
+            }).setOrigin(0.5);
+            nameTag.name = 'nameTag';
+
+            container.add([bodyIcon, statusDot, nameTag]);
+            container.setSize(40, 60);
+            container.setInteractive(new Phaser.Geom.Rectangle(0, -10, 40, 60), Phaser.Geom.Rectangle.Contains);
+            container._clawId = clawId;
+
+            agents[clawId] = container;
+        } else {
+            // 更新已有 agent
+            const container = agents[clawId];
+            container._targetX = pos.x;
+            container._targetY = pos.y;
+            container._status = status;
+
+            // 更新图标
+            const bodyIcon = container.getAt(0);
+            if (bodyIcon && bodyIcon.name === 'bodyIcon') {
+                const isWorking = (status === '工作' || status === 'online');
+                const isStudying = (status === '学习');
+                if (isWorking || isStudying) bodyIcon.setText('🦞');
+                else if (status === '摸鱼') bodyIcon.setText('🎮');
+                else if (status === '休息') bodyIcon.setText('💤');
+                else bodyIcon.setText('🦞');
+            }
+
+            // 更新状态点
+            const statusDot = container.getAt(1);
+            if (statusDot && statusDot.name === 'statusDot') {
+                let dotColor = 0x64748b;
+                if (status === '工作' || status === 'online') dotColor = 0x22c55e;
+                if (status === '学习') dotColor = 0x3b82f6;
+                if (status === '摸鱼' || status === 'busy') dotColor = 0xf59e0b;
+                if (status === '休息') dotColor = 0x94a3b8;
+                statusDot.fillColor = dotColor;
+            }
+
+            // 更新名字
+            const nameTag = container.getAt(2);
+            if (nameTag && nameTag.name === 'nameTag') {
+                nameTag.setText(name);
+                const nameColor = (status === 'offline') ? '#64748b' : (info.color || '#e2e8f0');
+                nameTag.setFill(nameColor);
+            }
+
+            // 透明度
+            let alpha = 1;
+            if (status === 'offline') alpha = 0.5;
+            if (status === '休息') alpha = 0.7;
+            container.setAlpha(alpha);
+        }
+
+        // 标记目标位置
+        agents[clawId]._targetX = pos.x;
+        agents[clawId]._targetY = pos.y;
+        agents[clawId]._status = status;
+    }
+
+    // 清除不存在的 agent
+    removeAgent(clawId) {
+        if (agents[clawId]) {
+            agents[clawId].destroy();
+            delete agents[clawId];
+        }
+    }
+
+    // 更新服务器/错误 bug 等全局动画
+    updateGlobalAnimations() {
+        const hasWorking = officeData.some(c => c.status === '工作' || c.status === 'online' || c.status === '学习');
+        const hasError = officeData.some(c => c.status === 'error');
+
+        // 服务器区动画
+        if (this.serverroom) {
+            if (hasWorking) {
+                if (!this.serverroom.anims.isPlaying) {
+                    this.serverroom.anims.play('serverroom_on', true);
+                }
+            } else {
+                this.serverroom.anims.stop();
+                this.serverroom.setFrame(0);
+            }
+        }
+
+        // 错误 bug
+        if (this.errorBug) {
+            if (hasError) {
+                this.errorBug.setVisible(true);
+            } else {
+                this.errorBug.setVisible(false);
+                this.errorBug.anims.stop();
+            }
+        }
+
+        // 更新状态文字
+        const workingCount = officeData.filter(c => c.status === '工作' || c.status === 'online').length;
+        const studyingCount = officeData.filter(c => c.status === '学习').length;
+        const totalOnline = officeData.filter(c => c.status !== 'offline' && c.status !== 'deleted').length;
+        if (this.statusTextEl) {
+            this.statusTextEl.textContent = `在线 ${totalOnline} | 工作 ${workingCount} | 学习 ${studyingCount}`;
+        }
+    }
+}
+
+// ========== 启动 Phaser ==========
+const phaserConfig = {
+    type: Phaser.AUTO,
+    width: CANVAS_W,
+    height: CANVAS_H,
+    parent: 'game-container',
+    pixelArt: true,
+    physics: { default: 'arcade', arcade: { gravity: { y: 0 }, debug: false } },
+    scene: OfficeScene
+};
+
+// 检测 WebP 支持
+let supportsWebP = false;
+(function checkWebP() {
+    try {
+        const c = document.createElement('canvas');
+        if (c.getContext && c.getContext('2d')) {
+            supportsWebP = c.toDataURL('image/webp').indexOf('data:image/webp') === 0;
+        }
+    } catch(e) {}
+})();
+
+const phaserGame = new Phaser.Game(phaserConfig);
+
+// ========== 数据加载与 UI ==========
+let loadTimer = null;
+
+async function loadOffice() {
+    try {
+        const claws = await API.listClaws();
+        const projects = await API.listProjects();
+        officeData = claws.filter(c => c.status !== 'deleted');
+
+        const projectSel = document.getElementById('filter-project');
+        projectSel.innerHTML = '<option value="">全部项目</option>' +
+            projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+
+        const projectFilter = projectSel.value;
+        const filtered = projectFilter
+            ? officeData.filter(c => c.project_name === projectFilter)
+            : officeData;
+
+        renderAgents(filtered);
+        renderStats();
+        renderCharList();
+    } catch(e) {
+        showToast('加载失败: ' + e.message, 'error');
+    }
+}
+
+function renderAgents(filteredClaws) {
+    if (!game || !game.scene || !game.scene.isActive('OfficeScene')) return;
+    const scene = game.scene.getScene('OfficeScene');
+
+    // 重置位置计数器
+    areaSlotCounters = {};
+
+    const currentIds = new Set();
+
+    filteredClaws.forEach(c => {
+        const clawId = c.id;
+        currentIds.add(clawId);
+        scene.renderAgent(c);
+    });
+
+    // 移除不存在的 agent
+    for (const id in agents) {
+        if (!currentIds.has(id)) {
+            scene.removeAgent(id);
+        }
+    }
+
+    scene.updateGlobalAnimations();
+}
+
+function renderStats() {
+    const counts = { '工作': 0, '学习': 0, '摸鱼': 0, '休息': 0, offline: 0 };
+    officeData.forEach(c => {
+        const s = c.status || 'offline';
+        if (counts.hasOwnProperty(s)) counts[s]++;
+        else counts.offline++;
+    });
+    document.getElementById('office-stats').innerHTML = `
+        <div class="stat-card stat-work" onclick="filterByStatus('工作')">
+            <div class="stat-num">${counts['工作']}</div><div class="stat-lbl">💻 工作</div>
+        </div>
+        <div class="stat-card stat-study" onclick="filterByStatus('学习')">
+            <div class="stat-num">${counts['学习']}</div><div class="stat-lbl">📖 学习</div>
+        </div>
+        <div class="stat-card stat-slack" onclick="filterByStatus('摸鱼')">
+            <div class="stat-num">${counts['摸鱼']}</div><div class="stat-lbl">🎮 摸鱼</div>
+        </div>
+        <div class="stat-card stat-rest" onclick="filterByStatus('休息')">
+            <div class="stat-num">${counts['休息']}</div><div class="stat-lbl">😴 休息</div>
+        </div>
+        <div class="stat-card stat-offline">
+            <div class="stat-num">${counts.offline}</div><div class="stat-lbl">⚫ 离线</div>
+        </div>
+    `;
+}
+
+function renderCharList() {
+    const list = document.getElementById('char-list');
+    const countEl = document.getElementById('char-count');
+    countEl.textContent = `${officeData.length} 个角色`;
+    const projectFilter = document.getElementById('filter-project').value;
+    const filtered = projectFilter ? officeData.filter(c => c.project_name === projectFilter) : officeData;
+    list.innerHTML = filtered.map(c => {
+        const info = STATUS_MAP[c.status] || STATUS_MAP['offline'];
+        return `
+        <div class="char-list-item" onclick="openCharDetail(${c.id})">
+            <div class="char-list-avatar">${c.avatar || '🦞'}</div>
+            <div class="char-list-info">
+                <div class="char-list-name">${c.name} <span class="status-tag tag-${c.status||'offline'}">${info.emoji} ${info.label}</span></div>
+                <div class="char-list-role">${c.role_title || '未设置'} · ${c.project_name || '未分配'}</div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function filterByStatus(status) {
+    loadOffice();
+}
+
+// 角色详情
+async function openCharDetail(clawId) {
+    selectedClawId = clawId;
+    try {
+        const c = await API.getClaw(clawId);
+        const info = STATUS_MAP[c.status] || STATUS_MAP['offline'];
+        document.getElementById('detail-modal-title').textContent = `${c.avatar||'🦞'} ${c.name}`;
+        document.getElementById('detail-modal-body').innerHTML = `
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:16px">
+                <div style="width:48px;height:48px;border-radius:10px;background:var(--bg-primary);border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:1.4rem">${c.avatar||'🦞'}</div>
+                <div>
+                    <div style="font-weight:600;font-size:1rem">${c.name}</div>
+                    <div style="font-size:0.82rem;color:var(--text-muted)">${c.role_title||'未设置'} · ${c.project_name||'未分配'}</div>
+                </div>
+                <span class="status-tag tag-${c.status||'offline'}">${info.emoji} ${info.label}</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:0.82rem">
+                <div style="padding:8px 12px;background:var(--bg-secondary);border-radius:6px"><span style="color:var(--text-muted)">模块</span><br><strong>${c.module_name||'未分配'}</strong></div>
+                <div style="padding:8px 12px;background:var(--bg-secondary);border-radius:6px"><span style="color:var(--text-muted)">日报时间</span><br><strong>${c.report_schedule||'15:00,21:00'}</strong></div>
+                <div style="padding:8px 12px;background:var(--bg-secondary);border-radius:6px"><span style="color:var(--text-muted)">待办</span><br><strong>${c.total_todos||0} 个</strong></div>
+                <div style="padding:8px 12px;background:var(--bg-secondary);border-radius:6px"><span style="color:var(--text-muted)">今日提交</span><br><strong>${c.today_submitted||0} 个</strong></div>
+            </div>
+            ${c.responsibilities ? `<div style="margin-top:12px;font-size:0.82rem;color:var(--text-secondary)">${c.responsibilities}</div>` : ''}
+        `;
+        document.getElementById('char-detail-modal').classList.add('active');
+    } catch(e) { showToast('加载失败: '+e.message, 'error'); }
+}
+
+function closeCharDetail() { document.getElementById('char-detail-modal').classList.remove('active'); }
+document.getElementById('char-detail-modal').addEventListener('click', e => { if (e.target.id === 'char-detail-modal') closeCharDetail(); });
+
+// 状态切换
+function openStatusModalFromDetail() { closeCharDetail(); openStatusModal(selectedClawId); }
+
+async function openStatusModal(clawId) {
+    selectedClawId = clawId;
+    try {
+        const c = await API.getClaw(clawId);
+        document.getElementById('status-modal-title').textContent = `切换 ${c.name} 的状态`;
+        const statuses = ['工作','学习','摸鱼','休息'];
+        document.getElementById('status-picker').innerHTML = statuses.map(s => `
+            <button class="status-pick-btn pick-${s} ${c.status===s?'active':''}" onclick="setStatus('${s}')">${STATUS_MAP[s].emoji} ${s}</button>
+        `).join('');
+        document.getElementById('status-modal').classList.add('active');
+    } catch(e) { showToast('加载失败: '+e.message, 'error'); }
+}
+
+function closeStatusModal() { document.getElementById('status-modal').classList.remove('active'); }
+document.getElementById('status-modal').addEventListener('click', e => { if (e.target.id === 'status-modal') closeStatusModal(); });
+
+async function setStatus(status) {
+    if (!selectedClawId) return;
+    try {
+        await API.updateClaw(selectedClawId, { status });
+        showToast(`状态已切换为 ${STATUS_MAP[status].emoji} ${status}`, 'success');
+        closeStatusModal();
+        loadOffice();
+    } catch(e) { showToast('切换失败: '+e.message, 'error'); }
+}
+
+// ========== 定时刷新 ==========
+setInterval(loadOffice, 30000);
+</script>
+{% endblock %}

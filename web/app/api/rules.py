@@ -13,43 +13,74 @@ from app.api import api_bp
 
 
 def _get_current_user():
-    """获取当前登录用户"""
+    """获取当前用户（支持 Web session 和 OpenClaw Bearer Token）"""
     uid = session.get('user_id')
-    if not uid:
-        return None
-    return User.query.get(uid)
+    if uid:
+        return User.query.get(uid)
+
+    # Bearer Token → 找到 claw 的 owner 用户
+    from flask import request
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer '):
+        token = auth[7:]
+        from app.models import OpenClawInstance
+        for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
+            if claw.verify_token(token):
+                # admin claw 视为 super_admin 权限
+                if claw.role == 'admin':
+                    class _AdminProxy:
+                        role = 'super_admin'
+                        username = claw.name
+                        managed_projects = []
+                    return _AdminProxy()
+                # 非 admin 角色：返回 owner 用户（继承其权限），附带 claw_name 供 _can_edit 使用
+                owner = User.query.filter_by(username=claw.owner).first()
+                if owner:
+                    owner._claw_name = claw.name
+                    return owner
+    return None
 
 
 def _can_edit(user, resource):
-    """检查用户是否有权编辑资源"""
+    """检查用户是否有权编辑资源（skill/rule）
+    super_admin 和 admin: 可以编辑一切（同等权限）
+    user: 只能编辑自己创建的（或通过 Token 认证的 OpenClaw 自己创建的）
+    """
     if not user:
         return False
-    if user.role == 'super_admin':
+    if user.role in ('super_admin', 'admin'):
         return True
     created_by = getattr(resource, 'created_by', None) or ''
     if created_by == user.username:
         return True
+    # Token 认证时，_claw_name 是 OpenClaw 实例名，created_by 可能存的是 claw 名
+    claw_name = getattr(user, '_claw_name', None)
+    if claw_name and created_by == claw_name:
+        return True
+    # admin 可编辑自己管理项目下的资源
     if user.role == 'admin':
-        managed = user.managed_projects or []
-        if not managed:
-            return False
+        managed_projects = getattr(user, 'managed_projects', None) or []
         res_projects = getattr(resource, 'applicable_projects', None) or []
-        if not res_projects:
-            return False
-        if set(res_projects) & set(managed):
+        if managed_projects and res_projects and any(p in managed_projects for p in res_projects):
             return True
     return False
 
 
 @api_bp.route('/rules', methods=['GET'])
 def list_rules():
-    """获取 Rules 列表（支持筛选）"""
+    """获取 Rules 列表（支持筛选；已软删除的默认隐藏）"""
     scope = request.args.get('scope')  # global/project/module
     category = request.args.get('category')  # standard/custom/ai_generated
     project_id = request.args.get('project_id', type=int)
     search = request.args.get('search')
+    show_deleted = request.args.get('show_deleted', 'false').lower() == 'true'
 
     query = Rule.query
+
+    # 默认隐藏软删除的 Rule（除非管理员显式查询）
+    user = _get_current_user()
+    if not show_deleted or not user or user.role not in ('super_admin', 'admin'):
+        query = query.filter(Rule.is_deleted != True)
 
     # By default, hide admin-scoped rules unless explicitly requested
     include_admin = request.args.get('include_admin', 'false').lower() == 'true'
@@ -105,6 +136,22 @@ def create_rule():
     if Rule.query.filter_by(name=data['name']).first():
         return jsonify({'error': f'Rule {data["name"]} 已存在'}), 409
 
+    # 自动设置 created_by：优先用 _claw_name（Token认证），其次用 username
+    # ⚠️ 不再默认 'system'，未认证时必须传 created_by 或带 Token
+    user = _get_current_user()
+    if user:
+        created_by = getattr(user, '_claw_name', None) or user.username
+    elif data.get('created_by'):
+        created_by = data['created_by']
+    else:
+        return jsonify({'error': '未认证请求必须提供 created_by 字段，请在 Header 中携带 Authorization: Bearer {TOKEN}'}), 401
+
+    # 判断提交者身份，决定审核状态（与 Skill 一致）
+    if user and user.role in ('super_admin', 'admin'):
+        review_status = 'approved'
+    else:
+        review_status = 'pending'
+
     rule = Rule(
         name=data['name'],
         display_name=data['display_name'],
@@ -114,7 +161,8 @@ def create_rule():
         applicable_projects=data.get('applicable_projects'),
         applicable_modules=data.get('applicable_modules'),
         content_template=data.get('content_template', ''),
-        created_by=data.get('created_by', 'system'),
+        created_by=created_by,
+        review_status=review_status,
     )
     try:
         db.session.add(rule)
@@ -122,6 +170,19 @@ def create_rule():
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': f'创建 Rule 失败: {str(e)}'}), 500
+
+    from app.api.skills import _notify_admin_claws, _create_review_todo_for_admin_claws
+    if review_status == 'pending':
+        notified_ids = _notify_admin_claws('Rule', '待审核', rule.display_name,
+                            f'类型: {rule.category}, 作用域: {rule.scope}, 提交人: {rule.created_by}\n请审核后通过或拒绝。')
+        _create_review_todo_for_admin_claws('Rule', rule.display_name, rule.created_by, rule.category, rule.scope)
+    else:
+        notified_ids = _notify_admin_claws('Rule', '新建', rule.display_name,
+                            f'类型: {rule.category}, 作用域: {rule.scope}')
+    db.session.commit()
+    from app.api.agent_client import notify_claw
+    for cid in notified_ids:
+        notify_claw(cid)
 
     return jsonify(rule.to_dict()), 201
 
@@ -133,16 +194,100 @@ def get_rule(rule_id):
     return jsonify(rule.to_dict())
 
 
+@api_bp.route('/rules/<int:rule_id>/review', methods=['POST'])
+def review_rule(rule_id):
+    """审核 Rule（通过/打回待修改/废弃）— 仅 super_admin
+    
+    请求体：
+    {
+        "review_status": "approved" | "revise" | "rejected",
+        "review_comment": "审核意见"
+    }
+    """
+    from app.api.skills import _get_current_user, _notify_admin_claws, _notify_submitter_review_result
+    user = _get_current_user()
+    if not user or user.role not in ('super_admin', 'admin'):
+        return jsonify({'error': '只有管理员可以审核 Rule'}), 403
+
+    rule = Rule.query.get_or_404(rule_id)
+    data = request.get_json()
+    status = (data or {}).get('review_status', '')
+    comment = (data or {}).get('review_comment', '')
+    
+    if status not in ('approved', 'revise', 'rejected'):
+        return jsonify({'error': 'review_status 必须为 approved、revise 或 rejected'}), 400
+
+    # 校验状态流转合法性
+    if rule.review_status == 'approved' and status != 'approved':
+        return jsonify({'error': '已通过的 Rule 不能再打回或废弃'}), 400
+    if rule.review_status == 'rejected':
+        return jsonify({'error': '已废弃的 Rule 不能再审核'}), 400
+
+    old_status = rule.review_status
+    rule.review_status = status
+    if comment:
+        rule.review_comment = comment
+    elif status in ('revise', 'rejected'):
+        rule.review_comment = comment
+    
+    status_labels = {'approved': '通过', 'revise': '打回待修改', 'rejected': '废弃'}
+    action = status_labels.get(status, status)
+
+    # 审核完成后，自动关闭龙虾王的相关审核待办
+    from app.models import ClawTodo, ClawTodoLog
+    review_todos = ClawTodo.query.filter(
+        ClawTodo.title.like(f'%审核 Rule「{rule.display_name}」%'),
+        ClawTodo.task_category == 'review',
+        ClawTodo.enabled == True,
+    ).all()
+    from datetime import date as _date
+    _today = _date.today()
+    for todo in review_todos:
+        todo.enabled = False
+        log = ClawTodoLog.query.filter_by(
+            todo_id=todo.id, log_date=_today
+        ).first()
+        if log and log.status == 'pending':
+            log.status = 'approved' if status == 'approved' else 'rejected'
+            log.result_summary = f'Rule「{rule.display_name}」已{action}'
+            from app.models import _now as _model_now
+            log.completed_at = _model_now()
+
+    db.session.commit()
+
+    notified_ids = _notify_admin_claws('Rule', f'审核{action}', rule.display_name,
+                        f'{old_status} → {status}, 操作人: {user.username}' + (f'\n审核意见: {comment}' if comment else ''))
+    
+    if status == 'revise':
+        _notify_submitter_review_result(rule.created_by, 'Rule', rule.display_name, action, comment)
+    
+    db.session.commit()
+    from app.api.agent_client import notify_claw
+    for cid in notified_ids:
+        notify_claw(cid)
+
+    return jsonify({'message': f'Rule 已{action}', 'review_status': status, 'review_comment': comment})
+
+
 @api_bp.route('/rules/<int:rule_id>', methods=['PUT'])
 def update_rule(rule_id):
-    """更新 Rule"""
+    """更新 Rule（非管理员修改后自动重置为待评审状态，通知龙虾王审核）"""
     rule = Rule.query.get_or_404(rule_id)
+
+    # 已软删除的 Rule 不可编辑
+    if rule.is_deleted:
+        return jsonify({'error': '此 Rule 已被删除，无法编辑'}), 403
+
+    # 已废弃的 Rule 不可编辑
+    if rule.review_status == 'rejected':
+        return jsonify({'error': '已废弃的 Rule 不可编辑'}), 403
 
     user = _get_current_user()
     if not _can_edit(user, rule):
         return jsonify({'error': '无权修改此 Rule，只有超级管理员、管理员或提交人可编辑'}), 403
 
     data = request.get_json()
+    old_review_status = rule.review_status
 
     updatable_fields = [
         'display_name', 'description', 'category', 'scope',
@@ -155,36 +300,80 @@ def update_rule(rule_id):
     if 'is_standard' in data:
         rule.is_standard = bool(data['is_standard'])
 
-    # review_status 只有 admin 以上可改
-    if 'review_status' in data and data['review_status'] in ('approved', 'pending', 'rejected'):
-        if user and user.role in ('super_admin', 'admin'):
-            rule.review_status = data['review_status']
-        else:
-            return jsonify({'error': '只有管理员可以修改审核状态'}), 403
+    # review_status 只能通过专用审核接口修改
+    if 'review_status' in data:
+        return jsonify({'error': '请使用 POST /rules/<id>/review 接口修改审核状态'}), 403
+
+    # 非管理员编辑 Rule 后，自动重置为待评审状态，通知龙虾王审核
+    if user and user.role not in ('super_admin', 'admin') and old_review_status != 'pending':
+        rule.review_status = 'pending'
+        rule.review_comment = None
+        from app.api.skills import _notify_admin_claws, _create_review_todo_for_admin_claws
+        notified_ids = _notify_admin_claws('Rule', '待审核（修改后重新提交）', rule.display_name,
+                            f'类型: {rule.category}, 作用域: {rule.scope}, 提交人: {rule.created_by}\n请审核后通过或拒绝。')
+        _create_review_todo_for_admin_claws('Rule', rule.display_name, rule.created_by, rule.category, rule.scope)
+    else:
+        from app.api.skills import _notify_admin_claws
+        notified_ids = _notify_admin_claws('Rule', '更新', rule.display_name,
+                            f'更新字段: {", ".join(data.keys())}')
 
     db.session.commit()
+    from app.api.agent_client import notify_claw
+    for cid in notified_ids:
+        notify_claw(cid)
+
     return jsonify(rule.to_dict())
 
 
 @api_bp.route('/rules/<int:rule_id>', methods=['DELETE'])
 def delete_rule(rule_id):
-    """删除 Rule（管理员权限）
+    """软删除 Rule（隐藏，OpenClaw 搜索安装时不可见）
 
-    删除后，所有安装过此 Rule 的 OpenClaw 的关联记录会被级联删除，
-    OpenClaw 自行在下次同步时感知到 Rule 已不存在。
+    权限规则：
+    - super_admin：可删除任何 Rule
+    - admin：只能删除自己项目创建的 Rule
+    - user：只能删除自己创建的 Rule
     """
     rule = Rule.query.get_or_404(rule_id)
 
     user = _get_current_user()
-    if not user or user.role not in ('super_admin', 'admin'):
-        return jsonify({'error': '只有管理员可以删除 Rule'}), 403
+    if not user:
+        return jsonify({'error': '请先登录'}), 403
 
-    # 级联删除所有安装关联（OpenClawRule）
-    OpenClawRule.query.filter_by(rule_id=rule_id).delete()
+    # 已软删除的不能重复删除
+    if rule.is_deleted:
+        return jsonify({'error': '该 Rule 已被删除'}), 400
 
-    db.session.delete(rule)
+    # 权限检查
+    can_delete = False
+    if user.role in ('super_admin', 'admin'):
+        can_delete = True
+    else:
+        created_by = rule.created_by or ''
+        if created_by == user.username:
+            can_delete = True
+        elif created_by == getattr(user, '_claw_name', None):
+            can_delete = True
+
+    if not can_delete:
+        return jsonify({'error': '无权删除此 Rule，只能删除自己创建的'}), 403
+
+    # 软删除：标记 is_deleted=True，禁用安装关联
+    rule.is_deleted = True
+    rule.deleted_at = datetime.now()
+
+    # 禁用所有安装关联
+    OpenClawRule.query.filter_by(rule_id=rule_id).update({'enabled': False})
+
+    from app.api.skills import _notify_admin_claws
+    notified_ids = _notify_admin_claws('Rule', '删除（隐藏）', rule.display_name,
+                        f'由 {user.username} 软删除，OpenClaw 将无法搜索安装')
     db.session.commit()
-    return jsonify({'message': f'Rule "{rule.name}" 已删除'})
+    from app.api.agent_client import notify_claw
+    for cid in notified_ids:
+        notify_claw(cid)
+
+    return jsonify({'message': f'Rule "{rule.name}" 已删除（隐藏），OpenClaw 将无法搜索安装'})
 
 
 # ==================== OpenClaw 关联 Rules ====================
@@ -237,6 +426,9 @@ def update_claw_rules(claw_id):
         rule = Rule.query.get(rule_id)
         if not rule:
             continue
+        # 已软删除的 Rule 不能安装
+        if rule.is_deleted:
+            return jsonify({'error': f'Rule "{rule.display_name}" 已被删除，无法安装'}), 403
         existing = OpenClawRule.query.filter_by(
             openclaw_id=claw_id, rule_id=rule_id
         ).first()
@@ -279,6 +471,10 @@ def update_claw_rules(claw_id):
     )
     db.session.add(msg)
     db.session.commit()
+
+    # 通知 SSE 长连接立即推送
+    from app.api.agent_client import notify_claw
+    notify_claw(claw_id)
 
     return jsonify({'message': f'Rules 已分配', 'rule_ids': rule_ids})
 
@@ -373,7 +569,7 @@ def apply_rules_to_claw(claw_id):
         ).first()
         if assoc:
             assoc.applied = True
-            assoc.applied_at = datetime.utcnow()
+            assoc.applied_at = datetime.now()
 
     db.session.commit()
 
