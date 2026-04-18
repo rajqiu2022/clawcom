@@ -18,7 +18,7 @@ def _get_tapd_credentials():
         rows = db.session.execute(
             text("SELECT config_key, config_value FROM system_config WHERE config_key LIKE 'tapd_%'")
         ).fetchall()
-        cfg = {r.config_key: r.config_value for r in rows}
+        cfg = {r[0]: r[1] for r in rows}
         return cfg.get('tapd_api_user', ''), cfg.get('tapd_api_password', '')
     except Exception:
         return '', ''
@@ -63,22 +63,25 @@ def update_tapd_config():
     """更新 TAPD 配置"""
     data = request.get_json()
 
-    conn = db.engine.connect()
-    for key in ['tapd_api_user', 'tapd_api_password']:
-        if key in data:
-            existing = conn.execute(text(
-                "SELECT 1 FROM system_config WHERE config_key=:k"
-            ), {'k': key}).fetchone()
-            if existing:
-                conn.execute(text(
-                    "UPDATE system_config SET config_value=:v, updated_at=CURRENT_TIMESTAMP WHERE config_key=:k"
-                ), {'k': key, 'v': data[key]})
-            else:
-                conn.execute(text(
-                    "INSERT INTO system_config (config_key, config_value, updated_at) VALUES (:k, :v, CURRENT_TIMESTAMP)"
-                ), {'k': key, 'v': data[key]})
-    conn.commit()
-    conn.close()
+    try:
+        for key in ['tapd_api_user', 'tapd_api_password']:
+            if key in data:
+                existing = db.session.execute(text(
+                    "SELECT 1 FROM system_config WHERE config_key=:k"
+                ), {'k': key}).fetchone()
+                if existing:
+                    db.session.execute(text(
+                        "UPDATE system_config SET config_value=:v, updated_at=CURRENT_TIMESTAMP WHERE config_key=:k"
+                    ), {'k': key, 'v': data[key]})
+                else:
+                    db.session.execute(text(
+                        "INSERT INTO system_config (config_key, config_value, updated_at) VALUES (:k, :v, CURRENT_TIMESTAMP)"
+                    ), {'k': key, 'v': data[key]})
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'配置保存失败: {str(e)}'}), 500
+
     return jsonify({'message': 'TAPD 配置已更新'})
 
 

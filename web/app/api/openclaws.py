@@ -2,10 +2,11 @@ import uuid
 import logging
 from datetime import datetime, date, time
 from functools import wraps
-from flask import request, jsonify
+from flask import request, jsonify, session
 from app import db
 from app.models import (OpenClawInstance, DailyReport, Project, Rule,
                         OpenClawRule, OpenClawSkill, Skill, ClawMessage,
+                        ClawTodo, ClawTodoLog, User,
                         generate_api_token, hash_token, _simple_encrypt)
 from app.api import api_bp
 
@@ -14,9 +15,10 @@ logger = logging.getLogger(__name__)
 
 def require_claw_token(f):
     """OpenClaw API Token 认证装饰器
-    
+
     用于 OpenClaw 自身调用的接口（heartbeat、report、config）。
-    验证 Authorization: Bearer <token> 是否匹配该 OpenClaw 的 token。
+    优先验证 URL 中 claw_id 对应的 Token；
+    如果不匹配，回退遍历所有 OpenClawInstance 验证（支持 Token 与 claw_id 不一致的场景）。
     """
     @wraps(f)
     def decorated(claw_id, *args, **kwargs):
@@ -27,22 +29,48 @@ def require_claw_token(f):
             return jsonify({'error': '缺少认证 Token'}), 401
 
         token = auth_header[7:]  # 去掉 "Bearer "
-        if not claw.verify_token(token):
-            return jsonify({'error': 'Token 无效或不匹配'}), 403
-
-        return f(claw_id, claw=claw, *args, **kwargs)
+        # 优先匹配 claw_id 对应的 Token
+        if claw.verify_token(token):
+            return f(claw_id, claw=claw, *args, **kwargs)
+        # 回退：遍历所有非删除的 OpenClawInstance 验证 Token
+        for c in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
+            if c.verify_token(token):
+                return f(claw_id, claw=c, *args, **kwargs)
+        return jsonify({'error': 'Token 无效或不匹配'}), 403
     return decorated
 
 
 @api_bp.route('/openclaws', methods=['GET'])
 def list_openclaws():
-    """获取所有 OpenClaw 列表（默认不含已删除的，?include_deleted=true 可查看）"""
+    """获取所有 OpenClaw 列表（默认不含已删除的，?include_deleted=true 可查看）
+    非 super_admin/admin 看不到 admin 角色（龙虾王）
+    """
     include_deleted = request.args.get('include_deleted', 'false').lower() == 'true'
     query = OpenClawInstance.query
     if not include_deleted:
         query = query.filter(OpenClawInstance.status != 'deleted')
+
+    # 非 super_admin/admin 隐藏 admin 角色（龙虾王）
+    from app.api.skills import _get_current_user
+    user = _get_current_user()
+    if not user or user.role not in ('super_admin', 'admin'):
+        query = query.filter(OpenClawInstance.role != 'admin')
+
     claws = query.order_by(OpenClawInstance.created_at.desc()).all()
-    return jsonify([c.to_dict(brief=True) for c in claws])
+    today = date.today()
+    result = []
+    for c in claws:
+        d = c.to_dict(brief=True)
+        # 添加今日待办统计
+        total_todos = ClawTodo.query.filter_by(openclaw_id=c.id, enabled=True).count()
+        today_logs = ClawTodoLog.query.filter_by(openclaw_id=c.id, log_date=today).all()
+        today_submitted = sum(1 for l in today_logs if l.status == 'submitted')
+        today_approved = sum(1 for l in today_logs if l.status in ('approved', 'completed'))
+        d['total_todos'] = total_todos
+        d['today_submitted'] = today_submitted
+        d['today_approved'] = today_approved
+        result.append(d)
+    return jsonify(result)
 
 
 @api_bp.route('/openclaws', methods=['POST'])
@@ -223,8 +251,9 @@ def create_openclaw():
         init_task_count = 0
         db.session.rollback()
 
-    # 返回 Token 预览（不返回完整明文）
+    # 返回完整 Token（注册时必须返回，否则 OpenClaw 无法连接 SSE）
     result = claw.to_dict()
+    result['api_token'] = raw_token
     result['api_token_preview'] = claw.get_token_preview()
     result['has_token'] = True
     # 收集实际安装结果
@@ -256,7 +285,7 @@ def update_openclaw(claw_id):
     updatable_fields = [
         'name', 'role', 'role_title', 'responsibilities', 'project_name',
         'module_name', 'avatar', 'soul_config', 'workflow_config',
-        'report_schedule', 'connection_mode', 'web_system_url'
+        'report_schedule', 'connection_mode', 'web_system_url', 'status'
     ]
     for field in updatable_fields:
         if field in data:
@@ -312,7 +341,7 @@ def delete_openclaw(claw_id):
     claw = OpenClawInstance.query.get_or_404(claw_id)
 
     claw.status = 'deleted'
-    claw.deleted_at = datetime.utcnow()
+    claw.deleted_at = datetime.now()
     db.session.commit()
 
     return jsonify({
@@ -325,31 +354,31 @@ def delete_openclaw(claw_id):
 def get_registration_skill_for_claw(claw_id):
     """生成该 OpenClaw 专属的注册 Skill（已填好 CLAW_ID、TOKEN、Hub 地址）
 
-    管理员注册 OpenClaw 后，把这个链接发给用户，用户直接保存为 SKILL.md 即可使用。
-    用法：curl http://hub:8088/api/v1/openclaws/5/registration-skill
+    从数据库 hub-connect skill 的 template_content 读取最新内容，
+    替换占位符后返回，确保注册链接始终使用最新版 Skill。
     """
     from flask import Response
     claw = OpenClawInstance.query.get_or_404(claw_id)
     token = claw.get_token_plain()
     hub_url = 'http://your-hub-host:8088'
+    project_name = claw.project.name if claw.project else claw.project_name or '未指定'
 
-    # 获取已安装的标准 Skills 链接
-    skill_links = []
-    for s in claw.skills:
-        if s.enabled and s.skill:
-            skill_links.append(f"- [{s.skill.display_name}]({hub_url}/api/v1/skills/{s.skill.id}/raw)")
+    # 从数据库读取 hub-connect skill 的 template_content
+    hub_skill = Skill.query.filter_by(name='hub-connect').first()
+    if hub_skill and hub_skill.template_content:
+        md = hub_skill.template_content
+        # 替换占位符为实际值
+        md = md.replace('{HUB_URL}', hub_url)
+        md = md.replace('{CLAW_ID}', str(claw.id))
+        md = md.replace('{HUB_API_TOKEN}', token or '')
+        md = md.replace('{NAME}', claw.name or '')
+        md = md.replace('{PROJECT}', project_name)
+        md = md.replace('{ROLE}', claw.role or 'test_member')
+    else:
+        # 回退：如果数据库中没有 hub-connect skill，用简化模板
+        md = f"""# OpenClaw 注册配置 - {claw.name}
 
-    # 获取已安装的标准 Rules 链接
-    rule_links = []
-    for r in OpenClawRule.query.filter_by(openclaw_id=claw_id, enabled=True).all():
-        if r.rule:
-            rule_links.append(f"- [{r.rule.display_name}]({hub_url}/api/v1/rules/{r.rule.id}/raw)")
-
-    md = f"""# OpenClaw 注册配置 - {claw.name}
-
-> 此文件由 Hub 自动生成，已配置好连接信息。将此文件保存到你的 OpenClaw Skills 目录即可完成接入。
-
----
+> 此文件由 Hub 自动生成，已配置好连接信息。
 
 ## 连接信息
 
@@ -358,111 +387,13 @@ Hub 地址: {hub_url}
 CLAW_ID: {claw.id}
 HUB_API_TOKEN: {token}
 OpenClaw 名称: {claw.name}
-所属项目: {claw.project.name if claw.project else claw.project_name or '未指定'}
-所属模块: {claw.module_name or '未指定'}
-角色: {claw.role or 'test_member'}
-日报时间: {claw.report_schedule or '15:00,21:00'}
 ```
-
----
 
 ## 快速开始
 
-### 1. 验证连接
-
-```bash
-curl -H "Authorization: Bearer {token}" \\
-  {hub_url}/api/v1/openclaws/{claw.id}/config
-```
-
-### 2. 全量初始化（拉取所有已分配的 Skills 和 Rules）
-
-```bash
-# 获取已分配的 Skills
-curl -H "Authorization: Bearer {token}" \\
-  {hub_url}/api/v1/openclaws/{claw.id}/assigned-skills
-
-# 获取已分配的 Rules
-curl -H "Authorization: Bearer {token}" \\
-  {hub_url}/api/v1/openclaws/{claw.id}/assigned-rules
-```
-
-### 3. 建立通信（SSE 长连接）
-
-```bash
-curl -H "Authorization: Bearer {token}" \\
-  -H "Accept: text/event-stream" \\
-  {hub_url}/api/openclaws/{claw.id}/events
-```
-
-### 4. 心跳保活（每 30 秒）
-
-```bash
-curl -X POST -H "Authorization: Bearer {token}" \\
-  {hub_url}/api/v1/openclaws/{claw.id}/heartbeat
-```
-
----
-
-## 已安装的 Skills（可通过链接直接获取内容）
-
-{chr(10).join(skill_links) if skill_links else '暂无'}
-
-## 已安装的 Rules
-
-{chr(10).join(rule_links) if rule_links else '暂无'}
-
----
-
-## 增量模式（按需安装更多）
-
-### 浏览 Skills 市场
-
-```bash
-curl -H "Authorization: Bearer {token}" \\
-  {hub_url}/api/v1/skills
-```
-
-### 安装指定 Skill
-
-```bash
-curl -X POST -H "Authorization: Bearer {token}" \\
-  -H "Content-Type: application/json" \\
-  -d '{{"skill_id": 3}}' \\
-  {hub_url}/api/v1/openclaws/{claw.id}/skills
-```
-
-### 浏览并安装 Rules
-
-```bash
-# 浏览
-curl -H "Authorization: Bearer {token}" {hub_url}/api/v1/rules
-
-# 批量安装
-curl -X POST -H "Authorization: Bearer {token}" \\
-  -H "Content-Type: application/json" \\
-  -d '{{"rule_ids": [1, 3, 5]}}' \\
-  {hub_url}/api/v1/openclaws/{claw.id}/rules
-```
-
----
-
-## 日常使用
-
-- **提交日报**：`POST /api/v1/openclaws/{claw.id}/report`
-- **发送消息**：`POST /api/openclaws/{claw.id}/messages`
-- **获取消息**：`GET /api/openclaws/{claw.id}/messages`
-- **同步更新**：每小时调用 `GET /assigned-skills` 和 `GET /assigned-rules`
-
----
-
-## 触发词
-
-- "连接 Hub"
-- "同步配置"
-- "安装 Skill"
-- "查看市场"
-- "提交日报"
+1. 验证连接：curl -H "Authorization: Bearer {token}" {hub_url}/api/v1/openclaws/{claw.id}/config
+2. 拉取 Skills：curl -H "Authorization: Bearer {token}" {hub_url}/api/v1/openclaws/{claw.id}/assigned-skills
+3. 建立 SSE：curl -H "Authorization: Bearer {token}" -H "Accept: text/event-stream" {hub_url}/api/openclaws/{claw.id}/events
 """
 
     fmt = request.args.get('format', 'markdown')
@@ -519,13 +450,23 @@ def get_openclaw_config(claw_id, claw=None):
 def heartbeat(claw_id, claw=None):
     """心跳上报（轮询模式核心接口）
 
+    客户端可携带 status 字段上报当前状态（工作/学习/摸鱼/休息），
+    Hub 只记录，不硬编码。
     返回：当前状态 + 消息 + 待办统计
     OpenClaw 每 30 秒调用一次，根据返回决定下一步动作
     """
     from app.models import ClawTodo, ClawTodoLog
 
-    claw.status = 'online'
-    claw.last_heartbeat = datetime.utcnow()
+    data = request.get_json(silent=True) or {}
+    # 客户端上报状态，不硬编码
+    client_status = data.get('status')
+    valid_statuses = ('工作', '学习', '摸鱼', '休息')
+    if client_status and client_status in valid_statuses:
+        claw.status = client_status
+    elif not claw.status or claw.status == 'offline':
+        # 无上报且当前离线，默认设为工作
+        claw.status = '工作'
+    claw.last_activity = datetime.now()
     db.session.commit()
 
     today = date.today()
@@ -587,7 +528,7 @@ def heartbeat(claw_id, claw=None):
             'init_pending': init_pending,
             'interrupt': interrupt_pending,
         },
-        'server_time': datetime.utcnow().isoformat(),
+        'server_time': datetime.now().isoformat(),
     })
 
 
@@ -599,6 +540,10 @@ def submit_report(claw_id, claw=None):
 
     if not data:
         return jsonify({'error': '上报数据为空'}), 400
+
+    # 兼容：如果传了 content 但没传 tasks_completed，自动映射
+    if data.get('content') and not data.get('tasks_completed'):
+        data['tasks_completed'] = data['content']
 
     # 解析日期和时间
     report_date = date.fromisoformat(data.get('report_date',
@@ -616,12 +561,11 @@ def submit_report(claw_id, claw=None):
     ).first()
 
     if report:
-        # 更新已有日报
-        report.tasks_completed = data.get('tasks_completed')
-        report.knowledge_recorded = data.get('knowledge_recorded')
-        report.experience_shared = data.get('experience_shared')
-        report.knowledge_learned = data.get('knowledge_learned')
-        report.ai_summary = data.get('ai_summary')
+        # 更新已有日报（非 None 的字段才覆盖，避免清空已有内容）
+        for field in ['tasks_completed', 'knowledge_recorded', 'experience_shared', 'knowledge_learned', 'ai_summary']:
+            val = data.get(field)
+            if val is not None:
+                setattr(report, field, val)
     else:
         report = DailyReport(
             openclaw_id=claw_id,
@@ -713,7 +657,7 @@ def dispatch_task_to_claw(claw_id, claw=None):
     if not data or not data.get('task_type'):
         return jsonify({'error': 'task_type 为必填项'}), 400
 
-    task_id = f"task_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    task_id = f"task_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
     task_type = data.get('task_type')
     payload = data.get('payload', {})
 
@@ -790,7 +734,7 @@ def get_claw_messages(claw_id, claw=None):
     # 将待送达消息标记为已送达
     for msg in pending:
         msg.status = 'delivered'
-        msg.delivered_at = datetime.utcnow()
+        msg.delivered_at = datetime.now()
     db.session.commit()
 
     return jsonify({
@@ -802,13 +746,35 @@ def get_claw_messages(claw_id, claw=None):
 @api_bp.route('/openclaws/<int:claw_id>/messages/<int:msg_id>/read', methods=['PUT'])
 @require_claw_token
 def mark_claw_message_read(claw_id, msg_id, claw=None):
-    """标记消息为已读"""
+    """标记消息为已读，支持附带回复"""
     msg = ClawMessage.query.get_or_404(msg_id)
 
     if msg.claw_id != claw_id:
         return jsonify({'error': '无权操作'}), 403
 
     msg.status = 'read'
-    msg.read_at = datetime.utcnow()
+    msg.read_at = datetime.now()
+
+    # 如果附带了 reply，自动创建一条回复消息
+    reply_msg = None
+    data = request.get_json(silent=True) or {}
+    reply_content = data.get('reply', '').strip()
+    if reply_content:
+        reply_msg = ClawMessage(
+            claw_id=claw_id,
+            sender_name=claw.name,
+            content=reply_content,
+            msg_type='text',
+            direction='from_claw',
+            reply_to=msg_id,
+            status='delivered',
+            delivered_at=datetime.now(),
+        )
+        db.session.add(reply_msg)
+
     db.session.commit()
-    return jsonify({'message': '已标记为已读'})
+
+    result = {'message': '已标记为已读'}
+    if reply_msg:
+        result['reply'] = reply_msg.to_dict()
+    return jsonify(result)

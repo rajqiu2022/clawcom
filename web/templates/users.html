@@ -1,0 +1,418 @@
+{% extends "base.html" %}
+{% block title %}用户管理 - OpenClaw{% endblock %}
+{% block nav_users %}active{% endblock %}
+{% block page_title %}用户管理{% endblock %}
+
+{% block content %}
+<style>
+.users-stats { display:flex; gap:16px; margin-bottom:20px; flex-wrap:wrap }
+.stat-card { background:var(--bg-card); border:1px solid var(--border); border-radius:10px; padding:16px 20px; min-width:120px; text-align:center }
+.stat-card .val { font-size:1.5rem; font-weight:700; color:var(--accent) }
+.stat-card .label { font-size:0.78rem; color:var(--text-muted); margin-top:2px }
+
+.users-table { width:100%; border-collapse:collapse; background:var(--bg-card); border-radius:10px; overflow:hidden; border:1px solid var(--border) }
+.users-table th { background:var(--bg-hover); padding:10px 14px; text-align:left; font-size:0.82rem; color:var(--text-muted); font-weight:600 }
+.users-table td { padding:10px 14px; border-top:1px solid var(--border); font-size:0.88rem }
+.users-table tr:hover td { background:var(--bg-hover) }
+
+.role-badge { padding:2px 10px; border-radius:12px; font-size:0.76rem; font-weight:600; display:inline-block }
+.role-super_admin { background:rgba(239,68,68,0.12); color:#ef4444 }
+.role-admin { background:rgba(59,130,246,0.12); color:#3b82f6 }
+.role-user { background:rgba(34,197,94,0.12); color:#22c55e }
+.role-guest { background:rgba(156,163,175,0.15); color:#9ca3af }
+
+.btn-sm { padding:4px 10px; font-size:0.78rem; border-radius:6px; border:1px solid var(--border); background:var(--bg-card); cursor:pointer; transition:all .15s }
+.btn-sm:hover { background:var(--bg-hover) }
+.btn-sm.btn-danger { color:#ef4444; border-color:rgba(239,68,68,0.3) }
+.btn-sm.btn-danger:hover { background:rgba(239,68,68,0.08) }
+
+.modal-overlay { display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center }
+.modal-overlay.active { display:flex }
+.modal { background:var(--bg-card); border-radius:12px; padding:24px; max-width:420px; width:90%; box-shadow:0 20px 60px rgba(0,0,0,0.3) }
+.modal h3 { margin:0 0 16px; font-size:1.05rem }
+.form-group { margin-bottom:14px }
+.form-label { display:block; font-size:0.82rem; color:var(--text-muted); margin-bottom:4px; font-weight:500 }
+.form-input, .form-select { width:100%; padding:8px 12px; border:1px solid var(--border); border-radius:6px; background:var(--bg-primary); color:var(--text-primary); font-size:0.88rem; box-sizing:border-box }
+.form-select { cursor:pointer }
+.modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:18px }
+
+.toolbar { display:flex; gap:10px; margin-bottom:16px; align-items:center; flex-wrap:wrap }
+.toolbar .search-input { padding:7px 12px; border:1px solid var(--border); border-radius:6px; background:var(--bg-card); color:var(--text-primary); font-size:0.85rem; width:200px }
+.user-avatar { width:28px; height:28px; border-radius:50%; background:var(--accent); color:#fff; display:inline-flex; align-items:center; justify-content:center; font-size:0.75rem; font-weight:600; margin-right:8px; flex-shrink:0 }
+
+.dropdown-multi { position:relative }
+.dropdown-multi .dm-trigger { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; border:1px solid var(--border); border-radius:6px; background:var(--bg-primary); color:var(--text-primary); font-size:0.85rem; cursor:pointer; min-height:36px; gap:6px }
+.dropdown-multi .dm-trigger:hover { border-color:var(--accent) }
+.dropdown-multi .dm-trigger .dm-text { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.dropdown-multi .dm-trigger .dm-arrow { font-size:0.7rem; color:var(--text-muted); transition:transform .2s }
+.dropdown-multi.open .dm-arrow { transform:rotate(180deg) }
+.dropdown-multi .dm-list { display:none; position:absolute; top:100%; left:0; right:0; z-index:100; background:var(--bg-card); border:1px solid var(--border); border-radius:6px; margin-top:4px; max-height:280px; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.25) }
+.dropdown-multi.open .dm-list { display:block }
+.dropdown-multi .dm-item { display:flex; align-items:center; gap:10px; padding:10px 14px; cursor:pointer; font-size:0.9rem; color:#e8eaed !important; transition:background .1s }
+.dropdown-multi .dm-item:hover { background:var(--bg-hover) }
+.dropdown-multi .dm-item input { accent-color:var(--accent); width:15px; height:15px }
+.dropdown-multi .dm-empty { padding:12px; text-align:center; color:var(--text-muted); font-size:0.82rem }
+</style>
+
+<div class="users-stats" id="stats"></div>
+
+<div class="toolbar">
+    <input class="search-input" id="search" placeholder="搜索用户名/显示名..." oninput="renderUsers()">
+    <select class="form-select" id="role-filter" style="width:auto;padding:7px 12px" onchange="renderUsers()">
+        <option value="">全部角色</option>
+        <option value="super_admin">超级管理员</option>
+        <option value="admin">管理员</option>
+        <option value="user">成员</option>
+        <option value="guest">访客</option>
+    </select>
+    <div style="flex:1"></div>
+    <button class="btn btn-primary" onclick="showAddUserModal()" style="font-size:0.82rem">+ 添加用户</button>
+    <button class="btn btn-ghost" onclick="showChangePwdModal()" style="font-size:0.82rem">🔑 修改我的密码</button>
+</div>
+
+<table class="users-table">
+    <thead>
+        <tr>
+            <th>用户</th>
+            <th>角色</th>
+            <th>管理项目</th>
+            <th>绑定 OpenClaw</th>
+            <th>注册时间</th>
+            <th>操作</th>
+        </tr>
+    </thead>
+    <tbody id="users-body"></tbody>
+</table>
+
+<!-- 编辑用户弹窗 -->
+<div class="modal-overlay" id="edit-modal">
+    <div class="modal">
+        <h3>编辑用户</h3>
+        <input type="hidden" id="edit-id">
+        <div class="form-group">
+            <label class="form-label">用户名</label>
+            <input class="form-input" id="edit-username" disabled>
+        </div>
+        <div class="form-group">
+            <label class="form-label">显示名称</label>
+            <input class="form-input" id="edit-display-name">
+        </div>
+        <div class="form-group">
+            <label class="form-label">角色</label>
+            <select class="form-select" id="edit-role">
+                <option value="super_admin">超级管理员</option>
+                <option value="admin">管理员</option>
+                <option value="user">成员</option>
+                <option value="guest">访客</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">管理项目</label>
+            <div class="dropdown-multi" id="edit-projects"></div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('edit-modal')">取消</button>
+            <button class="btn btn-primary" onclick="saveUser()">保存</button>
+        </div>
+    </div>
+</div>
+
+<!-- 重置密码弹窗 -->
+<div class="modal-overlay" id="reset-pwd-modal">
+    <div class="modal">
+        <h3>重置密码</h3>
+        <p style="font-size:0.85rem;color:var(--text-muted);margin:0 0 14px">为 <strong id="reset-username"></strong> 设置新密码</p>
+        <input type="hidden" id="reset-id">
+        <div class="form-group">
+            <label class="form-label">新密码</label>
+            <input class="form-input" type="password" id="reset-new-pwd" placeholder="至少4位">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('reset-pwd-modal')">取消</button>
+            <button class="btn btn-primary" onclick="doResetPwd()">确定重置</button>
+        </div>
+    </div>
+</div>
+
+<!-- 修改自己密码弹窗 -->
+<div class="modal-overlay" id="change-pwd-modal">
+    <div class="modal">
+        <h3>修改我的密码</h3>
+        <div class="form-group">
+            <label class="form-label">原密码</label>
+            <input class="form-input" type="password" id="my-old-pwd">
+        </div>
+        <div class="form-group">
+            <label class="form-label">新密码</label>
+            <input class="form-input" type="password" id="my-new-pwd" placeholder="至少4位">
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('change-pwd-modal')">取消</button>
+            <button class="btn btn-primary" onclick="doChangePwd()">确定修改</button>
+        </div>
+    </div>
+</div>
+
+<!-- 添加用户弹窗 -->
+<div class="modal-overlay" id="add-user-modal">
+    <div class="modal">
+        <h3>添加用户</h3>
+        <div class="form-group">
+            <label class="form-label">用户名（登录账号）</label>
+            <input class="form-input" id="add-username" placeholder="英文/拼音，如 zhangsan">
+        </div>
+        <div class="form-group">
+            <label class="form-label">显示名称</label>
+            <input class="form-input" id="add-display-name" placeholder="中文姓名，如 张三">
+        </div>
+        <div class="form-group">
+            <label class="form-label">角色</label>
+            <select class="form-select" id="add-role">
+                <option value="user">成员</option>
+                <option value="guest">访客（只读）</option>
+                <option value="admin">管理员</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">管理项目（可选）</label>
+            <div class="dropdown-multi" id="add-projects"></div>
+        </div>
+        <div style="font-size:0.8rem;color:var(--text-muted);margin-top:4px">默认密码：<strong>123456</strong>，用户登录后可自行修改</div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeModal('add-user-modal')">取消</button>
+            <button class="btn btn-primary" onclick="doAddUser()">创建</button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* users.html v5 */
+const qs = s => document.querySelector(s);
+let allUsers = [];
+let allProjects = [];
+const roleLabels = {super_admin:'超级管理员', admin:'管理员', user:'成员', guest:'访客'};
+
+async function loadProjects() {
+    try { allProjects = await API.get('/projects'); } catch { allProjects = []; }
+}
+
+function renderProjectCheckboxes(containerId, selectedIds) {
+    const sel = new Set((selectedIds || []).map(Number));
+    const el = document.getElementById(containerId);
+    const placeholder = '请选择项目';
+
+    function getLabel() {
+        const names = allProjects.filter(p => sel.has(p.id)).map(p => p.name);
+        return names.length ? names.join('、') : placeholder;
+    }
+
+    el.innerHTML = `
+        <div class="dm-trigger" onclick="this.parentElement.classList.toggle('open')">
+            <span class="dm-text">${getLabel()}</span>
+            <span class="dm-arrow">▼</span>
+        </div>
+        <div class="dm-list">
+            ${allProjects.length ? allProjects.map(p => `
+                <label class="dm-item">
+                    <input type="checkbox" value="${p.id}" ${sel.has(p.id) ? 'checked' : ''}>
+                    <span style="color:#e8eaed">${p.name}</span>
+                </label>
+            `).join('') : '<div class="dm-empty">暂无项目</div>'}
+        </div>`;
+
+    // checkbox 变化时更新显示文本
+    el.querySelectorAll('input[type=checkbox]').forEach(cb => {
+        cb.addEventListener('change', () => {
+            if (cb.checked) sel.add(Number(cb.value)); else sel.delete(Number(cb.value));
+            el.querySelector('.dm-text').textContent = getLabel();
+        });
+    });
+}
+
+function getCheckedProjects(containerId) {
+    return Array.from(document.getElementById(containerId).querySelectorAll('input:checked'))
+        .map(cb => Number(cb.value));
+}
+
+// 点击外部关闭下拉
+document.addEventListener('click', e => {
+    document.querySelectorAll('.dropdown-multi.open').forEach(dd => {
+        if (!dd.contains(e.target)) dd.classList.remove('open');
+    });
+});
+
+async function loadUsers() {
+    try {
+        await loadProjects();
+        allUsers = await API.get('/users');
+        renderStats();
+        renderUsers();
+    } catch(e) {
+        document.getElementById('users-body').innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:30px">${e.message || '加载失败，需要管理员权限'}</td></tr>`;
+    }
+}
+
+function renderStats() {
+    const counts = {super_admin:0, admin:0, user:0, guest:0};
+    allUsers.forEach(u => { counts[u.role] = (counts[u.role]||0) + 1; });
+    qs('#stats').innerHTML = `
+        <div class="stat-card"><div class="val">${allUsers.length}</div><div class="label">总用户</div></div>
+        <div class="stat-card"><div class="val" style="color:#ef4444">${counts.super_admin}</div><div class="label">超级管理员</div></div>
+        <div class="stat-card"><div class="val" style="color:#3b82f6">${counts.admin}</div><div class="label">管理员</div></div>
+        <div class="stat-card"><div class="val" style="color:#22c55e">${counts.user}</div><div class="label">成员</div></div>
+        <div class="stat-card"><div class="val" style="color:#9ca3af">${counts.guest}</div><div class="label">访客</div></div>
+    `;
+}
+
+function renderUsers() {
+    const search = (qs('#search').value || '').toLowerCase();
+    const roleF = qs('#role-filter').value;
+    const filtered = allUsers.filter(u => {
+        if (roleF && u.role !== roleF) return false;
+        if (search && !(u.username.toLowerCase().includes(search) || (u.display_name||'').toLowerCase().includes(search))) return false;
+        return true;
+    });
+
+    const isSA = currentUser && currentUser.role === 'super_admin';
+    const isAdmin = currentUser && currentUser.role === 'admin';
+    // admin 和 super_admin 同等权限
+    const canEditAny = isSA || isAdmin;
+    const canDeleteAny = isSA || isAdmin;
+
+    qs('#users-body').innerHTML = filtered.map(u => {
+        const canEdit = canEditAny;
+        const canDelete = canDeleteAny && u.id !== currentUser.id;
+        const initial = (u.display_name || u.username)[0].toUpperCase();
+        return `<tr>
+            <td style="display:flex;align-items:center">
+                <span class="user-avatar">${initial}</span>
+                <div>
+                    <div style="font-weight:500">${u.display_name || u.username}</div>
+                    <div style="font-size:0.78rem;color:var(--text-muted)">${u.username}</div>
+                </div>
+            </td>
+            <td><span class="role-badge role-${u.role}">${roleLabels[u.role] || u.role}</span></td>
+            <td style="font-size:0.82rem;color:var(--text-muted)">${(u.managed_projects||[]).map(id => { const p = allProjects.find(x=>x.id===id); return p ? p.name : id; }).join(', ') || '-'}</td>
+            <td style="font-size:0.82rem;color:var(--text-muted)">${u.bound_claw_id || '-'}</td>
+            <td style="font-size:0.82rem;color:var(--text-muted)">${u.created_at ? u.created_at.split(' ')[0] : '-'}</td>
+            <td>
+                ${canEdit ? `<button class="btn-sm" onclick="editUser(${u.id})">编辑</button>` : ''}
+                ${canEdit ? `<button class="btn-sm" onclick="showResetPwd(${u.id},'${u.username}')">重置密码</button>` : ''}
+                ${canDelete ? `<button class="btn-sm btn-danger" onclick="deleteUser(${u.id},'${u.username}')">删除</button>` : ''}
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+function editUser(id) {
+    const u = allUsers.find(x => x.id === id);
+    if (!u) return;
+    qs('#edit-id').value = u.id;
+    qs('#edit-username').value = u.username;
+    qs('#edit-display-name').value = u.display_name || '';
+    qs('#edit-role').value = u.role;
+    renderProjectCheckboxes('edit-projects', u.managed_projects);
+    const roleSelect = qs('#edit-role');
+    Array.from(roleSelect.options).forEach(opt => {
+        opt.disabled = currentUser.role === 'admin' && (opt.value === 'super_admin' || opt.value === 'admin');
+    });
+    qs('#edit-modal').classList.add('active');
+}
+
+async function saveUser() {
+    const id = qs('#edit-id').value;
+    const projects = getCheckedProjects('edit-projects');
+    try {
+        await API.put(`/users/${id}`, {
+            display_name: qs('#edit-display-name').value.trim(),
+            role: qs('#edit-role').value,
+            managed_projects: projects,
+        });
+        closeModal('edit-modal');
+        loadUsers();
+    } catch(e) { showToast(e.message || '保存失败', 'error'); }
+}
+
+function showResetPwd(id, name) {
+    qs('#reset-id').value = id;
+    qs('#reset-username').textContent = name;
+    qs('#reset-new-pwd').value = '';
+    qs('#reset-pwd-modal').classList.add('active');
+}
+
+async function doResetPwd() {
+    const id = qs('#reset-id').value;
+    const pwd = qs('#reset-new-pwd').value.trim();
+    if (!pwd || pwd.length < 4) return showToast('密码至少4位', 'warning');
+    try {
+        await API.post(`/users/${id}/reset-password`, {new_password: pwd});
+        closeModal('reset-pwd-modal');
+        showToast('密码已重置', 'success');
+    } catch(e) { showToast(e.message || '重置失败', 'error'); }
+}
+
+async function deleteUser(id, name) {
+    if (!await customConfirm(`确定要删除用户「${name}」吗？此操作不可恢复。`)) return;
+    try {
+        await API.del(`/users/${id}`);
+        showToast('已删除', 'success');
+        loadUsers();
+    } catch(e) { showToast(e.message || '删除失败', 'error'); }
+}
+
+function showChangePwdModal() {
+    qs('#my-old-pwd').value = '';
+    qs('#my-new-pwd').value = '';
+    qs('#change-pwd-modal').classList.add('active');
+}
+
+function showAddUserModal() {
+    qs('#add-username').value = '';
+    qs('#add-display-name').value = '';
+    qs('#add-role').value = 'user';
+    renderProjectCheckboxes('add-projects', []);
+    const roleSelect = qs('#add-role');
+    Array.from(roleSelect.options).forEach(opt => {
+        opt.disabled = currentUser.role === 'admin' && (opt.value === 'super_admin' || opt.value === 'admin');
+    });
+    qs('#add-user-modal').classList.add('active');
+}
+
+async function doAddUser() {
+    const username = qs('#add-username').value.trim();
+    const display_name = qs('#add-display-name').value.trim();
+    const role = qs('#add-role').value;
+    const projects = getCheckedProjects('add-projects');
+    if (!username) return showToast('用户名不能为空', 'warning');
+    try {
+        const res = await API.post('/users', { username, display_name, role, managed_projects: projects });
+        closeModal('add-user-modal');
+        showToast(res.message || '创建成功', 'success');
+        loadUsers();
+    } catch(e) { showToast(e.message || '创建失败', 'error'); }
+}
+
+async function doChangePwd() {
+    const oldP = qs('#my-old-pwd').value.trim();
+    const newP = qs('#my-new-pwd').value.trim();
+    if (!oldP || !newP) return showToast('请填写新旧密码', 'warning');
+    if (newP.length < 4) return showToast('新密码至少4位', 'warning');
+    try {
+        await API.post('/auth/change-password', {old_password: oldP, new_password: newP});
+        closeModal('change-pwd-modal');
+        showToast('密码修改成功', 'success');
+    } catch(e) { showToast(e.message || '修改失败', 'error'); }
+}
+
+function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+
+document.querySelectorAll('.modal-overlay').forEach(el => {
+    el.addEventListener('click', e => { if (e.target === el) el.classList.remove('active'); });
+});
+
+loadUsers();
+</script>
+{% endblock %}

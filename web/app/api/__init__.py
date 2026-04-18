@@ -1,12 +1,82 @@
-from flask import Blueprint
+from flask import Blueprint, request, jsonify, session
 
 api_bp = Blueprint('api', __name__)
 
-from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, agent_client, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration  # noqa
+# 不需要认证的公开路径（前缀匹配，使用绝对路径）
+PUBLIC_PATHS = [
+    '/api/v1/auth/login',          # 登录
+    '/api/v1/auth/register',       # 注册
+    '/api/v1/system-changelog',    # 系统变更日志（公开）
+]
+
+# Token 验证缓存（避免每次请求遍历所有 claw）
+_token_claw_cache = {}
+_token_cache_ts = 0
+_TOKEN_CACHE_TTL = 60  # 60秒缓存
+
+
+def _verify_bearer_token(token):
+    """验证 Bearer Token，返回对应的 OpenClawInstance 或 None"""
+    import time
+    global _token_claw_cache, _token_cache_ts
+
+    # 快速路径：检查缓存
+    now = time.time()
+    if now - _token_cache_ts > _TOKEN_CACHE_TTL:
+        _token_claw_cache.clear()
+        _token_cache_ts = now
+
+    if token in _token_claw_cache:
+        return _token_claw_cache[token]
+
+    # 遍历验证
+    from app.models import OpenClawInstance
+    for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
+        if claw.verify_token(token):
+            _token_claw_cache[token] = claw
+            return claw
+
+    _token_claw_cache[token] = None
+    return None
+
+
+@api_bp.before_request
+def require_auth():
+    """全局 API 认证：所有 /api/v1/ 请求必须携带 Bearer Token 或 Web session 登录"""
+    path = request.path
+
+    # OPTIONS 预检请求放行
+    if request.method == 'OPTIONS':
+        return None
+
+    # 公开路径放行
+    for pub in PUBLIC_PATHS:
+        if path.startswith(pub):
+            return None
+
+    # Web session 登录
+    uid = session.get('user_id')
+    if uid:
+        return None
+
+    # Bearer Token 认证
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer '):
+        token = auth[7:]
+        if token:
+            claw = _verify_bearer_token(token)
+            if claw:
+                return None
+            return jsonify({'error': 'Token 无效，请检查 Authorization 头'}), 401
+
+    # 既没 session 也没 Token
+    return jsonify({'error': '未认证，请在 Header 中携带 Authorization: Bearer {TOKEN} 或先登录 Web'}), 401
+
+
+from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans  # noqa
 
 # 注册 Agent Hub 通信中心蓝图
 api_bp.register_blueprint(agent_hub.agent_hub_bp, url_prefix='/agent-hub')
 
-# 注册子agent客户端蓝图（SSE长连接、任务派发）
-# 注意：agent_bp 已有自己的 url_prefix='/api/openclaws'
-api_bp.register_blueprint(agent_client.agent_bp)
+# 注意：agent_client.agent_bp 不在此处注册，已在 app/__init__.py 中直接注册到 app（url_prefix='/api/openclaws'）
+# 在此处注册会导致路径嵌套错误（/api/v1/api/openclaws/）和路由冲突

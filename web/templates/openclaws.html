@@ -11,13 +11,15 @@
         </select>
         <select id="filter-status" class="form-select filter-select" onchange="applyFilters()">
             <option value="">全部状态</option>
-            <option value="online">🟢 在线</option>
-            <option value="offline">⚪ 离线</option>
-            <option value="busy">🟡 忙碌</option>
+            <option value="工作">🟢 工作</option>
+            <option value="学习">🔵 学习</option>
+            <option value="摸鱼">🟡 摸鱼</option>
+            <option value="休息">⚪ 休息</option>
+            <option value="offline">⚫ 离线</option>
         </select>
         <input type="text" id="filter-name" class="form-input filter-input" placeholder="🔍 搜索名称..." oninput="applyFilters()">
     </div>
-    <button class="btn btn-primary" onclick="openCreateModal()">+ 新增 OpenClaw</button>
+    <button class="btn btn-primary" id="btn-create-claw" onclick="openCreateModal()" style="display:none">+ 新增 OpenClaw</button>
 </div>
 {% endblock %}
 
@@ -33,16 +35,12 @@
         <span class="stat-lbl">在线</span>
     </div>
     <div class="stat-pill">
-        <span class="stat-num" id="stat-admin">-</span>
-        <span class="stat-lbl">管理员</span>
-    </div>
-    <div class="stat-pill">
         <span class="stat-num" id="stat-projects">-</span>
         <span class="stat-lbl">项目数</span>
     </div>
 </div>
 
-<!-- 管理员专属区域 -->
+<!-- 管理员专属区域（超级管理员可见龙虾王） -->
 <div class="admin-section" id="admin-section" style="display:none">
     <div class="section-header">
         <h3 class="section-title-admin">👑 管理员</h3>
@@ -75,6 +73,15 @@
     <div class="modal" style="max-width:640px">
         <h2 class="modal-title">注册新 OpenClaw</h2>
         <form id="create-form">
+            <div class="form-group">
+                <label class="form-label">头像</label>
+                <div style="display:flex;align-items:center;gap:12px">
+                    <div id="avatar-preview" class="avatar-preview-box">🤖</div>
+                    <input type="hidden" name="avatar" id="avatar-input" value="🤖">
+                    <div id="avatar-picker" class="avatar-picker"></div>
+                    <button type="button" class="btn btn-sm" onclick="randomAvatar()" style="font-size:0.78rem;white-space:nowrap">🎲 随机</button>
+                </div>
+            </div>
             <div class="two-col">
                 <div class="form-group">
                     <label class="form-label">名称 *</label>
@@ -145,6 +152,16 @@
                 <button class="btn btn-primary btn-sm" onclick="copyToken()"
                         style="position:absolute;top:8px;right:8px;font-size:0.78rem">复制</button>
             </div>
+            <!-- 注册 Skill 链接 -->
+            <div style="margin-bottom:12px">
+                <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:6px">📋 注册 Skill 链接</label>
+                <div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;position:relative">
+                    <code id="reg-skill-url-in-token" style="word-break:break-all;font-size:0.82rem;color:var(--accent)"></code>
+                    <button class="btn btn-ghost btn-sm" onclick="copyRegSkillUrlFromToken()"
+                            style="position:absolute;top:8px;right:8px;font-size:0.78rem">复制链接</button>
+                </div>
+                <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">发给 OpenClaw 使用者，保存为 SKILL.md 即可接入 Hub</div>
+            </div>
             <div id="token-warning" style="background:rgba(234,179,8,0.1);border:1px solid rgba(234,179,8,0.3);border-radius:8px;padding:12px;margin-bottom:12px;display:none">
                 <p style="font-size:0.85rem;color:#eab308;margin:0">
                     ⚠️ 重新生成 Token 后，旧的 Token 将立即失效。请确保更新所有使用该 Token 的客户端。
@@ -153,6 +170,16 @@
         </div>
         <div id="no-token-content" style="margin-bottom:12px;display:none">
             <p style="color:var(--text-secondary);margin-bottom:12px">尚未为该 OpenClaw 生成 API Token。</p>
+            <!-- 即使没有 token，也显示注册 Skill 链接 -->
+            <div style="margin-bottom:12px">
+                <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:6px">📋 注册 Skill 链接</label>
+                <div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;position:relative">
+                    <code id="reg-skill-url-in-token-nokey" style="word-break:break-all;font-size:0.82rem;color:var(--accent)"></code>
+                    <button class="btn btn-ghost btn-sm" onclick="copyRegSkillUrlFromToken2()"
+                            style="position:absolute;top:8px;right:8px;font-size:0.78rem">复制链接</button>
+                </div>
+                <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">发给 OpenClaw 使用者，保存为 SKILL.md 即可接入 Hub</div>
+            </div>
         </div>
         <div class="modal-actions">
             <button class="btn btn-ghost" id="btn-regenerate-token" onclick="showRegenerateConfirm()">重新生成</button>
@@ -195,6 +222,23 @@
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeRegSuccessModal()">关闭</button>
             <button class="btn btn-primary" id="reg-goto-detail" onclick="">查看详情</button>
+        </div>
+    </div>
+</div>
+
+<!-- 头像选择弹窗 -->
+<div class="modal-overlay" id="avatar-modal">
+    <div class="modal" style="max-width:480px">
+        <h2 class="modal-title">🎭 选择头像</h2>
+        <p style="color:var(--text-secondary);margin-bottom:8px;font-size:0.88rem">选择一个机器人头像，或点击🎲随机生成</p>
+        <div id="avatar-edit-grid" class="avatar-edit-grid"></div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:8px">
+            <button type="button" class="btn btn-sm" onclick="randomEditAvatar()">🎲 随机</button>
+            <span style="color:var(--text-muted);font-size:0.82rem">当前选中：<span id="avatar-edit-current" style="font-size:1.3rem"></span></span>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeAvatarModal()">取消</button>
+            <button class="btn btn-primary" onclick="confirmAvatar()">确认</button>
         </div>
     </div>
 </div>
@@ -333,6 +377,70 @@
     align-items: center;
     justify-content: center;
     font-size: 1.4rem;
+    cursor: pointer;
+    transition: border-color 0.2s, transform 0.15s;
+}
+.claw-avatar-lg:hover {
+    border-color: var(--accent);
+    transform: scale(1.08);
+}
+.avatar-preview-box {
+    width: 48px; height: 48px;
+    border-radius: 12px;
+    background: var(--bg-primary);
+    border: 2px solid var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.6rem;
+    flex-shrink: 0;
+    transition: transform 0.2s;
+}
+.avatar-picker {
+    display: flex; flex-wrap: wrap; gap: 4px;
+}
+.avatar-option {
+    width: 32px; height: 32px;
+    border-radius: 8px;
+    background: var(--bg-primary);
+    border: 2px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.avatar-option:hover {
+    border-color: var(--accent);
+    transform: scale(1.1);
+}
+.avatar-option.selected {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+/* 头像选择弹窗 */
+.avatar-edit-grid {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 6px;
+    margin: 12px 0;
+}
+.avatar-edit-option {
+    width: 40px; height: 40px;
+    border-radius: 10px;
+    background: var(--bg-primary);
+    border: 2px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.3rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.avatar-edit-option:hover {
+    border-color: var(--accent);
+    transform: scale(1.12);
+}
+.avatar-edit-option.selected {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .claw-main-info {
@@ -360,9 +468,10 @@
     flex-shrink: 0;
 }
 
-.status-indicator.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
-.status-indicator.offline { background: var(--text-muted); }
-.status-indicator.busy { background: #eab308; box-shadow: 0 0 6px #eab308; }
+.status-indicator.online, .status-indicator.工作 { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.status-indicator.offline, .status-indicator.休息 { background: var(--text-muted); }
+.status-indicator.busy, .status-indicator.摸鱼 { background: #eab308; box-shadow: 0 0 6px #eab308; }
+.status-indicator.学习 { background: #3b82f6; box-shadow: 0 0 6px #3b82f6; }
 
 .claw-role-text {
     font-size: 0.82rem;
@@ -482,6 +591,7 @@
 let allClaws = [];
 let allProjects = [];
 let filteredClaws = [];
+let canViewTokens = false;  // 是否有权限查看 Token
 
 const ROLE_LABELS = {
     'admin': { text: '管理员', cls: 'admin' },
@@ -502,6 +612,7 @@ async function loadClaws() {
         projectSel.innerHTML = '<option value="">全部项目</option>' +
             allProjects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
 
+        initProjectFilter(projectSel, applyFilters);
         applyFilters();
         updateStats();
     } catch (err) {
@@ -509,15 +620,25 @@ async function loadClaws() {
     }
 }
 
+// 加载当前用户权限，判断是否可查看 Token
+async function loadTokenPermission() {
+    try {
+        const me = await API.request('GET', '/auth/me');
+        const role = me.role || 'guest';
+        // super_admin / admin 可查看所有 token；user 只能查看绑定 claw 的 token
+        canViewTokens = (role === 'super_admin' || role === 'admin');
+    } catch(e) {
+        canViewTokens = false;
+    }
+}
+
 function updateStats() {
     const total = filteredClaws.length;
-    const online = filteredClaws.filter(c => c.status === 'online').length;
-    const admins = filteredClaws.filter(c => c.role === 'admin').length;
+    const online = filteredClaws.filter(c => ['工作','学习','摸鱼','online'].includes(c.status)).length;
     const projectNames = new Set(filteredClaws.filter(c => c.project_name).map(c => c.project_name));
 
     document.getElementById('stat-total').textContent = total;
     document.getElementById('stat-online').textContent = online;
-    document.getElementById('stat-admin').textContent = admins;
     document.getElementById('stat-projects').textContent = projectNames.size || '-';
 }
 
@@ -593,7 +714,7 @@ function renderClaws() {
                 <span class="project-name">📁 ${projectName}</span>
                 <span class="count-badge">${claws.length}</span>
                 <span class="status-summary">
-                    ${claws.filter(c => c.status === 'online').length} 在线
+                    ${claws.filter(c => ['工作','学习','摸鱼','online'].includes(c.status)).length} 在线
                 </span>
             </div>
             <div class="claw-list">${claws.map(c => renderClawCard(c)).join('')}</div>
@@ -620,12 +741,12 @@ function renderClaws() {
 
 function renderClawCard(c) {
     const roleInfo = ROLE_LABELS[c.role] || { text: '测试成员', cls: 'test_member' };
-    const onlineCount = filteredClaws.filter(cl => cl.status === 'online').length;
+    const onlineCount = filteredClaws.filter(cl => ['工作','学习','摸鱼','online'].includes(cl.status)).length;
 
     return `
     <div class="claw-item" data-id="${c.id}">
         <div class="claw-item-header">
-            <div class="claw-avatar-lg">${c.avatar || '🤖'}</div>
+            <div class="claw-avatar-lg" onclick="event.stopPropagation(); openAvatarModal(${c.id}, '${(c.avatar || '🤖').replace(/'/g, "\\'")}')" title="点击更换头像">${c.avatar || '🤖'}</div>
             <div class="claw-main-info">
                 <div class="claw-name-row">
                     <span class="status-indicator ${c.status || 'offline'}"></span>
@@ -638,10 +759,15 @@ function renderClawCard(c) {
         <div class="claw-meta-row">
             ${c.project_name ? `<span class="claw-meta-tag">📁 ${c.project_name}</span>` : ''}
             ${c.module_name ? `<span class="claw-meta-tag">📦 ${c.module_name}</span>` : ''}
-            <span class="claw-meta-tag">⏰ ${c.report_schedule || '15:00,21:00'}</span>
+           
+        </div>
+        <div class="claw-meta-row" style="margin-top:4px">
+            <span class="claw-meta-tag" style="color:var(--accent)">📋 ${c.total_todos || 0} 待办</span>
+            <span class="claw-meta-tag" style="color:var(--yellow)">📝 ${c.today_submitted || 0} 已提交</span>
+           
         </div>
         <div class="claw-desc">${c.responsibilities || '暂无描述'}</div>
-        <div class="claw-token-row">
+        ${canViewTokens ? `<div class="claw-token-row">
             <span class="token-preview" style="color:var(--text-secondary);font-size:0.8rem;font-family:monospace;">
                 🔑 ${c.api_token_preview || '未设置'}
             </span>
@@ -649,7 +775,7 @@ function renderClawCard(c) {
                     style="padding:4px 8px;font-size:0.75rem;margin-left:8px;">
                 查看
             </button>
-        </div>
+        </div>` : ''}
     </div>`;
 }
 
@@ -681,10 +807,105 @@ function onProjectChange(sel) {
     }
 }
 
+// === 头像系统 ===
+const ROBOT_AVATARS = [
+    '🤖','🦾','🦿','🧠','👁️','🔌','⚙️','🛡️',
+    '🔮','💎','🌟','⭐','🧲','🌀','🎯','🧩',
+    '🔬','📡','🔋','💡','🧪','🧬','🧯','🩺'
+];
+const AVATAR_COLORS = [
+    '#6366f1','#8b5cf6','#3b82f6','#06b6d4','#10b981','#f59e0b','#ef4444','#ec4899'
+];
+
+function initAvatarPicker() {
+    const picker = document.getElementById('avatar-picker');
+    if (!picker) return;
+    picker.innerHTML = ROBOT_AVATARS.slice(0, 12).map(a =>
+        `<span class="avatar-option${a === '🤖' ? ' selected' : ''}" onclick="selectAvatar(this)">${a}</span>`
+    ).join('');
+}
+
+function selectAvatar(el) {
+    const picker = el.closest('.avatar-picker') || el.parentElement;
+    picker.querySelectorAll('.avatar-option').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+    const avatar = el.textContent.trim();
+    document.getElementById('avatar-input').value = avatar;
+    document.getElementById('avatar-preview').textContent = avatar;
+    document.getElementById('avatar-preview').style.transform = 'scale(1.15)';
+    setTimeout(() => document.getElementById('avatar-preview').style.transform = '', 200);
+}
+
+function randomAvatar() {
+    const avatar = ROBOT_AVATARS[Math.floor(Math.random() * ROBOT_AVATARS.length)];
+    document.getElementById('avatar-input').value = avatar;
+    document.getElementById('avatar-preview').textContent = avatar;
+    document.getElementById('avatar-preview').style.transform = 'scale(1.2) rotate(10deg)';
+    setTimeout(() => document.getElementById('avatar-preview').style.transform = '', 300);
+    // deselect all picker options
+    document.querySelectorAll('#avatar-picker .avatar-option').forEach(o => o.classList.remove('selected'));
+}
+
+// 头像编辑弹窗（列表中点击头像触发）
+let avatarEditClawId = null;
+let avatarEditSelected = '🤖';
+
+function openAvatarModal(clawId, currentAvatar) {
+    avatarEditClawId = clawId;
+    avatarEditSelected = currentAvatar || '🤖';
+    const grid = document.getElementById('avatar-edit-grid');
+    grid.innerHTML = ROBOT_AVATARS.map(a =>
+        `<span class="avatar-edit-option${a === avatarEditSelected ? ' selected' : ''}" onclick="selectEditAvatar(this)">${a}</span>`
+    ).join('');
+    document.getElementById('avatar-edit-current').textContent = avatarEditSelected;
+    document.getElementById('avatar-modal').classList.add('active');
+}
+
+function selectEditAvatar(el) {
+    document.querySelectorAll('#avatar-edit-grid .avatar-edit-option').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+    avatarEditSelected = el.textContent.trim();
+    document.getElementById('avatar-edit-current').textContent = avatarEditSelected;
+}
+
+function randomEditAvatar() {
+    avatarEditSelected = ROBOT_AVATARS[Math.floor(Math.random() * ROBOT_AVATARS.length)];
+    document.getElementById('avatar-edit-current').textContent = avatarEditSelected;
+    // update grid selection
+    document.querySelectorAll('#avatar-edit-grid .avatar-edit-option').forEach(o => {
+        o.classList.toggle('selected', o.textContent.trim() === avatarEditSelected);
+    });
+}
+
+async function confirmAvatar() {
+    if (!avatarEditClawId) return;
+    try {
+        await API.updateClaw(avatarEditClawId, { avatar: avatarEditSelected });
+        closeAvatarModal();
+        loadClaws();
+        showToast('头像已更新', 'success');
+    } catch (err) {
+        showToast('更新头像失败: ' + err.message, 'error');
+    }
+}
+
+function closeAvatarModal() {
+    document.getElementById('avatar-modal').classList.remove('active');
+    avatarEditClawId = null;
+}
+
+document.getElementById('avatar-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('avatar-modal')) closeAvatarModal();
+});
+
 function openCreateModal() {
     loadProjectsForSelect();
     document.getElementById('create-form').reset();
     document.getElementById('role-hint').textContent = '';
+    // 重置头像选择
+    document.getElementById('avatar-input').value = '🤖';
+    document.getElementById('avatar-preview').textContent = '🤖';
+    initAvatarPicker();
     // 所属用户默认为当前登录用户
     if (currentUser) {
         document.querySelector('#create-form input[name="owner"]').value = currentUser.display_name || currentUser.username || '';
@@ -722,6 +943,28 @@ function copyToken() {
     }
 }
 
+function copyRegSkillUrlFromToken() {
+    const url = document.getElementById('reg-skill-url-in-token').textContent;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(() => {
+            showToast('注册 Skill 链接已复制', 'success');
+        }).catch(() => fallbackCopy(url));
+    } else {
+        fallbackCopy(url);
+    }
+}
+
+function copyRegSkillUrlFromToken2() {
+    const url = document.getElementById('reg-skill-url-in-token-nokey').textContent;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(() => {
+            showToast('注册 Skill 链接已复制', 'success');
+        }).catch(() => fallbackCopy(url));
+    } else {
+        fallbackCopy(url);
+    }
+}
+
 function fallbackCopy(token) {
     const el = document.createElement('textarea');
     el.value = token;
@@ -736,7 +979,12 @@ let currentClawId = null;
 
 // 查看 OpenClaw 的 Token
 async function viewToken(clawId, clawName) {
+    if (!canViewTokens) {
+        showToast('无权查看 Token', 'error');
+        return;
+    }
     currentClawId = clawId;
+    const skillUrl = `${location.origin}/api/v1/openclaws/${clawId}/registration-skill`;
     try {
         const result = await API.getClawToken(clawId);
         document.getElementById('token-modal-title').textContent = `🔑 ${clawName} 的 API Token`;
@@ -745,6 +993,7 @@ async function viewToken(clawId, clawName) {
         document.getElementById('no-token-content').style.display = 'none';
         document.getElementById('btn-regenerate-token').style.display = 'inline-block';
         document.getElementById('token-display').textContent = result.api_token;
+        document.getElementById('reg-skill-url-in-token').textContent = skillUrl;
         document.getElementById('token-warning').style.display = 'none';
         document.getElementById('token-modal').classList.add('active');
     } catch (err) {
@@ -754,6 +1003,7 @@ async function viewToken(clawId, clawName) {
         document.getElementById('token-content').style.display = 'none';
         document.getElementById('no-token-content').style.display = 'block';
         document.getElementById('btn-regenerate-token').style.display = 'inline-block';
+        document.getElementById('reg-skill-url-in-token-nokey').textContent = skillUrl;
         document.getElementById('token-warning').style.display = 'none';
         document.getElementById('token-modal').classList.add('active');
     }
@@ -854,6 +1104,14 @@ document.getElementById('create-form').addEventListener('submit', async e => {
     }
 });
 
-loadClaws();
+loadTokenPermission().then(() => loadClaws());
+
+// 权限控制（等 currentUser 加载完）
+setTimeout(() => {
+    if (perms.can_create_openclaw) {
+        const btn = document.getElementById('btn-create-claw');
+        if (btn) btn.style.display = '';
+    }
+}, 500);
 </script>
 {% endblock %}

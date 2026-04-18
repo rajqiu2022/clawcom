@@ -1,0 +1,271 @@
+{% extends "base.html" %}
+{% block title %}课题讨论 - OpenClaw 管理系统{% endblock %}
+{% block nav_topics %}active{% endblock %}
+{% block page_title %}课题讨论{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:8px;align-items:center">
+    <select id="filter-board" class="form-select" style="min-width:140px" onchange="loadTopics()">
+        <option value="">全部板块</option>
+    </select>
+    <select id="filter-status" class="form-select" style="min-width:100px" onchange="loadTopics()">
+        <option value="open">讨论中</option>
+        <option value="all">全部</option>
+        <option value="closed">已关闭</option>
+    </select>
+    <input type="text" id="search-input" class="form-input" style="width:180px" placeholder="🔍 搜索课题..." oninput="debounceSearch()">
+    <button class="btn btn-primary" onclick="showCreateModal()">+ 发起课题</button>
+</div>
+{% endblock %}
+
+{% block content %}
+<!-- 板块统计 -->
+<div class="stats-grid" id="board-stats" style="margin-bottom:20px"></div>
+
+<!-- 课题列表 -->
+<div id="topic-list">
+    <div class="loading"><span class="spinner"></span> 加载中...</div>
+</div>
+
+<!-- 分页 -->
+<div id="pagination" style="display:flex;justify-content:center;gap:8px;margin-top:16px"></div>
+
+<!-- 新建课题弹窗 -->
+<div class="modal-overlay" id="create-modal">
+    <div class="modal" style="max-width:680px">
+        <h2 class="modal-title">发起新课题</h2>
+        <form id="create-form">
+            <div class="form-group">
+                <label class="form-label">板块 *</label>
+                <select class="form-input" id="new-board" required onchange="onBoardChange()"></select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">可见范围 *</label>
+                <select class="form-input" id="new-visibility">
+                    <option value="public">🌐 公开（全平台可见可参与）</option>
+                    <option value="project">📁 项目（同项目可见可参与）</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">标题 *</label>
+                <input class="form-input" id="new-title" required placeholder="简要描述课题主题">
+            </div>
+            <div class="form-group">
+                <label class="form-label">内容 *（支持 Markdown）</label>
+                <textarea class="form-textarea" id="new-content" required style="min-height:160px" placeholder="详细描述课题背景、讨论方向..."></textarea>
+            </div>
+
+            <!-- 用例评审专属字段 -->
+            <div id="review-fields" style="display:none">
+                <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:4px">
+                    <h3 style="font-size:0.92rem;font-weight:600;margin-bottom:10px;color:var(--accent)">📋 用例评审配置</h3>
+                    <div class="form-group">
+                        <label class="form-label">关联用例库 *</label>
+                        <select class="form-input" id="new-review-library"></select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">评审模块（可多选）</label>
+                        <div id="module-checkboxes" style="max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px;font-size:0.82rem"></div>
+                        <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px">不选则评审整个用例库</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">前置信息（知识库条目 ID）</label>
+                        <input class="form-input" id="new-review-knowledge-id" type="number" placeholder="输入知识条目 ID，如 42">
+                        <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px">需求文档、代码实现等关键信息，建议先存入知识库后引用 ID</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
+                <button type="submit" class="btn btn-primary">发布</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+.topic-card {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    transition: background .15s;
+}
+.topic-card:hover { background: var(--bg-hover); }
+.topic-title { font-size: 1.05rem; font-weight: 600; margin-bottom: 4px; }
+.topic-meta { font-size: 0.8rem; color: var(--text-muted); display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.board-tag { padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 500; }
+.vis-tag { padding: 2px 6px; border-radius: 8px; font-size: 0.7rem; }
+.status-closed { opacity: 0.5; }
+</style>
+<script>
+let boards = [];
+let libraries = [];
+let currentPage = 1;
+let searchTimer = null;
+
+const BOARD_COLORS = {
+    test_methods: '#3b82f6', case_sharing: '#10b981', risk_assessment: '#ef4444',
+    client_perf: '#f59e0b', special_testing: '#8b5cf6', industry_news: '#06b6d4',
+    case_review: '#ec4899'
+};
+
+async function loadBoards() {
+    boards = await API.request('GET', '/topics/boards');
+    const sel = $('#filter-board');
+    const newSel = $('#new-board');
+    sel.innerHTML = '<option value="">全部板块</option>' + boards.map(b =>
+        `<option value="${b.key}">${b.label}</option>`).join('');
+    newSel.innerHTML = boards.map(b =>
+        `<option value="${b.key}">${b.label}</option>`).join('');
+}
+
+async function loadLibraries() {
+    try {
+        libraries = await API.request('GET', '/testcase-libraries');
+        const sel = $('#new-review-library');
+        sel.innerHTML = '<option value="">-- 选择用例库 --</option>' + libraries.map(l =>
+            `<option value="${l.id}">${l.name}${l.project_name ? ' (' + l.project_name + ')' : ''}</option>`
+        ).join('');
+    } catch(e) { libraries = []; }
+}
+
+async function loadModules() {
+    const libId = parseInt($('#new-review-library').value);
+    const box = $('#module-checkboxes');
+    if (!libId) { box.innerHTML = '<div style="color:var(--text-muted)">请先选择用例库</div>'; return; }
+    try {
+        const tree = await API.request('GET', `/testcase-libraries/${libId}/modules`);
+        if (!tree.length) { box.innerHTML = '<div style="color:var(--text-muted)">该用例库暂无模块</div>'; return; }
+        box.innerHTML = renderModuleCheckboxes(tree, '');
+    } catch(e) { box.innerHTML = '<div style="color:var(--red)">加载失败</div>'; }
+}
+
+function renderModuleCheckboxes(nodes, prefix) {
+    return nodes.map(n => {
+        const indent = prefix ? 'margin-left:16px' : '';
+        const check = `<label style="display:flex;align-items:center;gap:6px;${indent};padding:3px 0;cursor:pointer">
+            <input type="checkbox" value="${n.path}" class="module-cb"> ${n.name} <span style="color:var(--text-muted);font-size:0.72rem">(${n.count})</span></label>`;
+        const kids = n.children && n.children.length ? renderModuleCheckboxes(n.children, n.path) : '';
+        return check + kids;
+    }).join('');
+}
+
+function onBoardChange() {
+    const board = $('#new-board').value;
+    $('#review-fields').style.display = board === 'case_review' ? '' : 'none';
+    if (board === 'case_review' && !libraries.length) loadLibraries();
+}
+
+$('#new-review-library').addEventListener('change', loadModules);
+
+async function loadTopics() {
+    const board = $('#filter-board').value;
+    const status = $('#filter-status').value;
+    const search = $('#search-input').value.trim();
+    let url = `/topics?page=${currentPage}&per_page=20`;
+    if (board) url += `&board=${board}`;
+    if (status) url += `&status=${status}`;
+    if (search) url += `&search=${encodeURIComponent(search)}`;
+
+    try {
+        const data = await API.request('GET', url);
+        renderTopics(data.items, data.total);
+        renderPagination(data.total, data.page, data.per_page);
+    } catch(e) { showToast('加载失败: ' + e.message, 'error'); }
+}
+
+function renderTopics(items, total) {
+    const list = $('#topic-list');
+    if (!items.length) {
+        list.innerHTML = `<div class="empty-state"><div class="empty-state-icon">💬</div>
+            <div class="empty-state-text">暂无课题，点击右上角发起讨论</div></div>`;
+        return;
+    }
+    list.innerHTML = items.map(t => {
+        const color = BOARD_COLORS[t.board] || '#6b7280';
+        const closed = t.status === 'closed';
+        const visTag = t.visibility === 'project'
+            ? '<span class="vis-tag" style="background:#f59e0b22;color:#f59e0b">📁 项目</span>'
+            : '';
+        const reviewInfo = t.board === 'case_review' && t.review_library_name
+            ? `<span style="font-size:0.75rem;color:var(--accent)">📋 ${t.review_library_name}</span>`
+            : '';
+        return `<div class="topic-card ${closed ? 'status-closed' : ''}" onclick="location.href='/topics/${t.id}'">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div style="min-width:0;flex:1">
+                    <div class="topic-title">${closed ? '🔒 ' : ''}${t.title}</div>
+                    <div class="topic-meta">
+                        <span class="board-tag" style="background:${color}22;color:${color}">${t.board_label}</span>
+                        ${visTag}
+                        <span>👤 ${t.author_name}</span>
+                        ${t.project_name ? `<span>📁 ${t.project_name}</span>` : ''}
+                        ${reviewInfo}
+                        <span>🕐 ${timeAgo(t.created_at)}</span>
+                    </div>
+                </div>
+                <div style="text-align:right;min-width:60px">
+                    <div style="font-size:1.1rem;font-weight:700;color:var(--accent)">${t.reply_count || 0}</div>
+                    <div style="font-size:0.72rem;color:var(--text-muted)">回复</div>
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function renderPagination(total, page, perPage) {
+    const pages = Math.ceil(total / perPage);
+    if (pages <= 1) { $('#pagination').innerHTML = ''; return; }
+    let html = '';
+    for (let i = 1; i <= pages; i++) {
+        html += `<button class="btn btn-sm ${i === page ? 'btn-primary' : 'btn-ghost'}"
+            onclick="currentPage=${i};loadTopics()">${i}</button>`;
+    }
+    $('#pagination').innerHTML = html;
+}
+
+function debounceSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { currentPage = 1; loadTopics(); }, 300);
+}
+
+function showCreateModal() { $('#create-modal').classList.add('active'); }
+function closeCreateModal() { $('#create-modal').classList.remove('active'); }
+$('#create-modal').addEventListener('click', e => { if (e.target === $('#create-modal')) closeCreateModal(); });
+
+$('#create-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const board = $('#new-board').value;
+    const payload = {
+        board: board,
+        visibility: $('#new-visibility').value,
+        title: $('#new-title').value.trim(),
+        content: $('#new-content').value.trim(),
+    };
+
+    // 用例评审字段
+    if (board === 'case_review') {
+        const libId = parseInt($('#new-review-library').value);
+        if (!libId) { showToast('请选择关联用例库', 'error'); return; }
+        payload.review_library_id = libId;
+        const selectedModules = [...document.querySelectorAll('.module-cb:checked')].map(cb => cb.value);
+        if (selectedModules.length) payload.review_module_paths = selectedModules;
+        const knowledgeId = parseInt($('#new-review-knowledge-id').value);
+        if (knowledgeId) payload.review_knowledge_id = knowledgeId;
+    }
+
+    try {
+        await API.request('POST', '/topics', payload);
+        showToast('课题已发布', 'success');
+        closeCreateModal();
+        $('#create-form').reset();
+        $('#review-fields').style.display = 'none';
+        loadTopics();
+    } catch(e) { showToast(e.message || '发布失败', 'error'); }
+});
+
+loadBoards().then(() => loadTopics());
+</script>
+{% endblock %}

@@ -3,6 +3,134 @@
 {% block nav_knowledge %}active{% endblock %}
 {% block page_title %}知识库管理{% endblock %}
 
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vditor@3.10.8/dist/index.css" />
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
+
+/* Vditor 暗色主题修正 */
+.vditor { border: 1px solid var(--border) !important; border-radius: 8px !important; }
+.vditor--dark .vditor-ir .vditor-reset,
+.vditor--dark .vditor-sv,
+.vditor--dark .vditor-reset { color: #e2e8f0 !important; font-size: 0.92rem !important; line-height: 1.7 !important; }
+.vditor--dark { background: #1a1b2e !important; }
+.vditor--dark .vditor-toolbar { background: #1e1f33 !important; border-bottom: 1px solid var(--border) !important; }
+.vditor--dark .vditor-toolbar button { color: #94a3b8 !important; }
+.vditor--dark .vditor-toolbar button:hover { color: #e2e8f0 !important; }
+.vditor--dark .vditor-ir pre.vditor-reset { background: #1a1b2e !important; }
+.vditor--dark .vditor-reset code { background: #2a2b3e !important; color: #a5b4fc !important; }
+.vditor--dark .vditor-reset blockquote { border-left-color: var(--accent) !important; }
+.vditor--dark .vditor-ir .vditor-reset a { color: var(--accent) !important; }
+
+/* ===== 知识卡片网格 ===== */
+.knowledge-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 12px;
+}
+.kn-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    transition: all 0.2s ease;
+    cursor: pointer;
+    position: relative;
+}
+.kn-card:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent-dim), 0 4px 16px rgba(108,92,231,0.08);
+    transform: translateY(-2px);
+}
+.kn-card-title {
+    font-family: 'Noto Sans SC', sans-serif;
+    font-size: 0.94rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    line-height: 1.4;
+}
+.kn-card-preview {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.kn-card-tags {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+.kn-card-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: auto;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+.kn-card-submitter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+.kn-card-submitter-avatar {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: #fff;
+    flex-shrink: 0;
+}
+.kn-card-submitter-avatar.claw { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
+.kn-card-submitter-avatar.space { background: linear-gradient(135deg, #f59e0b, #f97316); }
+.kn-card-submitter-avatar.manual { background: linear-gradient(135deg, #6b7280, #4b5563); }
+.kn-card-time {
+    font-size: 0.74rem;
+    color: var(--text-muted);
+}
+.kn-card-actions {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    display: flex;
+    gap: 2px;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.kn-card:hover .kn-card-actions { opacity: 1; }
+.kn-act-btn {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 7px;
+    cursor: pointer;
+    font-size: 0.78rem;
+    transition: all 0.15s;
+}
+.kn-act-btn:hover { background: var(--bg-hover); border-color: var(--accent); }
+.kn-act-btn.del { color: var(--red); }
+.kn-act-btn.del:hover { background: var(--red-dim); }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/vditor@3.10.8/dist/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+{% endblock %}
+
 {% block top_actions %}
 <div style="display:flex;gap:10px;align-items:center">
     <select id="filter-project" class="form-select" style="min-width:140px" onchange="loadKnowledge()">
@@ -16,7 +144,7 @@
 <div class="tab-bar">
     <div class="tab-item active" data-tab="browse" onclick="switchTab('browse')">浏览</div>
     <div class="tab-item" data-tab="pending" onclick="switchTab('pending')">
-        待审核 <span id="pending-badge" style="background:var(--yellow);color:#000;border-radius:99px;padding:1px 7px;font-size:0.75rem;margin-left:4px"></span>
+        待审核 <span id="pending-badge" style="background:var(--yellow);color:#000;border-radius:99px;padding:1px 7px;font-size:0.75rem;margin-left:4px;display:none"></span>
     </div>
 </div>
 
@@ -38,13 +166,13 @@
         </select>
         <select class="form-select" id="filter-category" style="width:auto" onchange="loadKnowledge()">
             <option value="">全部标签</option>
-            <option value="bug-pattern">bug-pattern</option>
-            <option value="test-checklist">test-checklist</option>
-            <option value="performance-case">performance-case</option>
-            <option value="project-lesson">project-lesson</option>
-            <option value="tool-usage">tool-usage</option>
-            <option value="test-summary">test-summary</option>
-            <option value="general">general</option>
+            <option value="method">测试方法</option>
+            <option value="bug-standard">Bug 标准</option>
+            <option value="bug-pattern">Bug 模式</option>
+            <option value="perf-baseline">性能基线</option>
+            <option value="pitfall">踩坑记录</option>
+            <option value="workflow">流程规范</option>
+            <option value="best-practice">最佳实践</option>
         </select>
         <select class="form-select" id="filter-status" style="width:auto" onchange="loadKnowledge()">
             <option value="">全部状态</option>
@@ -56,7 +184,7 @@
         <span id="result-count" style="color:var(--text-muted);font-size:0.82rem"></span>
     </div>
 
-    <div class="knowledge-list" id="knowledge-list">
+    <div class="knowledge-grid" id="knowledge-list">
         <div class="loading"><span class="spinner"></span></div>
     </div>
 </div>
@@ -70,7 +198,7 @@
 
 <!-- 新增/编辑弹窗 -->
 <div class="modal-overlay" id="edit-modal">
-    <div class="modal" style="max-width:680px">
+    <div class="modal" style="max-width:860px">
         <div class="modal-title" id="edit-modal-title">新增知识</div>
         <input type="hidden" id="edit-id">
         <div style="display:flex;flex-direction:column;gap:14px">
@@ -82,13 +210,13 @@
                 <div style="flex:1">
                     <label class="form-label">分类标签</label>
                     <select class="form-select" id="edit-category">
-                        <option value="bug-pattern">bug-pattern</option>
-                        <option value="test-checklist">test-checklist</option>
-                        <option value="performance-case">performance-case</option>
-                        <option value="project-lesson">project-lesson</option>
-                        <option value="tool-usage">tool-usage</option>
-                        <option value="test-summary">test-summary</option>
-                        <option value="general">general</option>
+                        <option value="method">测试方法</option>
+                        <option value="bug-standard">Bug 标准</option>
+                        <option value="bug-pattern">Bug 模式</option>
+                        <option value="perf-baseline">性能基线</option>
+                        <option value="pitfall">踩坑记录</option>
+                        <option value="workflow">流程规范</option>
+                        <option value="best-practice">最佳实践</option>
                     </select>
                 </div>
                 <div style="flex:1">
@@ -117,8 +245,8 @@
                 </div>
             </div>
             <div>
-                <label class="form-label">内容 * (支持 Markdown)</label>
-                <textarea class="form-input" id="edit-content" rows="12" placeholder="知识内容，支持 Markdown 格式..." style="font-family:monospace;font-size:0.88rem;line-height:1.6;resize:vertical"></textarea>
+                <label class="form-label">内容 * (支持 Markdown，可粘贴/拖拽图片)</label>
+                <div id="vditor-editor"></div>
             </div>
         </div>
         <div class="modal-actions">
@@ -166,9 +294,14 @@ const statusLabels = {
     approved: '已通过', rejected: '已拒绝'
 };
 const sourceLabels = {
-    openclaw: ['tag-blue', '🤖 Agent'],
+    openclaw: ['tag-purple', '🤖 Agent'],
     openspace: ['tag-orange', '🧬 OpenSpace'],
-    manual: ['tag-accent', '✍️ 手动'],
+    manual: ['tag-blue', '✍️ 手动'],
+};
+const categoryLabels = {
+    'method': '测试方法', 'bug-standard': 'Bug 标准', 'bug-pattern': 'Bug 模式',
+    'perf-baseline': '性能基线', 'pitfall': '踩坑记录', 'workflow': '流程规范',
+    'best-practice': '最佳实践',
 };
 
 function escapeHtml(str) {
@@ -176,56 +309,65 @@ function escapeHtml(str) {
     return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function getSubmitterInfo(e) {
+    if (e.source_type === 'openclaw') {
+        const name = e.source_openclaw_name || '未知 Agent';
+        return { name, avatarClass: 'claw', initial: name.charAt(0) };
+    }
+    if (e.source_type === 'openspace') {
+        return { name: 'OpenSpace', avatarClass: 'space', initial: 'OS' };
+    }
+    return { name: '手动录入', avatarClass: 'manual', initial: '手' };
+}
+
 function renderEntry(e) {
-    const src = sourceLabels[e.source_type] || sourceLabels.manual;
-    const preview = (e.content || '').substring(0, 120).replace(/\n/g, ' ');
+    const src = sourceLabels[e.source_type] || ['tag-blue', '未知'];
+    const submitter = getSubmitterInfo(e);
+    const preview = (e.content || '').substring(0, 160).replace(/\n/g, ' ');
+
+    // 审核按钮：仅超级管理员可见（龙虾王 Token 认证映射为 super_admin）
+    let reviewBtns = '';
+    if (e.status === 'pending_review' && currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'admin')) {
+        reviewBtns = `
+            <button class="btn btn-sm btn-primary" onclick="event.stopPropagation();reviewEntry(${e.id}, 'approve')">通过</button>
+            <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();reviewEntry(${e.id}, 'reject')">拒绝</button>
+        `;
+    }
+
     return `
-        <div class="knowledge-item" style="cursor:pointer" onclick="showDetail(${e.id})">
-            <div class="knowledge-item-body" style="flex:1;min-width:0">
-                <div class="knowledge-title" style="font-size:0.95rem;font-weight:600;margin-bottom:4px">${escapeHtml(e.title)}</div>
-                <div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(preview)}${(e.content||'').length > 120 ? '...' : ''}</div>
-                <div class="knowledge-meta" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-                    <span class="tag ${src[0]}">${src[1]}</span>
-                    <span class="tag tag-accent">#${e.category}</span>
-                    <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
-                    ${e.project_name ? `<span class="tag tag-blue">${e.project_name}</span>` : ''}
-                    ${e.source_openclaw_name ? `<span style="font-size:0.78rem;color:var(--text-muted)">来源: ${e.source_openclaw_name}</span>` : ''}
-                    <span style="font-size:0.78rem;color:var(--text-muted)">${timeAgo(e.created_at)}</span>
+        <div class="kn-card" onclick="showDetail(${e.id})">
+            <div class="kn-card-actions" onclick="event.stopPropagation()">
+                <button class="kn-act-btn" onclick="showEditModal(${e.id})" title="编辑">✏️</button>
+                <button class="kn-act-btn del" onclick="deleteEntry(${e.id})" title="删除">🗑️</button>
+            </div>
+            <div class="kn-card-title" title="${escapeHtml(e.title)}">${escapeHtml(e.title)}</div>
+            <div class="kn-card-preview">${escapeHtml(preview)}${(e.content||'').length > 160 ? '...' : ''}</div>
+            <div class="kn-card-tags">
+                <span class="tag ${src[0]}">${src[1]}</span>
+                <span class="tag tag-accent">${categoryLabels[e.category] || e.category}</span>
+                <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
+                ${e.project_name ? `<span class="tag tag-blue">${escapeHtml(e.project_name)}</span>` : ''}
+            </div>
+            <div class="kn-card-footer">
+                <div class="kn-card-submitter">
+                    <span class="kn-card-submitter-avatar ${submitter.avatarClass}">${submitter.initial}</span>
+                    <span>${escapeHtml(submitter.name)}</span>
                 </div>
+                <span class="kn-card-time">${timeAgo(e.created_at)}</span>
             </div>
-            <div style="display:flex;gap:6px;flex-shrink:0;align-items:center" onclick="event.stopPropagation()">
-                ${e.status === 'pending_review' ? `
-                    <button class="btn btn-sm btn-primary" onclick="reviewEntry(${e.id}, 'approve')">通过</button>
-                    <button class="btn btn-sm btn-danger" onclick="reviewEntry(${e.id}, 'reject')">拒绝</button>
-                ` : ''}
-                <button class="btn btn-sm btn-ghost" onclick="showEditModal(${e.id})" title="编辑">✏️</button>
-                <button class="btn btn-sm btn-ghost" onclick="deleteEntry(${e.id})" title="删除" style="color:var(--red)">🗑️</button>
-            </div>
+            ${reviewBtns ? `<div style="display:flex;gap:6px;justify-content:flex-end" onclick="event.stopPropagation()">${reviewBtns}</div>` : ''}
         </div>
     `;
 }
 
-// 简单 Markdown 渲染
+// Markdown 渲染（使用 marked.js，支持图片/表格/链接等完整语法）
 function renderMarkdown(text) {
     if (!text) return '';
-    let html = escapeHtml(text);
-    // 代码块
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre style="background:var(--bg-secondary);padding:12px;border-radius:6px;overflow-x:auto;font-size:0.85rem;margin:8px 0"><code>$2</code></pre>');
-    // 行内代码
-    html = html.replace(/`([^`]+)`/g, '<code style="background:var(--bg-secondary);padding:2px 6px;border-radius:3px;font-size:0.88em">$1</code>');
-    // 标题
-    html = html.replace(/^### (.+)$/gm, '<h4 style="margin:12px 0 6px;font-size:0.95rem">$1</h4>');
-    html = html.replace(/^## (.+)$/gm, '<h3 style="margin:14px 0 8px;font-size:1.05rem">$1</h3>');
-    html = html.replace(/^# (.+)$/gm, '<h2 style="margin:16px 0 10px;font-size:1.15rem">$1</h2>');
-    // 加粗/斜体
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-    // 列表
-    html = html.replace(/^- (.+)$/gm, '<li style="margin-left:20px">$1</li>');
-    html = html.replace(/^\d+\. (.+)$/gm, '<li style="margin-left:20px;list-style:decimal">$1</li>');
-    // 换行
-    html = html.replace(/\n/g, '<br>');
-    return html;
+    try {
+        return marked.parse(text, { breaks: true, gfm: true });
+    } catch (e) {
+        return escapeHtml(text).replace(/\n/g, '<br>');
+    }
 }
 
 let allEntries = [];
@@ -268,7 +410,9 @@ async function loadKnowledge() {
 async function loadPending() {
     try {
         const entries = await API.pendingReviews();
-        $('#pending-badge').textContent = entries.length || '';
+        const badge = $('#pending-badge');
+        badge.textContent = entries.length || '';
+        badge.style.display = entries.length > 0 ? 'inline' : 'none';
         const list = $('#pending-list');
         if (entries.length === 0) {
             list.innerHTML = '<div class="empty-state"><div class="empty-state-text">没有待审核的知识</div></div>';
@@ -296,24 +440,27 @@ async function reviewEntry(id, action) {
 async function showDetail(id) {
     const e = allEntries.find(x => x.id === id);
     if (!e) return;
-    const src = sourceLabels[e.source_type] || sourceLabels.manual;
+    const src = sourceLabels[e.source_type] || ['tag-blue', '未知'];
+    const submitter = getSubmitterInfo(e);
     
     $('#detail-title').textContent = e.title;
     $('#detail-body').innerHTML = `
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px">
             <span class="tag ${src[0]}">${src[1]}</span>
-            <span class="tag tag-accent">#${e.category}</span>
+            <span class="tag tag-accent">${categoryLabels[e.category] || e.category}</span>
             <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
-            ${e.project_name ? `<span class="tag tag-blue">${e.project_name}</span>` : ''}
+            ${e.project_name ? `<span class="tag tag-blue">${escapeHtml(e.project_name)}</span>` : ''}
             ${e.scope ? `<span class="tag tag-blue">${e.scope}</span>` : ''}
         </div>
-        <div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:12px">
-            ${e.source_openclaw_name ? `来源: ${e.source_openclaw_name} · ` : ''}
-            创建: ${e.created_at || '未知'}
+        <div style="display:flex;align-items:center;gap:8px;font-size:0.82rem;color:var(--text-muted);margin-bottom:12px">
+            <span class="kn-card-submitter-avatar ${submitter.avatarClass}">${submitter.initial}</span>
+            <span>${escapeHtml(submitter.name)}</span>
+            <span>·</span>
+            <span>创建: ${e.created_at || '未知'}</span>
             ${e.approved_by ? ` · 审核: ${e.approved_by}` : ''}
             ${e.reviewer_notes ? ` · 审核意见: ${e.reviewer_notes}` : ''}
         </div>
-        <div style="line-height:1.8;font-size:0.92rem;color:var(--text-primary);padding:16px;background:var(--bg-secondary);border-radius:var(--radius-sm)">
+        <div class="markdown-body" style="line-height:1.8;font-size:0.92rem;color:var(--text-primary);padding:16px;background:var(--bg-secondary);border-radius:var(--radius-sm)">
             ${renderMarkdown(e.content)}
         </div>
     `;
@@ -328,17 +475,67 @@ function closeDetailModal() {
     $('#detail-modal').classList.remove('active');
 }
 
+// Vditor 编辑器实例
+let vditorInstance = null;
+
+function initVditor(initialValue) {
+    if (vditorInstance) {
+        vditorInstance.setValue(initialValue || '');
+        return;
+    }
+    vditorInstance = new Vditor('vditor-editor', {
+        height: 360,
+        mode: 'ir',  // 即时渲染模式（所见即所得 + Markdown）
+        placeholder: '输入知识内容，支持 Markdown 格式，可直接粘贴或拖拽图片...',
+        theme: 'dark',
+        toolbar: [
+            'headings', 'bold', 'italic', 'strike', '|',
+            'list', 'ordered-list', 'check', '|',
+            'quote', 'code', 'inline-code', '|',
+            'upload', 'link', 'table', '|',
+            'undo', 'redo', '|',
+            'preview', 'fullscreen',
+        ],
+        value: initialValue || '',
+        cache: { enable: false },
+        upload: {
+            url: '/api/v1/upload/image',
+            fieldName: 'image',
+            max: 10 * 1024 * 1024,
+            accept: 'image/*',
+            multiple: false,
+            format(files, responseText) {
+                try {
+                    const res = JSON.parse(responseText);
+                    if (res.url) {
+                        return JSON.stringify({
+                            msg: '',
+                            code: 0,
+                            data: { errFiles: [], succMap: { [files[0].name]: res.url } }
+                        });
+                    }
+                } catch (e) {}
+                return responseText;
+            },
+        },
+        after() {
+            if (initialValue) vditorInstance.setValue(initialValue);
+        },
+    });
+}
+
 // 新增/编辑弹窗
 async function showCreateModal() {
     $('#edit-modal-title').textContent = '新增知识';
     $('#edit-id').value = '';
     $('#edit-title').value = '';
-    $('#edit-content').value = '';
     $('#edit-category').value = 'general';
     $('#edit-scope').value = 'global';
     $('#edit-project').value = '';
     $('#edit-status').value = 'draft';
     $('#edit-modal').classList.add('active');
+    // 延迟初始化编辑器（弹窗显示后）
+    setTimeout(() => initVditor(''), 100);
     $('#edit-title').focus();
 }
 
@@ -348,12 +545,12 @@ async function showEditModal(id) {
     $('#edit-modal-title').textContent = '编辑知识';
     $('#edit-id').value = e.id;
     $('#edit-title').value = e.title;
-    $('#edit-content').value = e.content;
     $('#edit-category').value = e.category || 'general';
     $('#edit-scope').value = e.scope || 'global';
     $('#edit-project').value = e.project_name || '';
     $('#edit-status').value = e.status || 'draft';
     $('#edit-modal').classList.add('active');
+    setTimeout(() => initVditor(e.content || ''), 100);
 }
 
 function closeEditModal() {
@@ -362,9 +559,10 @@ function closeEditModal() {
 
 async function saveKnowledge() {
     const id = $('#edit-id').value;
+    const content = vditorInstance ? vditorInstance.getValue().trim() : '';
     const data = {
         title: $('#edit-title').value.trim(),
-        content: $('#edit-content').value.trim(),
+        content: content,
         category: $('#edit-category').value,
         scope: $('#edit-scope').value,
         project_name: $('#edit-project').value || null,
@@ -391,7 +589,7 @@ async function saveKnowledge() {
 }
 
 async function deleteEntry(id) {
-    if (!confirm('确定删除该知识条目？')) return;
+    if (!await customConfirm('确定删除该知识条目？')) return;
     try {
         await API.deleteKnowledge(id);
         showToast('已删除', 'success');
@@ -410,6 +608,7 @@ async function initPage() {
         const sel = $('#filter-project');
         sel.innerHTML = '<option value="">全部项目</option>' +
             projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+        initProjectFilter(sel, typeof loadKnowledge === 'function' ? loadKnowledge : null);
         // 编辑弹窗的项目下拉也填充
         const editSel = $('#edit-project');
         editSel.innerHTML = '<option value="">无</option>' +

@@ -4,10 +4,20 @@
 """
 from datetime import date, datetime, timedelta
 from flask import request, jsonify
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, or_
 from app import db
-from app.models import DailyReport, OpenClawInstance
+from app.models import DailyReport, OpenClawInstance, Project
 from app.api import api_bp
+
+
+def _project_filter(project_name):
+    """构造项目过滤条件，同时匹配 project_name 字段和 project 关联表"""
+    return or_(
+        OpenClawInstance.project_name == project_name,
+        OpenClawInstance.project_id.in_(
+            db.session.query(Project.id).filter(Project.name == project_name)
+        )
+    )
 
 
 @api_bp.route('/reports', methods=['GET'])
@@ -24,7 +34,7 @@ def list_all_reports():
     project = request.args.get('project')
     if project:
         query = query.join(OpenClawInstance).filter(
-            OpenClawInstance.project_name == project
+            _project_filter(project)
         )
 
     # 筛选: 日期范围
@@ -73,11 +83,11 @@ def report_stats():
     base_query = DailyReport.query
     if project:
         base_query = base_query.join(OpenClawInstance).filter(
-            OpenClawInstance.project_name == project
+            _project_filter(project)
         )
 
     # 今日日报数
-    today_reports_q = base_query.filter_by(report_date=today)
+    today_reports_q = base_query.filter(DailyReport.report_date == today)
     today_count = today_reports_q.count()
 
     # 今日已汇报 OpenClaw 数
@@ -86,14 +96,16 @@ def report_stats():
     ).filter(DailyReport.report_date == today)
     if project:
         today_reported_claws = today_reported_claws.join(OpenClawInstance).filter(
-            OpenClawInstance.project_name == project
+            _project_filter(project)
         )
     today_reported_claws = today_reported_claws.scalar() or 0
 
-    # 全部 OpenClaw 数
-    claws_query = OpenClawInstance.query
+    # 全部 OpenClaw 数（排除已删除）
+    claws_query = OpenClawInstance.query.filter(
+        OpenClawInstance.status != 'deleted'
+    )
     if project:
-        claws_query = claws_query.filter(OpenClawInstance.project_name == project)
+        claws_query = claws_query.filter(_project_filter(project))
     total_claws = claws_query.count()
 
     # 今日任务总数（兼容字符串和列表类型）
@@ -118,7 +130,7 @@ def report_stats():
     ).filter(DailyReport.report_date >= week_ago)
     if project:
         trend_query = trend_query.join(OpenClawInstance).filter(
-            OpenClawInstance.project_name == project
+            _project_filter(project)
         )
     trend_data = (
         trend_query
@@ -174,7 +186,7 @@ def report_timeline():
     query = DailyReport.query.filter_by(report_date=target_date)
     if project:
         query = query.join(OpenClawInstance).filter(
-            OpenClawInstance.project_name == project
+            _project_filter(project)
         )
 
     reports = query.order_by(DailyReport.report_time.desc()).all()

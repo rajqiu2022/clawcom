@@ -9,7 +9,8 @@
 <div class="top-actions-bar">
     <div class="header-left">
         <div class="view-tabs">
-            <button class="tab-btn active" data-view="command">📡 任务下发</button>
+            <button class="tab-btn active" data-view="command">📋 任务下发</button>
+            <button class="tab-btn" data-view="chat">💬 聊天</button>
             <button class="tab-btn" data-view="records">📋 消息记录</button>
             <button class="tab-btn" data-view="monitor">📊 状态监控</button>
         </div>
@@ -133,7 +134,7 @@
                         </select>
                         <select class="form-select" id="filter-status" onchange="loadMessageRecords()">
                             <option value="">全部状态</option>
-                            <option value="pending">⏳ 待送达</option>
+                            <option value="pending">⏳ 发送中</option>
                             <option value="delivered">📨 已送达</option>
                             <option value="read">✅ 已读</option>
                         </select>
@@ -163,13 +164,46 @@
                 </div>
             </div>
         </div>
+
+        <!-- 聊天视图 -->
+        <div class="view-content" id="view-chat" style="display:none">
+            <div class="chat-container">
+                <!-- 聊天对象选择提示 -->
+                <div class="chat-no-target" id="chatNoTarget">
+                    <div style="text-align:center;padding:60px 20px;color:var(--text-secondary)">
+                        <div style="font-size:2.5rem;margin-bottom:12px">💬</div>
+                        <div style="font-size:1.1rem;font-weight:600;margin-bottom:8px">选择一个 OpenClaw 开始聊天</div>
+                        <div style="font-size:0.85rem">在左侧列表中点击 OpenClaw 名称进入对话</div>
+                    </div>
+                </div>
+                <!-- 聊天窗口 -->
+                <div class="chat-window" id="chatWindow" style="display:none">
+                    <div class="chat-header" id="chatHeader">
+                        <div class="chat-avatar">🦞</div>
+                        <div class="chat-info">
+                            <div class="chat-name" id="chatTargetName">-</div>
+                            <div class="chat-status" id="chatTargetStatus">-</div>
+                        </div>
+                    </div>
+                    <div class="chat-messages" id="chatMessages">
+                        <div class="loading"><span class="spinner"></span></div>
+                    </div>
+                    <div class="chat-input-bar">
+                        <input type="file" id="chatImageInput" accept="image/*" style="display:none" onchange="sendChatImage(this)">
+                        <button class="btn btn-ghost" onclick="document.getElementById('chatImageInput').click()" title="发送图片" style="height:38px;padding:0 10px;font-size:1.1rem">🖼️</button>
+                        <textarea id="chatInput" class="form-textarea" placeholder="输入消息... (Enter 发送)" rows="2"></textarea>
+                        <button class="btn btn-primary" id="chatSendBtn" onclick="sendChatMessage()">发送</button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- 右侧：实时动态 -->
     <div class="cc-inbox">
         <div class="panel live-feed">
             <div class="panel-header">
-                <h3>📬 待回复任务</h3>
+                <h3>📬 消息动态</h3>
                 <span class="count-badge" id="pendingCount">0</span>
             </div>
             <div class="inbox-list" id="inboxList">
@@ -226,6 +260,18 @@
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeBroadcastModal()">取消</button>
             <button class="btn btn-primary" onclick="sendBroadcast()">发送</button>
+        </div>
+    </div>
+</div>
+
+<!-- 消息详情弹窗 -->
+<div class="modal-overlay" id="msg-detail-modal">
+    <div class="modal" style="max-width:560px">
+        <h2 class="modal-title" id="msg-detail-title">📬 消息详情</h2>
+        <div id="msg-detail-body" style="margin-bottom:16px"></div>
+        <div class="modal-actions">
+            <a id="msg-detail-link" href="#" class="btn btn-primary" style="display:none">查看课题 →</a>
+            <button class="btn btn-ghost" onclick="closeMsgDetail()">关闭</button>
         </div>
     </div>
 </div>
@@ -949,6 +995,79 @@
     margin-bottom: 20px;
 }
 
+/* ===== 聊天视图 ===== */
+.chat-container {
+    display: flex; flex-direction: column; height: calc(100vh - 180px);
+    background: var(--bg-card); border-radius: var(--radius); border: 1px solid var(--border);
+    overflow: hidden;
+}
+.chat-no-target { flex: 1; display: flex; align-items: center; justify-content: center; }
+.chat-window { display: flex; flex-direction: column; height: 100%; }
+.chat-header {
+    display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+    border-bottom: 1px solid var(--border); background: var(--bg-card);
+}
+.chat-avatar { font-size: 1.5rem; }
+.chat-name { font-weight: 700; font-size: 0.95rem; }
+.chat-status { font-size: 0.78rem; color: var(--text-secondary); }
+.chat-messages {
+    flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px;
+    background: var(--bg-primary);
+}
+.chat-bubble-row { display: flex; gap: 8px; max-width: 80%; }
+.chat-bubble-row.me { margin-left: auto; flex-direction: row-reverse; }
+.chat-bubble-row.them { margin-right: auto; }
+.chat-bubble-avatar {
+    width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; font-size: 0.8rem; flex-shrink: 0;
+    background: var(--bg-hover); margin-top: 2px;
+}
+.chat-bubble {
+    padding: 8px 14px; border-radius: 12px; font-size: 0.88rem; line-height: 1.5;
+    word-break: break-word; white-space: pre-wrap; position: relative;
+}
+.chat-bubble-row.me .chat-bubble {
+    background: var(--accent); color: #fff; border-bottom-right-radius: 4px;
+}
+.chat-bubble-row.them .chat-bubble {
+    background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border);
+    border-bottom-left-radius: 4px;
+}
+.chat-bubble-time {
+    font-size: 0.7rem; color: var(--text-muted); margin-top: 2px;
+    text-align: right;
+}
+.chat-bubble-row.them .chat-bubble-time { text-align: left; }
+.chat-bubble-sys {
+    text-align: center; font-size: 0.78rem; color: var(--text-muted); padding: 4px 0;
+}
+.chat-input-bar {
+    display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border);
+    background: var(--bg-card); align-items: flex-end;
+}
+.chat-input-bar textarea { flex: 1; resize: none; min-height: 38px; max-height: 120px; }
+.chat-input-bar .btn { height: 38px; padding: 0 20px; }
+.chat-date-divider {
+    text-align: center; font-size: 0.72rem; color: var(--text-muted); padding: 8px 0;
+    position: relative;
+}
+.chat-date-divider::before, .chat-date-divider::after {
+    content: ''; position: absolute; top: 50%; width: 30%; height: 1px;
+    background: var(--border);
+}
+.chat-date-divider::before { left: 5%; }
+.chat-date-divider::after { right: 5%; }
+
+/* 聊天模式：隐藏勾选相关 UI */
+.chat-mode .claw-checkbox,
+.chat-mode .claw-list-hint,
+.chat-mode .chat-btn,
+.chat-mode #select-all,
+.chat-mode .panel-header label { display: none !important; }
+.chat-mode .agent-item { cursor: pointer; }
+.chat-mode .agent-item:hover { border-color: var(--green); }
+.chat-mode .agent-item.chat-active { border-color: var(--green); background: rgba(34,197,94,0.1); }
+
 /* Multi Select */
 .multi-select-list {
     max-height: 200px;
@@ -1009,22 +1128,40 @@
 const HUB_API = '/api/v1/agent-hub/web';
 const API_BASE = '/api/v1';
 
+// 在线状态判断：兼容中文状态（工作/学习/摸鱼）和英文状态（online）
+const ONLINE_STATUSES = ['online', '工作', '学习', '摸鱼'];
+function _isOnline(status) { return ONLINE_STATUSES.includes(status); }
+
 let allClaws = [];
 let selectedClaws = new Set();
 
 // 视图切换
+let currentView = 'command';
+
 document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
 
         const view = btn.dataset.view;
+        currentView = view;
         document.querySelectorAll('.view-content').forEach(v => v.style.display = 'none');
         document.getElementById(`view-${view}`).style.display = 'flex';
         document.getElementById(`view-${view}`).style.flexDirection = 'column';
 
         if (view === 'records') loadMessageRecords();
         if (view === 'monitor') loadMonitorView();
+
+        // 聊天模式：隐藏右侧面板，左侧去掉勾选
+        const inbox = document.querySelector('.cc-inbox');
+        if (inbox) inbox.style.display = (view === 'chat') ? 'none' : '';
+        document.body.classList.toggle('chat-mode', view === 'chat');
+
+        // 离开聊天 tab 时停止自动刷新
+        if (view !== 'chat' && chatRefreshTimer) {
+            clearInterval(chatRefreshTimer);
+            chatRefreshTimer = null;
+        }
     });
 });
 
@@ -1059,7 +1196,7 @@ async function loadClaws() {
             projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
 
         document.getElementById('online-badge').textContent =
-            `${allClaws.filter(c => c.status === 'online').length} 在线`;
+            `${allClaws.filter(c => _isOnline(c.status)).length} 在线`;
 
         filterClaws();
         updateFilterOptions();
@@ -1076,6 +1213,11 @@ function filterClaws() {
             (c.project_name && c.project_name.toLowerCase().includes(nameFilter));
         const matchProject = !projectFilter || c.project_name === projectFilter;
         return matchName && matchProject;
+    }).sort((a, b) => {
+        // 在线优先排前面
+        const aOnline = _isOnline(a.status) ? 0 : 1;
+        const bOnline = _isOnline(b.status) ? 0 : 1;
+        return aOnline - bOnline;
     });
 
     const list = document.getElementById('clawList');
@@ -1085,10 +1227,10 @@ function filterClaws() {
     }
 
     list.innerHTML = filtered.map(c => {
-        const statusClass = c.status === 'online' ? 'online' : c.status === 'busy' ? 'busy' : 'offline';
+        const statusClass = _isOnline(c.status) ? 'online' : c.status === 'busy' ? 'busy' : 'offline';
         const isSelected = selectedClaws.has(c.id);
         return `
-        <div class="agent-item ${isSelected ? 'selected' : ''} ${c.status !== 'online' ? 'offline' : ''}"
+        <div class="agent-item ${isSelected ? 'selected' : ''} ${!_isOnline(c.status) ? 'offline' : ''}"
              data-id="${c.id}" data-name="${c.name}" data-status="${c.status}" data-avatar="${c.avatar || '🤖'}"
              onclick="toggleClawSelection(${c.id})">
             <input type="checkbox" class="claw-checkbox" ${isSelected ? 'checked' : ''} onclick="event.stopPropagation(); toggleClawSelection(${c.id})">
@@ -1097,12 +1239,24 @@ function filterClaws() {
                 <div class="agent-name">${c.name}</div>
                 <div class="agent-meta">${c.role_title || c.role || ''} ${c.project_name ? '· ' + c.project_name : ''}</div>
             </div>
+            <button class="btn btn-sm btn-ghost chat-btn" data-chat-id="${c.id}" data-chat-name="${c.name}" data-chat-status="${c.status}" onclick="event.stopPropagation()" title="聊天" style="padding:4px 8px;font-size:0.78rem;min-width:auto">💬</button>
             <span class="status-dot ${statusClass}"></span>
         </div>`;
     }).join('');
 
     // 更新全选复选框状态
     updateSelectAllState();
+
+    // 绑定聊天按钮事件
+    document.querySelectorAll('.chat-btn[data-chat-id]').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const id = parseInt(btn.dataset.chatId);
+            const name = btn.dataset.chatName;
+            const status = btn.dataset.chatStatus;
+            openChat(id, name, status);
+        });
+    });
 }
 
 function toggleSelectAll() {
@@ -1153,6 +1307,17 @@ function updateFilterOptions() {
 }
 
 function toggleClawSelection(clawId) {
+    // 聊天模式：直接打开聊天
+    if (currentView === 'chat') {
+        const item = document.querySelector(`.agent-item[data-id="${clawId}"]`);
+        const name = item ? item.dataset.name : '';
+        const status = item ? item.dataset.status : 'offline';
+        openChat(clawId, name, status);
+        // 高亮当前聊天对象
+        document.querySelectorAll('.agent-item').forEach(el => el.classList.remove('chat-active'));
+        if (item) item.classList.add('chat-active');
+        return;
+    }
     if (selectedClaws.has(clawId)) {
         selectedClaws.delete(clawId);
     } else {
@@ -1179,7 +1344,7 @@ function updateSelectedUI() {
         // Render selected claw tags
         const selected = allClaws.filter(c => selectedClaws.has(c.id));
         tagsDiv.innerHTML = selected.map(c => `
-            <span class="claw-tag ${c.status !== 'online' ? 'offline' : ''}">
+            <span class="claw-tag ${!_isOnline(c.status) ? 'offline' : ''}">
                 ${c.avatar || '🤖'} ${c.name}
                 <span class="remove-tag" onclick="toggleClawSelection(${c.id})">×</span>
             </span>
@@ -1235,7 +1400,10 @@ async function loadMessages() {
     try {
         const res = await fetch(`${HUB_API}/claw-messages?limit=20`);
         const data = await res.json();
-        const messages = data.messages || [];
+        const allMessages = data.messages || [];
+        _cachedMessages = allMessages;
+        // 过滤掉聊天消息，只显示任务/通知类
+        const messages = allMessages.filter(m => m.msg_type !== 'chat');
 
         const list = document.getElementById('inboxList');
         if (messages.length === 0) {
@@ -1248,16 +1416,23 @@ async function loadMessages() {
             task_delegate: '📋',
             knowledge_share: '📚',
             request_help: '🆘',
-            broadcast: '📢'
+            broadcast: '📢',
+            topic_notify: '💬'
         };
 
-        list.innerHTML = messages.map(m => `
-            <div class="inbox-item" onclick="showMessageDetail(${m.id})">
-                <div class="msg-sender">→ ${m.claw_name} <span class="record-status ${m.status}">${m.status === 'pending' ? '⏳' : m.status === 'delivered' ? '📨' : '✅'}</span></div>
-                <div class="msg-content">${m.content.substring(0, 60)}${m.content.length > 60 ? '...' : ''}</div>
+        list.innerHTML = messages.map(m => {
+            const displayContent = (m.content || '').replace(/\n?#topic_id=\d+/, '').trim();
+            const isFromClaw = m.direction === 'from_claw';
+            const arrow = isFromClaw ? '←' : '→';
+            const dirStyle = isFromClaw ? 'color:var(--green,#22c55e)' : '';
+            const dirLabel = isFromClaw ? `<span style="font-size:0.72rem;color:var(--green,#22c55e);margin-left:4px">回复</span>` : '';
+            return `
+            <div class="inbox-item" onclick="showMessageDetail(${m.id})" style="${isFromClaw ? 'border-left:3px solid var(--green,#22c55e)' : ''}">
+                <div class="msg-sender"><span style="${dirStyle}">${arrow}</span> ${m.claw_name} ${dirLabel} <span class="record-status ${m.status}">${m.status === 'pending' ? '⏳' : m.status === 'delivered' ? '📨' : '✅'}</span></div>
+                <div class="msg-content">${displayContent.substring(0, 60)}${displayContent.length > 60 ? '...' : ''}</div>
                 <div class="msg-time">${timeAgo(m.created_at)} · ${msgTypeLabels[m.msg_type] || ''}</div>
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
 
         // 更新今日概览
         updateTodayStats();
@@ -1360,7 +1535,7 @@ async function loadMessageRecords() {
                 <div class="record-content">${escapeHtml(m.content)}</div>
                 <div class="record-footer">
                     <span class="record-time">${formatTime(m.created_at)}</span>
-                    <span class="record-target">${m.claw_status === 'online' ? '🟢' : '⚫'} ${m.claw_status}</span>
+                    <span class="record-target">${_isOnline(m.claw_status) ? '🟢' : '⚫'} ${m.claw_status}</span>
                 </div>
             </div>
         `).join('');
@@ -1379,24 +1554,37 @@ async function loadMonitorView() {
         return;
     }
 
-    grid.innerHTML = allClaws.map(c => `
-        <div class="monitor-card">
+    const statusLabels = {'工作':'💻 工作','学习':'📖 学习','摸鱼':'🎮 摸鱼','休息':'😴 休息','online':'🟢 在线','offline':'⚫ 离线'};
+    grid.innerHTML = allClaws.map(c => {
+        const isOnline = _isOnline(c.status);
+        const statusText = statusLabels[c.status] || c.status || '⚫ 离线';
+        const statusColor = isOnline ? 'var(--green)' : (c.status === '休息' ? 'var(--accent)' : 'var(--text-muted)');
+        return `
+        <div class="monitor-card" style="${!isOnline ? 'opacity:0.6' : ''}">
             <div class="monitor-card-header">
                 <span class="monitor-card-name">${c.avatar || '🤖'} ${c.name}</span>
-                <span class="monitor-card-status ${c.status}"></span>
+                <span style="font-size:0.78rem;font-weight:600;color:${statusColor}">${statusText}</span>
             </div>
             <div class="monitor-card-stats">
                 <div class="monitor-stat">
-                    <div class="monitor-stat-value">${c.role || '-'}</div>
+                    <div class="monitor-stat-value">${c.role_title || c.role || '-'}</div>
                     <div class="monitor-stat-label">角色</div>
                 </div>
                 <div class="monitor-stat">
-                    <div class="monitor-stat-value">${c.project_name || '-'}</div>
+                    <div class="monitor-stat-value" style="font-size:0.78rem">${c.project_name || '-'}</div>
                     <div class="monitor-stat-label">项目</div>
                 </div>
+                <div class="monitor-stat">
+                    <div class="monitor-stat-value">${c.today_submitted ?? '-'}</div>
+                    <div class="monitor-stat-label">已提交</div>
+                </div>
+                <div class="monitor-stat">
+                    <div class="monitor-stat-value">${c.total_todos ?? '-'}</div>
+                    <div class="monitor-stat-label">待办</div>
+                </div>
             </div>
-        </div>
-    `).join('');
+        </div>`;
+    }).join('');
 }
 
 // 全员通知
@@ -1416,7 +1604,7 @@ async function sendBroadcast() {
         return;
     }
 
-    const onlineCount = allClaws.filter(c => c.status === 'online').length;
+    const onlineCount = allClaws.filter(c => _isOnline(c.status)).length;
     if (onlineCount === 0) {
         showToast('没有在线的 OpenClaw', 'error');
         return;
@@ -1452,7 +1640,8 @@ function escapeHtml(text) {
 
 function _fixUtcStr(s) {
     if (!s) return s;
-    if (!s.endsWith('Z') && !s.includes('+')) { s = s.replace(' ', 'T'); if (!s.endsWith('Z')) s += 'Z'; }
+    // 数据库存储的是北京时间（无时区后缀），不需要强制加 Z
+    // 只有明确以 Z 或 + 结尾的才是 UTC 时间
     return s;
 }
 
@@ -1484,6 +1673,259 @@ document.getElementById('messageInput').addEventListener('keydown', e => {
 
 document.getElementById('broadcast-modal').addEventListener('click', e => {
     if (e.target === document.getElementById('broadcast-modal')) closeBroadcastModal();
+});
+
+document.getElementById('msg-detail-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('msg-detail-modal')) closeMsgDetail();
+});
+
+// 缓存已加载的消息列表
+let _cachedMessages = [];
+
+// 消息详情
+function showMessageDetail(msgId) {
+    const modal = document.getElementById('msg-detail-modal');
+    const body = document.getElementById('msg-detail-body');
+    const link = document.getElementById('msg-detail-link');
+    const title = document.getElementById('msg-detail-title');
+
+    // 从缓存中找到消息
+    const msg = _cachedMessages.find(m => m.id === msgId);
+    if (!msg) {
+        body.innerHTML = '<p style="color:var(--text-secondary)">消息不存在或已过期</p>';
+        link.style.display = 'none';
+        modal.classList.add('active');
+        return;
+    }
+
+    // 解析内容：分离正文和 topic_id 标记
+    let content = msg.content || '';
+    let topicId = null;
+    const topicMatch = content.match(/#topic_id=(\d+)/);
+    if (topicMatch) {
+        topicId = parseInt(topicMatch[1]);
+        content = content.replace(/\n?#topic_id=\d+/, '').trim();
+    }
+
+    const statusLabels = { pending: '⏳ 发送中', delivered: '📨 已送达', read: '✅ 已读' };
+    const dirLabels = { to_claw: '→ 发给 OpenClaw', from_claw: '← 来自 OpenClaw' };
+
+    title.textContent = msg.sender_name === '课题讨论' ? '💬 课题通知' : '📬 消息详情';
+
+    body.innerHTML = `
+        <div style="margin-bottom:12px;display:flex;gap:12px;flex-wrap:wrap;font-size:0.85rem;color:var(--text-secondary)">
+            <span>${dirLabels[msg.direction] || ''}</span>
+            <span>${statusLabels[msg.status] || msg.status}</span>
+            <span>🕐 ${timeAgo(msg.created_at)}</span>
+        </div>
+        <div style="padding:4px 0;font-weight:600;margin-bottom:4px">
+            ${msg.claw_name || '未知'}
+            <span style="font-weight:400;color:var(--text-secondary);font-size:0.85rem;margin-left:8px">${msg.sender_name || ''}</span>
+        </div>
+        <div style="padding:12px 16px;background:var(--bg-primary);border-radius:var(--radius);border:1px solid var(--border);white-space:pre-wrap;font-size:0.9rem;line-height:1.6;max-height:300px;overflow-y:auto">
+            ${content.replace(/</g, '&lt;').replace(/>/g, '&gt;')}
+        </div>
+    `;
+
+    // 课题链接
+    if (topicId) {
+        link.href = '/topics/' + topicId;
+        link.style.display = '';
+    } else {
+        link.style.display = 'none';
+    }
+
+    modal.classList.add('active');
+
+    // 标记已读（如果是 to_claw 方向的待送达/已送达消息）
+    if (msg.status !== 'read') {
+        fetch(`${HUB_API}/claw-messages/${msgId}/read`, { method: 'PUT' }).catch(() => {});
+    }
+}
+
+function closeMsgDetail() {
+    document.getElementById('msg-detail-modal').classList.remove('active');
+}
+
+// ==================== 聊天功能 ====================
+let chatTargetClawId = null;
+let chatTargetClawName = '';
+let chatRefreshTimer = null;
+
+function openChat(clawId, clawName, clawStatus) {
+    chatTargetClawId = clawId;
+    chatTargetClawName = clawName;
+    currentView = 'chat';
+
+    // 切到聊天 tab
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    const chatTab = document.querySelector('.tab-btn[data-view="chat"]');
+    if (chatTab) chatTab.classList.add('active');
+    document.querySelectorAll('.view-content').forEach(v => v.style.display = 'none');
+    const chatView = document.getElementById('view-chat');
+    chatView.style.display = 'flex';
+    chatView.style.flexDirection = 'column';
+
+    // 隐藏右侧面板、开启聊天模式
+    const inbox = document.querySelector('.cc-inbox');
+    if (inbox) inbox.style.display = 'none';
+    document.body.classList.add('chat-mode');
+
+    // 高亮当前聊天对象
+    document.querySelectorAll('.agent-item').forEach(el => el.classList.remove('chat-active'));
+    const item = document.querySelector(`.agent-item[data-id="${clawId}"]`);
+    if (item) item.classList.add('chat-active');
+
+    // 显示聊天窗口
+    document.getElementById('chatNoTarget').style.display = 'none';
+    document.getElementById('chatWindow').style.display = 'flex';
+    document.getElementById('chatTargetName').textContent = clawName;
+    document.getElementById('chatTargetStatus').textContent =
+        _isOnline(clawStatus) ? '🟢 在线' : '⚫ 离线';
+
+    loadChatHistory();
+
+    // 自动刷新聊天
+    if (chatRefreshTimer) clearInterval(chatRefreshTimer);
+    chatRefreshTimer = setInterval(loadChatHistory, 5000);
+}
+
+async function loadChatHistory() {
+    if (!chatTargetClawId) return;
+    try {
+        const res = await fetch(`${HUB_API}/claw-messages?claw_id=${chatTargetClawId}&limit=100`);
+        const data = await res.json();
+        const messages = (data.messages || []).reverse();  // 旧→新
+
+        const container = document.getElementById('chatMessages');
+        const wasAtBottom = container.scrollHeight - container.scrollTop <= container.clientHeight + 50;
+
+        if (messages.length === 0) {
+            container.innerHTML = '<div class="chat-bubble-sys">暂无消息，开始聊天吧 👋</div>';
+            return;
+        }
+
+        let html = '';
+        let lastDate = '';
+        messages.forEach(m => {
+            // 日期分隔
+            const date = (m.created_at || '').substring(0, 10);
+            if (date && date !== lastDate) {
+                lastDate = date;
+                html += `<div class="chat-date-divider">${date}</div>`;
+            }
+
+            const isMe = m.direction === 'to_claw';
+            const isSys = m.msg_type === 'sync_config';
+            const content = (m.content || '').replace(/\n?#topic_id=\d+/, '').trim();
+
+            if (isSys) {
+                html += `<div class="chat-bubble-sys">🔧 ${content.substring(0, 80)}</div>`;
+                return;
+            }
+
+            const time = (m.created_at || '').substring(11, 16);
+            const avatar = isMe ? '👤' : '🦞';
+
+            // 识别图片消息
+            const imgMatch = content.match(/^\[img\](.*?)\[\/img\]$/);
+            let bubbleContent;
+            if (imgMatch) {
+                bubbleContent = `<img src="${imgMatch[1]}" style="max-width:260px;max-height:200px;border-radius:8px;cursor:pointer" onclick="window.open('${imgMatch[1]}','_blank')" alt="图片">`;
+            } else {
+                bubbleContent = content.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            }
+
+            html += `
+                <div class="chat-bubble-row ${isMe ? 'me' : 'them'}">
+                    <div class="chat-bubble-avatar">${avatar}</div>
+                    <div>
+                        <div class="chat-bubble">${bubbleContent}</div>
+                        <div class="chat-bubble-time">${time}</div>
+                    </div>
+                </div>`;
+        });
+
+        container.innerHTML = html;
+
+        // 保持滚动在底部
+        if (wasAtBottom) {
+            container.scrollTop = container.scrollHeight;
+        }
+    } catch (e) {
+        console.error('加载聊天历史失败:', e);
+    }
+}
+
+async function sendChatMessage() {
+    const input = document.getElementById('chatInput');
+    const content = input.value.trim();
+    if (!content || !chatTargetClawId) return;
+
+    try {
+        await fetch(`${HUB_API}/broadcast`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                content: content,
+                msg_type: 'chat',
+                target_claw_ids: [chatTargetClawId]
+            })
+        });
+
+        input.value = '';
+        loadChatHistory();
+    } catch (e) {
+        showToast('发送失败', 'error');
+    }
+}
+
+async function sendChatImage(fileInput) {
+    if (!fileInput.files.length || !chatTargetClawId) return;
+    const file = fileInput.files[0];
+    if (file.size > 10 * 1024 * 1024) {
+        showToast('图片不能超过 10MB', 'error');
+        fileInput.value = '';
+        return;
+    }
+
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('source', 'chat');
+        const uploadRes = await fetch('/api/v1/upload', { method: 'POST', body: formData });
+        if (!uploadRes.ok) throw new Error('上传失败');
+        const uploadData = await uploadRes.json();
+
+        await fetch(`${HUB_API}/broadcast`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                content: '[img]' + uploadData.url + '[/img]',
+                msg_type: 'chat',
+                target_claw_ids: [chatTargetClawId]
+            })
+        });
+
+        fileInput.value = '';
+        loadChatHistory();
+    } catch (e) {
+        showToast('图片发送失败: ' + e.message, 'error');
+        fileInput.value = '';
+    }
+}
+
+// 聊天输入框 Enter 发送
+document.addEventListener('DOMContentLoaded', () => {
+    const chatInput = document.getElementById('chatInput');
+    if (chatInput) {
+        chatInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendChatMessage();
+            }
+        });
+    }
 });
 
 // 初始化

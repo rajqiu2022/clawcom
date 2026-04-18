@@ -1,8 +1,79 @@
+import os
+import uuid
 from datetime import datetime
-from flask import request, jsonify
+from flask import request, jsonify, current_app, send_from_directory
 from app import db
 from app.models import KnowledgeEntry, KnowledgeDistribution
 from app.api import api_bp
+
+
+def _get_current_user():
+    """获取当前用户（支持 Web session 和 OpenClaw Bearer Token）"""
+    from flask import session
+    from app.models import User, OpenClawInstance
+    uid = session.get('user_id')
+    if uid:
+        return User.query.get(uid)
+
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer '):
+        token = auth[7:]
+        for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
+            if claw.verify_token(token):
+                if claw.role == 'admin':
+                    class _AdminProxy:
+                        role = 'super_admin'
+                        username = claw.name
+                        managed_projects = []
+                    return _AdminProxy()
+                owner = User.query.filter_by(username=claw.owner).first()
+                if owner:
+                    owner._claw_name = claw.name
+                    return owner
+    return None
+
+
+UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                          'static', 'uploads')
+
+
+@api_bp.route('/upload/image', methods=['POST'])
+def upload_image():
+    """上传图片，返回 Markdown 可用的 URL"""
+    if 'image' not in request.files:
+        return jsonify({'error': '未选择文件'}), 400
+
+    f = request.files['image']
+    if not f.filename:
+        return jsonify({'error': '文件名为空'}), 400
+
+    # 校验文件类型
+    allowed = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'}
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in allowed:
+        return jsonify({'error': f'不支持的格式: {ext}'}), 400
+
+    # 限制 10MB
+    f.seek(0, 2)
+    size = f.tell()
+    f.seek(0)
+    if size > 10 * 1024 * 1024:
+        return jsonify({'error': '图片不能超过 10MB'}), 400
+
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+    # 生成唯一文件名
+    filename = f'{uuid.uuid4().hex[:12]}{ext}'
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    f.save(filepath)
+
+    url = f'/static/uploads/{filename}'
+    return jsonify({
+        'url': url,
+        'filename': filename,
+        # Vditor 需要的格式
+        'data': {'url': url},
+    })
 
 
 @api_bp.route('/knowledge', methods=['GET'])
@@ -138,7 +209,11 @@ def pending_reviews():
 
 @api_bp.route('/knowledge/<int:entry_id>/review', methods=['POST'])
 def review_knowledge(entry_id):
-    """审核知识（通过/拒绝）"""
+    """审核知识（通过/拒绝）— 仅超级管理员（龙虾王 Token 认证映射为 super_admin）"""
+    user = _get_current_user()
+    if not user or user.role not in ('super_admin', 'admin'):
+        return jsonify({'error': '仅管理员可审核知识'}), 403
+
     entry = KnowledgeEntry.query.get_or_404(entry_id)
     data = request.get_json()
 
@@ -151,7 +226,7 @@ def review_knowledge(entry_id):
 
     if action == 'approve':
         entry.status = 'approved'
-        entry.approved_at = datetime.utcnow()
+        entry.approved_at = datetime.now()
     else:
         entry.status = 'rejected'
 

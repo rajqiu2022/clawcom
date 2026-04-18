@@ -41,8 +41,8 @@ class ConnectionManager:
         with self.lock:
             self.connections[session_id] = {
                 **info,
-                'connected_at': datetime.utcnow(),
-                'last_activity': datetime.utcnow(),
+                'connected_at': datetime.now(),
+                'last_activity': datetime.now(),
             }
         logger.info(f"连接已注册: {session_id}, 客户端: {info.get('display_name', 'unknown')}")
 
@@ -55,7 +55,7 @@ class ConnectionManager:
     def update_activity(self, session_id: str):
         with self.lock:
             if session_id in self.connections:
-                self.connections[session_id]['last_activity'] = datetime.utcnow()
+                self.connections[session_id]['last_activity'] = datetime.now()
 
     def get_connection(self, session_id: str) -> Optional[Dict[str, Any]]:
         return self.connections.get(session_id)
@@ -166,8 +166,8 @@ def register_handlers(sio: SocketIO):
                 'token': token,
             })
 
-            # 更新 claw 状态为 online
-            claw.status = 'online'
+            # 更新 claw 状态为 工作
+            claw.status = '工作'
             from app import db
             db.session.commit()
 
@@ -187,7 +187,7 @@ def register_handlers(sio: SocketIO):
                 'health': {
                     'status': 'ok',
                     'uptime': get_server_uptime(),
-                    'timestamp': datetime.utcnow().isoformat(),
+                    'timestamp': datetime.now().isoformat(),
                 }
             }
 
@@ -313,7 +313,7 @@ def handle_health_method(params: Dict[str, Any]) -> Dict[str, Any]:
     return {
         'status': 'ok',
         'uptime': get_server_uptime(),
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now().isoformat(),
         'connections': len(conn_manager.list_connections()),
     }
 
@@ -328,7 +328,7 @@ def handle_nodes_list(params: Dict[str, Any]) -> Dict[str, Any]:
             'id': sid,
             'name': info.get('display_name', 'Unknown'),
             'status': 'online',
-            'lastSeen': info.get('last_activity', datetime.utcnow()).isoformat() if isinstance(info.get('last_activity'), datetime) else str(info.get('last_activity', '')),
+            'lastSeen': info.get('last_activity', datetime.now()).isoformat() if isinstance(info.get('last_activity'), datetime) else str(info.get('last_activity', '')),
         })
 
     return {'nodes': nodes}
@@ -382,18 +382,18 @@ def handle_task_report(session_id: str, event_type: str, payload: Dict[str, Any]
             task.status = status
             task.result = result
             task.error = error
-            task.completed_at = datetime.utcnow()
+            task.completed_at = datetime.now()
             db.session.commit()
             logger.info(f"任务 {task_id} 状态已更新: {status}")
 
 
 # ==================== 辅助函数 ====================
 
-_server_start_time = datetime.utcnow()
+_server_start_time = datetime.now()
 
 def get_server_uptime() -> int:
     """获取服务器运行时间（秒）"""
-    delta = datetime.utcnow() - _server_start_time
+    delta = datetime.now() - _server_start_time
     return int(delta.total_seconds())
 
 
@@ -436,5 +436,5 @@ def broadcast_to_all(event_type: str, payload: Dict[str, Any]):
 def send_heartbeat():
     """发送心跳到所有连接"""
     broadcast_to_all('tick', {
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now().isoformat(),
     })

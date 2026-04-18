@@ -34,6 +34,53 @@ def log_action(action, resource_type, resource_id=None,
     return log
 
 
+
+
+@api_bp.route('/system-changelog', methods=['GET'])
+def system_changelog():
+    """系统变更日志（供 OpenClaw 查询，Token 认证或公开）
+
+    返回最近的 Skills/Rules/Knowledge 变更记录，让 OpenClaw 了解系统动态。
+    支持参数：
+      - since: ISO 日期，如 2026-04-01（默认最近 7 天）
+      - limit: 最多返回条数（默认 50，最大 200）
+      - resource_type: 过滤资源类型（skill/rule/knowledge）
+    """
+    from datetime import timedelta
+    since = request.args.get('since')
+    limit = min(request.args.get('limit', 50, type=int), 200)
+    resource_type = request.args.get('resource_type')
+
+    query = AuditLog.query
+
+    if resource_type:
+        query = query.filter(AuditLog.resource_type == resource_type)
+    else:
+        # 默认只返回 skill/rule/knowledge 相关变更
+        query = query.filter(AuditLog.resource_type.in_(['skill', 'rule', 'knowledge']))
+
+    if since:
+        query = query.filter(AuditLog.created_at >= since)
+    else:
+        seven_days_ago = date.today() - timedelta(days=7)
+        query = query.filter(AuditLog.created_at >= seven_days_ago)
+
+    logs = query.order_by(desc(AuditLog.created_at)).limit(limit).all()
+
+    return jsonify({
+        'changelog': [{
+            'time': str(l.created_at) if l.created_at else None,
+            'action': l.action,
+            'resource_type': l.resource_type,
+            'resource_id': l.resource_id,
+            'resource_name': l.resource_name,
+            'operator': l.operator,
+            'detail': l.detail,
+        } for l in logs],
+        'total': len(logs),
+    })
+
+
 @api_bp.route('/audit-logs', methods=['GET'])
 def list_audit_logs():
     """查询审计日志（支持多维筛选）"""

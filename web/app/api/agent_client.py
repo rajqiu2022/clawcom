@@ -13,24 +13,98 @@ API设计：
 - POST /api/openclaws/<id>/dispatch  - 派发任务给指定claw (Manager管理接口)
 """
 
-from datetime import datetime
+import os
+from datetime import datetime, date, timedelta
 from flask import request, jsonify, Response, stream_with_context, Blueprint
 from app import db
-from app.models import OpenClawInstance, ClawMessage
+from app.models import OpenClawInstance, ClawMessage, ClawTodo, ClawTodoLog, _now
 from functools import wraps
 import json
 import time
 import hashlib
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
 # 创建蓝图（注意：这里不再使用 api_bp 前缀，因为已在 __init__.py 中单独注册）
 agent_bp = Blueprint('agent_client', __name__, url_prefix='/api/openclaws')
 
+# 离线超时阈值（秒）：超过此时间无 last_activity 更新，标记为 offline
+OFFLINE_TIMEOUT = 300  # 5 分钟
+
+# ==================== SSE 即时通知机制 ====================
+# 每个 claw_id 对应一个 threading.Event，SSE generator 等待它，
+# 写入 ClawMessage 时触发它，实现即时推送而非轮询。
+
+_claw_events: dict = {}   # claw_id -> threading.Event
+_claw_events_lock = threading.Lock()
+
+# 待办变更通知：记录有待办变更需要立即推送的 claw_id
+_todo_changed_claws: set = set()
+_todo_changed_lock = threading.Lock()
+
+
+def _get_claw_event(claw_id: int) -> threading.Event:
+    """获取指定 claw 的通知事件（不存在则创建）"""
+    with _claw_events_lock:
+        if claw_id not in _claw_events:
+            _claw_events[claw_id] = threading.Event()
+        return _claw_events[claw_id]
+
+
+def notify_claw(claw_id: int):
+    """通知指定 claw 的 SSE 长连接有新数据，立即唤醒"""
+    evt = _get_claw_event(claw_id)
+    evt.set()
+    print(f"[SSE_NOTIFY] notify_claw called for claw_id={claw_id}, event.is_set={evt.is_set()}", flush=True)
+
+
+def notify_claw_todo(claw_id: int):
+    """通知指定 claw 的待办列表有变更，SSE 立即推送待办更新"""
+    with _todo_changed_lock:
+        _todo_changed_claws.add(claw_id)
+    notify_claw(claw_id)
+
+
+def _consume_todo_change(claw_id: int) -> bool:
+    """检查并消费 claw 的待办变更标记"""
+    with _todo_changed_lock:
+        if claw_id in _todo_changed_claws:
+            _todo_changed_claws.discard(claw_id)
+            return True
+        return False
+
+
+def _clear_claw_event(claw_id: int):
+    """SSE generator 读取完数据后重置事件"""
+    with _claw_events_lock:
+        evt = _claw_events.get(claw_id)
+        if evt:
+            evt.clear()
+
+
+def _cleanup_stale_connections():
+    """将 last_activity 超时的 claw 标记为 offline（防止 SSE 挂断后状态不更新）"""
+    threshold = datetime.now() - timedelta(seconds=OFFLINE_TIMEOUT)
+    stale_claws = OpenClawInstance.query.filter(
+        OpenClawInstance.status.in_(['工作', '学习', '摸鱼', 'online']),
+        OpenClawInstance.last_activity < threshold
+    ).all()
+    for c in stale_claws:
+        logger.warning(f"检测到超时连接: {c.name} (ID={c.id}), last_activity={c.last_activity}, 标记为 offline")
+        c.status = 'offline'
+    if stale_claws:
+        db.session.commit()
+
 
 def require_claw_token(f):
-    """OpenClaw API Token 认证装饰器"""
+    """OpenClaw API Token 认证装饰器
+
+    优先验证 URL 中 claw_id 对应的 Token；
+    如果不匹配，回退遍历所有 OpenClawInstance 验证（支持 Token 与 claw_id 不一致的场景，
+    如客户端 Token 更新后 claw_id 仍为旧值但 Token 有效的情况）。
+    """
     @wraps(f)
     def decorated(claw_id, *args, **kwargs):
         claw = OpenClawInstance.query.get_or_404(claw_id)
@@ -38,9 +112,14 @@ def require_claw_token(f):
         if not auth_header.startswith('Bearer '):
             return jsonify({'error': '缺少认证 Token'}), 401
         token = auth_header[7:]
-        if not claw.verify_token(token):
-            return jsonify({'error': 'Token 无效'}), 403
-        return f(claw_id, claw=claw, *args, **kwargs)
+        # 优先匹配 claw_id 对应的 Token
+        if claw.verify_token(token):
+            return f(claw_id, claw=claw, *args, **kwargs)
+        # 回退：遍历所有非删除的 OpenClawInstance 验证 Token
+        for c in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
+            if c.verify_token(token):
+                return f(claw_id, claw=c, *args, **kwargs)
+        return jsonify({'error': 'Token 无效'}), 403
     return decorated
 
 
@@ -58,7 +137,7 @@ class AgentTask(db.Model):
     status = db.Column(db.String(20), default='pending', comment='pending/running/completed/failed')
     result = db.Column(db.Text, comment='执行结果')
     error = db.Column(db.Text, comment='错误信息')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=_now)
     assigned_at = db.Column(db.DateTime, comment='分配时间')
     completed_at = db.Column(db.DateTime, comment='完成时间')
 
@@ -92,72 +171,269 @@ def claw_sse_events(claw_id, claw=None):
     - event: connected\ndata: {claw_id, name}\n\n
     - event: heartbeat\ndata: {server_time}\n\n
     - event: task\ndata: {task_id, task_type, command, target_path, payload}\n\n
+    - event: message\ndata: {msg_id, content, msg_type, ...}\n\n
+    - event: todos_pending\ndata: {count, todos: [{id, title, urgency, ...}]}\n\n
     - event: ping\ndata: \n\n
     """
-    # 连接时更新状态为 online
-    claw.status = 'online'
-    claw.last_heartbeat = datetime.utcnow()
-    db.session.commit()
-    logger.info(f"SSE连接建立，OpenClaw {claw_id} ({claw.name}) 状态已设为 online")
+    # 清理超时的 SSE 连接（防止挂断后状态不更新）
+    _cleanup_stale_connections()
+
+    # SSE 连接建立时设为在线
+    # 重要：在 gevent 环境下，SQLAlchemy 的 db.session.commit() 可能不真正提交到 MariaDB，
+    # 必须使用独立的 pymysql 连接来确保状态更新
+    import pymysql as _pymysql
+    _raw_conn = _pymysql.connect(
+        host=os.getenv('MYSQL_HOST', 'localhost'),
+        port=int(os.getenv('MYSQL_PORT', '3306')),
+        user=os.getenv('MYSQL_USER', 'your_mysql_user'),
+        password=os.getenv('MYSQL_PASSWORD', 'your_mysql_user'),
+        database=os.getenv('MYSQL_DATABASE', 'openclaw_manager'),
+        charset='utf8mb4'
+    )
+    try:
+        with _raw_conn.cursor() as _cur:
+            _cur.execute(
+                "UPDATE openclaw_instances SET status='工作', last_activity=NOW() WHERE id=%s",
+                (claw_id,)
+            )
+        _raw_conn.commit()
+    finally:
+        _raw_conn.close()
+
+    # 刷新 claw 对象以获取最新状态
+    db.session.expire(claw)
+    claw_name = claw.name
+    logger.info(f"SSE连接建立，OpenClaw {claw_id} ({claw_name}) 状态: {claw.status}")
 
     def generate():
         # 发送连接成功事件
-        yield f"event: connected\ndata: {json.dumps({'claw_id': claw.id, 'name': claw.name, 'server_time': datetime.utcnow().isoformat()})}\n\n"
+        yield f"event: connected\ndata: {json.dumps({'claw_id': claw_id, 'name': claw_name, 'server_time': datetime.now().isoformat()})}\n\n"
+
+        # === 连接建立时推送未读消息和当前待办（解决断线期间消息丢失问题）===
+        try:
+            # 推送所有未读的 to_claw 消息（pending + delivered 但未 read 的）
+            unread_msgs = ClawMessage.query.filter(
+                ClawMessage.claw_id == claw_id,
+                ClawMessage.direction == 'to_claw',
+                ClawMessage.status.in_(['pending', 'delivered'])
+            ).order_by(ClawMessage.created_at.asc()).limit(50).all()
+            for msg in unread_msgs:
+                if msg.status == 'pending':
+                    msg.status = 'delivered'
+                    msg.delivered_at = datetime.now()
+                yield f"event: message\ndata: {json.dumps(msg.to_dict())}\n\n"
+            if unread_msgs:
+                db.session.commit()
+                logger.info(f"SSE连接建立，推送 {len(unread_msgs)} 条未读消息给 OpenClaw {claw_id}")
+
+            # 推送当前待办列表
+            today = date.today()
+            all_todos = ClawTodo.query.filter_by(openclaw_id=claw_id, enabled=True).all()
+            today_logs = {l.todo_id: l for l in ClawTodoLog.query.filter_by(
+                openclaw_id=claw_id, log_date=today).all()}
+            pending_todos = []
+            for t in all_todos:
+                log = today_logs.get(t.id)
+                is_done = log and log.status in ('completed', 'approved')
+                need_today = False
+                if t.schedule_type == 'once':
+                    need_today = not is_done
+                elif t.schedule_type == 'daily':
+                    need_today = True
+                elif t.schedule_type == 'weekly' and t.schedule_day:
+                    need_today = today.isoweekday() == t.schedule_day
+                elif t.schedule_type == 'monthly' and t.schedule_day:
+                    need_today = today.day == t.schedule_day
+                if need_today and not is_done:
+                    pending_todos.append({
+                        'id': t.id,
+                        'title': t.title,
+                        'urgency': t.urgency_level or 'flexible',
+                        'schedule_time': t.schedule_time,
+                        'schedule_type': t.schedule_type,
+                        'today_status': log.status if log else None,
+                    })
+            yield f"event: todos_pending\ndata: {json.dumps({'count': len(pending_todos), 'todos': pending_todos})}\n\n"
+            logger.info(f"SSE连接建立，推送 {len(pending_todos)} 个待办给 OpenClaw {claw_id}")
+        except Exception as e:
+            logger.error(f"SSE连接建立时推送初始数据失败: {e}")
 
         last_task_check = time.time()
+        last_todo_check = 0  # 待办推送节流：上次推送待办的时间
+        # 用初始推送的待办数初始化（避免重复推送）
+        try:
+            last_todo_count = len(pending_todos)
+        except NameError:
+            last_todo_count = -1
 
+        loop_count = 0
         while True:
             try:
-                # 每5秒发送一次心跳，并检查新任务和新消息
+                loop_count += 1
+                if loop_count % 30 == 1:  # 每60秒打一次
+                    print(f"[SSE_LOOP] claw_id={claw_id} loop={loop_count}", flush=True)
+
+                # 强制刷新 session 缓存，确保查询到最新数据
+                # （SSE 长连接中 db.session 会缓存旧数据，导致 pending 消息不可见）
+                db.session.expire_all()
+
+                # 每10秒检查新任务和新消息
                 tasks = AgentTask.query.filter(
                     AgentTask.claw_id == claw_id,
                     AgentTask.status == 'pending'
                 ).order_by(AgentTask.created_at.asc()).limit(10).all()
 
-                # 检查待发送的消息
-                messages = ClawMessage.query.filter(
-                    ClawMessage.claw_id == claw_id,
-                    ClawMessage.status == 'pending'
-                ).order_by(ClawMessage.created_at.asc()).limit(10).all()
+                # 使用独立 pymysql 连接查询消息，绕过 gevent session 缓存问题
+                # （db.session 在 gevent 长连接中会缓存旧数据，导致新消息不可见）
+                import pymysql as _pymysql
+                _mc = _pymysql.connect(
+                    host=os.getenv('MYSQL_HOST', 'localhost'),
+                    port=int(os.getenv('MYSQL_PORT', '3306')),
+                    user=os.getenv('MYSQL_USER', 'your_mysql_user'),
+                    password=os.getenv('MYSQL_PASSWORD', 'your_mysql_user'),
+                    database=os.getenv('MYSQL_DATABASE', 'openclaw_manager'),
+                    charset='utf8mb4'
+                )
+                pending_msg_ids = []
+                try:
+                    with _mc.cursor(_pymysql.cursors.DictCursor) as _mcur:
+                        _mcur.execute(
+                            "SELECT id FROM claw_messages WHERE claw_id=%s AND status='pending' ORDER BY created_at ASC LIMIT 10",
+                            (claw_id,)
+                        )
+                        pending_msg_ids = [row['id'] for row in _mcur.fetchall()]
+                finally:
+                    _mc.close()
+
+                # 用 SQLAlchemy 加载消息对象（session 已 expire_all，会从 DB 读最新）
+                messages = []
+                if pending_msg_ids:
+                    messages = ClawMessage.query.filter(
+                        ClawMessage.id.in_(pending_msg_ids)
+                    ).order_by(ClawMessage.created_at.asc()).all()
 
                 now = time.time()
-                if now - last_task_check > 5:
-                    # 更新心跳时间
-                    claw.last_heartbeat = datetime.utcnow()
+                
+                # === 每次循环都推送消息（不再等 10 秒间隔）===
+                # 消息查询已用独立 pymysql，结果可靠，直接推送
+                for msg in messages:
+                    msg.status = 'delivered'
+                    msg.delivered_at = datetime.now()
+                    yield f"event: message\ndata: {json.dumps(msg.to_dict())}\n\n"
+                
+                if messages:
                     db.session.commit()
 
-                    # 发送心跳
-                    yield f"event: heartbeat\ndata: {json.dumps({'server_time': datetime.utcnow().isoformat()})}\n\n"
+                if now - last_task_check > 10:
+                    # 更新活跃时间和在线状态（使用独立 pymysql 连接，绕过 gevent session 问题）
+                    import pymysql as _pymysql
+                    _rc = _pymysql.connect(
+                        host=os.getenv('MYSQL_HOST', 'localhost'),
+                        port=int(os.getenv('MYSQL_PORT', '3306')),
+                        user=os.getenv('MYSQL_USER', 'your_mysql_user'),
+                        password=os.getenv('MYSQL_PASSWORD', 'your_mysql_user'),
+                        database=os.getenv('MYSQL_DATABASE', 'openclaw_manager'),
+                        charset='utf8mb4'
+                    )
+                    try:
+                        with _rc.cursor() as _cur:
+                            _cur.execute(
+                                "UPDATE openclaw_instances SET last_activity=NOW(), status='工作' WHERE id=%s AND status!='deleted'",
+                                (claw_id,)
+                            )
+                        _rc.commit()
+                    finally:
+                        _rc.close()
 
                     # 发送待处理任务
                     for task in tasks:
                         task.status = 'running'
-                        task.assigned_at = datetime.utcnow()
+                        task.assigned_at = datetime.now()
                         db.session.commit()
 
                         yield f"event: task\ndata: {json.dumps(task.to_dict())}\n\n"
 
-                    # 发送待处理消息
-                    for msg in messages:
-                        msg.status = 'delivered'
-                        msg.delivered_at = datetime.utcnow()
-                        db.session.commit()
+                    # 检查待办任务变化（每 30 秒，或收到待办变更通知时立即推送）
+                    has_todo_change = _consume_todo_change(claw_id)
+                    if has_todo_change or now - last_todo_check > 30:
+                        today = date.today()
+                        all_todos = ClawTodo.query.filter_by(
+                            openclaw_id=claw_id, enabled=True).all()
+                        today_logs = {l.todo_id: l for l in ClawTodoLog.query.filter_by(
+                            openclaw_id=claw_id, log_date=today).all()}
 
-                        yield f"event: message\ndata: {json.dumps(msg.to_dict())}\n\n"
+                        pending_todos = []
+                        for t in all_todos:
+                            log = today_logs.get(t.id)
+                            is_done = log and log.status in ('completed', 'approved')
+
+                            # 判断今天是否需要执行
+                            need_today = False
+                            if t.schedule_type == 'once':
+                                need_today = not is_done
+                            elif t.schedule_type == 'daily':
+                                need_today = True
+                            elif t.schedule_type == 'weekly' and t.schedule_day:
+                                need_today = today.isoweekday() == t.schedule_day
+                            elif t.schedule_type == 'monthly' and t.schedule_day:
+                                need_today = today.day == t.schedule_day
+
+                            if need_today and not is_done:
+                                pending_todos.append({
+                                    'id': t.id,
+                                    'title': t.title,
+                                    'urgency': t.urgency_level or 'flexible',
+                                    'schedule_time': t.schedule_time,
+                                    'schedule_type': t.schedule_type,
+                                    'today_status': log.status if log else None,
+                                })
+
+                        current_count = len(pending_todos)
+                        # 待办数变化时推送，或首次连接时推送，或收到待办变更通知时立即推送
+                        if current_count != last_todo_count or last_todo_count == -1 or has_todo_change:
+                            yield f"event: todos_pending\ndata: {json.dumps({'count': current_count, 'todos': pending_todos})}\n\n"
+                            last_todo_count = current_count
+
+                        last_todo_check = now
 
                     last_task_check = now
 
-                # 发送 ping 保持连接
-                yield f"event: ping\ndata: \n\n"
+                # ping 保持连接（防止 nginx/proxy 超时断开）
+                # 有消息推送时跳过 ping（消息本身就是保活信号）
+                if not messages:
+                    yield f"event: ping\ndata: \n\n"
 
-                time.sleep(3)
+
+
+
+                # 轮询间隔 2 秒（gevent 多 worker 下 Event 不跨进程，用短轮询更可靠）
+                time.sleep(2)
+
+
+
 
             except GeneratorExit:
                 # 客户端断开连接，更新状态为 offline
                 try:
-                    claw.status = 'offline'
-                    db.session.commit()
-                    logger.info(f"SSE断开，OpenClaw {claw_id} ({claw.name}) 状态已设为 offline")
+                    import pymysql as _pymysql
+                    _rc = _pymysql.connect(
+                        host=os.getenv('MYSQL_HOST', 'localhost'),
+                        port=int(os.getenv('MYSQL_PORT', '3306')),
+                        user=os.getenv('MYSQL_USER', 'your_mysql_user'),
+                        password=os.getenv('MYSQL_PASSWORD', 'your_mysql_user'),
+                        database=os.getenv('MYSQL_DATABASE', 'openclaw_manager'),
+                        charset='utf8mb4'
+                    )
+                    try:
+                        with _rc.cursor() as _cur:
+                            _cur.execute(
+                                "UPDATE openclaw_instances SET status='offline' WHERE id=%s",
+                                (claw_id,)
+                            )
+                        _rc.commit()
+                    finally:
+                        _rc.close()
+                    logger.info(f"SSE断开，OpenClaw {claw_id} ({claw_name}) 状态已设为 offline")
                 except Exception as e:
                     logger.error(f"更新 claw 状态失败: {e}")
                     db.session.rollback()
@@ -202,7 +478,7 @@ def claw_task_report(claw_id, claw=None):
     task.status = data.get('status', 'completed')
     task.result = data.get('result')
     task.error = data.get('error')
-    task.completed_at = datetime.utcnow()
+    task.completed_at = datetime.now()
     db.session.commit()
 
     return jsonify({'status': 'ok', 'task': task.to_dict()})
@@ -235,12 +511,65 @@ def claw_send_message(claw_id, claw=None):
         direction='from_claw',
         reply_to=data.get('reply_to'),
         status='delivered',
-        delivered_at=datetime.utcnow(),
+        delivered_at=datetime.now(),
     )
     db.session.add(msg)
     db.session.commit()
 
     return jsonify({'status': 'ok', 'message': msg.to_dict()}), 201
+
+
+@agent_bp.route('/<int:claw_id>/send-to-claw', methods=['POST'])
+@require_claw_token
+def claw_send_to_claw(claw_id, claw=None):
+    """OpenClaw 给其他 OpenClaw 发消息（admin claw 可发给任意 claw）
+
+    请求体：
+    {
+        "target_claw_ids": [1, 2, 3],
+        "content": "消息内容",
+        "msg_type": "text|chat|task_delegate|knowledge_share"
+    }
+    """
+    if claw.role != 'admin':
+        return jsonify({'error': '只有管理员 claw 可以给其他 claw 发消息'}), 403
+
+    data = request.get_json()
+    if not data or not data.get('content'):
+        return jsonify({'error': 'content 为必填项'}), 400
+
+    target_ids = data.get('target_claw_ids', [])
+    if not target_ids:
+        return jsonify({'error': 'target_claw_ids 为必填项'}), 400
+
+    content = data['content']
+    msg_type = data.get('msg_type', 'text')
+    sent = 0
+
+    targets = OpenClawInstance.query.filter(
+        OpenClawInstance.id.in_([int(x) for x in target_ids]),
+        OpenClawInstance.status != 'deleted',
+    ).all()
+
+    for target in targets:
+        msg = ClawMessage(
+            claw_id=target.id,
+            sender_name=claw.name,
+            content=content,
+            msg_type=msg_type,
+            direction='to_claw',
+            status='pending',  # 先设pending，SSE推送到客户端后再改delivered
+        )
+        db.session.add(msg)
+        sent += 1
+
+    db.session.commit()
+
+    # 通知目标 claw 的 SSE 长连接立即推送
+    for target_id in target_ids:
+        notify_claw(int(target_id))
+
+    return jsonify({'status': 'ok', 'sent_count': sent}), 201
 
 
 @agent_bp.route('/<int:claw_id>/messages', methods=['GET'])
@@ -279,16 +608,37 @@ def claw_get_messages(claw_id, claw=None):
 @agent_bp.route('/<int:claw_id>/messages/<int:msg_id>/read', methods=['PUT'])
 @require_claw_token
 def claw_mark_read(claw_id, msg_id, claw=None):
-    """OpenClaw 标记消息已读"""
+    """OpenClaw 标记消息已读，支持附带回复"""
     msg = ClawMessage.query.filter_by(id=msg_id, claw_id=claw_id).first()
     if not msg:
         return jsonify({'error': '消息不存在'}), 404
 
     msg.status = 'read'
-    msg.read_at = datetime.utcnow()
+    msg.read_at = datetime.now()
+
+    # 如果附带了 reply，自动创建一条回复消息
+    reply_msg = None
+    data = request.get_json(silent=True) or {}
+    reply_content = data.get('reply', '').strip()
+    if reply_content:
+        reply_msg = ClawMessage(
+            claw_id=claw_id,
+            sender_name=claw.name,
+            content=reply_content,
+            msg_type='text',
+            direction='from_claw',
+            reply_to=msg_id,
+            status='delivered',
+            delivered_at=datetime.now(),
+        )
+        db.session.add(reply_msg)
+
     db.session.commit()
 
-    return jsonify({'status': 'ok'})
+    result = {'status': 'ok'}
+    if reply_msg:
+        result['reply'] = reply_msg.to_dict()
+    return jsonify(result)
 
 
 @agent_bp.route('/<int:claw_id>/dispatch', methods=['POST'])
@@ -325,6 +675,9 @@ def dispatch_task_to_claw(claw_id):
     )
     db.session.add(task)
     db.session.commit()
+
+    # 通知 SSE 长连接立即推送新任务
+    notify_claw(claw_id)
 
     return jsonify({
         'status': 'dispatched',
@@ -385,13 +738,13 @@ def get_pending_tasks_poll(claw_id, claw=None):
     # 标记为 running
     for task in tasks:
         task.status = 'running'
-        task.assigned_at = datetime.utcnow()
+        task.assigned_at = datetime.now()
     db.session.commit()
 
     return jsonify({
         'has_tasks': len(tasks) > 0,
         'tasks': [t.to_dict() for t in tasks],
-        'server_time': datetime.utcnow().isoformat(),
+        'server_time': datetime.now().isoformat(),
     })
 
 
@@ -420,7 +773,7 @@ def poll_task_result(claw_id, claw=None):
     task.status = data.get('status', 'completed')
     task.result = data.get('result')
     task.error = data.get('error')
-    task.completed_at = datetime.utcnow()
+    task.completed_at = datetime.now()
     db.session.commit()
 
     return jsonify({'status': 'ok', 'task': task.to_dict()})

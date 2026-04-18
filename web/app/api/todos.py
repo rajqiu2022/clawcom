@@ -9,6 +9,7 @@
 """
 from datetime import datetime, date
 from flask import request, jsonify
+from sqlalchemy import func
 from app import db
 from app.models import ClawTodo, ClawTodoLog, OpenClawInstance
 from app.api import api_bp
@@ -36,7 +37,7 @@ def list_todos(claw_id):
     if urgency:
         q = q.filter_by(urgency_level=urgency)
 
-    todos = q.order_by(ClawTodo.priority, ClawTodo.schedule_time).all()
+    todos = q.order_by(ClawTodo.created_at.desc()).all()
     return jsonify([t.to_dict(with_today_status=True) for t in todos])
 
 
@@ -76,11 +77,14 @@ def create_todo(claw_id):
         priority=data.get('priority', 'P1'),
         task_category=data.get('task_category', 'routine'),
         verification_target=data.get('verification_target'),
-        enabled=data.get('enabled', True),
+        enabled=True,  # 创建时始终启用，禁用只能通过 PUT 更新
         created_by=data.get('created_by', 'system'),
     )
     db.session.add(todo)
     db.session.commit()
+    # 通知 SSE 长连接立即推送（待办变更通过 SSE 事件通知，不再发聊天消息）
+    from app.api.agent_client import notify_claw_todo
+    notify_claw_todo(claw_id)
     return jsonify(todo.to_dict(with_today_status=True)), 201
 
 
@@ -97,6 +101,9 @@ def update_todo(claw_id, todo_id):
     if 'enabled' in data:
         todo.enabled = bool(data['enabled'])
     db.session.commit()
+    # 通知 SSE 长连接立即推送（待办变更通过 SSE 事件通知，不再发聊天消息）
+    from app.api.agent_client import notify_claw_todo
+    notify_claw_todo(claw_id)
     return jsonify(todo.to_dict(with_today_status=True))
 
 
@@ -104,29 +111,34 @@ def update_todo(claw_id, todo_id):
 def delete_todo(claw_id, todo_id):
     """删除待办"""
     todo = ClawTodo.query.filter_by(id=todo_id, openclaw_id=claw_id).first_or_404()
+    todo_title = todo.title
     db.session.delete(todo)
     db.session.commit()
+    # 通知 SSE 长连接立即推送（待办变更通过 SSE 事件通知，不再发聊天消息）
+    from app.api.agent_client import notify_claw_todo
+    notify_claw_todo(claw_id)
     return jsonify({'message': '待办已删除'})
 
 
 @api_bp.route('/openclaws/<int:claw_id>/todos/<int:todo_id>/complete', methods=['POST'])
 def complete_todo(claw_id, todo_id):
-    """标记待办完成（上报执行结果）
+    """标记待办为已提交（上报执行结果）
 
     请求体：
     {
       "result_summary": "执行结果描述",
-      "status": "completed"           // completed/skipped/retry_failed（可选，默认 completed）
+      "status": "submitted"            // submitted(默认)/skipped/retry_failed
     }
+    提交后状态变为 submitted，需管理员审核通过后才算完成(approved)。
     """
     todo = ClawTodo.query.filter_by(id=todo_id, openclaw_id=claw_id).first_or_404()
     data = request.get_json() or {}
     today = date.today()
-    status = data.get('status', 'completed')
+    status = data.get('status', 'submitted')
 
     log = ClawTodoLog.query.filter_by(todo_id=todo_id, log_date=today).first()
     if log:
-        log.completed_at = datetime.utcnow()
+        log.completed_at = datetime.now()
         log.result_summary = data.get('result_summary', log.result_summary)
         log.status = status
         if status == 'retry_failed':
@@ -134,17 +146,42 @@ def complete_todo(claw_id, todo_id):
     else:
         log = ClawTodoLog(
             todo_id=todo_id, openclaw_id=claw_id, log_date=today,
-            completed_at=datetime.utcnow(),
+            completed_at=datetime.now(),
             result_summary=data.get('result_summary'),
             status=status,
             retry_count=1 if status == 'retry_failed' else 0,
         )
         db.session.add(log)
 
-    # once 类型完成后自动关闭
-    if todo.schedule_type == 'once' and status == 'completed':
+    # once 类型提交后自动关闭
+    if todo.schedule_type == 'once' and status == 'submitted':
         todo.enabled = False
 
+    db.session.commit()
+    return jsonify(log.to_dict())
+
+
+@api_bp.route('/openclaws/<int:claw_id>/todos/<int:todo_id>/approve', methods=['POST'])
+def approve_todo(claw_id, todo_id):
+    """审核通过待办（管理员操作，将 submitted 改为 approved）
+
+    请求体（可选）：
+    {
+      "log_date": "2026-04-13"   // 指定审核哪天的记录，默认今天
+    }
+    """
+    log_date_str = (request.get_json() or {}).get('log_date')
+    target_date = date.fromisoformat(log_date_str) if log_date_str else date.today()
+
+    log = ClawTodoLog.query.filter_by(
+        todo_id=todo_id, openclaw_id=claw_id, log_date=target_date
+    ).first()
+    if not log:
+        return jsonify({'error': '未找到该日期的提交记录'}), 404
+    if log.status != 'submitted':
+        return jsonify({'error': f'当前状态为 {log.status}，只能审核 submitted 状态的记录'}), 400
+
+    log.status = 'approved'
     db.session.commit()
     return jsonify(log.to_dict())
 
@@ -210,24 +247,30 @@ def todo_summary(claw_id):
             })
 
     total = len(items)
-    done = sum(1 for i in items if i['status'] == 'completed')
+    submitted = sum(1 for i in items if i['status'] == 'submitted')
+    approved = sum(1 for i in items if i['status'] in ('approved', 'completed'))
+    pending = sum(1 for i in items if i['status'] == 'pending')
     return jsonify({
         'date': target_date,
-        'total': total, 'completed': done, 'pending': total - done,
-        'rate': round(done / total * 100, 1) if total else 100,
+        'total': total,
+        'pending': pending,
+        'submitted': submitted,
+        'approved': approved,
+        'rate': round(approved / total * 100, 1) if total else 100,
         'items': items,
     })
 
 
 @api_bp.route('/openclaws/<int:claw_id>/todos/completed', methods=['GET'])
 def list_completed_todos(claw_id):
-    """已完成待办列表（最近 3 天或最近 50 条，取较小集合）
+    """待办执行记录列表（最近 3 天或最近 50 条，取较小集合）
 
     查询参数：
       days:  回溯天数（默认 3）
       limit: 最大条数（默认 50）
 
     返回按完成时间倒序的执行记录列表，每条包含待办详情和执行结果。
+    包括 submitted/approved/completed/skipped/overdue/retry_failed 状态。
     """
     from datetime import timedelta
 
@@ -241,7 +284,7 @@ def list_completed_todos(claw_id):
     logs = (ClawTodoLog.query
             .filter(ClawTodoLog.openclaw_id == claw_id,
                     ClawTodoLog.log_date >= since)
-            .order_by(ClawTodoLog.completed_at.desc().nullslast(),
+            .order_by(func.coalesce(ClawTodoLog.completed_at, ClawTodoLog.created_at).desc(),
                       ClawTodoLog.created_at.desc())
             .limit(limit)
             .all())

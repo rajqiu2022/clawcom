@@ -1,0 +1,411 @@
+{% extends "base.html" %}
+{% block title %}TAPD 集成 - OpenClaw 管理系统{% endblock %}
+{% block nav_tapd %}active{% endblock %}
+{% block page_title %}🔗 TAPD 集成{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <select id="project-select" class="form-select" style="width:200px">
+        <option value="">选择项目</option>
+    </select>
+    <button class="btn btn-ghost btn-sm" onclick="refreshData()">🔄 刷新</button>
+    <button class="btn btn-primary btn-sm" onclick="openConfigModal()">⚙️ API 配置</button>
+</div>
+{% endblock %}
+
+{% block content %}
+<!-- 连接状态 -->
+<div class="card" id="config-status" style="margin-bottom:20px">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+        <div style="display:flex;align-items:center;gap:12px">
+            <span style="font-size:1.5rem">🔗</span>
+            <div>
+                <div style="font-weight:600" id="tapd-status-text">检查 TAPD 连接...</div>
+                <div style="font-size:0.82rem;color:var(--text-muted)" id="tapd-status-detail">正在检查 API 凭证配置</div>
+            </div>
+        </div>
+        <span id="tapd-status-badge" class="tag tag-yellow">检查中</span>
+    </div>
+</div>
+
+<!-- Tab 切换 -->
+<div class="tab-bar" id="tapd-tabs">
+    <div class="tab-item active" data-tab="stories" onclick="switchTab('stories')">📋 需求</div>
+    <div class="tab-item" data-tab="bugs" onclick="switchTab('bugs')">🐛 缺陷</div>
+    <div class="tab-item" data-tab="iterations" onclick="switchTab('iterations')">🔄 迭代</div>
+</div>
+
+<!-- 需求列表 -->
+<div id="tab-stories" class="tab-content">
+    <div class="tapd-filters" style="margin-bottom:16px;display:flex;gap:10px">
+        <select id="story-status" class="form-select" style="width:150px">
+            <option value="">全部状态</option>
+            <option value="planning">规划中</option>
+            <option value="developing">开发中</option>
+            <option value="testing">测试中</option>
+            <option value="done">已完成</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" onclick="loadStories()">查询</button>
+    </div>
+    <div id="stories-list">
+        <div class="empty-state">
+            <div class="empty-state-icon">📋</div>
+            <div class="empty-state-text">请先选择项目并配置 TAPD API 凭证</div>
+        </div>
+    </div>
+</div>
+
+<!-- 缺陷列表 -->
+<div id="tab-bugs" class="tab-content" style="display:none">
+    <div class="tapd-filters" style="margin-bottom:16px;display:flex;gap:10px">
+        <select id="bug-status" class="form-select" style="width:150px">
+            <option value="">全部状态</option>
+            <option value="new">新建</option>
+            <option value="open">打开</option>
+            <option value="fixed">已修复</option>
+            <option value="closed">已关闭</option>
+            <option value="rejected">已拒绝</option>
+        </select>
+        <select id="bug-severity" class="form-select" style="width:150px">
+            <option value="">全部严重度</option>
+            <option value="fatal">致命</option>
+            <option value="serious">严重</option>
+            <option value="normal">一般</option>
+            <option value="prompt">提示</option>
+            <option value="advice">建议</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" onclick="loadBugs()">查询</button>
+    </div>
+    <div id="bugs-list">
+        <div class="empty-state">
+            <div class="empty-state-icon">🐛</div>
+            <div class="empty-state-text">请先选择项目并配置 TAPD API 凭证</div>
+        </div>
+    </div>
+</div>
+
+<!-- 迭代列表 -->
+<div id="tab-iterations" class="tab-content" style="display:none">
+    <div id="iterations-list">
+        <div class="empty-state">
+            <div class="empty-state-icon">🔄</div>
+            <div class="empty-state-text">请先选择项目并配置 TAPD API 凭证</div>
+        </div>
+    </div>
+</div>
+
+<!-- TAPD API 配置弹窗 -->
+<div class="modal-overlay" id="config-modal">
+    <div class="modal" style="max-width:480px">
+        <div class="modal-title">⚙️ TAPD API 配置</div>
+        <div class="form-group">
+            <label class="form-label">API User（TAPD 应用 API Account）</label>
+            <input type="text" id="cfg-api-user" class="form-input" placeholder="请输入 TAPD API User">
+        </div>
+        <div class="form-group">
+            <label class="form-label">API Password（TAPD 应用 API Password）</label>
+            <input type="password" id="cfg-api-password" class="form-input" placeholder="请输入 TAPD API Password">
+        </div>
+        <div style="font-size:0.82rem;color:var(--text-muted);margin-top:8px">
+            💡 在 <a href="https://www.tapd.cn/company/developer_settings" target="_blank">TAPD 公司管理 → 应用管理</a> 中创建应用获取凭证
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeConfigModal()">取消</button>
+            <button class="btn btn-primary" onclick="saveConfig()">保存配置</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentProject = null;
+let currentTab = 'stories';
+
+// ============== 初始化 ==============
+
+async function initPage() {
+    // 加载项目列表
+    try {
+        const projects = await API.listProjects();
+        const sel = document.querySelector('#project-select');
+        projects.forEach(p => {
+            if (p.tapd_workspace_id) {
+                const opt = document.createElement('option');
+                opt.value = p.tapd_workspace_id;
+                opt.textContent = `${p.name} (${p.tapd_workspace_id})`;
+                opt.dataset.projectId = p.id;
+                sel.appendChild(opt);
+            }
+        });
+    } catch (err) { console.error(err); }
+
+    // 检查 TAPD 配置
+    checkConfig();
+}
+
+async function checkConfig() {
+    try {
+        const cfg = await API.get('/tapd/config');
+        const statusText = document.querySelector('#tapd-status-text');
+        const statusDetail = document.querySelector('#tapd-status-detail');
+        const statusBadge = document.querySelector('#tapd-status-badge');
+
+        if (cfg.configured) {
+            statusText.textContent = 'TAPD 已连接';
+            statusDetail.textContent = `API User: ${cfg.api_user}`;
+            statusBadge.className = 'tag tag-green';
+            statusBadge.textContent = '✅ 已连接';
+        } else {
+            statusText.textContent = 'TAPD 未配置';
+            statusDetail.textContent = '请点击右上角"API 配置"按钮设置 TAPD 凭证';
+            statusBadge.className = 'tag tag-red';
+            statusBadge.textContent = '❌ 未配置';
+        }
+    } catch (err) {
+        console.error(err);
+    }
+}
+
+// ============== Tab 切换 ==============
+
+function switchTab(tab) {
+    currentTab = tab;
+    document.querySelectorAll('.tab-item').forEach(t => t.classList.remove('active'));
+    document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
+    document.querySelectorAll('.tab-content').forEach(c => c.style.display = 'none');
+    document.querySelector(`#tab-${tab}`).style.display = 'block';
+}
+
+// ============== 项目选择 ==============
+
+document.querySelector('#project-select').addEventListener('change', function() {
+    currentProject = this.value;
+    if (currentProject) {
+        refreshData();
+    }
+});
+
+function refreshData() {
+    if (!currentProject) {
+        showToast('请先选择项目', 'error');
+        return;
+    }
+    loadStories();
+    loadBugs();
+    loadIterations();
+}
+
+// ============== 需求 ==============
+
+async function loadStories() {
+    if (!currentProject) return;
+    const el = document.querySelector('#stories-list');
+    el.innerHTML = '<div class="loading"><span class="spinner"></span> 加载中...</div>';
+
+    try {
+        const status = document.querySelector('#story-status').value;
+        let qs = `workspace_id=${currentProject}`;
+        if (status) qs += `&status=${status}`;
+
+        const data = await API.get(`/tapd/stories?${qs}`);
+        
+        if (data.stories.length === 0) {
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-text">无需求数据</div></div>';
+            return;
+        }
+
+        el.innerHTML = `
+            <div class="tapd-table">
+                <div class="tapd-table-header">
+                    <span style="flex:3">需求名称</span>
+                    <span style="flex:1">状态</span>
+                    <span style="flex:1">优先级</span>
+                    <span style="flex:1">负责人</span>
+                    <span style="flex:1">创建时间</span>
+                </div>
+                ${data.stories.map(s => `
+                    <div class="tapd-table-row">
+                        <span style="flex:3;font-weight:500">${s.name || '-'}</span>
+                        <span style="flex:1"><span class="tag ${statusTagClass(s.status)}">${statusLabel(s.status)}</span></span>
+                        <span style="flex:1">${priorityBadge(s.priority)}</span>
+                        <span style="flex:1;color:var(--text-secondary);font-size:0.85rem">${s.owner || '-'}</span>
+                        <span style="flex:1;color:var(--text-muted);font-size:0.82rem">${s.created ? s.created.slice(0,10) : '-'}</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    } catch (err) {
+        el.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">加载失败: ${err.message}</div></div>`;
+    }
+}
+
+// ============== 缺陷 ==============
+
+async function loadBugs() {
+    if (!currentProject) return;
+    const el = document.querySelector('#bugs-list');
+    el.innerHTML = '<div class="loading"><span class="spinner"></span> 加载中...</div>';
+
+    try {
+        const status = document.querySelector('#bug-status').value;
+        const severity = document.querySelector('#bug-severity').value;
+        let qs = `workspace_id=${currentProject}`;
+        if (status) qs += `&status=${status}`;
+        if (severity) qs += `&severity=${severity}`;
+
+        const data = await API.get(`/tapd/bugs?${qs}`);
+        
+        if (data.bugs.length === 0) {
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-text">无缺陷数据</div></div>';
+            return;
+        }
+
+        el.innerHTML = `
+            <div class="tapd-table">
+                <div class="tapd-table-header">
+                    <span style="flex:3">缺陷标题</span>
+                    <span style="flex:1">状态</span>
+                    <span style="flex:1">严重度</span>
+                    <span style="flex:1">负责人</span>
+                    <span style="flex:1">创建时间</span>
+                </div>
+                ${data.bugs.map(b => `
+                    <div class="tapd-table-row">
+                        <span style="flex:3;font-weight:500">${b.title || '-'}</span>
+                        <span style="flex:1"><span class="tag ${bugStatusTagClass(b.status)}">${bugStatusLabel(b.status)}</span></span>
+                        <span style="flex:1">${severityBadge(b.severity)}</span>
+                        <span style="flex:1;color:var(--text-secondary);font-size:0.85rem">${b.current_owner || '-'}</span>
+                        <span style="flex:1;color:var(--text-muted);font-size:0.82rem">${b.created ? b.created.slice(0,10) : '-'}</span>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    } catch (err) {
+        el.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">加载失败: ${err.message}</div></div>`;
+    }
+}
+
+// ============== 迭代 ==============
+
+async function loadIterations() {
+    if (!currentProject) return;
+    const el = document.querySelector('#iterations-list');
+    el.innerHTML = '<div class="loading"><span class="spinner"></span> 加载中...</div>';
+
+    try {
+        const data = await API.get(`/tapd/iterations?workspace_id=${currentProject}`);
+        
+        if (data.iterations.length === 0) {
+            el.innerHTML = '<div class="empty-state"><div class="empty-state-text">无迭代数据</div></div>';
+            return;
+        }
+
+        el.innerHTML = data.iterations.map(it => `
+            <div class="card" style="margin-bottom:12px">
+                <div style="display:flex;align-items:center;justify-content:space-between">
+                    <div>
+                        <div style="font-weight:600;font-size:1rem">${it.name}</div>
+                        <div style="font-size:0.82rem;color:var(--text-muted);margin-top:4px">
+                            ${it.startdate || '?'} ~ ${it.enddate || '?'} · 创建: ${it.creator || '-'}
+                        </div>
+                    </div>
+                    <span class="tag ${it.status === 'open' ? 'tag-green' : 'tag-accent'}">${it.status || '-'}</span>
+                </div>
+            </div>
+        `).join('');
+    } catch (err) {
+        el.innerHTML = `<div class="empty-state"><div class="empty-state-text" style="color:var(--red)">加载失败: ${err.message}</div></div>`;
+    }
+}
+
+// ============== 配置弹窗 ==============
+
+function openConfigModal() {
+    document.querySelector('#config-modal').classList.add('active');
+}
+
+function closeConfigModal() {
+    document.querySelector('#config-modal').classList.remove('active');
+}
+
+async function saveConfig() {
+    const apiUser = document.querySelector('#cfg-api-user').value.trim();
+    const apiPassword = document.querySelector('#cfg-api-password').value.trim();
+
+    if (!apiUser || !apiPassword) {
+        showToast('请填写完整的 API 凭证', 'error');
+        return;
+    }
+
+    try {
+        await API.put('/tapd/config', {
+            tapd_api_user: apiUser,
+            tapd_api_password: apiPassword,
+        });
+        showToast('TAPD 配置已保存', 'success');
+        closeConfigModal();
+        checkConfig();
+    } catch (err) {
+        showToast('保存失败: ' + err.message, 'error');
+    }
+}
+
+// ============== 工具函数 ==============
+
+function statusLabel(s) {
+    const map = {
+        planning: '规划中', developing: '开发中', testing: '测试中',
+        done: '已完成', resolved: '已解决', closed: '已关闭',
+    };
+    return map[s] || s || '-';
+}
+
+function statusTagClass(s) {
+    const map = {
+        planning: 'tag-yellow', developing: 'tag-blue', testing: 'tag-accent',
+        done: 'tag-green', resolved: 'tag-green', closed: 'tag-green',
+    };
+    return map[s] || 'tag-accent';
+}
+
+function bugStatusLabel(s) {
+    const map = {
+        new: '新建', open: '打开', fixed: '已修复',
+        closed: '已关闭', rejected: '已拒绝', reopen: '重新打开',
+    };
+    return map[s] || s || '-';
+}
+
+function bugStatusTagClass(s) {
+    const map = {
+        new: 'tag-blue', open: 'tag-yellow', fixed: 'tag-green',
+        closed: 'tag-green', rejected: 'tag-red', reopen: 'tag-orange',
+    };
+    return map[s] || 'tag-accent';
+}
+
+function priorityBadge(p) {
+    const map = {
+        high: '<span class="tag tag-red">高</span>',
+        medium: '<span class="tag tag-yellow">中</span>',
+        low: '<span class="tag tag-green">低</span>',
+        nice: '<span class="tag tag-accent">建议</span>',
+    };
+    return map[p] || `<span class="tag tag-accent">${p || '-'}</span>`;
+}
+
+function severityBadge(s) {
+    const map = {
+        fatal: '<span class="tag tag-red">致命</span>',
+        serious: '<span class="tag tag-orange">严重</span>',
+        normal: '<span class="tag tag-yellow">一般</span>',
+        prompt: '<span class="tag tag-blue">提示</span>',
+        advice: '<span class="tag tag-green">建议</span>',
+    };
+    return map[s] || `<span class="tag tag-accent">${s || '-'}</span>`;
+}
+
+initPage();
+</script>
+{% endblock %}

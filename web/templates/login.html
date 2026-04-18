@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw 管理系统 - 登录</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0c0e14; color: #edf0f7; min-height: 100vh;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .login-card {
+            background: #12141c; border-radius: 18px; padding: 44px;
+            width: 390px; box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+            border: 1px solid #252838;
+        }
+        .login-logo { text-align: center; margin-bottom: 28px; }
+        .login-logo span { font-size: 2.8rem; }
+        .login-title { text-align: center; font-size: 1.2rem; font-weight: 700; margin-bottom: 6px; letter-spacing: -0.01em; }
+        .login-subtitle { text-align: center; font-size: 0.78rem; color: #5c6178; margin-bottom: 32px; text-transform: uppercase; letter-spacing: 0.08em; }
+        .form-group { margin-bottom: 18px; }
+        .form-label { display: block; font-size: 0.82rem; font-weight: 600; color: #8b91a8; margin-bottom: 6px; }
+        .form-input {
+            width: 100%; padding: 11px 14px; background: #1e2130; border: 1px solid #252838;
+            border-radius: 8px; color: #edf0f7; font-size: 0.95rem; outline: none;
+            transition: border-color 0.18s, box-shadow 0.18s; font-family: inherit;
+        }
+        .form-input:focus { border-color: #5b5ff0; box-shadow: 0 0 0 3px rgba(91,95,240,0.12); }
+        .btn-login {
+            width: 100%; padding: 12px; background: #5b5ff0; color: #fff; border: none;
+            border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer;
+            transition: all 0.18s; margin-top: 8px; font-family: inherit;
+            box-shadow: 0 1px 3px rgba(91,95,240,0.2);
+        }
+        .btn-login:hover { background: #6e72ff; box-shadow: 0 2px 8px rgba(91,95,240,0.35); transform: translateY(-1px); }
+        .btn-login:active { transform: translateY(0); }
+        .btn-login:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+        .toggle-mode {
+            text-align: center; margin-top: 18px; font-size: 0.85rem; color: #5c6178;
+        }
+        .toggle-mode a { color: #5b5ff0; cursor: pointer; text-decoration: none; font-weight: 500; }
+        .toggle-mode a:hover { color: #6e72ff; }
+        .error-msg { color: #f06060; font-size: 0.85rem; margin-top: 8px; text-align: center; display: none; }
+        .display-name-group { display: none; }
+    </style>
+</head>
+<body>
+<div class="login-card">
+    <div class="login-logo"><span>🦞</span></div>
+    <div class="login-title" id="page-title">登录 OpenClaw</div>
+    <div class="login-subtitle">Team Management System</div>
+
+    <form id="auth-form">
+        <div class="form-group">
+            <label class="form-label">用户名</label>
+            <input class="form-input" id="username" placeholder="输入用户名" required autofocus>
+        </div>
+        <div class="form-group">
+            <label class="form-label">密码</label>
+            <input class="form-input" type="password" id="password" placeholder="输入密码" required>
+        </div>
+        <div class="form-group display-name-group" id="display-name-group">
+            <label class="form-label">显示名称（可选）</label>
+            <input class="form-input" id="display-name" placeholder="你的昵称">
+        </div>
+        <div class="error-msg" id="error-msg"></div>
+        <button class="btn-login" type="submit" id="submit-btn">登录</button>
+    </form>
+
+    <div class="toggle-mode">
+        <span id="toggle-text">还没有账号？</span>
+        <a id="toggle-link" onclick="toggleMode()">注册</a>
+    </div>
+</div>
+
+<script>
+let isRegister = false;
+
+function toggleMode() {
+    isRegister = !isRegister;
+    document.getElementById('page-title').textContent = isRegister ? '注册 OpenClaw' : '登录 OpenClaw';
+    document.getElementById('submit-btn').textContent = isRegister ? '注册' : '登录';
+    document.getElementById('toggle-text').textContent = isRegister ? '已有账号？' : '还没有账号？';
+    document.getElementById('toggle-link').textContent = isRegister ? '登录' : '注册';
+    document.getElementById('display-name-group').style.display = isRegister ? '' : 'none';
+    document.getElementById('error-msg').style.display = 'none';
+}
+
+document.getElementById('auth-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const errEl = document.getElementById('error-msg');
+    errEl.style.display = 'none';
+
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    const displayName = document.getElementById('display-name').value.trim();
+
+    const btn = document.getElementById('submit-btn');
+    btn.disabled = true;
+
+    try {
+        const url = isRegister ? '/api/v1/auth/register' : '/api/v1/auth/login';
+        const body = { username, password };
+        if (isRegister && displayName) body.display_name = displayName;
+
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+
+        if (resp.ok) {
+            window.location.href = '/';
+        } else {
+            errEl.textContent = data.error || '操作失败';
+            errEl.style.display = '';
+        }
+    } catch (err) {
+        errEl.textContent = '网络错误: ' + err.message;
+        errEl.style.display = '';
+    } finally {
+        btn.disabled = false;
+    }
+});
+</script>
+</body>
+</html>

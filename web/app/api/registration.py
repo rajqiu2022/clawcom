@@ -123,7 +123,7 @@ def get_all_init_tasks_status():
     uid = flask_session.get('user_id')
     if uid:
         user = User.query.get(uid)
-        if user and user.role == 'super_admin':
+        if user and user.role in ('super_admin', 'admin'):
             authorized = True
 
     # 方式2：OpenClaw Token

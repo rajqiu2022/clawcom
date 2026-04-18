@@ -69,8 +69,14 @@ def call_manager_tool(claw, name, args):
     """执行 manager 工具"""
 
     if name == "manager_heartbeat":
-        claw.status = "online"
-        claw.last_heartbeat = datetime.utcnow()
+        # status 由客户端通过 args 上报，不硬编码
+        client_status = (args or {}).get("status")
+        valid_statuses = ("工作", "学习", "摸鱼", "休息")
+        if client_status and client_status in valid_statuses:
+            claw.status = client_status
+        elif not claw.status or claw.status == "offline":
+            claw.status = "工作"
+        claw.last_activity = datetime.now()
         db.session.commit()
         return {"content": [{"type": "text", "text": "ok"}]}
 
