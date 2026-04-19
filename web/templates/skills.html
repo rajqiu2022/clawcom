@@ -198,8 +198,8 @@ function _canDeleteSkill(s) {
 let currentFilter = 'all';
 
 function _isAdmin() {
-    // 审核权限：super_admin 和 admin 同等权限（龙虾王 Token 认证时映射为 super_admin）
-    return currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'admin');
+    // 审核权限：仅 super_admin（龙虾王 Token 认证时映射为 super_admin）
+    return currentUser && currentUser.role === 'super_admin';
 }
 
 function reviewStatusTag(s) {
@@ -649,7 +649,7 @@ async function reviewSkill(id, status) {
         loadSkills();
     } catch (err) {
         if (err.message && err.message.includes('403')) {
-            showToast('只有管理员可以审核 Skill', 'error');
+            showToast('只有超级管理员可以审核 Skill', 'error');
         } else {
             showToast('操作失败: ' + err.message, 'error');
         }

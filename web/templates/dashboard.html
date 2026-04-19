@@ -287,8 +287,8 @@ function applyDashboardFilters() {
     }
 
     // ===== 任务动态渲染 =====
-    // 待审核标签页仅 super_admin/admin 可见
-    const _isAdmin = currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'admin');
+    // 待审核标签页仅 super_admin 可见
+    const _isAdmin = currentUser && currentUser.role === 'super_admin';
     const submittedTab = document.getElementById('subtab-submitted');
     if (submittedTab) submittedTab.style.display = _isAdmin ? '' : 'none';
 
