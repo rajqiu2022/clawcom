@@ -8,11 +8,32 @@
   retry      — 周期容错-重试，错过延后重试
 """
 from datetime import datetime, date
-from flask import request, jsonify
+from flask import request, jsonify, session as flask_session
 from sqlalchemy import func
 from app import db
-from app.models import ClawTodo, ClawTodoLog, OpenClawInstance
+from app.models import ClawTodo, ClawTodoLog, OpenClawInstance, User
 from app.api import api_bp
+
+
+def _is_admin_user():
+    """检查当前请求是否来自管理员（Web session 或 admin 角色的 OpenClaw Token）"""
+    # Web session 认证
+    uid = flask_session.get('user_id')
+    if uid:
+        user = User.query.get(uid)
+        if user and user.role in ('super_admin', 'admin'):
+            return True
+
+    # Bearer Token 认证
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer '):
+        token = auth[7:]
+        for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
+            if claw.verify_token(token):
+                if claw.role == 'admin':
+                    return True
+                break
+    return False
 
 
 @api_bp.route('/openclaws/<int:claw_id>/todos', methods=['GET'])
@@ -59,10 +80,13 @@ def create_todo(claw_id):
       "verification_target": null
     }
     """
-    OpenClawInstance.query.get_or_404(claw_id)
+    claw = OpenClawInstance.query.get_or_404(claw_id)
     data = request.get_json()
     if not data or not data.get('title'):
         return jsonify({'error': 'title 必填'}), 400
+
+    # created_by 优先取请求体参数，其次取 OpenClaw 名称，兜底 system
+    created_by = data.get('created_by') or claw.name or 'system'
 
     todo = ClawTodo(
         openclaw_id=claw_id,
@@ -78,7 +102,7 @@ def create_todo(claw_id):
         task_category=data.get('task_category', 'routine'),
         verification_target=data.get('verification_target'),
         enabled=True,  # 创建时始终启用，禁用只能通过 PUT 更新
-        created_by=data.get('created_by', 'system'),
+        created_by=created_by,
     )
     db.session.add(todo)
     db.session.commit()
@@ -170,6 +194,9 @@ def approve_todo(claw_id, todo_id):
       "log_date": "2026-04-13"   // 指定审核哪天的记录，默认今天
     }
     """
+    if not _is_admin_user():
+        return jsonify({'error': '仅管理员可审核待办'}), 403
+
     log_date_str = (request.get_json() or {}).get('log_date')
     target_date = date.fromisoformat(log_date_str) if log_date_str else date.today()
 
