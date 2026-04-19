@@ -1257,6 +1257,12 @@ function filterClaws() {
             openChat(id, name, status);
         });
     });
+
+    // 聊天模式：恢复当前聊天对象的高亮状态（DOM 重建后 chat-active 会丢失）
+    if (currentView === 'chat' && chatTargetClawId) {
+        const activeItem = document.querySelector(`.agent-item[data-id="${chatTargetClawId}"]`);
+        if (activeItem) activeItem.classList.add('chat-active');
+    }
 }
 
 function toggleSelectAll() {
