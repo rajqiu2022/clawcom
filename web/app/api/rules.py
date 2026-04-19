@@ -147,7 +147,7 @@ def create_rule():
         return jsonify({'error': '未认证请求必须提供 created_by 字段，请在 Header 中携带 Authorization: Bearer {TOKEN}'}), 401
 
     # 判断提交者身份，决定审核状态（与 Skill 一致）
-    if user and user.role in ('super_admin', 'admin'):
+    if user and user.role == 'super_admin':
         review_status = 'approved'
     else:
         review_status = 'pending'
@@ -206,8 +206,8 @@ def review_rule(rule_id):
     """
     from app.api.skills import _get_current_user, _notify_admin_claws, _notify_submitter_review_result
     user = _get_current_user()
-    if not user or user.role not in ('super_admin', 'admin'):
-        return jsonify({'error': '只有管理员可以审核 Rule'}), 403
+    if not user or user.role != 'super_admin':
+        return jsonify({'error': '只有超级管理员可以审核 Rule'}), 403
 
     rule = Rule.query.get_or_404(rule_id)
     data = request.get_json()
@@ -305,7 +305,7 @@ def update_rule(rule_id):
         return jsonify({'error': '请使用 POST /rules/<id>/review 接口修改审核状态'}), 403
 
     # 非管理员编辑 Rule 后，自动重置为待评审状态，通知龙虾王审核
-    if user and user.role not in ('super_admin', 'admin') and old_review_status != 'pending':
+    if user and user.role != 'super_admin' and old_review_status != 'pending':
         rule.review_status = 'pending'
         rule.review_comment = None
         from app.api.skills import _notify_admin_claws, _create_review_todo_for_admin_claws

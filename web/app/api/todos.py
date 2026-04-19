@@ -16,15 +16,15 @@ from app.api import api_bp
 
 
 def _is_admin_user():
-    """检查当前请求是否来自管理员（Web session 或 admin 角色的 OpenClaw Token）"""
-    # Web session 认证
+    """检查当前请求是否来自超级管理员（Web session 的 super_admin 或 admin 角色的 OpenClaw Token）"""
+    # Web session 认证 — 仅 super_admin
     uid = flask_session.get('user_id')
     if uid:
         user = User.query.get(uid)
-        if user and user.role in ('super_admin', 'admin'):
+        if user and user.role == 'super_admin':
             return True
 
-    # Bearer Token 认证
+    # Bearer Token 认证 — admin 角色的 OpenClaw（龙虾王）Token 映射为超级管理员
     auth = request.headers.get('Authorization', '')
     if auth.startswith('Bearer '):
         token = auth[7:]

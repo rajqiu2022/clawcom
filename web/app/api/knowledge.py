@@ -211,8 +211,8 @@ def pending_reviews():
 def review_knowledge(entry_id):
     """审核知识（通过/拒绝）— 仅超级管理员（龙虾王 Token 认证映射为 super_admin）"""
     user = _get_current_user()
-    if not user or user.role not in ('super_admin', 'admin'):
-        return jsonify({'error': '仅管理员可审核知识'}), 403
+    if not user or user.role != 'super_admin':
+        return jsonify({'error': '仅超级管理员可审核知识'}), 403
 
     entry = KnowledgeEntry.query.get_or_404(entry_id)
     data = request.get_json()

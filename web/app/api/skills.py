@@ -136,7 +136,7 @@ def _semantic_search_skills(keyword, user=None, review_filter=None, show_deleted
     """用 LLM 根据关键词语义匹配 Skill 描述"""
     # 先获取所有候选 Skill（非删除、权限过滤后的）
     query = Skill.query.filter(Skill.is_deleted != True)
-    if not user or user.role not in ('super_admin', 'admin'):
+    if not user or user.role != 'super_admin':
         query = query.filter(Skill.scope != 'admin')
         query = query.filter(Skill.review_status == 'approved')
     if review_filter:
@@ -232,7 +232,7 @@ def create_skill():
 
     # 判断提交者身份，决定审核状态
     user = _get_current_user()
-    if user and user.role in ('super_admin', 'admin'):
+    if user and user.role == 'super_admin':
         review_status = 'approved'
     else:
         review_status = 'pending'
@@ -381,8 +381,8 @@ def review_skill(skill_id):
     - revise → rejected（废弃）
     """
     user = _get_current_user()
-    if not user or user.role not in ('super_admin', 'admin'):
-        return jsonify({'error': '只有管理员可以审核 Skill'}), 403
+    if not user or user.role != 'super_admin':
+        return jsonify({'error': '只有超级管理员可以审核 Skill'}), 403
 
     skill = Skill.query.get_or_404(skill_id)
     data = request.get_json()
@@ -514,7 +514,7 @@ def update_skill(skill_id):
 
     # 非管理员编辑 Skill 后，自动重置为待评审状态，通知龙虾王审核
     # 管理员编辑不重置状态（管理员直接审核通过）
-    if user and user.role not in ('super_admin', 'admin') and old_review_status != 'pending':
+    if user and user.role != 'super_admin' and old_review_status != 'pending':
         skill.review_status = 'pending'
         skill.review_comment = None  # 重新提交时清除之前的审核意见
         # 通知龙虾王有待审核的 Skill
@@ -721,20 +721,65 @@ def install_skill(claw_id):
         )
         db.session.add(existing)
 
-    # 下发安装待办（interrupt 级别，心跳时立即感知）
+    # 检测 skill 是否带一键安装脚本（install.sh / setup.sh）
+    # —— 主要给 sidecar / 守护进程类 skill 用，普通文档 skill 不会有
+    has_install_sh = False
+    install_sh_name = None
+    if skill.files:
+        for f in skill.files:
+            if isinstance(f, dict):
+                fname = f.get('name', '')
+                if fname.endswith('install.sh') or fname.endswith('setup.sh'):
+                    has_install_sh = True
+                    install_sh_name = fname
+                    break
+
+    # 拼描述：含 install.sh 的 skill 优先给一键命令
+    # 优先用环境变量 OPENCLAW_PUBLIC_URL；没配则用固定外网地址（不能用 request.host_url，
+    # 因为 curl 从内网 localhost 调时会拿到 localhost:8088，发给 claw 没法用）
+    import os as _os
+    hub_url_hint = (
+        _os.environ.get('OPENCLAW_PUBLIC_URL', '').rstrip('/')
+        or 'http://9.134.11.169:8088'
+    )
+    desc_lines = [
+        f'Hub 已分配 Skill「{skill.display_name}」(id={skill.id})，请拉取并安装到本地。',
+        '',
+    ]
+    if has_install_sh:
+        desc_lines.extend([
+            f'⚡ 本 skill 含一键安装脚本 `{install_sh_name}`，推荐路径（一行搞定）：',
+            '',
+            '```bash',
+            f'curl -fsSL {hub_url_hint}/static/skills/{skill.name}/{install_sh_name} \\',
+            f'  | CLAW_ID={claw_id} API_TOKEN=<你的 Hub API token> bash',
+            '```',
+            '',
+            '或者照标准流程：把 skill 拉到 ~/.qclaw/skills/ 后再执行：',
+            '',
+            '```bash',
+            f'CLAW_ID={claw_id} API_TOKEN=<你的 token> \\',
+            f'  bash ~/.qclaw/skills/{skill.name}/{install_sh_name}',
+            '```',
+            '',
+            '标准拉取流程：',
+        ])
+    else:
+        desc_lines.append('执行步骤：')
+
+    desc_lines.extend([
+        f'1. GET /api/v1/openclaws/{claw_id}/assigned-skills 获取最新 Skills 列表',
+        f'2. 找到 name="{skill.name}" 的 Skill',
+        f'3. GET /api/v1/skills/{skill.id}/files 获取文档包文件清单',
+        f'4. 逐个拉取文件写入 ~/.qclaw/skills/{skill.name}/',
+        f'5. 完成后上报 POST /todos/{{todo_id}}/complete',
+    ])
+
     from app.models import ClawTodo
     todo = ClawTodo(
         openclaw_id=claw_id,
         title=f'安装 Skill：{skill.display_name}',
-        description=(
-            f'Hub 已分配 Skill「{skill.display_name}」(id={skill.id})，请拉取并安装到本地。\n\n'
-            f'执行步骤：\n'
-            f'1. GET /api/v1/openclaws/{claw_id}/assigned-skills 获取最新 Skills 列表\n'
-            f'2. 找到 name="{skill.name}" 的 Skill\n'
-            f'3. GET /api/v1/skills/{skill.id}/files 获取文档包文件清单\n'
-            f'4. 逐个拉取文件写入 ~/.qclaw/skills/{skill.name}/\n'
-            f'5. 完成后上报 POST /todos/{{todo_id}}/complete'
-        ),
+        description='\n'.join(desc_lines),
         schedule_type='once',
         urgency_level='interrupt',
         priority='P0',

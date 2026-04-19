@@ -155,7 +155,7 @@ function _canDeleteRule(r) {
 }
 
 function _isAdmin() {
-    return currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'admin');
+    return currentUser && currentUser.role === 'super_admin';
 }
 
 function reviewStatusTag(r) {
@@ -539,7 +539,7 @@ async function reviewRule(id, status) {
         loadRules();
     } catch (err) {
         if (err.message && err.message.includes('403')) {
-            showToast('只有管理员可以审核 Rule', 'error');
+            showToast('只有超级管理员可以审核 Rule', 'error');
         } else {
             showToast('操作失败: ' + err.message, 'error');
         }
