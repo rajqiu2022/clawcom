@@ -72,7 +72,7 @@
     <div id="panel-activity" style="display:none">
         <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px">
             <button id="subtab-todos" class="dashboard-subtab active" onclick="switchActivitySubTab('todos')">📌 今日待办</button>
-            <button id="subtab-submitted" class="dashboard-subtab" onclick="switchActivitySubTab('submitted')">📝 待审核 <span id="submitted-count-badge" class="tag tag-yellow" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
+            <button id="subtab-submitted" class="dashboard-subtab" onclick="switchActivitySubTab('submitted')" style="display:none">📝 待审核 <span id="submitted-count-badge" class="tag tag-yellow" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
             <button id="subtab-done" class="dashboard-subtab" onclick="switchActivitySubTab('done')">✅ 近3天记录</button>
         </div>
         <div id="subpanel-todos">
@@ -287,8 +287,13 @@ function applyDashboardFilters() {
     }
 
     // ===== 任务动态渲染 =====
+    // 待审核标签页仅 super_admin/admin 可见
+    const _isAdmin = currentUser && (currentUser.role === 'super_admin' || currentUser.role === 'admin');
+    const submittedTab = document.getElementById('subtab-submitted');
+    if (submittedTab) submittedTab.style.display = _isAdmin ? '' : 'none';
+
     renderUpcomingTodos();
-    renderSubmittedTodos();
+    if (_isAdmin) renderSubmittedTodos();
     renderRecentApproved();
 }
 
