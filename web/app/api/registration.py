@@ -24,6 +24,19 @@ def _get_init_tasks_config():
     return INIT_TASKS
 
 
+def _required_verification_targets(tasks):
+    """返回配置中的必验 verification_target 列表（去空去重，保序）。"""
+    seen = set()
+    out = []
+    for t in tasks or []:
+        vt = (t.get('verification_target') or '').strip()
+        if not vt or vt in seen:
+            continue
+        seen.add(vt)
+        out.append(vt)
+    return out
+
+
 def _save_init_tasks_config(tasks):
     """保存初始化任务配置到数据库"""
     from app.models import SystemConfig
@@ -81,8 +94,15 @@ def send_init_tasks(claw_id):
     tasks = _get_init_tasks_config()
 
     from app.models import ClawTodo
+    existing_targets = {
+        (t.verification_target or '').strip()
+        for t in ClawTodo.query.filter_by(openclaw_id=claw_id, task_category='init').all()
+    }
     created = 0
     for task in tasks:
+        vt = (task.get('verification_target') or '').strip()
+        if vt and vt in existing_targets:
+            continue
         todo = ClawTodo(
             openclaw_id=claw_id,
             title=task['title'],
@@ -97,8 +117,10 @@ def send_init_tasks(claw_id):
         )
         db.session.add(todo)
         created += 1
+        if vt:
+            existing_targets.add(vt)
     db.session.commit()
-    return jsonify({'message': f'已下发 {created} 个初始化任务', 'count': created}), 201
+    return jsonify({'message': f'已补发 {created} 个缺失初始化任务', 'count': created}), 201
 
 
 @api_bp.route('/registration/init-tasks/status', methods=['GET'])
@@ -114,7 +136,6 @@ def get_all_init_tasks_status():
     """
     from flask import session as flask_session
     from app.models import User, ClawTodo, ClawTodoLog
-    from datetime import date as d
 
     # 权限检查：Web session super_admin 或 OpenClaw admin Token
     authorized = False
@@ -143,20 +164,26 @@ def get_all_init_tasks_status():
 
     status_filter = request.args.get('status', 'all')
 
+    tasks_cfg = _get_init_tasks_config()
+    required_targets = _required_verification_targets(tasks_cfg)
+
     # 查所有 init 任务
     q = ClawTodo.query.filter_by(task_category='init')
     todos = q.order_by(ClawTodo.openclaw_id, ClawTodo.created_at).all()
 
-    # 获取今天的执行记录
-    today = d.today()
-    today_logs = {}
+    # 获取每个 todo 的最新执行记录（不是只看今天）
+    latest_logs = {}
     if todos:
         todo_ids = [t.id for t in todos]
-        for log in ClawTodoLog.query.filter(
-            ClawTodoLog.todo_id.in_(todo_ids),
-            ClawTodoLog.log_date == today
-        ).all():
-            today_logs[log.todo_id] = log
+        logs = (ClawTodoLog.query
+                .filter(ClawTodoLog.todo_id.in_(todo_ids))
+                .order_by(ClawTodoLog.todo_id.asc(),
+                          ClawTodoLog.log_date.desc(),
+                          ClawTodoLog.created_at.desc())
+                .all())
+        for log in logs:
+            if log.todo_id not in latest_logs:
+                latest_logs[log.todo_id] = log
 
     # 构建 OpenClaw 名称映射
     claw_ids = list({t.openclaw_id for t in todos})
@@ -168,8 +195,9 @@ def get_all_init_tasks_status():
     # 按 OpenClaw 分组
     grouped = {}
     for t in todos:
-        log = today_logs.get(t.id)
-        is_done = (log and log.status == 'completed') or (not t.enabled and t.schedule_type == 'once')
+        log = latest_logs.get(t.id)
+        # 注册验收仅认 approved/completed，submitted 仍算未通过
+        is_done = bool(log and log.status in ('approved', 'completed'))
         task_status = 'completed' if is_done else 'pending'
 
         if status_filter != 'all' and task_status != status_filter:
@@ -177,7 +205,15 @@ def get_all_init_tasks_status():
 
         claw_name = claws_map.get(t.openclaw_id, f'OpenClaw#{t.openclaw_id}')
         if claw_name not in grouped:
-            grouped[claw_name] = {'claw_id': t.openclaw_id, 'tasks': [], 'completed': 0, 'total': 0}
+            grouped[claw_name] = {
+                'claw_id': t.openclaw_id,
+                'tasks': [],
+                'completed': 0,
+                'total': 0,
+                'target_status': {},
+                'required_targets': required_targets,
+                'gate_passed': False,
+            }
 
         grouped[claw_name]['total'] += 1
         if is_done:
@@ -195,6 +231,17 @@ def get_all_init_tasks_status():
             'result_summary': log.result_summary if log else None,
             'created_at': str(t.created_at) if t.created_at else None,
         })
+        vt = (t.verification_target or '').strip()
+        if vt:
+            grouped[claw_name]['target_status'][vt] = task_status
+
+    for g in grouped.values():
+        pending_required = [
+            vt for vt in g['required_targets']
+            if g['target_status'].get(vt) != 'completed'
+        ]
+        g['pending_required_targets'] = pending_required
+        g['gate_passed'] = len(pending_required) == 0
 
     # 汇总
     summary = {
@@ -203,6 +250,8 @@ def get_all_init_tasks_status():
         'total_completed': sum(g['completed'] for g in grouped.values()),
     }
     summary['total_pending'] = summary['total_tasks'] - summary['total_completed']
+    summary['gate_passed_claws'] = sum(1 for g in grouped.values() if g['gate_passed'])
+    summary['gate_pending_claws'] = summary['total_claws'] - summary['gate_passed_claws']
 
     return jsonify({
         'summary': summary,

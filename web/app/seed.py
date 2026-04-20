@@ -1094,32 +1094,39 @@ def seed_modules():
 
 INIT_TASKS = [
     {
-        'title': '验证 Memos 连接',
-        'description': '确认你能正常访问 Memos 服务，执行一次读取操作（如获取最近的 memo 列表）。如果不可用，报告具体错误。',
+        'title': '验证 sidecar 进程在线',
+        'description': '确认仅有一个 hub-sse-sidecar 在运行，并且日志出现“已连接 Hub”。提交进程列表与日志片段。',
         'priority': 'P0',
-        'urgency_level': 'background',
-        'verification_target': 'memos-access',
+        'urgency_level': 'interrupt',
+        'verification_target': 'sidecar-online',
     },
     {
-        'title': '验证本地 Skills 加载',
-        'description': '检查本地 ~/.qclaw/skills/ 目录下的 Skill 文件是否正确加载。列出已加载的 Skill 名称和文件数量。',
+        'title': '验证聊天闭环',
+        'description': '在 Hub 通信中心接收一条测试消息后，60 秒内完成 read_at + reply_to 闭环。提交 msg_id、reply_id、耗时。',
         'priority': 'P0',
-        'urgency_level': 'background',
-        'verification_target': 'local-skills',
+        'urgency_level': 'interrupt',
+        'verification_target': 'chat-closure',
     },
     {
-        'title': '验证 Hub 通信',
-        'description': '调用 Hub 心跳接口 POST /heartbeat，确认返回 200 且 pending_messages 字段存在。',
+        'title': '验证待办闭环',
+        'description': '在 Hub 新建一条测试待办，确保收到通知并完成提交。提交 todo_id、完成状态和结果摘要。',
         'priority': 'P0',
         'urgency_level': 'retry',
-        'verification_target': 'hub-heartbeat',
+        'verification_target': 'todo-closure',
     },
     {
-        'title': '执行首次日报上报',
-        'description': '生成一份简单的注册日报，包含：1) 注册时间 2) 已安装的 Skills/Rules 列表 3) 初始化任务完成情况。通过 POST /report 上报。',
+        'title': '提交注册验收报告',
+        'description': '汇总 sidecar/chat/todo 三项验收证据，提交到本任务 result_summary，格式固定：指标+证据链接/日志片段。',
         'priority': 'P1',
         'urgency_level': 'flexible',
-        'verification_target': 'first-report',
+        'verification_target': 'registration-report',
+    },
+    {
+        'title': '等待龙虾王审核',
+        'description': '此任务由龙虾王审核通过后，注册才算完成。未通过需按审核意见整改并重新提交。',
+        'priority': 'P0',
+        'urgency_level': 'background',
+        'verification_target': 'dragonking-approval',
     },
 ]
 
