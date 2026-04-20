@@ -8,10 +8,12 @@
   retry      — 周期容错-重试，错过延后重试
 """
 from datetime import datetime, date
+import json
+import urllib.request
 from flask import request, jsonify, session as flask_session
 from sqlalchemy import func
 from app import db
-from app.models import ClawTodo, ClawTodoLog, OpenClawInstance, User
+from app.models import ClawTodo, ClawTodoLog, OpenClawInstance, User, SystemConfig
 from app.api import api_bp
 
 
@@ -34,6 +36,79 @@ def _is_admin_user():
                     return True
                 break
     return False
+
+
+def _compute_init_gate(claw_id: int) -> dict:
+    """计算某 claw 的 init 验收门状态（仅 approved/completed 视为通过）。"""
+    from app.api.registration import _get_init_tasks_config, _required_verification_targets
+
+    required_targets = _required_verification_targets(_get_init_tasks_config())
+    todos = ClawTodo.query.filter_by(openclaw_id=claw_id, task_category='init').all()
+    todo_by_target = {}
+    for t in todos:
+        vt = (t.verification_target or '').strip()
+        if vt and vt not in todo_by_target:
+            todo_by_target[vt] = t.id
+
+    latest_logs = {}
+    if todo_by_target:
+        todo_ids = list(todo_by_target.values())
+        logs = (ClawTodoLog.query
+                .filter(ClawTodoLog.todo_id.in_(todo_ids))
+                .order_by(ClawTodoLog.todo_id.asc(),
+                          ClawTodoLog.log_date.desc(),
+                          ClawTodoLog.created_at.desc())
+                .all())
+        for log in logs:
+            if log.todo_id not in latest_logs:
+                latest_logs[log.todo_id] = log
+
+    pending_targets = []
+    target_status = {}
+    for vt in required_targets:
+        tid = todo_by_target.get(vt)
+        log = latest_logs.get(tid) if tid else None
+        status = log.status if log else 'pending'
+        target_status[vt] = status
+        if status not in ('approved', 'completed'):
+            pending_targets.append(vt)
+
+    return {
+        'required_targets': required_targets,
+        'target_status': target_status,
+        'pending_required_targets': pending_targets,
+        'passed': len(pending_targets) == 0,
+    }
+
+
+def _notify_registration_pass(claw_id: int, gate: dict) -> None:
+    """注册验收通过后，发送可选 webhook 通知（预留给企微接口）。"""
+    cfg = SystemConfig.query.filter_by(config_key='registration_pass_webhook').first()
+    webhook = (cfg.value or '').strip() if cfg and cfg.value else ''
+    if not webhook:
+        return
+
+    claw = OpenClawInstance.query.get(claw_id)
+    payload = {
+        'event': 'registration_passed',
+        'claw_id': claw_id,
+        'claw_name': claw.name if claw else f'OpenClaw#{claw_id}',
+        'role': claw.role if claw else None,
+        'project_name': claw.project_name if claw else None,
+        'gate': gate,
+        'approved_at': datetime.now().isoformat(),
+    }
+    try:
+        req = urllib.request.Request(
+            webhook,
+            data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        urllib.request.urlopen(req, timeout=5).read()
+    except Exception:
+        # 通知失败不影响审核结果
+        pass
 
 
 @api_bp.route('/openclaws/<int:claw_id>/todos', methods=['GET'])
@@ -200,6 +275,7 @@ def approve_todo(claw_id, todo_id):
     log_date_str = (request.get_json() or {}).get('log_date')
     target_date = date.fromisoformat(log_date_str) if log_date_str else date.today()
 
+    todo = ClawTodo.query.filter_by(id=todo_id, openclaw_id=claw_id).first_or_404()
     log = ClawTodoLog.query.filter_by(
         todo_id=todo_id, openclaw_id=claw_id, log_date=target_date
     ).first()
@@ -210,7 +286,12 @@ def approve_todo(claw_id, todo_id):
 
     log.status = 'approved'
     db.session.commit()
-    return jsonify(log.to_dict())
+    gate = None
+    if todo.task_category == 'init':
+        gate = _compute_init_gate(claw_id)
+        if gate.get('passed'):
+            _notify_registration_pass(claw_id, gate)
+    return jsonify({'log': log.to_dict(), 'registration_gate': gate})
 
 
 @api_bp.route('/openclaws/<int:claw_id>/todos/<int:todo_id>/skip', methods=['POST'])
