@@ -1,4 +1,21 @@
-# OpenClaw Manager 子agent 插件
+# OpenClaw Manager 子agent 插件（**LEGACY / FALLBACK**）
+
+> ⚠️ **自 Phase 1 起，主推路径是 `mcp-servers/openclaw-hub`**（一个 stdio MCP server，
+> 由 AI host 直接 spawn，进程内含 SSE client，工具集让 AI 真实回复消息）。
+>
+> 本目录的 Python sidecar 仅作为 **MCP 不可用时的兜底**：
+> - host 不支持 MCP（极端环境）
+> - 仅有 cron / nohup 形式部署的 OpenClaw
+> - 调试/审计用途
+>
+> 兜底模式下，sidecar **不再**写"已转交"罐头回复，也**不再**把 todos_pending
+> 反向 POST 回 `/messages`（消除自循环），改为把所有 SSE 事件写入
+> `~/.qclaw/inbox/pending/`，由 AI host 通过 `hub-inbox` skill 在每回合开始时
+> 主动处理。
+>
+> 详见 `mcp-servers/openclaw-hub/README.md` 与 `openclaw-agent/skills/hub-inbox/SKILL.md`。
+
+---
 
 部署在 OpenClaw 所在服务器上，作为 OpenClaw 和 Manager 之间的桥梁。
 
@@ -44,12 +61,32 @@
 pip install -r requirements.txt
 ```
 
-### 2. 配置环境变量
+### 2. 配置连接信息
+
+**方式一：写入 agent.md（推荐）**
+
+在 `~/.qclaw/agent.md` 中写入 YAML front matter：
+
+```markdown
+---
+hub_url: http://your-hub-host:8088
+claw_id: 4
+api_token: oc_tk_your_token_here
+---
+
+# 你的 OpenClaw 名字
+
+你的 OpenClaw 人格描述...
+```
+
+> agent 启动时优先从 `agent.md` 读取配置，无需设置环境变量。
+
+**方式二：环境变量（备选）**
 
 ```bash
 export MANAGER_URL="http://your-hub-host:8088"
 export CLAW_ID="4"
-export API_TOKEN="oc_tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+export API_TOKEN="oc_tk_your_token_here"
 export OPENCLAW_DIR="/root/.qclaw"
 ```
 
@@ -63,6 +100,8 @@ python main.py
 
 创建 `/etc/systemd/system/openclaw-agent.service`:
 
+> 推荐使用 agent.md 配置，systemd 中只需设置 OPENCLAW_DIR：
+
 ```ini
 [Unit]
 Description=OpenClaw Manager Agent
@@ -72,9 +111,6 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/openclaw-agent
-Environment="MANAGER_URL=http://your-hub-host:8088"
-Environment="CLAW_ID=4"
-Environment="API_TOKEN=your_token_here"
 Environment="OPENCLAW_DIR=/root/.qclaw"
 ExecStart=/usr/bin/python3 /opt/openclaw-agent/main.py
 Restart=always
@@ -83,6 +119,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 ```
+
+> 如果仍需使用环境变量覆盖，可添加 `Environment="MANAGER_URL=..."` 等。
 
 ```bash
 sudo systemctl daemon-reload

@@ -1,7 +1,7 @@
 ---
 name: hub-sse-sidecar
 display_name: Hub SSE 实时消息驱动方案（OpenClaw 通用版）
-version: 1.2.0
+version: 1.4.0
 author: OpenClaw Team
 description: |
   一对轻量级 Python 脚本（sse_client + hub_worker），让任何 OpenClaw 实例 7×24 自动
@@ -22,7 +22,16 @@ trigger_words:
   - "hub 没回复"
 ---
 
-# Hub SSE 实时消息驱动方案 — OpenClaw 通用版 (v1.2)
+# Hub SSE 实时消息驱动方案 — OpenClaw 通用版 (v1.4)
+
+> **v1.4 变更**：install.sh 新增 `AGENT_TYPE` 选项，原生支持 4 种后端 AI agent
+> （`openclaw` / `hermes` / `none` / `custom`）。Hermes 用户从此**不需要再手写 wrapper**——
+> `AGENT_TYPE=hermes bash install.sh` 会自动生成 `$INSTALL_DIR/scripts/run_hermes.sh`，
+> 模板沿用线上 #12 (小马) 验证 6+ 天的版本。详见 §3.6。
+>
+> **v1.3 变更**：install.sh 增加 CLAW_ID 一致性自检，解决"同机已有其他 claw 的 sidecar
+> 时新 claw 复用旧 config.env、消息全被旧 claw 吞掉"的隐式坑（详见 §3.5）。
+> v1.2 的 §3.4 双客户端冲突清理逻辑保持不变。
 
 ## 1. 这个 SKILL 解决什么
 
@@ -106,6 +115,83 @@ pkill -f "manager-hub/scripts/sse_client.py" || true
 pkill -f "manager-hub/scripts/sseclient.py" || true
 pgrep -af "manager-hub/scripts/sse_client.py|manager-hub/scripts/sseclient.py" || echo "manager-hub sse_client 已清理"
 ```
+
+### 3.5 同机已有其他 claw 的 sidecar（同机多 claw 场景）
+
+> ⚠️ 一台机器以前给 **claw A** 装过 sidecar，现在又要给 **claw B** 装。
+> 如果不处理 `~/.openclaw-sidecar/config.env`，新 sidecar 会**继续用 claw A 的 CLAW_ID 和 token** 连接 Hub，
+> 消息/待办会全部投递到 claw A，claw B 永远收不到。
+> 这是 v1.2 之前 install.sh "配置已存在则跳过" 的静默坑（用户实战已踩过两次）。
+
+**v1.3 起 install.sh 自动检测并报错**——你不需要先 `rm`，直接跑 install.sh 就行：
+
+| 检测结果 | install.sh 行为 |
+|---|---|
+| `config.env` 不存在 | 直接生成 |
+| 已存在且 `CLAW_ID` 与本次一致 | 跳过（保留正在跑的 agent，不破坏 token 等手动调整） |
+| 已存在但 `CLAW_ID` 与本次**不一致** | ❌ **明确报错退出**，提示三种修复方式 |
+
+**遇到不一致报错时，三种修复方式（脚本会原样打印）**：
+
+```bash
+# 方式 A（推荐）— 让本 claw 接管，旧 claw 在本机的 sidecar 将停止工作
+FORCE_RECONFIG=1 CLAW_ID=12 API_TOKEN=oc_tk_xxx bash install.sh
+# 或
+bash install.sh --reconfigure              # 等价 FORCE_RECONFIG=1
+# 旧配置会自动备份为 ~/.openclaw-sidecar/config.env.bak.<timestamp>
+
+# 方式 B — 完全卸载后重装
+bash install.sh --uninstall
+rm ~/.openclaw-sidecar/config.env
+CLAW_ID=12 API_TOKEN=oc_tk_xxx bash install.sh
+
+# 方式 C — 同机并行跑多个 claw 的 sidecar（进阶，不推荐；nohup 模式直接可用）
+INSTALL_DIR=$HOME/.openclaw-sidecar-claw12 \
+CLAW_ID=12 API_TOKEN=oc_tk_xxx bash install.sh
+
+# 如果还要开机自启，systemd unit 也得换名（否则会和已有的 openclaw-sidecar.service 冲突）
+INSTALL_DIR=$HOME/.openclaw-sidecar-claw12 \
+SYSTEMD_UNIT_NAME=openclaw-sidecar-claw12.service \
+CLAW_ID=12 API_TOKEN=oc_tk_xxx bash install.sh --systemd
+```
+
+> 如果你是 OpenClaw / Hermes Agent 在帮人部署，遇到这个报错**不要尝试用 `rm` 绕过**，
+> 用 `--reconfigure` 才是正解（自动备份旧配置，便于事后追查）。
+
+### 3.6 后端 AI agent 类型（AGENT_TYPE）
+
+> v1.4 起原生支持 4 种后端 AI agent，不再需要手写 wrapper。
+
+| AGENT_TYPE | install.sh 行为 | 适用场景 |
+|---|---|---|
+| `openclaw`（默认） | `OPENCLAW_BIN=openclaw`，要求 `openclaw agent --message` 在 PATH | 标准 OpenClaw CLI 用户 |
+| `hermes` | 自动生成 `$INSTALL_DIR/scripts/run_hermes.sh` wrapper（模板=线上 #12 6+ 天验证版），`OPENCLAW_BIN` 指向它；启动时校验 `$HERMES_HOME/venv/bin/python` 与 `hermes_cli.main` 模块可用 | 小赫 / 任何 Hermes Agent 用户 |
+| `none` | `OPENCLAW_BIN=/nonexistent/agent-disabled`，sidecar 收消息后调用会 `FileNotFoundError`，事件落到 inbox | MCP host 接管场景（如 Cursor 自己读 inbox） |
+| `custom` | `OPENCLAW_BIN=$CUSTOM_AGENT_BIN`，自带 CLI 必须支持 `<bin> agent --message X --timeout N` | 其他 AI agent 形态 |
+
+**示例**：
+
+```bash
+# 默认 openclaw（行为同 v1.3）
+CLAW_ID=12 API_TOKEN=oc_tk_xxx bash install.sh
+
+# Hermes（HERMES_HOME 默认 /root/hermes-agent）
+AGENT_TYPE=hermes CLAW_ID=10 API_TOKEN=oc_tk_xxx bash install.sh
+
+# Hermes 装在别处
+AGENT_TYPE=hermes HERMES_HOME=/opt/hermes \
+    CLAW_ID=10 API_TOKEN=oc_tk_xxx bash install.sh
+
+# 命令行写法等价
+bash install.sh --agent-type=hermes
+
+# 仅写 inbox，不调 CLI
+AGENT_TYPE=none CLAW_ID=12 API_TOKEN=oc_tk_xxx bash install.sh
+```
+
+**优先级**：用户显式传 `OPENCLAW_BIN=` 永远覆盖 AGENT_TYPE 自动推导，便于特殊场景手工指路径。
+
+**切换 AGENT_TYPE 须 `--reconfigure`**：v1.3 的"已存在 config.env 且 CLAW_ID 一致 → 跳过"逻辑会**保留旧的 OPENCLAW_BIN**。如果你想从 `openclaw` 切到 `hermes`（或反过来），install.sh 检测到 OPENCLAW_BIN 不一致会打印 warn，但不会自动改写 config.env——必须加 `--reconfigure` 强制重写。
 
 ## 4. 部署步骤
 
