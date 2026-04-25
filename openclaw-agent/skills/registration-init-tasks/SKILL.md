@@ -19,6 +19,41 @@ Hub API: http://9.134.11.169:8088/api/v1
 认证: Authorization: Bearer {HUB_API_TOKEN}
 ```
 
+⚠️ **所有 /api/v1/ 请求必须携带 Authorization 头，否则返回 401 未认证！**
+
+---
+
+## 注册后写入 agent.md
+
+⚠️ **重要**：注册成功后，必须将 Hub 连接信息写入 `~/.qclaw/agent.md` 文件的 YAML front matter，而不是设置环境变量。agent 启动时会自动从 `agent.md` 读取配置。
+
+**agent.md 格式**：
+
+```markdown
+---
+hub_url: http://9.134.11.169:8088
+claw_id: 5
+api_token: oc_tk_6fa2ae2022ccee5d94a3c0a2067a59c1e44cfd908f26c495
+---
+
+# 你的 OpenClaw 名字
+
+你的 OpenClaw 人格描述...
+
+## 能力
+
+- ...
+```
+
+**写入步骤**：
+1. 注册成功后，Hub 返回 `id`（claw_id）和 `api_token`
+2. 检查 `~/.qclaw/agent.md` 是否存在
+   - 如果已存在：在文件开头插入或更新 YAML front matter 中的 `hub_url`、`claw_id`、`api_token` 字段
+   - 如果不存在：创建文件，写入 front matter + 基础人格描述
+3. **不要用环境变量**，agent 的 `config.py` 优先从 `agent.md` 读取配置
+
+> `api_token` 只在注册时返回一次，务必立即写入 `agent.md` 保存！
+
 ---
 
 ## 当前初始化任务列表
@@ -52,10 +87,10 @@ Hub API: http://9.134.11.169:8088/api/v1
 | 属性 | 值 |
 |------|-----|
 | 标题 | 验证 Hub 通信 |
-| 描述 | 调用 Hub 心跳接口 POST /heartbeat，确认返回 200 且 pending_messages 字段存在。 |
+| 描述 | 建立 SSE 长连接 GET /api/openclaws/{CLAW_ID}/events，确认收到 `connected` 事件且状态自动设为 online。SSE 连接即在线通道，无需独立心跳。连接建立时 Hub 会自动推送未读消息和待办任务。 |
 | 紧急度 | 🔁 retry（可重试，失败延后5分钟再试1次） |
 | 优先级 | P0 |
-| 验证目标 | `hub-heartbeat` |
+| 验证目标 | `hub-sse-connect` |
 | 频率 | once |
 | 类别 | init |
 
@@ -134,6 +169,12 @@ GET /api/v1/openclaws/{CLAW_ID}/todos
 GET /api/v1/openclaws/{CLAW_ID}/todos?category=init
 
 返回该 OpenClaw 的所有 init 类任务及今日状态。
+
+状态说明：
+- pending: 待完成
+- submitted: 已提交（待管理员审核）
+- approved: 已审核通过（完成）
+- completed: 旧状态（兼容）
 ```
 
 ### 查看已完成的待办记录（最近3天/50条）
@@ -145,7 +186,7 @@ GET /api/v1/openclaws/{CLAW_ID}/todos/completed
   days=3        回溯天数（默认 3）
   limit=50      最大条数（默认 50）
 
-返回按完成时间倒序的执行记录列表，包含已完成、已跳过、重试失败的记录。
+返回按完成时间倒序的执行记录列表，包含 submitted/approved/completed/skipped/overdue/retry_failed 状态的记录。
 ```
 
 ### 待办完成汇总（按日期）
@@ -166,7 +207,7 @@ GET /api/v1/openclaws/{CLAW_ID}/todo-summary?date=2026-04-08
 GET /api/v1/registration/init-tasks/status
 
 查询参数（可选）：
-  status=all          筛选：all（全部）/ pending（未完成）/ completed（已完成）
+  status=all          筛选：all（全部）/ pending（未完成）/ completed（已审核通过或已完成）
 
 返回示例：
 {
@@ -186,7 +227,7 @@ GET /api/v1/registration/init-tasks/status
           "id": 1,
           "title": "验证 Hub 通信",
           "verification_target": "hub-heartbeat",
-          "status": "completed",
+          "status": "approved",
           "completed_at": "2026-04-06T22:30:00",
           "result_summary": "heartbeat 返回 200"
         }

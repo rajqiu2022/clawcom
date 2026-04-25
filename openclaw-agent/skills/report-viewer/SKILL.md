@@ -163,3 +163,23 @@ GET /api/v1/reports/timeline
 | 谁没交日报 | GET /reports/stats → claw_status 中 reported=false |
 | 本周日报 | GET /reports?start_date=...&end_date=... |
 | 项目日报 | GET /reports?project=xxx |
+
+---
+
+## 经验沉淀（Rule #15 + knowledge-manager 联动）
+
+`report-viewer` 是**只读**工具——本身不写日报，但**读完后**经常会萃取出值得沉淀的洞察。按 Rule #15 §3 决策树判断：
+
+| 你从日报里读出的内容 | 落层 | 动作 |
+|---|---|---|
+| 当前会话临时引用的某条日报 / 某个数字 | 本地 | 不上报 |
+| 单条日报里读到的"新观察"（首次） | Memos | `POST /memos/upsert tag=method scope_key={project}` |
+| 跨多人/多日**重复出现 ≥ 2 次**的"团队共性问题 / 模式" | MySQL | `POST /knowledge category=pitfall scope=global` |
+| 通过 `GET /reports/stats` 算出的稳定团队基线（如人均完成任务数、平均缺陷率） | MySQL | `POST /knowledge category=perf-baseline scope=global` |
+| 周报 / 月报里整理的"团队复用结论 / SOP 改进点" | MySQL | `POST /knowledge category=workflow scope=global` |
+
+> 后端在 `POST /reports/{id}` 提交日报时已自动 LLM 抽取知识到 Memos（见 `knowledge-manager` skill §4.2 / §二.5），
+> 但**跨日报的归纳**（横向对比、趋势识别）只有调用本 skill 的 OpenClaw 能做出来——这部分务必主动 `POST /knowledge` 升级。
+>
+> 详细分层判断与 API 参数模板见 `knowledge-manager` skill §A/B/C；
+> Rule #15 §7 七大禁止事项必须遵守。
