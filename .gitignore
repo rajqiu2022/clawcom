@@ -41,3 +41,44 @@ package-lock.json
 *.tmp
 *.temp
 temp/
+_tmp/
+_tmp_*
+
+# Deploy archives (本地一次性部署目录/打包，不入库)
+_deploy_*/
+*.tgz
+*.tar.gz
+_remote_compare/
+_design_samples/
+_verify_*.py
+_hub_guardrail_daily.py
+
+# 本地报告/导出（HTML / PPTX / ZIP）
+*.html
+!web/templates/*.html
+!web/static/**/*.html
+*.pptx
+*.zip
+
+# 本地辅助脚本（一次性 migration / init 数据）
+init_mysql.sql
+migrate_*.py
+system.py
+111.txt
+CONTEXT_HANDOVER.md
+DEPLOY_GUIDE_*.md
+DEPLOY_HUB_CONNECTOR.md
+HUB_GUARDRAIL_RUNBOOK.md
+OPENCLAW_SYSTEM_DESIGN.md
+
+# 第三方/不属于本仓库的产物
+.codebuddy/
+mcp-servers/
+openclaw-hub-connector/
+Star-Office-UI/
+Q飞手游QA-AI-Share/
+龙虾王设定汇总-*.md
+game-testcase-design-SKILL.md
+openclaw-agent/skills/hub-connect/SKILL_V2.md
+openclaw-agent/skills/hub-connect/bootstrap.sh
+
