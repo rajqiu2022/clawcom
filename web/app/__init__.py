@@ -38,6 +38,20 @@ def create_app(config_name=None):
     from app.views import views_bp
     app.register_blueprint(views_bp)
 
+    # HTML 页面强制不缓存（避免 base.html / 子模板缓存导致 inline JS 与版本号不一致）。
+    # 静态资源 (.js/.css/.png 等) 不受影响，仍走带 ?v=xxx 的强缓存。
+    @app.after_request
+    def _no_cache_html(resp):
+        try:
+            ct = (resp.headers.get('Content-Type') or '').lower()
+            if ct.startswith('text/html'):
+                resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+                resp.headers['Pragma'] = 'no-cache'
+                resp.headers['Expires'] = '0'
+        except Exception:
+            pass
+        return resp
+
     # 注册 MCP 蓝图
     from app.api.mcp_protocol import mcp_bp
     app.register_blueprint(mcp_bp)
@@ -131,8 +145,58 @@ def create_app(config_name=None):
                 except Exception:
                     pass
 
+                # skills 表添加镜像内容和历史记录字段
+                for col, coltype in [
+                    ('mirror_content', 'LONGTEXT DEFAULT NULL'),
+                    ('mirror_updated_by', 'VARCHAR(100) DEFAULT NULL'),
+                    ('mirror_updated_at', 'DATETIME DEFAULT NULL'),
+                    ('content_history', 'LONGTEXT DEFAULT NULL'),
+                ]:
+                    try:
+                        conn.execute(text(f'ALTER TABLE skills ADD COLUMN {col} {coltype}'))
+                        logger.info(f'已添加 skills.{col} 列')
+                    except Exception:
+                        pass
+
+                # skills 表添加最后修改人字段（不论镜像/直改/审核通过都会写入）
+                for col, coltype in [
+                    ('last_modified_by', 'VARCHAR(100) DEFAULT NULL'),
+                    ('last_modified_at', 'DATETIME DEFAULT NULL'),
+                    ('last_modified_source', "VARCHAR(20) DEFAULT 'web'"),
+                ]:
+                    try:
+                        conn.execute(text(f'ALTER TABLE skills ADD COLUMN {col} {coltype}'))
+                        logger.info(f'已添加 skills.{col} 列')
+                    except Exception:
+                        pass
+
                 # rules 表添加软删除字段
                 for col, coltype in [('is_deleted', 'BOOLEAN DEFAULT 0'), ('deleted_at', 'DATETIME DEFAULT NULL')]:
+                    try:
+                        conn.execute(text(f'ALTER TABLE rules ADD COLUMN {col} {coltype}'))
+                        logger.info(f'已添加 rules.{col} 列')
+                    except Exception:
+                        pass
+
+                # rules 表添加镜像内容和历史记录字段
+                for col, coltype in [
+                    ('mirror_content', 'LONGTEXT DEFAULT NULL'),
+                    ('mirror_updated_by', 'VARCHAR(100) DEFAULT NULL'),
+                    ('mirror_updated_at', 'DATETIME DEFAULT NULL'),
+                    ('content_history', 'LONGTEXT DEFAULT NULL'),
+                ]:
+                    try:
+                        conn.execute(text(f'ALTER TABLE rules ADD COLUMN {col} {coltype}'))
+                        logger.info(f'已添加 rules.{col} 列')
+                    except Exception:
+                        pass
+
+                # rules 表添加最后修改人字段
+                for col, coltype in [
+                    ('last_modified_by', 'VARCHAR(100) DEFAULT NULL'),
+                    ('last_modified_at', 'DATETIME DEFAULT NULL'),
+                    ('last_modified_source', "VARCHAR(20) DEFAULT 'web'"),
+                ]:
                     try:
                         conn.execute(text(f'ALTER TABLE rules ADD COLUMN {col} {coltype}'))
                         logger.info(f'已添加 rules.{col} 列')
@@ -294,6 +358,545 @@ def create_app(config_name=None):
                     logger.info('已添加 test_tasks.case_filter 列')
                 except Exception:
                     pass
+
+                # ===== 三级架构迁移：test_iterations 表 + test_plans.iteration_id =====
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS test_iterations (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            name VARCHAR(200) NOT NULL,
+                            description TEXT,
+                            version_name VARCHAR(100),
+                            version_type VARCHAR(20) DEFAULT 'regular',
+                            start_date DATE,
+                            end_date DATE,
+                            project_id INTEGER,
+                            tapd_iteration_ids LONGTEXT,
+                            tapd_iteration_names LONGTEXT,
+                            tapd_workspace_id VARCHAR(50),
+                            status VARCHAR(20) DEFAULT 'draft',
+                            total_plans INTEGER DEFAULT 0,
+                            total_tasks INTEGER DEFAULT 0,
+                            completed_tasks INTEGER DEFAULT 0,
+                            total_bugs INTEGER DEFAULT 0,
+                            created_by VARCHAR(100) DEFAULT '',
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (project_id) REFERENCES projects(id)
+                        )
+                    """))
+                    logger.info('test_iterations 表已创建')
+                except Exception as e:
+                    logger.info(f'test_iterations 表创建跳过: {e}')
+
+                # test_plans 添加 iteration_id 外键列
+                try:
+                    conn.execute(text(
+                        "ALTER TABLE test_plans ADD COLUMN iteration_id INTEGER DEFAULT NULL"
+                    ))
+                    logger.info('已添加 test_plans.iteration_id 列')
+                except Exception:
+                    pass
+                try:
+                    conn.execute(text(
+                        "ALTER TABLE test_plans ADD CONSTRAINT fk_test_plans_iteration "
+                        "FOREIGN KEY (iteration_id) REFERENCES test_iterations(id)"
+                    ))
+                except Exception:
+                    pass
+
+                # test_cases 添加 TAPD 需求绑定字段
+                for col, coltype in [
+                    ('tapd_story_url', 'VARCHAR(500) DEFAULT NULL'),
+                    ('tapd_story_title', 'VARCHAR(255) DEFAULT NULL'),
+                ]:
+                    try:
+                        conn.execute(text(f'ALTER TABLE test_cases ADD COLUMN {col} {coltype}'))
+                        logger.info(f'已添加 test_cases.{col} 列')
+                    except Exception:
+                        pass
+
+                # ===== 工程分析中心（Engineering Analysis Center）相关表 =====
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS engineering_baselines (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            project_id INTEGER NOT NULL,
+                            name VARCHAR(200) NOT NULL,
+                            repo_url VARCHAR(500) NOT NULL,
+                            branch VARCHAR(100) NOT NULL DEFAULT 'main',
+                            baseline_commit VARCHAR(64),
+                            architecture_doc_url VARCHAR(500),
+                            module_mapping LONGTEXT,
+                            risk_rules LONGTEXT,
+                            status VARCHAR(20) DEFAULT 'active',
+                            created_by VARCHAR(100) DEFAULT '',
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (project_id) REFERENCES projects(id)
+                        )
+                    """))
+                    logger.info('engineering_baselines 表已创建')
+                except Exception as e:
+                    logger.info(f'engineering_baselines 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS analysis_refresh_batches (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            project_id INTEGER NOT NULL,
+                            baseline_id INTEGER NOT NULL,
+                            iteration_id INTEGER,
+                            refresh_type VARCHAR(20) DEFAULT 'manual',
+                            from_commit VARCHAR(64),
+                            to_commit VARCHAR(64),
+                            commit_count INTEGER DEFAULT 0,
+                            changed_file_count INTEGER DEFAULT 0,
+                            summary TEXT,
+                            risk_level VARCHAR(20),
+                            status VARCHAR(20) DEFAULT 'queued',
+                            assignee_claw_id INTEGER,
+                            result_payload LONGTEXT,
+                            error_message TEXT,
+                            started_at DATETIME,
+                            finished_at DATETIME,
+                            triggered_by VARCHAR(100) DEFAULT '',
+                            approved_by VARCHAR(100),
+                            approved_at DATETIME,
+                            reject_reason TEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            FOREIGN KEY (baseline_id) REFERENCES engineering_baselines(id),
+                            FOREIGN KEY (iteration_id) REFERENCES test_iterations(id),
+                            FOREIGN KEY (assignee_claw_id) REFERENCES openclaw_instances(id)
+                        )
+                    """))
+                    logger.info('analysis_refresh_batches 表已创建')
+                except Exception as e:
+                    logger.info(f'analysis_refresh_batches 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS engineering_change_items (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            batch_id INTEGER NOT NULL,
+                            file_path VARCHAR(500) NOT NULL,
+                            change_type VARCHAR(20) DEFAULT 'modify',
+                            module_id INTEGER,
+                            module_name VARCHAR(100) DEFAULT '',
+                            symbol_names LONGTEXT,
+                            impact_tags LONGTEXT,
+                            risk_score INTEGER DEFAULT 0,
+                            reason TEXT,
+                            tapd_story_ids LONGTEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (batch_id) REFERENCES analysis_refresh_batches(id),
+                            FOREIGN KEY (module_id) REFERENCES modules(id)
+                        )
+                    """))
+                    logger.info('engineering_change_items 表已创建')
+                except Exception as e:
+                    logger.info(f'engineering_change_items 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS engineering_test_impact_items (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            batch_id INTEGER NOT NULL,
+                            library_id INTEGER,
+                            module_id INTEGER,
+                            module_name VARCHAR(100) DEFAULT '',
+                            feature_chain VARCHAR(500),
+                            action_type VARCHAR(20) DEFAULT 'update_case',
+                            priority VARCHAR(5) DEFAULT 'P2',
+                            suggestion TEXT,
+                            acceptance_criteria TEXT,
+                            owner VARCHAR(100) DEFAULT '',
+                            status VARCHAR(20) DEFAULT 'todo',
+                            linked_test_task_id INTEGER,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (batch_id) REFERENCES analysis_refresh_batches(id),
+                            FOREIGN KEY (library_id) REFERENCES test_case_libraries(id),
+                            FOREIGN KEY (module_id) REFERENCES modules(id),
+                            FOREIGN KEY (linked_test_task_id) REFERENCES test_tasks(id)
+                        )
+                    """))
+                    logger.info('engineering_test_impact_items 表已创建')
+                except Exception as e:
+                    logger.info(f'engineering_test_impact_items 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS engineering_test_case_links (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            impact_item_id INTEGER NOT NULL,
+                            test_case_id INTEGER NOT NULL,
+                            link_type VARCHAR(20) DEFAULT 'affected',
+                            created_by VARCHAR(100) DEFAULT '',
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (impact_item_id) REFERENCES engineering_test_impact_items(id),
+                            FOREIGN KEY (test_case_id) REFERENCES test_cases(id),
+                            UNIQUE KEY uq_impact_case_link (impact_item_id, test_case_id)
+                        )
+                    """))
+                    logger.info('engineering_test_case_links 表已创建')
+                except Exception as e:
+                    logger.info(f'engineering_test_case_links 表创建跳过: {e}')
+
+                # 工程架构分析快照（双子模块改版：full=全工程 / module=单模块深度）
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS engineering_architecture_snapshots (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            baseline_id INTEGER NOT NULL,
+                            scope VARCHAR(20) NOT NULL DEFAULT 'full',
+                            target_module VARCHAR(100) DEFAULT '',
+                            title VARCHAR(200),
+                            summary TEXT,
+                            content_md LONGTEXT,
+                            structured LONGTEXT,
+                            analyzed_commit VARCHAR(64),
+                            source_type VARCHAR(20) DEFAULT 'agent',
+                            triggered_by VARCHAR(100) DEFAULT '',
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (baseline_id) REFERENCES engineering_baselines(id),
+                            INDEX ix_arch_snap_baseline (baseline_id),
+                            INDEX ix_arch_snap_created (baseline_id, created_at)
+                        )
+                    """))
+                    logger.info('engineering_architecture_snapshots 表已创建')
+                except Exception as e:
+                    logger.info(f'engineering_architecture_snapshots 表创建跳过: {e}')
+
+                # ===== 需求分析中心（Requirement Analysis Center）相关表 =====
+                # JSON 字段统一使用 LONGTEXT 兼容 MariaDB 10.1
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS requirement_items (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            iteration_id INTEGER NOT NULL,
+                            tapd_story_id VARCHAR(64) NOT NULL,
+                            tapd_workspace_id VARCHAR(50),
+                            tapd_iteration_id VARCHAR(64),
+                            title VARCHAR(500) DEFAULT '',
+                            description TEXT,
+                            description_text TEXT,
+                            status VARCHAR(40),
+                            priority_label VARCHAR(40),
+                            priority_num INTEGER DEFAULT 0,
+                            owner VARCHAR(500) DEFAULT '',
+                            creator VARCHAR(100) DEFAULT '',
+                            developer VARCHAR(500) DEFAULT '',
+                            category_id VARCHAR(64),
+                            workitem_type_id VARCHAR(64),
+                            tapd_module VARCHAR(200) DEFAULT '',
+                            feature VARCHAR(200) DEFAULT '',
+                            local_module_name VARCHAR(200) DEFAULT '',
+                            tapd_version VARCHAR(100),
+                            tapd_release_id VARCHAR(64),
+                            tapd_baseline_id VARCHAR(64),
+                            acceptance_criteria TEXT,
+                            test_focus TEXT,
+                            test_result TEXT,
+                            need_test VARCHAR(40),
+                            review_progress VARCHAR(40),
+                            parent_id VARCHAR(64),
+                            children_id VARCHAR(500),
+                            tree_path VARCHAR(500),
+                            progress INTEGER DEFAULT 0,
+                            effort FLOAT DEFAULT 0,
+                            effort_completed FLOAT DEFAULT 0,
+                            remain FLOAT DEFAULT 0,
+                            tech_risk VARCHAR(200),
+                            tapd_created_at DATETIME,
+                            tapd_modified_at DATETIME,
+                            tapd_completed_at DATETIME,
+                            tapd_begin DATE,
+                            tapd_due DATE,
+                            risk_score INTEGER DEFAULT 0,
+                            risk_level VARCHAR(20) DEFAULT 'low',
+                            local_test_status VARCHAR(20) DEFAULT 'pending',
+                            local_synced_at DATETIME,
+                            raw_payload LONGTEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (iteration_id) REFERENCES test_iterations(id),
+                            UNIQUE KEY uq_req_item_iter_story (iteration_id, tapd_story_id),
+                            INDEX ix_req_item_status (status),
+                            INDEX ix_req_item_version (tapd_version),
+                            INDEX ix_req_item_baseline (tapd_baseline_id)
+                        )
+                    """))
+                    logger.info('requirement_items 表已创建')
+                except Exception as e:
+                    logger.info(f'requirement_items 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS requirement_change_logs (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            requirement_item_id INTEGER NOT NULL,
+                            iteration_id INTEGER NOT NULL,
+                            change_date DATE,
+                            change_type VARCHAR(20) NOT NULL,
+                            field_name VARCHAR(80) DEFAULT '',
+                            old_value TEXT,
+                            new_value TEXT,
+                            diff_summary TEXT,
+                            impact_level VARCHAR(10) DEFAULT 'low',
+                            processed BOOLEAN DEFAULT 0,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (requirement_item_id) REFERENCES requirement_items(id),
+                            FOREIGN KEY (iteration_id) REFERENCES test_iterations(id),
+                            UNIQUE KEY uq_req_change_dedup (requirement_item_id, change_date, field_name, change_type),
+                            INDEX ix_req_change_date (change_date),
+                            INDEX ix_req_change_created (created_at)
+                        )
+                    """))
+                    logger.info('requirement_change_logs 表已创建')
+                except Exception as e:
+                    logger.info(f'requirement_change_logs 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS requirement_engineering_links (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            requirement_item_id INTEGER NOT NULL,
+                            change_item_id INTEGER NOT NULL,
+                            link_source VARCHAR(20) DEFAULT 'auto_tapd_id',
+                            confidence INTEGER DEFAULT 90,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (requirement_item_id) REFERENCES requirement_items(id),
+                            FOREIGN KEY (change_item_id) REFERENCES engineering_change_items(id),
+                            UNIQUE KEY uq_req_eng_link (requirement_item_id, change_item_id)
+                        )
+                    """))
+                    logger.info('requirement_engineering_links 表已创建')
+                except Exception as e:
+                    logger.info(f'requirement_engineering_links 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS requirement_testcase_links (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            requirement_item_id INTEGER NOT NULL,
+                            test_case_id INTEGER NOT NULL,
+                            link_type VARCHAR(20) DEFAULT 'covers',
+                            coverage_status VARCHAR(20) DEFAULT 'covered',
+                            created_by VARCHAR(100) DEFAULT '',
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (requirement_item_id) REFERENCES requirement_items(id),
+                            FOREIGN KEY (test_case_id) REFERENCES test_cases(id),
+                            UNIQUE KEY uq_req_case_link (requirement_item_id, test_case_id)
+                        )
+                    """))
+                    logger.info('requirement_testcase_links 表已创建')
+                except Exception as e:
+                    logger.info(f'requirement_testcase_links 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS tapd_versions (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            project_id INTEGER,
+                            tapd_workspace_id VARCHAR(50) NOT NULL,
+                            tapd_version_id VARCHAR(64) NOT NULL,
+                            name VARCHAR(200) DEFAULT '',
+                            description TEXT,
+                            status VARCHAR(40),
+                            version_type VARCHAR(40) DEFAULT 'Normal version',
+                            start DATE,
+                            due DATE,
+                            realbegin DATE,
+                            realend DATE,
+                            testtime DATE,
+                            releasetime DATE,
+                            creator VARCHAR(100) DEFAULT '',
+                            owner VARCHAR(500) DEFAULT '',
+                            tapd_created_at DATETIME,
+                            tapd_modified_at DATETIME,
+                            local_synced_at DATETIME,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            UNIQUE KEY uq_tapd_version (tapd_workspace_id, tapd_version_id)
+                        )
+                    """))
+                    logger.info('tapd_versions 表已创建')
+                except Exception as e:
+                    logger.info(f'tapd_versions 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS tapd_baselines (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            tapd_workspace_id VARCHAR(50) NOT NULL,
+                            tapd_baseline_id VARCHAR(64) NOT NULL,
+                            tapd_version_id_str VARCHAR(64),
+                            version_id INTEGER,
+                            name VARCHAR(200) DEFAULT '',
+                            creator VARCHAR(100) DEFAULT '',
+                            tapd_created_at DATETIME,
+                            story_count INTEGER DEFAULT 0,
+                            stories_snapshot LONGTEXT,
+                            local_synced_at DATETIME,
+                            FOREIGN KEY (version_id) REFERENCES tapd_versions(id),
+                            UNIQUE KEY uq_tapd_baseline (tapd_workspace_id, tapd_baseline_id)
+                        )
+                    """))
+                    logger.info('tapd_baselines 表已创建')
+                except Exception as e:
+                    logger.info(f'tapd_baselines 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS tapd_iterations_cache (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            tapd_workspace_id VARCHAR(50) NOT NULL,
+                            tapd_iteration_id VARCHAR(64) NOT NULL,
+                            name VARCHAR(200) DEFAULT '',
+                            status VARCHAR(40),
+                            startdate DATE,
+                            enddate DATE,
+                            creator VARCHAR(100) DEFAULT '',
+                            description TEXT,
+                            parent_id VARCHAR(64),
+                            last_synced_at DATETIME,
+                            cache_version INTEGER DEFAULT 1,
+                            UNIQUE KEY uq_tapd_iter_cache (tapd_workspace_id, tapd_iteration_id),
+                            INDEX ix_tapd_iter_ws_status (tapd_workspace_id, status),
+                            INDEX ix_tapd_iter_synced (last_synced_at)
+                        )
+                    """))
+                    logger.info('tapd_iterations_cache 表已创建')
+                except Exception as e:
+                    logger.info(f'tapd_iterations_cache 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS tapd_field_map_cache (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            tapd_workspace_id VARCHAR(50) NOT NULL,
+                            entity_type VARCHAR(20) NOT NULL DEFAULT 'story',
+                            field_map LONGTEXT,
+                            last_synced_at DATETIME,
+                            UNIQUE KEY uq_tapd_field_map (tapd_workspace_id, entity_type)
+                        )
+                    """))
+                    logger.info('tapd_field_map_cache 表已创建')
+                except Exception as e:
+                    logger.info(f'tapd_field_map_cache 表创建跳过: {e}')
+
+                # ===== 用例库共享授权 / 评审记录（参考 EngineeringShare 设计） =====
+                # 1) test_case_libraries 加 review_status / current_review_id / review_status_at
+                for col, coltype in [
+                    ('review_status', "VARCHAR(20) DEFAULT 'draft'"),
+                    ('current_review_id', 'INTEGER DEFAULT NULL'),
+                    ('review_status_at', 'DATETIME DEFAULT NULL'),
+                ]:
+                    try:
+                        conn.execute(text(
+                            f'ALTER TABLE test_case_libraries ADD COLUMN {col} {coltype}'))
+                        logger.info(f'已添加 test_case_libraries.{col} 列')
+                    except Exception:
+                        pass
+                # 历史脏数据兜底：把空值 review_status 设为 'draft'
+                try:
+                    conn.execute(text(
+                        "UPDATE test_case_libraries SET review_status='draft' "
+                        "WHERE review_status IS NULL OR review_status=''"))
+                except Exception as e:
+                    logger.info(f'review_status 默认值回填跳过: {e}')
+
+                # 2) 共享授权表
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS test_case_library_shares (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            library_id INTEGER NOT NULL,
+                            share_type VARCHAR(20) NOT NULL,
+                            target_user_id INTEGER,
+                            target_claw_id INTEGER,
+                            permission VARCHAR(20) DEFAULT 'reviewer',
+                            granted_by VARCHAR(100) DEFAULT '',
+                            note VARCHAR(500) DEFAULT '',
+                            expires_at DATETIME,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (library_id) REFERENCES test_case_libraries(id),
+                            FOREIGN KEY (target_user_id) REFERENCES users(id),
+                            FOREIGN KEY (target_claw_id) REFERENCES openclaw_instances(id),
+                            INDEX ix_tcl_share_lib (library_id),
+                            INDEX ix_tcl_share_user (share_type, target_user_id),
+                            INDEX ix_tcl_share_claw (share_type, target_claw_id)
+                        )
+                    """))
+                    logger.info('test_case_library_shares 表已创建')
+                except Exception as e:
+                    logger.info(f'test_case_library_shares 表创建跳过: {e}')
+
+                # 旧表迁移：补 permission 列（针对早期未带 permission 的部署）
+                try:
+                    conn.execute(text(
+                        "ALTER TABLE test_case_library_shares "
+                        "ADD COLUMN permission VARCHAR(20) DEFAULT 'reviewer'"))
+                    logger.info('已添加 test_case_library_shares.permission 列')
+                except Exception:
+                    pass
+
+                # 3) 评审记录表
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS test_case_library_reviews (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            library_id INTEGER NOT NULL,
+                            status VARCHAR(20) DEFAULT 'submitted',
+                            submitted_by VARCHAR(100) DEFAULT '',
+                            submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            submit_note TEXT,
+                            scope_summary VARCHAR(500) DEFAULT '',
+                            invited_reviewers LONGTEXT,
+                            decided_by VARCHAR(100),
+                            decided_at DATETIME,
+                            decision_note TEXT,
+                            related_topic_id INTEGER,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (library_id) REFERENCES test_case_libraries(id),
+                            INDEX ix_tcl_review_lib (library_id),
+                            INDEX ix_tcl_review_status (status),
+                            INDEX ix_tcl_review_lib_status (library_id, status)
+                        )
+                    """))
+                    logger.info('test_case_library_reviews 表已创建')
+                except Exception as e:
+                    logger.info(f'test_case_library_reviews 表创建跳过: {e}')
+
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS tapd_refresh_requests (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            scope VARCHAR(20) NOT NULL DEFAULT 'iterations',
+                            tapd_workspace_id VARCHAR(50),
+                            iteration_id INTEGER,
+                            tapd_iteration_id VARCHAR(64),
+                            status VARCHAR(20) DEFAULT 'pending',
+                            requested_by VARCHAR(100) DEFAULT '',
+                            picked_by_claw_id INTEGER,
+                            picked_at DATETIME,
+                            finished_at DATETIME,
+                            error_message TEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (iteration_id) REFERENCES test_iterations(id),
+                            FOREIGN KEY (picked_by_claw_id) REFERENCES openclaw_instances(id),
+                            INDEX ix_tapd_refresh_status (status),
+                            INDEX ix_tapd_refresh_created (created_at)
+                        )
+                    """))
+                    logger.info('tapd_refresh_requests 表已创建')
+                except Exception as e:
+                    logger.info(f'tapd_refresh_requests 表创建跳过: {e}')
 
         except Exception as e:
             logger.warning(f'自动迁移检查异常: {e}')

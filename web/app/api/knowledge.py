@@ -25,11 +25,30 @@ def _get_current_user():
                         role = 'super_admin'
                         username = claw.name
                         managed_projects = []
+                        _claw_id = claw.id
+                        _claw_name = claw.name
                     return _AdminProxy()
                 owner = User.query.filter_by(username=claw.owner).first()
                 if owner:
                     owner._claw_name = claw.name
+                    owner._claw_id = claw.id
                     return owner
+    return None
+
+
+def _get_current_openclaw():
+    """从 Bearer Token 反推当前 OpenClaw 实例（不要信任 body 里的 source_openclaw_id）。
+
+    返回 OpenClawInstance 或 None。Web session 用户调用时返回 None。
+    """
+    from app.models import OpenClawInstance
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
+        return None
+    token = auth[7:]
+    for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
+        if claw.verify_token(token):
+            return claw
     return None
 
 
@@ -125,6 +144,16 @@ def create_knowledge():
     if not data or not data.get('title') or not data.get('content'):
         return jsonify({'error': '标题和内容为必填项'}), 400
 
+    # 从 Bearer Token 反推 OpenClaw，强制覆盖 source_openclaw_id / source_type
+    # 防止 Agent 因不知道自己 ID 而 hardcode 错的数字（历史曾因此出现"未知 Agent"）
+    caller_claw = _get_current_openclaw()
+    if caller_claw:
+        source_openclaw_id = caller_claw.id
+        source_type = 'openclaw'
+    else:
+        source_openclaw_id = data.get('source_openclaw_id')
+        source_type = data.get('source_type', 'manual')
+
     entry = KnowledgeEntry(
         memos_id=data.get('memos_id'),
         title=data['title'],
@@ -133,8 +162,8 @@ def create_knowledge():
         scope=data.get('scope', 'global'),
         project_name=data.get('project_name'),
         module_name=data.get('module_name'),
-        source_openclaw_id=data.get('source_openclaw_id'),
-        source_type=data.get('source_type', 'manual'),
+        source_openclaw_id=source_openclaw_id,
+        source_type=source_type,
         status=data.get('status', 'draft'),
     )
     db.session.add(entry)
@@ -155,10 +184,20 @@ def batch_import_knowledge():
     if source_type not in ('openclaw', 'openspace'):
         return jsonify({'error': 'source_type 必须是 openclaw 或 openspace'}), 400
 
+    # 同 create_knowledge：Bearer Token → 强制覆盖 source_openclaw_id / source_type
+    caller_claw = _get_current_openclaw()
+
     created = 0
     for e_data in entries:
         if not e_data.get('title') or not e_data.get('content'):
             continue
+
+        if caller_claw:
+            entry_source_id = caller_claw.id
+            entry_source_type = 'openclaw'
+        else:
+            entry_source_id = e_data.get('source_openclaw_id')
+            entry_source_type = source_type
 
         entry = KnowledgeEntry(
             memos_id=e_data.get('memos_id'),
@@ -168,8 +207,8 @@ def batch_import_knowledge():
             scope=e_data.get('scope', 'global'),
             project_name=e_data.get('project_name'),
             module_name=e_data.get('module_name'),
-            source_openclaw_id=e_data.get('source_openclaw_id'),
-            source_type=source_type,
+            source_openclaw_id=entry_source_id,
+            source_type=entry_source_type,
             status=e_data.get('status', 'pending_review'),
         )
         db.session.add(entry)

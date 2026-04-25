@@ -127,6 +127,8 @@ class OpenClawInstance(db.Model):
     created_at = db.Column(db.DateTime, default=_now)
     updated_at = db.Column(db.DateTime, default=_now,
                            onupdate=_now)
+    last_modified_by = db.Column(db.String(100),
+                                 comment='最近一次修改人（用户名/OpenClaw 名）')
 
     project = db.relationship('Project', backref='openclaws')
 
@@ -154,6 +156,8 @@ class OpenClawInstance(db.Model):
             'last_activity': str(self.last_activity) if self.last_activity else None,
             'report_schedule': self.report_schedule,
             'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+            'last_modified_by': self.last_modified_by or None,
             'api_token_preview': self.get_token_preview() if self.api_token_plain else None,
         }
         if not brief:
@@ -161,7 +165,6 @@ class OpenClawInstance(db.Model):
                 'soul_config': self.soul_config,
                 'workflow_config': self.workflow_config,
                 'web_system_url': self.web_system_url,
-                'updated_at': str(self.updated_at) if self.updated_at else None,
                 'skills': [s.skill.to_dict() for s in self.skills if s.enabled and s.skill],
             })
         return data
@@ -235,6 +238,21 @@ class Skill(db.Model):
                               default='approved',
                               comment='评审状态：approved=已通过，pending=待评审，revise=待修改，rejected=已废弃')
     review_comment = db.Column(db.Text, comment='审核意见（打回/废弃时填写）')
+
+    # 镜像内容：非管理员修改时写入镜像，审核通过后替换原内容
+    mirror_content = db.Column(db.Text, comment='镜像内容（待审核的修改内容）')
+    mirror_updated_by = db.Column(db.String(100), comment='镜像内容修改人')
+    mirror_updated_at = db.Column(db.DateTime, comment='镜像内容修改时间')
+    # 修改历史：最近10条修改记录
+    content_history = db.Column(db.JSON, comment='最近10次修改记录 [{content, updated_by, updated_at, summary}]')
+
+    # 最后修改人（不论镜像/直改/审核通过都会写入）
+    last_modified_by = db.Column(db.String(100), comment='最后修改人（user.username 或 OpenClaw 名）')
+    last_modified_at = db.Column(db.DateTime, comment='最后修改时间')
+    last_modified_source = db.Column(db.Enum('web', 'openclaw', 'system'),
+                                     default='web',
+                                     comment='修改来源：web=人在网页改，openclaw=OpenClaw API 改，system=系统/迁移')
+
     is_deleted = db.Column(db.Boolean, default=False,
                            comment='软删除标记：True=已删除（隐藏），False=正常')
     deleted_at = db.Column(db.DateTime, comment='软删除时间')
@@ -265,6 +283,13 @@ class Skill(db.Model):
             'review_comment': self.review_comment or None,
             'is_deleted': self.is_deleted or False,
             'rating': self.rating if self.rating is not None else 3.0,
+            'mirror_content': self.mirror_content or None,
+            'mirror_updated_by': self.mirror_updated_by or None,
+            'mirror_updated_at': str(self.mirror_updated_at) if self.mirror_updated_at else None,
+            'content_history': self.content_history or [],
+            'last_modified_by': self.last_modified_by or None,
+            'last_modified_at': str(self.last_modified_at) if self.last_modified_at else None,
+            'last_modified_source': self.last_modified_source or 'web',
         }
         # 进化指标
         if self.category == 'evolved':
@@ -654,6 +679,21 @@ class Rule(db.Model):
                               default='approved',
                               comment='评审状态：approved=已通过，pending=待评审，revise=待修改，rejected=已废弃')
     review_comment = db.Column(db.Text, comment='审核意见（打回/废弃时填写）')
+
+    # 镜像内容：非管理员修改时写入镜像，审核通过后替换原内容
+    mirror_content = db.Column(db.Text, comment='镜像内容模板（待审核的修改内容）')
+    mirror_updated_by = db.Column(db.String(100), comment='镜像内容修改人')
+    mirror_updated_at = db.Column(db.DateTime, comment='镜像内容修改时间')
+    # 修改历史：最近10条修改记录
+    content_history = db.Column(db.JSON, comment='最近10次修改记录 [{content_template, updated_by, updated_at, summary}]')
+
+    # Rule 最后修改人（不论镜像/直改/审核通过都会写入）
+    last_modified_by = db.Column(db.String(100), comment='最后修改人（user.username 或 OpenClaw 名）')
+    last_modified_at = db.Column(db.DateTime, comment='最后修改时间')
+    last_modified_source = db.Column(db.Enum('web', 'openclaw', 'system'),
+                                     default='web',
+                                     comment='修改来源：web/openclaw/system')
+
     is_deleted = db.Column(db.Boolean, default=False,
                            comment='软删除标记：True=已删除（隐藏），False=正常')
     deleted_at = db.Column(db.DateTime, comment='软删除时间')
@@ -680,6 +720,14 @@ class Rule(db.Model):
             'review_status': self.review_status or 'approved',
             'review_comment': self.review_comment or None,
             'is_deleted': self.is_deleted or False,
+            'mirror_content': self.mirror_content or None,
+            'mirror_updated_by': self.mirror_updated_by or None,
+            'mirror_updated_at': str(self.mirror_updated_at) if self.mirror_updated_at else None,
+            'content_history': self.content_history or [],
+            # rule last_modified_by emit
+            'last_modified_by': self.last_modified_by or None,
+            'last_modified_at': str(self.last_modified_at) if self.last_modified_at else None,
+            'last_modified_source': self.last_modified_source or 'web',
         }
 
 
@@ -774,6 +822,15 @@ class TestCaseLibrary(db.Model):
     owner = db.Column(db.String(50), comment='负责人')
     status = db.Column(db.Enum('active', 'archived'),
                       default='active', comment='状态')
+    # 评审状态机：draft=草稿(未评审) / pending_review=待评审(已发起) /
+    #            approved=已通过 / rejected=被驳回（仍可继续编辑、再次发起）
+    review_status = db.Column(db.String(20), default='draft',
+                              comment='评审状态：draft/pending_review/approved/rejected')
+    # 当前进行中的评审记录 ID（pending_review 时有值）
+    current_review_id = db.Column(db.Integer,
+                                  comment='当前进行中的 TestCaseLibraryReview ID')
+    review_status_at = db.Column(db.DateTime,
+                                 comment='review_status 最近一次变更时间')
 
     # 脑图结构（JSON格式）
     mindmap = db.Column(db.JSON, comment='脑图结构')
@@ -794,6 +851,10 @@ class TestCaseLibrary(db.Model):
             'module_name': self.module_name,
             'owner': self.owner,
             'status': self.status,
+            'review_status': self.review_status or 'draft',
+            'current_review_id': self.current_review_id,
+            'review_status_at': (str(self.review_status_at)
+                                 if self.review_status_at else None),
             'mindmap': self.mindmap,
             'case_count': self.cases.count(),
             'created_at': str(self.created_at) if self.created_at else None,
@@ -838,6 +899,10 @@ class TestCase(db.Model):
                                comment='是否为目录占位用例（空目录的占位符，不在列表中显示）')
     created_by = db.Column(db.String(100), default='', comment='创建人')
 
+    # TAPD 需求绑定
+    tapd_story_url = db.Column(db.String(500), comment='TAPD 需求链接')
+    tapd_story_title = db.Column(db.String(255), comment='TAPD 需求标题（冗余，方便展示）')
+
     created_at = db.Column(db.DateTime, default=_now)
     updated_at = db.Column(db.DateTime, default=_now,
                           onupdate=_now)
@@ -857,6 +922,8 @@ class TestCase(db.Model):
             'module_path': self.module_path or '',
             'is_placeholder': self.is_placeholder or False,
             'created_by': self.created_by or '',
+            'tapd_story_url': self.tapd_story_url or '',
+            'tapd_story_title': self.tapd_story_title or '',
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
@@ -957,6 +1024,26 @@ class ClawMessage(db.Model):
     # 关联到 OpenClaw
     claw = db.relationship('OpenClawInstance', backref='messages')
 
+    def _infer_urgency(self):
+        """根据 msg_type 推断 urgency（DB 没存就推断）
+
+        规则：
+          - request_help / task_delegate          → interrupt（要求 AI 立刻处理）
+          - text                                   → flexible（可下回合处理）
+          - knowledge_share / system / 其他      → background（默默归档即可）
+
+        如果将来在 ClawMessage 上加 urgency 列，这里优先返回它即可。
+        """
+        explicit = getattr(self, 'urgency_level', None)
+        if explicit:
+            return explicit
+        mt = (self.msg_type or 'text').lower()
+        if mt in ('request_help', 'task_delegate'):
+            return 'interrupt'
+        if mt in ('knowledge_share', 'system'):
+            return 'background'
+        return 'flexible'
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -967,6 +1054,7 @@ class ClawMessage(db.Model):
             'direction': self.direction or 'to_claw',
             'reply_to': self.reply_to,
             'status': self.status,
+            'urgency': self._infer_urgency(),
             'delivered_at': str(self.delivered_at) if self.delivered_at else None,
             'read_at': str(self.read_at) if self.read_at else None,
             'created_at': str(self.created_at) if self.created_at else None,
@@ -1076,15 +1164,90 @@ class ClawTodo(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
         }
         if with_today_status:
-            from datetime import date as d
+            from datetime import date as d, datetime as dt, time as t, timedelta
+            today = d.today()
             today_log = ClawTodoLog.query.filter_by(
-                todo_id=self.id, log_date=d.today()
+                todo_id=self.id, log_date=today
             ).first()
-            data['today_status'] = today_log.status if today_log else 'pending'
-            data['today_completed_at'] = (
-                str(today_log.completed_at) if today_log and today_log.completed_at else None
-            )
+
+            # ============ today_status / today_completed_at ============
+            if today_log:
+                data['today_status'] = today_log.status
+                data['today_completed_at'] = str(today_log.completed_at) if today_log.completed_at else None
+            else:
+                # 跨天兜底：仅 once 类型保留"昨天 submitted 维持待审核"语义，
+                # 避免一次性任务跨过 0 点后审核入口消失。
+                # daily/weekly/monthly 是周期任务，每天必须重新算 pending，
+                # 不能被昨天的 submitted log 粘住（否则今天的 daily 会从今日队列消失）。
+                if (self.schedule_type or 'daily') == 'once':
+                    latest_log = (ClawTodoLog.query
+                                  .filter_by(todo_id=self.id)
+                                  .order_by(ClawTodoLog.log_date.desc(),
+                                            ClawTodoLog.created_at.desc())
+                                  .first())
+                    if latest_log and latest_log.status == 'submitted':
+                        data['today_status'] = 'submitted'
+                        data['today_completed_at'] = str(latest_log.completed_at) if latest_log.completed_at else None
+                    else:
+                        data['today_status'] = 'pending'
+                        data['today_completed_at'] = None
+                else:
+                    data['today_status'] = 'pending'
+                    data['today_completed_at'] = None
+
+            # ============ cycle_started_at / created_at 覆盖 ============
+            # 解决「周期任务模板 created_at 是几个月前，OpenClaw 误判为旧任务、
+            # 不优先处理」的问题。OpenClaw 拉今日待办时，应当看到的是「本期实例」
+            # 的开始时间，而不是模板创建时间。
+            #
+            # 注：此覆盖仅在 with_today_status=True 时发生（即 OpenClaw 视角），
+            # 管理页面调用 to_dict() 默认不带该参数，因此模板真实 created_at 不受影响。
+            stype = (self.schedule_type or 'daily').lower()
+            cycle_start = None
+            if stype == 'once':
+                # 一次性任务：本期就是模板首次创建那一刻
+                cycle_start = self.created_at
+            else:
+                if today_log and today_log.created_at:
+                    # 已经被实例化过：以今天的 log 创建时间为准（更精确）
+                    cycle_start = today_log.created_at
+                else:
+                    # 还没实例化：用本期"应该开始"的时刻
+                    if stype == 'daily':
+                        cycle_start = dt.combine(today, t(0, 0))
+                    elif stype == 'weekly':
+                        # schedule_day: 1=周一 ... 7=周日，与 isoweekday() 一致
+                        target = self.schedule_day or today.isoweekday()
+                        delta_days = (today.isoweekday() - target) % 7
+                        cycle_start = dt.combine(today - timedelta(days=delta_days), t(0, 0))
+                    elif stype == 'monthly':
+                        # schedule_day: 几号；如果今天还没到本月那一天，回退到上月那天
+                        target_day = self.schedule_day or today.day
+                        if today.day >= target_day:
+                            base = today.replace(
+                                day=min(target_day,
+                                        self._days_in_month(today.year, today.month)))
+                        else:
+                            year, month = (today.year, today.month - 1) if today.month > 1 \
+                                          else (today.year - 1, 12)
+                            base = d(year, month,
+                                     min(target_day, self._days_in_month(year, month)))
+                        cycle_start = dt.combine(base, t(0, 0))
+                    else:
+                        cycle_start = dt.combine(today, t(0, 0))
+
+            data['template_created_at'] = data['created_at']
+            data['cycle_started_at'] = str(cycle_start) if cycle_start else None
+            # ⚠️ 关键：覆盖 created_at，让现有 OpenClaw 不改代码就能正确判优先级
+            if cycle_start:
+                data['created_at'] = str(cycle_start)
+            data['is_today_instance'] = (stype != 'once')
         return data
+
+    @staticmethod
+    def _days_in_month(year, month):
+        import calendar
+        return calendar.monthrange(year, month)[1]
 
     def schedule_label(self):
         """生成可读的调度描述"""
@@ -1276,6 +1439,81 @@ class TopicReply(db.Model):
 
 # ============== 测试计划与任务模型 ==============
 
+class TestIteration(db.Model):
+    """测试迭代 — 代表一次外发版本，迭代下有多次转测（TestPlan）"""
+    __tablename__ = 'test_iterations'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(200), nullable=False, comment='迭代名称')
+    description = db.Column(db.Text, comment='迭代描述')
+
+    # 版本信息
+    version_name = db.Column(db.String(100), comment='版本号，如 v3.2.1')
+    version_type = db.Column(db.String(20), default='regular',
+                             comment='版本类型：regular=常规版本, resource=资源版本, hotfix=紧急补丁')
+
+    # 排期
+    start_date = db.Column(db.Date, comment='开始日期')
+    end_date = db.Column(db.Date, comment='结束日期')
+
+    # 项目关联
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           comment='关联项目ID')
+
+    # TAPD 迭代关联（JSON数组，支持多选）—— 从 TestPlan 层上移到 Iteration 层
+    tapd_iteration_ids = db.Column(db.JSON, comment='TAPD 迭代 ID 列表')
+    tapd_iteration_names = db.Column(db.JSON, comment='TAPD 迭代名称列表（冗余）')
+    tapd_workspace_id = db.Column(db.String(50), comment='TAPD workspace ID')
+
+    # 状态
+    status = db.Column(db.String(20), default='draft',
+                       comment='状态：draft=草稿, active=进行中, completed=已完成, archived=已归档')
+
+    # 进度统计（由子计划/任务汇总）
+    total_plans = db.Column(db.Integer, default=0, comment='测试计划数')
+    total_tasks = db.Column(db.Integer, default=0, comment='总任务数')
+    completed_tasks = db.Column(db.Integer, default=0, comment='已完成任务数')
+    total_bugs = db.Column(db.Integer, default=0, comment='Bug 总数')
+
+    # 创建者
+    created_by = db.Column(db.String(100), default='', comment='创建人')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    # 关联
+    project = db.relationship('Project', backref='test_iterations')
+    plans = db.relationship('TestPlan', backref='iteration',
+                            lazy='dynamic', cascade='all, delete-orphan')
+
+    def to_dict(self, with_plans=False):
+        data = {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'version_name': self.version_name,
+            'version_type': self.version_type,
+            'start_date': str(self.start_date) if self.start_date else None,
+            'end_date': str(self.end_date) if self.end_date else None,
+            'project_id': self.project_id,
+            'project_name': self.project.name if self.project else None,
+            'tapd_iteration_ids': self.tapd_iteration_ids or [],
+            'tapd_iteration_names': self.tapd_iteration_names or [],
+            'tapd_workspace_id': self.tapd_workspace_id,
+            'status': self.status,
+            'total_plans': self.total_plans,
+            'total_tasks': self.total_tasks,
+            'completed_tasks': self.completed_tasks,
+            'total_bugs': self.total_bugs,
+            'progress': round(self.completed_tasks / self.total_tasks * 100, 1) if self.total_tasks > 0 else 0,
+            'created_by': self.created_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if with_plans:
+            data['plans'] = [p.to_dict(with_tasks=True) for p in self.plans.order_by(TestPlan.created_at)]
+        return data
+
+
 class TestPlan(db.Model):
     """测试计划排期"""
     __tablename__ = 'test_plans'
@@ -1284,7 +1522,11 @@ class TestPlan(db.Model):
     name = db.Column(db.String(200), nullable=False, comment='计划名称')
     description = db.Column(db.Text, comment='计划描述')
 
-    # 版本类型
+    # 所属迭代（三级架构核心外键）
+    iteration_id = db.Column(db.Integer, db.ForeignKey('test_iterations.id'),
+                             comment='所属测试迭代ID')
+
+    # 版本类型（保留，兼容旧数据；新建时从迭代继承）
     version_type = db.Column(db.Enum('regular', 'resource', 'hotfix'),
                              default='regular',
                              comment='版本类型：regular=常规版本, resource=资源版本, hotfix=紧急补丁')
@@ -1329,6 +1571,8 @@ class TestPlan(db.Model):
             'id': self.id,
             'name': self.name,
             'description': self.description,
+            'iteration_id': self.iteration_id,
+            'iteration_name': self.iteration.name if self.iteration else None,
             'version_type': self.version_type,
             'version_name': self.version_name,
             'start_date': str(self.start_date) if self.start_date else None,
@@ -1503,3 +1747,1260 @@ class TestTaskCase(db.Model):
         }
 
 
+# ==================== 工程分析中心（Engineering Analysis Center）====================
+# 详细设计参考：g:/RacingGoUnity/Documents/Testing/OpenClaw_Engineering_Analysis_Center_Design.md
+# 落地原则：所有写操作复用 Hub 已有 projects / test_iterations / test_case_libraries / test_cases / knowledge_entries / audit_logs
+# 仅新增 5 张本模块专属表，不修改 Hub 任何现有表/接口。
+
+class EngineeringBaseline(db.Model):
+    """工程分析基线 — 一个项目可有多份基线（不同分支或不同时点）"""
+    __tablename__ = 'engineering_baselines'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           nullable=False, comment='关联 Hub 项目ID')
+    name = db.Column(db.String(200), nullable=False,
+                     comment='基线名称，如 RacingGoUnity-dev-baseline')
+    repo_url = db.Column(db.String(500), nullable=False,
+                         comment='Git 仓库地址')
+    branch = db.Column(db.String(100), nullable=False, default='main',
+                       comment='目标分支')
+    baseline_commit = db.Column(db.String(64), comment='基线 commit hash')
+    architecture_doc_url = db.Column(db.String(500),
+                                     comment='基线说明文档 URL 或 knowledge_entries.id')
+    module_mapping = db.Column(db.JSON,
+                               comment='路径->模块映射规则，如 {"Assets/Scripts/Network/.*": "network"}')
+    risk_rules = db.Column(db.JSON,
+                           comment='风险评分规则覆盖（为空则用全局默认）')
+    status = db.Column(db.Enum('active', 'inactive'),
+                       default='active', comment='基线状态')
+    created_by = db.Column(db.String(100), default='', comment='创建人')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    project = db.relationship('Project', backref='engineering_baselines')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'project_name': self.project.name if self.project else None,
+            'name': self.name,
+            'repo_url': self.repo_url,
+            'branch': self.branch,
+            'baseline_commit': self.baseline_commit,
+            'architecture_doc_url': self.architecture_doc_url,
+            'module_mapping': self.module_mapping or {},
+            'risk_rules': self.risk_rules or {},
+            'status': self.status,
+            'created_by': self.created_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class AnalysisRefreshBatch(db.Model):
+    """工程分析增量刷新批次 — 一次 from_commit..to_commit 的分析"""
+    __tablename__ = 'analysis_refresh_batches'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           nullable=False, comment='关联项目ID（冗余便于筛选）')
+    baseline_id = db.Column(db.Integer,
+                            db.ForeignKey('engineering_baselines.id'),
+                            nullable=False, comment='所属基线')
+    iteration_id = db.Column(db.Integer,
+                             db.ForeignKey('test_iterations.id'),
+                             comment='可选关联的测试迭代')
+    refresh_type = db.Column(db.Enum('manual', 'scheduled', 'webhook', 'direct'),
+                             default='manual',
+                             comment='触发方式：manual/scheduled/webhook/direct（直接录入结果，跳过 Agent）')
+    from_commit = db.Column(db.String(64), comment='起始 commit')
+    to_commit = db.Column(db.String(64), comment='结束 commit')
+    commit_count = db.Column(db.Integer, default=0, comment='区间内提交数')
+    changed_file_count = db.Column(db.Integer, default=0,
+                                   comment='变更文件数')
+    summary = db.Column(db.Text, comment='AI 输出摘要')
+    risk_level = db.Column(db.Enum('low', 'medium', 'high', 'critical'),
+                           comment='整体风险等级')
+    status = db.Column(db.Enum('queued', 'running', 'success', 'failed',
+                               'approved', 'rejected'),
+                       default='queued', comment='批次状态')
+    assignee_claw_id = db.Column(db.Integer,
+                                 db.ForeignKey('openclaw_instances.id'),
+                                 comment='执行 Agent（可空）')
+    result_payload = db.Column(db.JSON,
+                               comment='Agent 回传的原始 JSON 结果')
+    error_message = db.Column(db.Text, comment='失败时的错误信息')
+    started_at = db.Column(db.DateTime)
+    finished_at = db.Column(db.DateTime)
+    triggered_by = db.Column(db.String(100), default='', comment='触发人')
+    approved_by = db.Column(db.String(100), comment='审批人')
+    approved_at = db.Column(db.DateTime, comment='审批时间')
+    reject_reason = db.Column(db.Text, comment='驳回原因')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    baseline = db.relationship('EngineeringBaseline', backref='batches')
+    project = db.relationship('Project')
+    assignee = db.relationship('OpenClawInstance')
+
+    def to_dict(self, with_details=False):
+        data = {
+            'id': self.id,
+            'project_id': self.project_id,
+            'project_name': self.project.name if self.project else None,
+            'baseline_id': self.baseline_id,
+            'baseline_name': self.baseline.name if self.baseline else None,
+            'iteration_id': self.iteration_id,
+            'refresh_type': self.refresh_type,
+            'from_commit': self.from_commit,
+            'to_commit': self.to_commit,
+            'commit_count': self.commit_count,
+            'changed_file_count': self.changed_file_count,
+            'summary': self.summary,
+            'risk_level': self.risk_level,
+            'status': self.status,
+            'assignee_claw_id': self.assignee_claw_id,
+            'assignee_claw_name': self.assignee.name if self.assignee else None,
+            'error_message': self.error_message,
+            'started_at': str(self.started_at) if self.started_at else None,
+            'finished_at': str(self.finished_at) if self.finished_at else None,
+            'triggered_by': self.triggered_by,
+            'approved_by': self.approved_by,
+            'approved_at': str(self.approved_at) if self.approved_at else None,
+            'reject_reason': self.reject_reason,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if with_details:
+            data['result_payload'] = self.result_payload
+            data['change_count'] = EngineeringChangeItem.query.filter_by(
+                batch_id=self.id).count()
+            data['impact_count'] = EngineeringTestImpactItem.query.filter_by(
+                batch_id=self.id).count()
+        return data
+
+
+class EngineeringChangeItem(db.Model):
+    """单个文件变更项 — 一次刷新可有多条"""
+    __tablename__ = 'engineering_change_items'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    batch_id = db.Column(db.Integer,
+                         db.ForeignKey('analysis_refresh_batches.id'),
+                         nullable=False)
+    file_path = db.Column(db.String(500), nullable=False, comment='变更文件路径')
+    change_type = db.Column(db.Enum('add', 'modify', 'delete', 'rename'),
+                            default='modify')
+    module_id = db.Column(db.Integer, db.ForeignKey('modules.id'),
+                          comment='映射到的 Hub 模块ID（可空）')
+    module_name = db.Column(db.String(100), default='',
+                            comment='模块名（冗余便于筛选）')
+    symbol_names = db.Column(db.JSON, comment='涉及的符号名 JSON 数组')
+    impact_tags = db.Column(db.JSON,
+                            comment='影响标签，如 ["network","login","perf"]')
+    risk_score = db.Column(db.Integer, default=0, comment='风险评分 0-100')
+    reason = db.Column(db.Text, comment='风险原因说明')
+    tapd_story_ids = db.Column(db.JSON,
+                               comment='自动解析的 TAPD 需求 ID 列表')
+
+    created_at = db.Column(db.DateTime, default=_now)
+
+    batch = db.relationship('AnalysisRefreshBatch', backref='change_items')
+    module = db.relationship('Module')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'batch_id': self.batch_id,
+            'file_path': self.file_path,
+            'change_type': self.change_type,
+            'module_id': self.module_id,
+            'module_name': self.module_name or (
+                self.module.name if self.module else ''),
+            'symbol_names': self.symbol_names or [],
+            'impact_tags': self.impact_tags or [],
+            'risk_score': self.risk_score,
+            'reason': self.reason,
+            'tapd_story_ids': self.tapd_story_ids or [],
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class EngineeringTestImpactItem(db.Model):
+    """用例变更建议 — 由 batch 自动生成，进入审批/认领闭环"""
+    __tablename__ = 'engineering_test_impact_items'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    batch_id = db.Column(db.Integer,
+                         db.ForeignKey('analysis_refresh_batches.id'),
+                         nullable=False)
+    library_id = db.Column(db.Integer,
+                           db.ForeignKey('test_case_libraries.id'),
+                           comment='建议归属用例库（可空）')
+    module_id = db.Column(db.Integer, db.ForeignKey('modules.id'),
+                          comment='所属模块ID（可空）')
+    module_name = db.Column(db.String(100), default='', comment='模块名')
+    feature_chain = db.Column(db.String(500), comment='功能链路')
+    action_type = db.Column(db.Enum('add_case', 'update_case',
+                                    'deprecate_case'),
+                            default='update_case', comment='建议动作')
+    priority = db.Column(db.Enum('P0', 'P1', 'P2', 'P3'),
+                         default='P2', comment='建议优先级')
+    suggestion = db.Column(db.Text, comment='建议描述')
+    acceptance_criteria = db.Column(db.Text, comment='验收要点')
+    owner = db.Column(db.String(100), default='', comment='认领人')
+    status = db.Column(db.Enum('todo', 'in_progress', 'done', 'rejected'),
+                       default='todo', comment='处理状态')
+    linked_test_task_id = db.Column(db.Integer,
+                                    db.ForeignKey('test_tasks.id'),
+                                    comment='已写入的测试任务ID')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    batch = db.relationship('AnalysisRefreshBatch', backref='impact_items')
+    library = db.relationship('TestCaseLibrary')
+    module = db.relationship('Module')
+
+    def to_dict(self, with_links=False):
+        data = {
+            'id': self.id,
+            'batch_id': self.batch_id,
+            'library_id': self.library_id,
+            'library_name': self.library.name if self.library else None,
+            'module_id': self.module_id,
+            'module_name': self.module_name or (
+                self.module.name if self.module else ''),
+            'feature_chain': self.feature_chain,
+            'action_type': self.action_type,
+            'priority': self.priority,
+            'suggestion': self.suggestion,
+            'acceptance_criteria': self.acceptance_criteria,
+            'owner': self.owner,
+            'status': self.status,
+            'linked_test_task_id': self.linked_test_task_id,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if with_links:
+            data['linked_cases'] = [
+                l.to_dict() for l in EngineeringTestCaseLink.query
+                .filter_by(impact_item_id=self.id).all()
+            ]
+        return data
+
+
+class EngineeringTestCaseLink(db.Model):
+    """用例建议 -> Hub 已有用例 关联"""
+    __tablename__ = 'engineering_test_case_links'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    impact_item_id = db.Column(
+        db.Integer, db.ForeignKey('engineering_test_impact_items.id'),
+        nullable=False)
+    test_case_id = db.Column(db.Integer, db.ForeignKey('test_cases.id'),
+                             nullable=False)
+    link_type = db.Column(db.Enum('affected', 'newly_created', 'replaced'),
+                          default='affected',
+                          comment='affected=已有用例受影响, newly_created=新建用例, '
+                                  'replaced=被新用例替换')
+    created_by = db.Column(db.String(100), default='')
+    created_at = db.Column(db.DateTime, default=_now)
+
+    impact_item = db.relationship('EngineeringTestImpactItem',
+                                  backref='case_links')
+    test_case = db.relationship('TestCase')
+
+    __table_args__ = (
+        db.UniqueConstraint('impact_item_id', 'test_case_id',
+                            name='uq_impact_case_link'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'impact_item_id': self.impact_item_id,
+            'test_case_id': self.test_case_id,
+            'test_case_title': self.test_case.title if self.test_case else None,
+            'test_case_priority': self.test_case.priority
+                if self.test_case else None,
+            'link_type': self.link_type,
+            'created_by': self.created_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class EngineeringArchitectureSnapshot(db.Model):
+    """工程架构分析快照 — 每条 baseline LRU 保留最新 10 个，超出删最旧。
+
+    支持两种分析方式：
+      - scope='full'   全工程级总览（模块清单 / 通信机制 / 关键链路 / 全局架构图）
+      - scope='module' 单模块深度分析（针对登录/网络/匹配等单模块出详细子架构 + 时序图）
+
+    内容三件套：
+      - structured  结构化 JSON（modules / communications / key_logic / risks / suggestions）
+      - content_md  完整 Markdown（嵌入 ```mermaid 三要素图：架构 / 时序 / 流程）
+      - summary     1-2 句概述
+    """
+
+    __tablename__ = 'engineering_architecture_snapshots'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    baseline_id = db.Column(db.Integer,
+                            db.ForeignKey('engineering_baselines.id'),
+                            nullable=False, index=True)
+    # 冗余字段：避免每次鉴权都要 join engineering_baselines 拿项目归属。
+    # 写入时由 baseline.project_id 同步；后台脚本一次性回填历史数据。
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           nullable=True, index=True,
+                           comment='所属项目（冗余自 baseline，便于按项目鉴权/筛选）')
+
+    scope = db.Column(db.Enum('full', 'module'), nullable=False,
+                      default='full',
+                      comment='full=全工程  module=单模块深度')
+    target_module = db.Column(
+        db.String(100), default='',
+        comment='scope=module 时填模块名，如 "登录"/"网络通信"；'
+                'scope=full 时必须为空字符串')
+
+    title = db.Column(db.String(200),
+                      comment='快照标题，如 "v1.2.0 全工程总览"')
+    summary = db.Column(db.Text, comment='1-2 句概述')
+    content_md = db.Column(db.Text,
+                           comment='完整 markdown（嵌入 ```mermaid 三要素图）；'
+                                   'MariaDB Text 上限约 64KB，超出请拆模块')
+    structured = db.Column(
+        db.JSON,
+        comment='结构化字段：modules / communications / key_logic '
+                '/ risks / suggestions')
+
+    analyzed_commit = db.Column(db.String(64),
+                                comment='本次分析对应的 commit hash')
+    source_type = db.Column(
+        db.Enum('agent', 'manual', 'memos_import'),
+        default='agent',
+        comment='生成来源：agent=AI 自动 / manual=人工录入 / memos_import=Memos 引入')
+    triggered_by = db.Column(db.String(100), default='',
+                             comment='触发人 / 提交 Agent 名')
+
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    baseline = db.relationship('EngineeringBaseline',
+                               backref='architecture_snapshots')
+
+    def to_dict(self, with_content=False):
+        data = {
+            'id': self.id,
+            'baseline_id': self.baseline_id,
+            'baseline_name': self.baseline.name if self.baseline else None,
+            'project_id': self.project_id or (
+                self.baseline.project_id if self.baseline else None),
+            'scope': self.scope,
+            'target_module': self.target_module or '',
+            'title': self.title or '',
+            'summary': self.summary or '',
+            'analyzed_commit': self.analyzed_commit,
+            'source_type': self.source_type,
+            'triggered_by': self.triggered_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if with_content:
+            data['content_md'] = self.content_md or ''
+            data['structured'] = self.structured or {}
+        else:
+            # 列表场景：仅给前 200 字预览，避免响应膨胀
+            md = self.content_md or ''
+            data['content_preview'] = md[:200] + ('...' if len(md) > 200 else '')
+        return data
+
+
+class EngineeringShare(db.Model):
+    """工程分析结果共享授权（跨项目临时开放）。
+
+    设计要点：
+    - 一张表覆盖三类资源（baseline/batch/snapshot），通过 (resource_type, resource_id) 定位
+    - share_type='public' → target_user_id / target_claw_id 都为空（全部登录用户/claw 可见）
+    - share_type='user'   → 授权给某个用户；该用户名下的 OpenClaw 自动继承（_user_managed_claw_ids）
+    - share_type='claw'   → 单独授权给某个 OpenClaw 实例
+    - expires_at 可空：空 = 永久（手动撤销）；有值 = 到期自动失效（鉴权时过滤）
+    - granted_by 记审计；note 记原因（如 "课题 #45 临时讨论"）
+    """
+
+    __tablename__ = 'engineering_shares'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    resource_type = db.Column(
+        db.Enum('baseline', 'batch', 'snapshot'),
+        nullable=False, comment='资源类型')
+    resource_id = db.Column(db.Integer, nullable=False, comment='资源 ID')
+
+    share_type = db.Column(
+        db.Enum('user', 'claw', 'public'),
+        nullable=False, comment='授权类型')
+    target_user_id = db.Column(
+        db.Integer, db.ForeignKey('users.id'),
+        nullable=True, comment='被授权用户（share_type=user）')
+    target_claw_id = db.Column(
+        db.Integer, db.ForeignKey('openclaw_instances.id'),
+        nullable=True, comment='被授权 OpenClaw（share_type=claw）')
+
+    granted_by = db.Column(db.String(100), default='',
+                           comment='授权人 username')
+    note = db.Column(db.String(500), default='', comment='授权原因/备注')
+    expires_at = db.Column(db.DateTime,
+                           comment='过期时间；为空表示永久（手动撤销）')
+
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    target_user = db.relationship('User', foreign_keys=[target_user_id])
+    target_claw = db.relationship('OpenClawInstance',
+                                  foreign_keys=[target_claw_id])
+
+    __table_args__ = (
+        db.Index('ix_share_resource', 'resource_type', 'resource_id'),
+        db.Index('ix_share_user', 'share_type', 'target_user_id'),
+        db.Index('ix_share_claw', 'share_type', 'target_claw_id'),
+    )
+
+    def is_active(self, now=None):
+        if not self.expires_at:
+            return True
+        return (now or _now()) < self.expires_at
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'resource_type': self.resource_type,
+            'resource_id': self.resource_id,
+            'share_type': self.share_type,
+            'target_user_id': self.target_user_id,
+            'target_user_name': (self.target_user.display_name
+                                 or self.target_user.username)
+                                 if self.target_user else None,
+            'target_claw_id': self.target_claw_id,
+            'target_claw_name': self.target_claw.name
+                                if self.target_claw else None,
+            'granted_by': self.granted_by,
+            'note': self.note or '',
+            'expires_at': str(self.expires_at) if self.expires_at else None,
+            'is_active': self.is_active(),
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# 用例库共享授权 / 评审记录（参考 EngineeringShare 设计，资源固定为 library）
+# ---------------------------------------------------------------------------
+
+
+class TestCaseLibraryShare(db.Model):
+    """用例库共享授权（"开放权限+邀请评审"）。
+
+    设计要点：
+    - 仅一种资源类型：用例库（test_case_libraries）→ 不引入 resource_type
+    - share_type='public' → target_user_id / target_claw_id 都为空（全部登录用户/claw 可见）
+    - share_type='user'   → 授权给某个用户；该用户名下的 OpenClaw 自动继承
+    - share_type='claw'   → 单独授权给某个 OpenClaw 实例
+    - permission='reviewer' → 在 readonly 之外可对评审发表评论/审批意见
+                              （MVP-2 只读 + 评审参与；editor 留口子）
+    - expires_at 可空：空 = 永久（手动撤销）
+    """
+
+    __tablename__ = 'test_case_library_shares'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    library_id = db.Column(db.Integer,
+                           db.ForeignKey('test_case_libraries.id'),
+                           nullable=False, comment='用例库 ID')
+    share_type = db.Column(
+        db.Enum('user', 'claw', 'public'),
+        nullable=False, comment='授权类型')
+    target_user_id = db.Column(
+        db.Integer, db.ForeignKey('users.id'),
+        nullable=True, comment='被授权用户（share_type=user）')
+    target_claw_id = db.Column(
+        db.Integer, db.ForeignKey('openclaw_instances.id'),
+        nullable=True, comment='被授权 OpenClaw（share_type=claw）')
+    permission = db.Column(
+        db.String(20), default='reviewer',
+        comment='权限：readonly=只读 / reviewer=只读+可评审 / editor=可编辑（预留）')
+    granted_by = db.Column(db.String(100), default='',
+                           comment='授权人 username')
+    note = db.Column(db.String(500), default='', comment='授权原因/备注')
+    expires_at = db.Column(db.DateTime,
+                           comment='过期时间；为空表示永久（手动撤销）')
+
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    library = db.relationship('TestCaseLibrary',
+                              foreign_keys=[library_id])
+    target_user = db.relationship('User', foreign_keys=[target_user_id])
+    target_claw = db.relationship('OpenClawInstance',
+                                  foreign_keys=[target_claw_id])
+
+    __table_args__ = (
+        db.Index('ix_tcl_share_lib', 'library_id'),
+        db.Index('ix_tcl_share_user', 'share_type', 'target_user_id'),
+        db.Index('ix_tcl_share_claw', 'share_type', 'target_claw_id'),
+    )
+
+    def is_active(self, now=None):
+        if not self.expires_at:
+            return True
+        return (now or _now()) < self.expires_at
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'library_id': self.library_id,
+            'share_type': self.share_type,
+            'target_user_id': self.target_user_id,
+            'target_user_name': ((self.target_user.display_name
+                                  or self.target_user.username)
+                                 if self.target_user else None),
+            'target_claw_id': self.target_claw_id,
+            'target_claw_name': (self.target_claw.name
+                                 if self.target_claw else None),
+            'permission': self.permission or 'reviewer',
+            'granted_by': self.granted_by,
+            'note': self.note or '',
+            'expires_at': str(self.expires_at) if self.expires_at else None,
+            'is_active': self.is_active(),
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class TestCaseLibraryReview(db.Model):
+    """用例库评审记录（一次发起 = 一条记录，全程留痕）。
+
+    生命周期：
+        submitted（pending_review） →
+            approved   完成
+            rejected   被驳回（可再次提交）
+            withdrawn  发起方主动撤回
+    """
+
+    __tablename__ = 'test_case_library_reviews'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    library_id = db.Column(db.Integer,
+                           db.ForeignKey('test_case_libraries.id'),
+                           nullable=False, comment='用例库 ID')
+    status = db.Column(
+        db.String(20), default='submitted',
+        comment='状态：submitted/approved/rejected/withdrawn')
+
+    submitted_by = db.Column(db.String(100), default='',
+                             comment='发起人 username/claw_name')
+    submitted_at = db.Column(db.DateTime, default=_now,
+                             comment='发起时间')
+    submit_note = db.Column(db.Text, default='',
+                            comment='发起说明（本次评审范围/重点）')
+    scope_summary = db.Column(db.String(500), default='',
+                              comment='评审范围简述（前端冗余展示）')
+    # 评审范围（结构化）：library=整库 / module=某子目录（含子树）/ cases=多选用例（预留）
+    scope_type = db.Column(db.String(20), default='library',
+                           comment='评审范围类型：library/module/cases')
+    scope_module_path = db.Column(
+        db.String(500), default='',
+        comment='评审范围模块路径（scope_type=module 时必填，按前缀匹配子树）')
+    scope_case_count = db.Column(
+        db.Integer, default=0,
+        comment='本次评审覆盖的用例数（发起时快照）')
+    invited_reviewers = db.Column(
+        db.JSON,
+        comment='本次邀请的评审人快照：[{type:user/claw, id, name}]')
+
+    decided_by = db.Column(db.String(100),
+                           comment='审批人 username/claw_name')
+    decided_at = db.Column(db.DateTime,
+                           comment='审批时间')
+    decision_note = db.Column(db.Text, default='',
+                              comment='审批意见')
+    related_topic_id = db.Column(db.Integer,
+                                 comment='关联的 case_review topic ID（可选）')
+
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    library = db.relationship('TestCaseLibrary',
+                              foreign_keys=[library_id])
+
+    __table_args__ = (
+        db.Index('ix_tcl_review_lib', 'library_id'),
+        db.Index('ix_tcl_review_status', 'status'),
+        db.Index('ix_tcl_review_lib_status', 'library_id', 'status'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'library_id': self.library_id,
+            'status': self.status,
+            'submitted_by': self.submitted_by or '',
+            'submitted_at': str(self.submitted_at) if self.submitted_at else None,
+            'submit_note': self.submit_note or '',
+            'scope_summary': self.scope_summary or '',
+            'scope_type': self.scope_type or 'library',
+            'scope_module_path': self.scope_module_path or '',
+            'scope_case_count': int(self.scope_case_count or 0),
+            'invited_reviewers': self.invited_reviewers or [],
+            'decided_by': self.decided_by or '',
+            'decided_at': str(self.decided_at) if self.decided_at else None,
+            'decision_note': self.decision_note or '',
+            'related_topic_id': self.related_topic_id,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# 测试账号管理（QQ / 微信 / ...）
+# ---------------------------------------------------------------------------
+
+
+class TestAccount(db.Model):
+    """测试账号池：供 OpenClaw 调度领用 / 释放。
+
+    设计要点：
+    - 区分 platform（qq / wechat / 其他）+ account 唯一
+    - 状态机：idle <-> in_use；任何时刻可被标记 abnormal
+    - 领用时记录 current_user（claw 名或 web 用户名）+ current_purpose（备注）
+    - 软删除：is_deleted=True 视为已下架
+    """
+
+    __tablename__ = 'test_accounts'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    platform = db.Column(db.Enum('qq', 'wechat', 'other'),
+                         nullable=False, default='qq',
+                         comment='账号平台：qq / wechat / other')
+    account = db.Column(db.String(100), nullable=False, comment='账号')
+    password = db.Column(db.String(255), nullable=False, comment='密码（明文）')
+    status = db.Column(db.Enum('idle', 'in_use', 'abnormal'),
+                       nullable=False, default='idle',
+                       comment='状态：idle=空闲, in_use=使用中, abnormal=异常')
+    holder_name = db.Column(db.String(100), default='',
+                            comment='当前使用人（claw 名或 web 用户名）')
+    current_claw_id = db.Column(db.Integer,
+                                db.ForeignKey('openclaw_instances.id'),
+                                comment='当前占用的 OpenClaw ID（如果是 claw 领用）')
+    current_purpose = db.Column(db.String(500), default='',
+                                comment='当前使用途径/备注（acquire 时上报）')
+    last_login_at = db.Column(db.DateTime, comment='最近一次领用/登录时间')
+    notes = db.Column(db.Text, default='', comment='账号备注（账号自身固有备注）')
+
+    is_deleted = db.Column(db.Boolean, default=False,
+                           comment='软删除标记：True=已删除（隐藏）')
+    deleted_at = db.Column(db.DateTime, comment='软删除时间')
+    deleted_by = db.Column(db.String(100), default='', comment='删除人')
+
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+    created_by = db.Column(db.String(100), default='', comment='创建人')
+
+    __table_args__ = (
+        db.UniqueConstraint('platform', 'account', name='uq_platform_account'),
+    )
+
+    def to_dict(self, include_password=False):
+        data = {
+            'id': self.id,
+            'platform': self.platform,
+            'account': self.account,
+            'status': self.status,
+            'current_user': self.holder_name or '',
+            'holder_name': self.holder_name or '',
+            'current_claw_id': self.current_claw_id,
+            'current_purpose': self.current_purpose or '',
+            'last_login_at': str(self.last_login_at) if self.last_login_at else None,
+            'notes': self.notes or '',
+            'created_by': self.created_by or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+            'is_deleted': bool(self.is_deleted),
+        }
+        if include_password:
+            data['password'] = self.password or ''
+        else:
+            data['password_present'] = bool(self.password)
+        return data
+
+
+class TestAccountUsageLog(db.Model):
+    """测试账号使用流水 — 每次 acquire / release / mark_abnormal 留痕。"""
+
+    __tablename__ = 'test_account_usage_logs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    account_id = db.Column(db.Integer, db.ForeignKey('test_accounts.id'),
+                           nullable=False, index=True)
+    action = db.Column(db.Enum('acquire', 'release', 'mark_abnormal',
+                               'recover', 'create', 'delete'),
+                       nullable=False, comment='动作类型')
+    actor_type = db.Column(db.Enum('claw', 'user'),
+                           nullable=False, default='claw',
+                           comment='动作发起方类型')
+    actor_name = db.Column(db.String(100), default='', comment='发起方名（claw 名或用户名）')
+    actor_claw_id = db.Column(db.Integer,
+                              db.ForeignKey('openclaw_instances.id'),
+                              comment='发起方 claw id（如果是 claw）')
+    actor_user_id = db.Column(db.Integer,
+                              db.ForeignKey('users.id'),
+                              comment='发起方 user id（如果是 web user）')
+    purpose = db.Column(db.String(500), default='',
+                        comment='使用途径/备注（acquire 必填）')
+    extra = db.Column(db.JSON, comment='附加信息：异常原因、释放摘要等')
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    account = db.relationship('TestAccount',
+                              backref=db.backref(
+                                  'usage_logs',
+                                  lazy='dynamic',
+                                  cascade='all, delete-orphan'))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'account_id': self.account_id,
+            'action': self.action,
+            'actor_type': self.actor_type,
+            'actor_name': self.actor_name or '',
+            'actor_claw_id': self.actor_claw_id,
+            'actor_user_id': self.actor_user_id,
+            'purpose': self.purpose or '',
+            'extra': self.extra or {},
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+# ============================================================
+# 需求分析中心（Requirement Analysis Center）
+# ============================================================
+# 数据来源：OpenClaw Agent 通过 mcporter-internal 调用 TAPD MCP，
+# 把需求快照 / 版本基线 / 字段映射 POST 到 Hub 落库。Hub 端零 TAPD 凭证。
+#
+# 字段对齐规范见 plan「七·B、TAPD 字段映射规范」与 skills/requirement-analysis/SKILL.md
+# ============================================================
+
+
+class RequirementItem(db.Model):
+    """TAPD Story 本地快照（每条需求一行，与 TestIteration 强 1:1 关联）"""
+    __tablename__ = 'requirement_items'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    iteration_id = db.Column(db.Integer,
+                             db.ForeignKey('test_iterations.id'),
+                             nullable=False, index=True,
+                             comment='所属 Hub TestIteration')
+
+    # TAPD 主键
+    tapd_story_id = db.Column(db.String(64), nullable=False, index=True,
+                              comment='TAPD Story.id')
+    tapd_workspace_id = db.Column(db.String(50), index=True)
+    tapd_iteration_id = db.Column(db.String(64), index=True,
+                                  comment='TAPD Story.iteration_id')
+
+    # 基础字段
+    title = db.Column(db.String(500), default='', comment='TAPD Story.name')
+    description = db.Column(db.Text, comment='TAPD Story.description（HTML）')
+    description_text = db.Column(db.Text,
+                                 comment='description 抽出的纯文本副本，给 LLM 用')
+    status = db.Column(db.String(40), index=True,
+                       comment='TAPD status key，如 status_3/status_22，UI 翻译用字典')
+    priority_label = db.Column(db.String(40),
+                               comment='High/Middle/Low/Nice To Have')
+    priority_num = db.Column(db.Integer, default=0)
+
+    # 人员
+    owner = db.Column(db.String(500), default='',
+                      comment='处理人，可能 ; 分隔多人')
+    creator = db.Column(db.String(100), default='')
+    developer = db.Column(db.String(500), default='')
+
+    # 分类与模块
+    category_id = db.Column(db.String(64), comment='TAPD 需求分类 ID')
+    workitem_type_id = db.Column(db.String(64), comment='TAPD 需求类别')
+    tapd_module = db.Column(db.String(200), default='',
+                            comment='TAPD Story.module')
+    feature = db.Column(db.String(200), default='',
+                        comment='TAPD Story.feature')
+    local_module_name = db.Column(db.String(200), default='',
+                                  comment='映射后的 testcase-manager 一级模块')
+
+    # 版本与基线
+    tapd_version = db.Column(db.String(100), index=True,
+                             comment='TAPD Story.version 字符串值，如 M1版本')
+    tapd_release_id = db.Column(db.String(64), index=True,
+                                comment='TAPD Story.release_id')
+    tapd_baseline_id = db.Column(db.String(64), index=True,
+                                 comment='所属转测基线（agent 推送时关联）')
+
+    # 测试相关 custom_field
+    acceptance_criteria = db.Column(db.Text,
+                                    comment='custom_field_eight 测试验收')
+    test_focus = db.Column(db.Text,
+                           comment='test_focus + custom_field_three 测试执行')
+    test_result = db.Column(db.Text, comment='custom_field_six 测试结果')
+    need_test = db.Column(db.String(40),
+                          comment='custom_field_18 是否需要测试')
+    review_progress = db.Column(db.String(40),
+                                comment='custom_field_19 评审进度')
+
+    # 层级
+    parent_id = db.Column(db.String(64), comment='TAPD parent_id，0 表示无')
+    children_id = db.Column(db.String(500), comment='TAPD children_id，| 分隔')
+    tree_path = db.Column(db.String(500), comment='TAPD path')
+
+    # 进度工时
+    progress = db.Column(db.Integer, default=0)
+    effort = db.Column(db.Float, default=0)
+    effort_completed = db.Column(db.Float, default=0)
+    remain = db.Column(db.Float, default=0)
+    tech_risk = db.Column(db.String(200))
+
+    # 时间（TAPD 原值）
+    tapd_created_at = db.Column(db.DateTime, comment='TAPD created')
+    tapd_modified_at = db.Column(db.DateTime, comment='TAPD modified')
+    tapd_completed_at = db.Column(db.DateTime, comment='TAPD completed')
+    tapd_begin = db.Column(db.Date)
+    tapd_due = db.Column(db.Date)
+
+    # 本地分析增强
+    risk_score = db.Column(db.Integer, default=0,
+                           comment='LLM 评估风险 0-100')
+    risk_level = db.Column(db.String(20), default='low',
+                           comment='low/medium/high/critical')
+    local_test_status = db.Column(db.String(20), default='pending',
+                                  comment='pending/case_designed/testing/passed/blocked')
+    local_synced_at = db.Column(db.DateTime, default=_now,
+                                comment='最近一次 agent 推送同步时间')
+
+    # 兜底全字段
+    raw_payload = db.Column(db.JSON,
+                            comment='完整 TAPD Story JSON，便于扩展不 ALTER')
+
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    iteration = db.relationship('TestIteration',
+                                backref=db.backref('requirement_items',
+                                                   lazy='dynamic',
+                                                   cascade='all, delete-orphan'))
+
+    __table_args__ = (
+        db.UniqueConstraint('iteration_id', 'tapd_story_id',
+                            name='uq_req_item_iter_story'),
+    )
+
+    def to_dict(self, with_raw=False):
+        data = {
+            'id': self.id,
+            'iteration_id': self.iteration_id,
+            'tapd_story_id': self.tapd_story_id,
+            'tapd_workspace_id': self.tapd_workspace_id,
+            'tapd_iteration_id': self.tapd_iteration_id,
+            'title': self.title or '',
+            'description': self.description,
+            'description_text': self.description_text,
+            'status': self.status,
+            'priority_label': self.priority_label,
+            'priority_num': self.priority_num or 0,
+            'owner': self.owner or '',
+            'creator': self.creator or '',
+            'developer': self.developer or '',
+            'category_id': self.category_id,
+            'workitem_type_id': self.workitem_type_id,
+            'tapd_module': self.tapd_module or '',
+            'feature': self.feature or '',
+            'local_module_name': self.local_module_name or '',
+            'tapd_version': self.tapd_version,
+            'tapd_release_id': self.tapd_release_id,
+            'tapd_baseline_id': self.tapd_baseline_id,
+            'acceptance_criteria': self.acceptance_criteria,
+            'test_focus': self.test_focus,
+            'test_result': self.test_result,
+            'need_test': self.need_test,
+            'review_progress': self.review_progress,
+            'parent_id': self.parent_id,
+            'children_id': self.children_id,
+            'tree_path': self.tree_path,
+            'progress': self.progress or 0,
+            'effort': self.effort or 0,
+            'effort_completed': self.effort_completed or 0,
+            'remain': self.remain or 0,
+            'tech_risk': self.tech_risk,
+            'tapd_created_at': str(self.tapd_created_at) if self.tapd_created_at else None,
+            'tapd_modified_at': str(self.tapd_modified_at) if self.tapd_modified_at else None,
+            'tapd_completed_at': str(self.tapd_completed_at) if self.tapd_completed_at else None,
+            'tapd_begin': str(self.tapd_begin) if self.tapd_begin else None,
+            'tapd_due': str(self.tapd_due) if self.tapd_due else None,
+            'risk_score': self.risk_score or 0,
+            'risk_level': self.risk_level or 'low',
+            'local_test_status': self.local_test_status or 'pending',
+            'local_synced_at': str(self.local_synced_at) if self.local_synced_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if with_raw:
+            data['raw_payload'] = self.raw_payload or {}
+        return data
+
+
+class RequirementChangeLog(db.Model):
+    """需求字段级变更日志（每日 diff 自动产生）"""
+    __tablename__ = 'requirement_change_logs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    requirement_item_id = db.Column(db.Integer,
+                                    db.ForeignKey('requirement_items.id'),
+                                    nullable=False, index=True)
+    iteration_id = db.Column(db.Integer,
+                             db.ForeignKey('test_iterations.id'),
+                             nullable=False, index=True,
+                             comment='冗余迭代 ID 便于按迭代查')
+
+    change_date = db.Column(db.Date, default=lambda: _now().date(), index=True)
+    change_type = db.Column(db.String(20), nullable=False,
+                            comment='added/modified/status_changed/removed')
+    field_name = db.Column(db.String(80), default='',
+                           comment='变更字段名，如 status/title/acceptance_criteria')
+    old_value = db.Column(db.Text)
+    new_value = db.Column(db.Text)
+    diff_summary = db.Column(db.Text, comment='LLM 生成 1 句话摘要（可选）')
+    impact_level = db.Column(db.String(10), default='low',
+                             comment='low/medium/high，决定是否触发用例重评')
+    processed = db.Column(db.Boolean, default=False,
+                          comment='是否已被处理为用例变更建议')
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    item = db.relationship('RequirementItem',
+                           backref=db.backref('change_logs',
+                                              lazy='dynamic',
+                                              cascade='all, delete-orphan'))
+
+    __table_args__ = (
+        db.UniqueConstraint('requirement_item_id', 'change_date',
+                            'field_name', 'change_type',
+                            name='uq_req_change_dedup'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'requirement_item_id': self.requirement_item_id,
+            'iteration_id': self.iteration_id,
+            'change_date': str(self.change_date) if self.change_date else None,
+            'change_type': self.change_type,
+            'field_name': self.field_name or '',
+            'old_value': self.old_value,
+            'new_value': self.new_value,
+            'diff_summary': self.diff_summary,
+            'impact_level': self.impact_level or 'low',
+            'processed': bool(self.processed),
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class RequirementEngineeringLink(db.Model):
+    """需求 ↔ 工程变更关联（自动 by tapd_story_id 或手动）"""
+    __tablename__ = 'requirement_engineering_links'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    requirement_item_id = db.Column(db.Integer,
+                                    db.ForeignKey('requirement_items.id'),
+                                    nullable=False, index=True)
+    change_item_id = db.Column(db.Integer,
+                               db.ForeignKey('engineering_change_items.id'),
+                               nullable=False, index=True)
+    link_source = db.Column(db.String(20), default='auto_tapd_id',
+                            comment='auto_tapd_id / manual / llm_inferred')
+    confidence = db.Column(db.Integer, default=90,
+                           comment='自动关联可信度 0-100')
+    created_at = db.Column(db.DateTime, default=_now)
+
+    item = db.relationship('RequirementItem',
+                           backref=db.backref('engineering_links',
+                                              lazy='dynamic',
+                                              cascade='all, delete-orphan'))
+
+    __table_args__ = (
+        db.UniqueConstraint('requirement_item_id', 'change_item_id',
+                            name='uq_req_eng_link'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'requirement_item_id': self.requirement_item_id,
+            'change_item_id': self.change_item_id,
+            'link_source': self.link_source or 'auto_tapd_id',
+            'confidence': self.confidence or 0,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class RequirementTestcaseLink(db.Model):
+    """需求 ↔ 已有测试用例关联"""
+    __tablename__ = 'requirement_testcase_links'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    requirement_item_id = db.Column(db.Integer,
+                                    db.ForeignKey('requirement_items.id'),
+                                    nullable=False, index=True)
+    test_case_id = db.Column(db.Integer,
+                             db.ForeignKey('test_cases.id'),
+                             nullable=False, index=True)
+    link_type = db.Column(db.String(20), default='covers',
+                          comment='covers/partial/new_required/outdated')
+    coverage_status = db.Column(db.String(20), default='covered',
+                                comment='covered/gap/outdated')
+    created_by = db.Column(db.String(100), default='')
+    created_at = db.Column(db.DateTime, default=_now)
+
+    item = db.relationship('RequirementItem',
+                           backref=db.backref('testcase_links',
+                                              lazy='dynamic',
+                                              cascade='all, delete-orphan'))
+
+    __table_args__ = (
+        db.UniqueConstraint('requirement_item_id', 'test_case_id',
+                            name='uq_req_case_link'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'requirement_item_id': self.requirement_item_id,
+            'test_case_id': self.test_case_id,
+            'link_type': self.link_type or 'covers',
+            'coverage_status': self.coverage_status or 'covered',
+            'created_by': self.created_by or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class TapdVersion(db.Model):
+    """TAPD 原生版本缓存（外发版本，对应"M1版本/M2版本"等）"""
+    __tablename__ = 'tapd_versions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           index=True)
+    tapd_workspace_id = db.Column(db.String(50), nullable=False, index=True)
+    tapd_version_id = db.Column(db.String(64), nullable=False,
+                                comment='TAPD Version.id')
+
+    name = db.Column(db.String(200), default='')
+    description = db.Column(db.Text)
+    status = db.Column(db.String(40), comment='Unclosed/Closed')
+    version_type = db.Column(db.String(40), default='Normal version')
+
+    start = db.Column(db.Date)
+    due = db.Column(db.Date)
+    realbegin = db.Column(db.Date)
+    realend = db.Column(db.Date)
+    testtime = db.Column(db.Date)
+    releasetime = db.Column(db.Date)
+
+    creator = db.Column(db.String(100), default='')
+    owner = db.Column(db.String(500), default='')
+    tapd_created_at = db.Column(db.DateTime)
+    tapd_modified_at = db.Column(db.DateTime)
+    local_synced_at = db.Column(db.DateTime, default=_now)
+
+    __table_args__ = (
+        db.UniqueConstraint('tapd_workspace_id', 'tapd_version_id',
+                            name='uq_tapd_version'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'tapd_workspace_id': self.tapd_workspace_id,
+            'tapd_version_id': self.tapd_version_id,
+            'name': self.name or '',
+            'description': self.description,
+            'status': self.status,
+            'version_type': self.version_type or 'Normal version',
+            'start': str(self.start) if self.start else None,
+            'due': str(self.due) if self.due else None,
+            'realbegin': str(self.realbegin) if self.realbegin else None,
+            'realend': str(self.realend) if self.realend else None,
+            'testtime': str(self.testtime) if self.testtime else None,
+            'releasetime': str(self.releasetime) if self.releasetime else None,
+            'creator': self.creator or '',
+            'owner': self.owner or '',
+            'tapd_created_at': str(self.tapd_created_at) if self.tapd_created_at else None,
+            'tapd_modified_at': str(self.tapd_modified_at) if self.tapd_modified_at else None,
+            'local_synced_at': str(self.local_synced_at) if self.local_synced_at else None,
+        }
+
+
+class TapdBaseline(db.Model):
+    """TAPD 原生基线缓存（一次转测内容快照）"""
+    __tablename__ = 'tapd_baselines'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    tapd_workspace_id = db.Column(db.String(50), nullable=False, index=True)
+    tapd_baseline_id = db.Column(db.String(64), nullable=False,
+                                 comment='TAPD Baseline.id')
+    tapd_version_id_str = db.Column(db.String(64), index=True,
+                                    comment='TAPD Baseline.version_id 原值')
+    version_id = db.Column(db.Integer, db.ForeignKey('tapd_versions.id'),
+                           comment='本地 tapd_versions FK，可空（version 还未同步时）')
+
+    name = db.Column(db.String(200), default='')
+    creator = db.Column(db.String(100), default='')
+    tapd_created_at = db.Column(db.DateTime)
+
+    story_count = db.Column(db.Integer, default=0,
+                            comment='基线下需求数')
+    stories_snapshot = db.Column(db.JSON,
+                                 comment='["story_id1", ...] 这次转测包含的需求 ID 列表')
+    local_synced_at = db.Column(db.DateTime, default=_now)
+
+    version = db.relationship('TapdVersion',
+                              backref=db.backref('baselines',
+                                                 lazy='dynamic'))
+
+    __table_args__ = (
+        db.UniqueConstraint('tapd_workspace_id', 'tapd_baseline_id',
+                            name='uq_tapd_baseline'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'tapd_workspace_id': self.tapd_workspace_id,
+            'tapd_baseline_id': self.tapd_baseline_id,
+            'tapd_version_id_str': self.tapd_version_id_str,
+            'version_id': self.version_id,
+            'name': self.name or '',
+            'creator': self.creator or '',
+            'tapd_created_at': str(self.tapd_created_at) if self.tapd_created_at else None,
+            'story_count': self.story_count or 0,
+            'stories_snapshot': self.stories_snapshot or [],
+            'local_synced_at': str(self.local_synced_at) if self.local_synced_at else None,
+        }
+
+
+class TapdIterationsCache(db.Model):
+    """TAPD 迭代下拉缓存（agent 推送维护，前端永远查这张表）"""
+    __tablename__ = 'tapd_iterations_cache'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    tapd_workspace_id = db.Column(db.String(50), nullable=False, index=True)
+    tapd_iteration_id = db.Column(db.String(64), nullable=False,
+                                  comment='TAPD Iteration.id')
+
+    name = db.Column(db.String(200), default='')
+    status = db.Column(db.String(40), index=True,
+                       comment='TAPD 原值，如 open/done')
+    startdate = db.Column(db.Date)
+    enddate = db.Column(db.Date)
+    creator = db.Column(db.String(100), default='')
+    description = db.Column(db.Text)
+    parent_id = db.Column(db.String(64))
+
+    last_synced_at = db.Column(db.DateTime, default=_now, index=True)
+    cache_version = db.Column(db.Integer, default=1,
+                              comment='每次 upsert +1，前端轮询用')
+
+    __table_args__ = (
+        db.UniqueConstraint('tapd_workspace_id', 'tapd_iteration_id',
+                            name='uq_tapd_iter_cache'),
+        db.Index('ix_tapd_iter_ws_status', 'tapd_workspace_id', 'status'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'tapd_workspace_id': self.tapd_workspace_id,
+            'tapd_iteration_id': self.tapd_iteration_id,
+            'name': self.name or '',
+            'status': self.status,
+            'startdate': str(self.startdate) if self.startdate else None,
+            'enddate': str(self.enddate) if self.enddate else None,
+            'creator': self.creator or '',
+            'description': self.description,
+            'parent_id': self.parent_id,
+            'last_synced_at': str(self.last_synced_at) if self.last_synced_at else None,
+            'cache_version': self.cache_version or 1,
+        }
+
+
+class TapdFieldMapCache(db.Model):
+    """自定义字段中英映射缓存（不同 workspace custom_field_* 含义不同）"""
+    __tablename__ = 'tapd_field_map_cache'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    tapd_workspace_id = db.Column(db.String(50), nullable=False, index=True)
+    entity_type = db.Column(db.String(20), nullable=False,
+                            default='story',
+                            comment='story/bug/task')
+    field_map = db.Column(db.JSON,
+                          comment='{"custom_field_eight": "测试验收", ...}')
+    last_synced_at = db.Column(db.DateTime, default=_now)
+
+    __table_args__ = (
+        db.UniqueConstraint('tapd_workspace_id', 'entity_type',
+                            name='uq_tapd_field_map'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'tapd_workspace_id': self.tapd_workspace_id,
+            'entity_type': self.entity_type or 'story',
+            'field_map': self.field_map or {},
+            'last_synced_at': str(self.last_synced_at) if self.last_synced_at else None,
+        }
+
+
+class TapdRefreshRequest(db.Model):
+    """TAPD 实时刷新队列（R1 方案：agent 反向轮询消费）"""
+    __tablename__ = 'tapd_refresh_requests'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    scope = db.Column(db.String(20), nullable=False, default='iterations',
+                      comment='iterations/stories/all')
+    tapd_workspace_id = db.Column(db.String(50), index=True)
+    iteration_id = db.Column(db.Integer,
+                             db.ForeignKey('test_iterations.id'),
+                             comment='缩小范围到某个 Hub TestIteration')
+    tapd_iteration_id = db.Column(db.String(64),
+                                  comment='缩小范围到某个 TAPD 迭代')
+
+    status = db.Column(db.String(20), default='pending', index=True,
+                       comment='pending/picked/done/failed')
+    requested_by = db.Column(db.String(100), default='',
+                             comment='发起人（用户名 / system）')
+    picked_by_claw_id = db.Column(db.Integer,
+                                  db.ForeignKey('openclaw_instances.id'),
+                                  comment='被哪个 agent 领走')
+    picked_at = db.Column(db.DateTime)
+    finished_at = db.Column(db.DateTime)
+    error_message = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'scope': self.scope,
+            'tapd_workspace_id': self.tapd_workspace_id,
+            'iteration_id': self.iteration_id,
+            'tapd_iteration_id': self.tapd_iteration_id,
+            'status': self.status or 'pending',
+            'requested_by': self.requested_by or '',
+            'picked_by_claw_id': self.picked_by_claw_id,
+            'picked_at': str(self.picked_at) if self.picked_at else None,
+            'finished_at': str(self.finished_at) if self.finished_at else None,
+            'error_message': self.error_message,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }

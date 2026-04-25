@@ -8,7 +8,7 @@
     <select class="form-select" id="project-filter" onchange="onProjectFilterChange()" style="min-width:160px">
         <option value="">全部项目</option>
     </select>
-    <button class="btn btn-ghost" onclick="openAIGenerateModal()" style="font-size:0.82rem">🤖 AI 生成</button>
+
 </div>
 {% endblock %}
 
@@ -107,7 +107,7 @@
 
 .tc-case-card {
     display: grid;
-    grid-template-columns: 56px 1fr 56px 72px 110px 48px;
+    grid-template-columns: 56px 1fr 130px 56px 72px 110px 48px;
     align-items: center; gap: 0;
     padding: 8px 16px;
     background: var(--bg-card);
@@ -161,7 +161,7 @@
 /* 列表表头 */
 .tc-list-head {
     display: grid;
-    grid-template-columns: 56px 1fr 56px 72px 110px 48px;
+    grid-template-columns: 56px 1fr 130px 56px 72px 110px 48px;
     padding: 6px 16px;
     font-size: 0.72rem; font-weight: 600;
     color: var(--text-muted);
@@ -170,8 +170,8 @@
     border-bottom: 1px solid var(--border);
     margin-bottom: 4px;
 }
-.tc-list-head span:nth-child(3),
-.tc-list-head span:nth-child(6) { text-align: center; }
+.tc-list-head span:nth-child(4),
+.tc-list-head span:nth-child(7) { text-align: center; }
 
 /* 分页 */
 .tc-pagination {
@@ -267,6 +267,25 @@
 .tc-act-btn:hover { background: var(--bg-secondary); }
 .tc-act-btn.del { color: var(--red); }
 .tc-act-btn.del:hover { background: var(--red-dim); }
+
+/* TAPD 需求绑定展示 */
+.tc-tapd-cell {
+    display: flex; align-items: center; gap: 4px; min-width: 0;
+}
+.tc-tapd-link {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 0.82rem; text-decoration: none; cursor: pointer;
+    opacity: 0.6; transition: opacity 0.15s; flex-shrink: 0;
+}
+.tc-tapd-link:hover { opacity: 1; }
+.tc-tapd-link.bound { opacity: 1; color: #3b82f6; }
+.tc-tapd-link.unbound { opacity: 0.3; color: var(--text-muted); }
+.tc-tapd-title {
+    font-size: 0.76rem; color: var(--text-secondary);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 120px; cursor: pointer;
+}
+.tc-tapd-title:hover { color: #3b82f6; }
 </style>
 {% endblock %}
 
@@ -294,11 +313,12 @@
                     <div class="tc-list-breadcrumb" id="list-breadcrumb">全部用例</div>
                     <div class="tc-list-meta">
                         <span id="list-count" style="font-size:0.82rem;color:var(--text-muted)"></span>
+                        <button class="btn btn-ghost btn-sm" onclick="openTapdBindBatch()" style="font-size:0.78rem" title="为当前目录下的用例批量绑定 TAPD 需求">🔗 绑定需求</button>
                         <button class="btn btn-primary btn-sm" onclick="openCaseModal()" style="font-size:0.82rem">+ 新建用例</button>
                     </div>
                 </div>
                 <div class="tc-list-head">
-                    <span>ID</span><span>用例名称</span><span>优先级</span><span>创建人</span><span>更新时间</span><span>操作</span>
+                    <span>ID</span><span>用例名称</span><span>需求</span><span>优先级</span><span>创建人</span><span>更新时间</span><span>操作</span>
                 </div>
                 <div class="tc-case-list" id="case-list"></div>
                 <div class="tc-pagination" id="pagination"></div>
@@ -352,6 +372,16 @@
                 <label class="form-label">预期结果 *</label>
                 <textarea class="form-textarea" name="expected_results" id="case-results-input" style="min-height:100px;font-family:monospace;font-size:0.88rem" placeholder="每行一个预期结果" required></textarea>
             </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                <div class="form-group">
+                    <label class="form-label">TAPD 需求链接</label>
+                    <input class="form-input" name="tapd_story_url" id="case-tapd-url-input" placeholder="https://www.tapd.cn/...">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">需求标题</label>
+                    <input class="form-input" name="tapd_story_title" id="case-tapd-title-input" placeholder="需求标题（可选）">
+                </div>
+            </div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeCaseModal()">取消</button>
                 <button type="submit" class="btn btn-primary">保存</button>
@@ -380,20 +410,7 @@
     </div>
 </div>
 
-<!-- AI 生成弹窗 -->
-<div class="modal-overlay" id="ai-modal">
-    <div class="modal" style="max-width:560px">
-        <h2 class="modal-title">🤖 AI 生成用例</h2>
-        <form id="ai-form">
-            <div class="form-group"><label class="form-label">目标用例库</label><select class="form-select" id="ai-lib-select"></select></div>
-            <div class="form-group"><label class="form-label">需求描述 *</label><textarea class="form-textarea" id="ai-prompt-input" style="min-height:120px" placeholder="描述要测试的功能..." required></textarea></div>
-            <div class="modal-actions">
-                <button type="button" class="btn btn-ghost" onclick="$('#ai-modal').classList.remove('active')">取消</button>
-                <button type="submit" class="btn btn-primary">🤖 生成</button>
-            </div>
-        </form>
-    </div>
-</div>
+
 
 <!-- 新增子目录弹窗 -->
 <div class="modal-overlay" id="subdir-modal">
@@ -429,6 +446,123 @@
             <button type="button" class="btn btn-primary" style="background:var(--red)" onclick="confirmDelDir()">删除</button>
         </div>
     </div>
+</div>
+
+<!-- TAPD 需求绑定弹窗 -->
+<div class="modal-overlay" id="tapd-bind-modal">
+    <div class="modal" style="max-width:520px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+            <h2 class="modal-title" style="margin:0" id="tapd-bind-title">🔗 绑定 TAPD 需求</h2>
+            <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="closeTapdBindModal()">✕</span>
+        </div>
+        <div id="tapd-bind-scope" style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:14px;padding:8px 12px;background:var(--bg-secondary);border-radius:6px"></div>
+        <form id="tapd-bind-form">
+            <input type="hidden" id="tapd-bind-case-id">
+            <input type="hidden" id="tapd-bind-mode" value="single">
+            <div class="form-group">
+                <label class="form-label">TAPD 需求链接 *</label>
+                <input class="form-input" id="tapd-bind-url" placeholder="https://www.tapd.cn/..." required>
+            </div>
+            <div class="form-group">
+                <label class="form-label">需求标题 <span style="color:var(--text-muted);font-size:0.78rem">(可选，方便展示)</span></label>
+                <input class="form-input" id="tapd-bind-story-title" placeholder="需求标题">
+            </div>
+            <div class="modal-actions" style="display:flex;gap:12px;justify-content:center;margin-top:18px">
+                <button type="button" class="btn btn-ghost" onclick="closeTapdBindModal()">关闭</button>
+                <button type="submit" class="btn btn-primary">确认绑定</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 用例库共享/邀请评审 弹窗（参考工程分析 share-modal） -->
+<div class="modal-overlay" id="lib-share-modal">
+  <div class="modal" style="max-width:680px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <h2 class="modal-title" style="margin:0">👥 共享用例库 · <span id="lib-share-name" style="color:var(--text-muted)"></span></h2>
+      <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="closeLibShareDialog()">✕</span>
+    </div>
+    <input type="hidden" id="lib-share-id">
+    <div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:10px">
+      授权后被共享人/OpenClaw 可只读查看本库；选择 <code>reviewer</code> 还可发起 / 参与评审。
+    </div>
+
+    <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+      <button class="btn btn-primary btn-sm" onclick="toggleLibPublicShare(true)">🌐 全部开放（讨论用）</button>
+      <button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="toggleLibPublicShare(false)">关闭全部开放</button>
+    </div>
+
+    <form id="lib-share-form" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;background:var(--bg-secondary);padding:10px;border-radius:8px;margin-bottom:14px">
+      <div style="flex:1 1 130px">
+        <label class="form-label" style="font-size:0.78rem">类型</label>
+        <select class="form-select" id="lib-share-form-type" onchange="onLibShareTypeChange()">
+          <option value="user">指定用户</option>
+          <option value="claw">指定 OpenClaw</option>
+          <option value="public">全部公开</option>
+        </select>
+      </div>
+      <div style="flex:1 1 200px" id="lib-share-target-wrap">
+        <label class="form-label" style="font-size:0.78rem"><span id="lib-share-target-label">用户 ID</span></label>
+        <input type="text" class="form-input" id="lib-share-form-target" placeholder="输入 user_id">
+      </div>
+      <div style="flex:1 1 130px">
+        <label class="form-label" style="font-size:0.78rem">权限</label>
+        <select class="form-select" id="lib-share-form-perm">
+          <option value="reviewer" selected>reviewer（只读 + 可评审）</option>
+          <option value="readonly">readonly（仅查看）</option>
+        </select>
+      </div>
+      <div style="flex:1 1 160px">
+        <label class="form-label" style="font-size:0.78rem">过期时间（可选）</label>
+        <input type="datetime-local" class="form-input" id="lib-share-form-expires">
+      </div>
+      <div style="flex:2 1 250px">
+        <label class="form-label" style="font-size:0.78rem">备注</label>
+        <input type="text" class="form-input" id="lib-share-form-note" placeholder="例：v2.0 用例评审">
+      </div>
+      <button type="submit" class="btn btn-primary btn-sm">＋ 添加授权</button>
+    </form>
+
+    <div style="font-size:0.85rem;font-weight:600;margin-bottom:8px">现有授权</div>
+    <div id="lib-share-list" style="max-height:280px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:6px">
+      <div style="color:var(--text-muted);text-align:center;padding:18px">加载中...</div>
+    </div>
+  </div>
+</div>
+
+<!-- 用例库 评审 弹窗 -->
+<div class="modal-overlay" id="lib-review-modal">
+  <div class="modal" style="max-width:680px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <h2 class="modal-title" style="margin:0">📝 用例库评审 · <span id="lib-review-name" style="color:var(--text-muted)"></span></h2>
+      <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="closeLibReviewDialog()">✕</span>
+    </div>
+    <input type="hidden" id="lib-review-libid">
+
+    <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:6px;margin-bottom:14px;font-size:0.85rem">
+      当前状态：<span id="lib-review-current-status">--</span>
+      <span id="lib-review-current-id" style="color:var(--text-muted);margin-left:8px"></span>
+    </div>
+
+    <form id="lib-review-form" style="background:var(--bg-secondary);padding:10px;border-radius:8px;margin-bottom:14px">
+      <div class="form-group">
+        <label class="form-label" style="font-size:0.78rem">本次评审范围（简要）</label>
+        <input type="text" class="form-input" id="lib-review-scope" placeholder="例：登录 + 支付模块 共 56 条用例">
+      </div>
+      <div class="form-group">
+        <label class="form-label" style="font-size:0.78rem">发起说明</label>
+        <textarea class="form-input" id="lib-review-note" rows="3" placeholder="本次评审重点、希望评审人关注什么..."></textarea>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button type="submit" class="btn btn-primary btn-sm">📤 发起评审</button>
+      </div>
+    </form>
+
+    <div style="font-size:0.85rem;font-weight:600;margin-bottom:8px">历史评审记录</div>
+    <div id="lib-review-list" style="max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:6px">
+      <div style="color:var(--text-muted);text-align:center;padding:18px">加载中...</div>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
@@ -523,10 +657,18 @@ function renderTree() {
 
         const libCollapsed = collapsedLibs.has(lib.id);
 
+        const reviewBadge = libReviewBadgeHtml(lib);
+        const sharedBadge = libSharedBadgeHtml(lib);
+        const canShare = lib.can_share || lib.shared_with_me === false /* fallback：若后端没返回 can_share，作者本人前端按可共享渲染由后端二次校验兜底 */;
+        const shareBtn = `<span class="tc-tree-add" style="color:#3b82f6" onclick="event.stopPropagation();openLibShareDialog(${lib.id}, '${(lib.name || '').replace(/'/g, "\\'")}')" title="共享/邀请评审">👥</span>`;
+        const reviewBtn = lib.can_manage ? `<span class="tc-tree-add" style="color:#10b981" onclick="event.stopPropagation();openLibReviewDialog(${lib.id}, '${(lib.name || '').replace(/'/g, "\\'")}')" title="发起/查看评审">📝</span>` : '';
         html += `<div class="tc-tree-lib${isLibSel ? ' active' : ''}" onclick="selectNode(${lib.id}, null)" style="color:${isLibSel ? 'var(--accent)' : ''}">
             <span class="tc-tree-arrow${libCollapsed ? '' : ' open'}" onclick="event.stopPropagation();toggleLib(${lib.id})">›</span> ${libCollapsed ? '📁' : '📂'} ${escHtml(lib.name)}
+            ${reviewBadge}${sharedBadge}
             <span class="tc-tree-cnt">${cases.length}</span>
             <span class="tc-tree-add" onclick="event.stopPropagation();openSubdirModal(${lib.id}, '')" title="新增子目录">+</span>
+            ${shareBtn}
+            ${reviewBtn}
         </div>`;
 
         function renderDir(tree, parentPath, depth) {
@@ -597,8 +739,6 @@ function closeSubdirModal() {
     $('#subdir-modal').classList.remove('active');
 }
 
-$('#subdir-modal').addEventListener('click', e => { if (e.target === $('#subdir-modal')) closeSubdirModal(); });
-
 $('#subdir-form').addEventListener('submit', async e => {
     e.preventDefault();
     const name = $('#subdir-name-input').value.trim();
@@ -635,8 +775,6 @@ function openDelDirModal(libId, path, name) {
 function closeDelDirModal() {
     $('#del-dir-modal').classList.remove('active');
 }
-
-$('#del-dir-modal').addEventListener('click', e => { if (e.target === $('#del-dir-modal')) closeDelDirModal(); });
 
 async function confirmDelDir() {
     try {
@@ -762,6 +900,7 @@ function renderListTab() {
         <div class="tc-case-card">
             <span class="tc-case-id">${c.case_id || '-'}</span>
             <span class="tc-case-title" onclick="openCaseTab(allCaseById(${c.id}))" title="${escHtml(c.title)}">${escHtml(c.title)}</span>
+            <span class="tc-tapd-cell">${c.tapd_story_url ? `<a class="tc-tapd-link bound" href="${escHtml(c.tapd_story_url)}" target="_blank" title="${escHtml(c.tapd_story_title || c.tapd_story_url)}">🔗</a>${c.tapd_story_title ? `<span class="tc-tapd-title" onclick="window.open('${escHtml(c.tapd_story_url)}','_blank')" title="${escHtml(c.tapd_story_title)}">${escHtml(c.tapd_story_title)}</span>` : ''}` : `<span class="tc-tapd-link unbound" onclick="openTapdBindModal(${c.id})" title="点击绑定需求">🔗</span>`}</span>
             <span class="tc-case-prio"><span class="prio-badge ${PRIO_CLS[c.priority]}">${c.priority || '-'}</span></span>
             <span class="tc-case-author">${c.created_by || '-'}</span>
             <span class="tc-case-time">${c.updated_at ? c.updated_at.substring(0,16).replace('T',' ') : '-'}</span>
@@ -974,7 +1113,6 @@ function openCaseModal() {
     $('#case-modal').classList.add('active');
 }
 function closeCaseModal() { $('#case-modal').classList.remove('active'); }
-$('#case-modal').addEventListener('click', e => { if (e.target === $('#case-modal')) closeCaseModal(); });
 
 function loadModuleOptions() {
     if (!selectedLibId) return;
@@ -999,6 +1137,8 @@ async function editCase(id) {
     $('#case-pre-input').value = content.preconditions || '';
     $('#case-steps-input').value = Array.isArray(content.steps) ? content.steps.join('\n') : '';
     $('#case-results-input').value = Array.isArray(content.expected_results) ? content.expected_results.join('\n') : '';
+    $('#case-tapd-url-input').value = c.tapd_story_url || '';
+    $('#case-tapd-title-input').value = c.tapd_story_title || '';
     $('#case-modal').classList.add('active');
 }
 
@@ -1015,6 +1155,8 @@ $('#case-form').addEventListener('submit', async e => {
         module_path: (data.module_path || '').trim(),
         content: { status: data.status, preconditions: data.preconditions, steps, expected_results },
         tags: data.module_path ? [data.module_path.split('/').pop()] : [],
+        tapd_story_url: (data.tapd_story_url || '').trim(),
+        tapd_story_title: (data.tapd_story_title || '').trim(),
     };
     const editId = $('#case-edit-id').value;
     try {
@@ -1054,7 +1196,6 @@ function openCreateLibraryModal() {
     $('#library-modal').classList.add('active');
 }
 function closeLibraryModal() { $('#library-modal').classList.remove('active'); }
-$('#library-modal').addEventListener('click', e => { if (e.target === $('#library-modal')) closeLibraryModal(); });
 
 async function fillLibProjects() {
     try {
@@ -1085,35 +1226,446 @@ $('#library-form').addEventListener('submit', async e => {
     } catch(err) { showToast('失败: ' + err.message, 'error'); }
 });
 
-// ==================== AI 生成 ====================
-function openAIGenerateModal() {
-    const sel = $('#ai-lib-select');
-    sel.innerHTML = allLibraries.map(l => `<option value="${l.id}"${l.id === selectedLibId ? ' selected' : ''}>${l.name}</option>`).join('');
-    $('#ai-modal').classList.add('active');
+
+
+// ==================== TAPD 需求绑定 ====================
+function openTapdBindModal(caseId) {
+    const c = allCaseById(caseId);
+    if (!c) return;
+    $('#tapd-bind-case-id').value = caseId;
+    $('#tapd-bind-mode').value = 'single';
+    $('#tapd-bind-title').textContent = '🔗 绑定 TAPD 需求';
+    $('#tapd-bind-scope').innerHTML = `<strong>单条用例</strong>：${escHtml(c.title)}`;
+    $('#tapd-bind-url').value = c.tapd_story_url || '';
+    $('#tapd-bind-story-title').value = c.tapd_story_title || '';
+    $('#tapd-bind-modal').classList.add('active');
+    setTimeout(() => $('#tapd-bind-url').focus(), 100);
 }
 
-$('#ai-form').addEventListener('submit', async e => {
-    e.preventDefault();
-    const libId = $('#ai-lib-select').value;
-    const prompt = $('#ai-prompt-input').value.trim();
-    if (!prompt) return;
-    showToast('AI 正在生成用例...', 'info');
-    try {
-        const res = await API.request('POST', '/ai/testcases/chat', {
-            library_id: parseInt(libId), message: prompt, action: 'generate'
-        });
-        if (res.cases && res.cases.length) {
-            await API.request('POST', `/testcase-libraries/${libId}/cases/batch`, { cases: res.cases });
-            showToast(`已生成 ${res.cases.length} 条用例`, 'success');
-            casesCache[libId] = await API.request('GET', `/testcase-libraries/${libId}/cases?include_placeholders=true`);
-            renderTree();
-            renderListTab();
-        } else {
-            showToast(res.reply || '未生成用例', 'info');
+function openTapdBindBatch() {
+    if (!selectedLibId) { showToast('请先选择用例库', 'warning'); return; }
+    const cases = getFilteredCases();
+    if (!cases.length) { showToast('当前无用例', 'warning'); return; }
+    $('#tapd-bind-case-id').value = '';
+    $('#tapd-bind-mode').value = 'batch';
+    $('#tapd-bind-title').textContent = '🔗 批量绑定 TAPD 需求';
+    const scopeLabel = selectedPath ? `目录「${selectedPath}」下 ${cases.length} 条用例` : `全部 ${cases.length} 条用例`;
+    $('#tapd-bind-scope').innerHTML = `<strong>批量绑定</strong>：${scopeLabel}`;
+    $('#tapd-bind-url').value = '';
+    $('#tapd-bind-story-title').value = '';
+    $('#tapd-bind-modal').classList.add('active');
+    setTimeout(() => $('#tapd-bind-url').focus(), 100);
+}
+
+function closeTapdBindModal() {
+    $('#tapd-bind-modal').classList.remove('active');
+}
+
+// 粘贴时自动解析：1) 只有链接 → 自动获取标题；2) 标题+链接 → 自动填充
+$('#tapd-bind-url').addEventListener('paste', function(e) {
+    setTimeout(() => {
+        const pasted = this.value.trim();
+        if (!pasted) return;
+        // 尝试匹配「标题 + URL」格式
+        const titleUrlMatch = pasted.match(/^(.+?)\s+(https?:\/\/\S+)$/s);
+        if (titleUrlMatch) {
+            const title = titleUrlMatch[1].trim();
+            const url = titleUrlMatch[2].trim();
+            this.value = url;
+            const titleInput = $('#tapd-bind-story-title');
+            if (!titleInput.value.trim()) titleInput.value = title;
+            return;
         }
-        $('#ai-modal').classList.remove('active');
-    } catch(err) { showToast('AI 生成失败: ' + err.message, 'error'); }
+        // 尝试匹配「URL + 标题」格式
+        const urlTitleMatch = pasted.match(/^(https?:\/\/\S+)\s+(.+)$/s);
+        if (urlTitleMatch) {
+            const url = urlTitleMatch[1].trim();
+            const title = urlTitleMatch[2].trim();
+            this.value = url;
+            const titleInput = $('#tapd-bind-story-title');
+            if (!titleInput.value.trim()) titleInput.value = title;
+            return;
+        }
+        // 只有链接：自动从 TAPD 获取标题
+        const tapdUrlMatch = pasted.match(/^https?:\/\/www\.tapd\.cn\/\d+\/stories\/view\/\d+/);
+        if (tapdUrlMatch && !$('#tapd-bind-story-title').value.trim()) {
+            fetchTapdStoryTitle(pasted);
+        }
+    }, 50);
 });
+
+// 自动获取 TAPD 需求标题
+async function fetchTapdStoryTitle(storyUrl) {
+    try {
+        const titleInput = $('#tapd-bind-story-title');
+        titleInput.placeholder = '正在获取标题...';
+        const res = await API.request('GET', `/tapd/story-title?story_url=${encodeURIComponent(storyUrl)}`);
+        if (res && res.title && !titleInput.value.trim()) {
+            titleInput.value = res.title;
+        }
+        titleInput.placeholder = '需求标题';
+    } catch(e) {
+        // 获取失败不影响绑定流程
+        $('#tapd-bind-story-title').placeholder = '需求标题';
+    }
+}
+
+// 编辑用例弹窗的 TAPD URL 粘贴自动解析
+$('#case-tapd-url-input').addEventListener('paste', function(e) {
+    setTimeout(() => {
+        const pasted = this.value.trim();
+        if (!pasted) return;
+        const titleUrlMatch = pasted.match(/^(.+?)\s+(https?:\/\/\S+)$/s);
+        if (titleUrlMatch) {
+            this.value = titleUrlMatch[2].trim();
+            const ti = $('#case-tapd-title-input');
+            if (!ti.value.trim()) ti.value = titleUrlMatch[1].trim();
+            return;
+        }
+        const urlTitleMatch = pasted.match(/^(https?:\/\/\S+)\s+(.+)$/s);
+        if (urlTitleMatch) {
+            this.value = urlTitleMatch[1].trim();
+            const ti = $('#case-tapd-title-input');
+            if (!ti.value.trim()) ti.value = urlTitleMatch[2].trim();
+            return;
+        }
+        const tapdUrlMatch = pasted.match(/^https?:\/\/www\.tapd\.cn\/\d+\/stories\/view\/\d+/);
+        if (tapdUrlMatch && !$('#case-tapd-title-input').value.trim()) {
+            // 复用 fetchTapdStoryTitle，但标题填到 case-tapd-title-input
+            fetchTapdStoryTitleForCase(pasted);
+        }
+    }, 50);
+});
+
+async function fetchTapdStoryTitleForCase(storyUrl) {
+    try {
+        const titleInput = $('#case-tapd-title-input');
+        titleInput.placeholder = '正在获取标题...';
+        const res = await API.request('GET', `/tapd/story-title?story_url=${encodeURIComponent(storyUrl)}`);
+        if (res && res.title && !titleInput.value.trim()) {
+            titleInput.value = res.title;
+        }
+        titleInput.placeholder = '需求标题（可选）';
+    } catch(e) {
+        $('#case-tapd-title-input').placeholder = '需求标题（可选）';
+    }
+}
+
+$('#tapd-bind-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const url = $('#tapd-bind-url').value.trim();
+    const title = $('#tapd-bind-story-title').value.trim();
+    const mode = $('#tapd-bind-mode').value;
+    const caseId = $('#tapd-bind-case-id').value;
+
+    if (!url) { showToast('请输入 TAPD 需求链接', 'warning'); return; }
+
+    try {
+        if (mode === 'single' && caseId) {
+            // 单条绑定
+            const c = allCaseById(parseInt(caseId));
+            if (!c) { showToast('用例不存在', 'error'); return; }
+            await API.request('PUT', `/testcase-libraries/${c.library_id}/cases/${caseId}/tapd-bind`, {
+                tapd_story_url: url,
+                tapd_story_title: title,
+            });
+            showToast('需求已绑定', 'success');
+        } else {
+            // 批量绑定
+            const payload = {
+                tapd_story_url: url,
+                tapd_story_title: title,
+            };
+            if (selectedPath !== null) {
+                payload.module_path = selectedPath;
+            } else {
+                // 全库绑定 — 用 module_path=null 配合 case_ids
+                const cases = getFilteredCases();
+                payload.case_ids = cases.map(c => c.id);
+            }
+            const res = await API.request('POST', `/testcase-libraries/${selectedLibId}/cases/tapd-bind-batch`, payload);
+            showToast(res.message || '批量绑定成功', 'success');
+        }
+        closeTapdBindModal();
+        // 刷新数据
+        casesCache[selectedLibId] = await API.request('GET', `/testcase-libraries/${selectedLibId}/cases?include_placeholders=true`);
+        renderTree();
+        renderListTab();
+    } catch(err) {
+        showToast('绑定失败: ' + err.message, 'error');
+    }
+});
+
+
+// ==================== 用例库 共享 / 评审 ====================
+
+function libReviewBadgeHtml(lib) {
+    const st = lib && lib.review_status;
+    if (!st || st === 'draft') return '';
+    const map = {
+        pending_review: { txt: '评审中', color: '#f59e0b', bg: 'rgba(245,158,11,0.15)' },
+        approved:       { txt: '已通过', color: '#10b981', bg: 'rgba(16,185,129,0.15)' },
+        rejected:       { txt: '已拒绝', color: '#ef4444', bg: 'rgba(239,68,68,0.15)' },
+    };
+    const c = map[st]; if (!c) return '';
+    return `<span style="margin-left:6px;padding:1px 6px;border-radius:4px;font-size:0.7rem;color:${c.color};background:${c.bg}">${c.txt}</span>`;
+}
+
+function libSharedBadgeHtml(lib) {
+    if (!lib) return '';
+    if (lib.shared_with_me) {
+        const perm = lib.my_share_permission || 'readonly';
+        return `<span style="margin-left:6px;padding:1px 6px;border-radius:4px;font-size:0.7rem;color:#3b82f6;background:rgba(59,130,246,0.15)" title="他人共享给我（${perm}）">共享给我</span>`;
+    }
+    if (lib.active_share_count && lib.active_share_count > 0) {
+        return `<span style="margin-left:6px;padding:1px 6px;border-radius:4px;font-size:0.7rem;color:#8b5cf6;background:rgba(139,92,246,0.15)" title="已开放 ${lib.active_share_count} 项共享">共享 ${lib.active_share_count}</span>`;
+    }
+    return '';
+}
+
+// -------- 共享弹窗 --------
+function openLibShareDialog(libId, libName) {
+    document.getElementById('lib-share-id').value = libId;
+    document.getElementById('lib-share-name').textContent = libName || `#${libId}`;
+    document.getElementById('lib-share-form-type').value = 'user';
+    onLibShareTypeChange();
+    document.getElementById('lib-share-form-target').value = '';
+    document.getElementById('lib-share-form-perm').value = 'reviewer';
+    document.getElementById('lib-share-form-expires').value = '';
+    document.getElementById('lib-share-form-note').value = '';
+    document.getElementById('lib-share-modal').classList.add('active');
+    loadLibShareList();
+}
+
+function closeLibShareDialog() {
+    document.getElementById('lib-share-modal').classList.remove('active');
+}
+
+function onLibShareTypeChange() {
+    const t = document.getElementById('lib-share-form-type').value;
+    const wrap = document.getElementById('lib-share-target-wrap');
+    const label = document.getElementById('lib-share-target-label');
+    const inp = document.getElementById('lib-share-form-target');
+    if (t === 'public') {
+        wrap.style.display = 'none';
+        inp.value = '';
+    } else {
+        wrap.style.display = '';
+        if (t === 'user') {
+            label.textContent = '用户 ID';
+            inp.placeholder = '输入 user_id';
+        } else {
+            label.textContent = 'OpenClaw ID';
+            inp.placeholder = '输入 openclaw_id';
+        }
+    }
+}
+
+async function loadLibShareList() {
+    const libId = document.getElementById('lib-share-id').value;
+    const el = document.getElementById('lib-share-list');
+    el.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:18px">加载中...</div>';
+    try {
+        const r = await API.request('GET', `/testcase-libraries/${libId}/shares`);
+        const items = r.shares || [];
+        if (!items.length) {
+            el.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:18px">尚未授权给任何用户/OpenClaw</div>';
+            return;
+        }
+        el.innerHTML = items.map(s => {
+            const stateBadge = s.is_active
+                ? '<span style="color:#10b981">● 生效</span>'
+                : '<span style="color:var(--text-muted)">○ 已过期</span>';
+            const target = s.share_type === 'public'
+                ? '🌐 全部登录用户/OpenClaw'
+                : (s.share_type === 'user'
+                    ? `👤 用户 #${s.target_user_id} ${escHtml(s.target_user_name||'')}`
+                    : `🤖 OpenClaw #${s.target_claw_id} ${escHtml(s.target_claw_name||'')}`);
+            const permBadge = `<span style="margin-left:6px;padding:0 6px;border-radius:4px;font-size:0.72rem;background:rgba(59,130,246,0.12);color:#3b82f6">${escHtml(s.permission||'reviewer')}</span>`;
+            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px">
+                <div style="min-width:0;flex:1">
+                  <div>${target} ${permBadge} ${stateBadge}</div>
+                  <div style="font-size:0.76rem;color:var(--text-muted);margin-top:2px">
+                    by ${escHtml(s.granted_by||'-')}
+                    ${s.expires_at ? ` · 至 ${escHtml(String(s.expires_at).slice(0,16))}` : ' · 永久'}
+                    ${s.note ? ` · ${escHtml(s.note)}` : ''}
+                  </div>
+                </div>
+                <button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="revokeLibShare(${s.id})">撤销</button>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        el.innerHTML = `<div style="color:#ef4444;padding:12px">加载失败：${escHtml(e.message||'')}</div>`;
+    }
+}
+
+async function revokeLibShare(shareId) {
+    if (!confirm('确认撤销此授权？')) return;
+    try {
+        await API.request('DELETE', `/testcase-libraries/shares/${shareId}`);
+        showToast('已撤销', 'success');
+        loadLibShareList();
+        await loadTree();
+    } catch (e) { showToast('撤销失败：' + e.message, 'error'); }
+}
+
+document.getElementById('lib-share-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const libId = document.getElementById('lib-share-id').value;
+    const share_type = document.getElementById('lib-share-form-type').value;
+    const target = document.getElementById('lib-share-form-target').value.trim();
+    const permission = document.getElementById('lib-share-form-perm').value;
+    const expires = document.getElementById('lib-share-form-expires').value.trim();
+    const note = document.getElementById('lib-share-form-note').value.trim();
+
+    const body = { share_type, permission, note };
+    if (share_type === 'user') {
+        if (!target) { showToast('请填写 user_id', 'warning'); return; }
+        body.target_user_id = parseInt(target, 10);
+    } else if (share_type === 'claw') {
+        if (!target) { showToast('请填写 openclaw_id', 'warning'); return; }
+        body.target_claw_id = parseInt(target, 10);
+    }
+    if (expires) body.expires_at = expires;
+
+    try {
+        await API.request('POST', `/testcase-libraries/${libId}/shares`, body);
+        showToast('授权已添加', 'success');
+        document.getElementById('lib-share-form-target').value = '';
+        document.getElementById('lib-share-form-note').value = '';
+        document.getElementById('lib-share-form-expires').value = '';
+        loadLibShareList();
+        await loadTree();
+    } catch (e) { showToast('添加失败：' + e.message, 'error'); }
+});
+
+async function toggleLibPublicShare(on) {
+    const libId = document.getElementById('lib-share-id').value;
+    try {
+        if (on) {
+            await API.request('POST', `/testcase-libraries/${libId}/shares/public`, {});
+            showToast('已开启全部公开', 'success');
+        } else {
+            await API.request('DELETE', `/testcase-libraries/${libId}/shares/public`);
+            showToast('已关闭全部公开', 'success');
+        }
+        loadLibShareList();
+        await loadTree();
+    } catch (e) { showToast('操作失败：' + e.message, 'error'); }
+}
+
+// -------- 评审弹窗 --------
+function openLibReviewDialog(libId, libName) {
+    document.getElementById('lib-review-libid').value = libId;
+    document.getElementById('lib-review-name').textContent = libName || `#${libId}`;
+    document.getElementById('lib-review-scope').value = '';
+    document.getElementById('lib-review-note').value = '';
+    document.getElementById('lib-review-modal').classList.add('active');
+    loadLibReviewList();
+}
+
+function closeLibReviewDialog() {
+    document.getElementById('lib-review-modal').classList.remove('active');
+}
+
+const REVIEW_STATUS_MAP = {
+    draft:          { txt: '草稿',   color: '#6b7280' },
+    pending_review: { txt: '评审中', color: '#f59e0b' },
+    submitted:      { txt: '评审中', color: '#f59e0b' },
+    approved:       { txt: '已通过', color: '#10b981' },
+    rejected:       { txt: '已拒绝', color: '#ef4444' },
+    withdrawn:      { txt: '已撤回', color: '#6b7280' },
+};
+function reviewStatusBadge(st) {
+    const c = REVIEW_STATUS_MAP[st] || { txt: st || '-', color: '#6b7280' };
+    return `<span style="color:${c.color};font-weight:600">${c.txt}</span>`;
+}
+
+async function loadLibReviewList() {
+    const libId = document.getElementById('lib-review-libid').value;
+    const lib = (allLibraries || []).find(x => x.id == libId);
+    document.getElementById('lib-review-current-status').innerHTML = reviewStatusBadge(lib && lib.review_status || 'draft');
+    document.getElementById('lib-review-current-id').textContent =
+        (lib && lib.current_review_id) ? `(当前 review #${lib.current_review_id})` : '';
+
+    const el = document.getElementById('lib-review-list');
+    el.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:18px">加载中...</div>';
+    try {
+        const r = await API.request('GET', `/testcase-libraries/${libId}/reviews`);
+        const items = r.reviews || [];
+        if (!items.length) {
+            el.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:18px">暂无评审记录</div>';
+            return;
+        }
+        el.innerHTML = items.map(rv => {
+            const isOpen = rv.status === 'submitted';
+            const actions = [];
+            if (isOpen) {
+                actions.push(`<button class="btn btn-primary btn-sm" onclick="approveLibReview(${rv.id})">✓ 通过</button>`);
+                actions.push(`<button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="rejectLibReview(${rv.id})">✕ 拒绝</button>`);
+                actions.push(`<button class="btn btn-ghost btn-sm" onclick="withdrawLibReview(${rv.id})">↩ 撤回</button>`);
+            }
+            return `<div style="padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                  <div>#${rv.id} ${reviewStatusBadge(rv.status)} <span style="color:var(--text-muted);font-size:0.78rem">by ${escHtml(rv.submitted_by||'-')} · ${escHtml(String(rv.submitted_at||'').slice(0,16))}</span></div>
+                  <div style="display:flex;gap:6px">${actions.join('')}</div>
+                </div>
+                ${rv.scope_summary ? `<div style="font-size:0.8rem;margin-top:4px"><b>范围：</b>${escHtml(rv.scope_summary)}</div>` : ''}
+                ${rv.submit_note ? `<div style="font-size:0.8rem;color:var(--text-secondary);margin-top:2px">${escHtml(rv.submit_note)}</div>` : ''}
+                ${rv.decided_by ? `<div style="font-size:0.76rem;color:var(--text-muted);margin-top:4px">→ ${escHtml(rv.decided_by)} · ${escHtml(String(rv.decided_at||'').slice(0,16))} ${rv.decision_note ? '· ' + escHtml(rv.decision_note) : ''}</div>` : ''}
+            </div>`;
+        }).join('');
+    } catch (e) {
+        el.innerHTML = `<div style="color:#ef4444;padding:12px">加载失败：${escHtml(e.message||'')}</div>`;
+    }
+}
+
+document.getElementById('lib-review-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const libId = document.getElementById('lib-review-libid').value;
+    const scope = document.getElementById('lib-review-scope').value.trim();
+    const note = document.getElementById('lib-review-note').value.trim();
+    try {
+        await API.request('POST', `/testcase-libraries/${libId}/reviews`, {
+            scope_summary: scope,
+            submit_note: note,
+        });
+        showToast('已发起评审', 'success');
+        document.getElementById('lib-review-scope').value = '';
+        document.getElementById('lib-review-note').value = '';
+        loadLibReviewList();
+        await loadTree();
+    } catch (e) { showToast('发起失败：' + e.message, 'error'); }
+});
+
+async function approveLibReview(reviewId) {
+    const note = prompt('通过意见（可选）') || '';
+    try {
+        await API.request('POST', `/testcase-libraries/reviews/${reviewId}/approve`, { decision_note: note });
+        showToast('已通过', 'success');
+        loadLibReviewList(); await loadTree();
+    } catch (e) { showToast('操作失败：' + e.message, 'error'); }
+}
+
+async function rejectLibReview(reviewId) {
+    const note = prompt('拒绝原因（必填）');
+    if (note === null) return;
+    if (!note.trim()) { showToast('请填写拒绝原因', 'warning'); return; }
+    try {
+        await API.request('POST', `/testcase-libraries/reviews/${reviewId}/reject`, { decision_note: note });
+        showToast('已拒绝', 'success');
+        loadLibReviewList(); await loadTree();
+    } catch (e) { showToast('操作失败：' + e.message, 'error'); }
+}
+
+async function withdrawLibReview(reviewId) {
+    if (!confirm('确认撤回此次评审？')) return;
+    try {
+        await API.request('POST', `/testcase-libraries/reviews/${reviewId}/withdraw`, {});
+        showToast('已撤回', 'success');
+        loadLibReviewList(); await loadTree();
+    } catch (e) { showToast('操作失败：' + e.message, 'error'); }
+}
 
 init();
 </script>
