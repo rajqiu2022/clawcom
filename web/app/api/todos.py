@@ -7,23 +7,23 @@
   periodic   — 周期容错-跳过，错过就下次
   retry      — 周期容错-重试，错过延后重试
 """
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import json
 import urllib.request
 from flask import request, jsonify, session as flask_session
 from sqlalchemy import func
 from app import db
-from app.models import ClawTodo, ClawTodoLog, OpenClawInstance, User, SystemConfig
+from app.models import ClawTodo, ClawTodoLog, OpenClawInstance, User, SystemConfig, Project
 from app.api import api_bp
 
 
 def _is_admin_user():
     """检查当前请求是否来自超级管理员（Web session 的 super_admin 或 admin 角色的 OpenClaw Token）"""
-    # Web session 认证 — 仅 super_admin
+    # Web session 认证 — super_admin / admin
     uid = flask_session.get('user_id')
     if uid:
         user = User.query.get(uid)
-        if user and user.role == 'super_admin':
+        if user and user.role in ('super_admin', 'admin'):
             return True
 
     # Bearer Token 认证 — admin 角色的 OpenClaw（龙虾王）Token 映射为超级管理员
@@ -36,6 +36,84 @@ def _is_admin_user():
                     return True
                 break
     return False
+
+
+def _resolve_claw_project_id(claw):
+    if not claw:
+        return None
+    if claw.project_id:
+        return int(claw.project_id)
+    if claw.project_name:
+        p = Project.query.filter_by(name=claw.project_name).first()
+        if p:
+            return int(p.id)
+    return None
+
+
+def _can_review_todo_for_claw(target_claw_id: int) -> bool:
+    """审核权限：super_admin 全量；admin 仅本项目；admin claw token 全量（按用户确认口径）。"""
+    target = OpenClawInstance.query.get(target_claw_id)
+    if not target:
+        return False
+    target_pid = _resolve_claw_project_id(target)
+
+    uid = flask_session.get('user_id')
+    if uid:
+        user = User.query.get(uid)
+        if not user:
+            return False
+        if user.role == 'super_admin':
+            return True
+        if user.role == 'admin':
+            pids = _collect_user_project_ids(user)
+            return bool(target_pid and target_pid in pids)
+        return False
+
+    token_claw = _get_token_claw()
+    if token_claw:
+        if token_claw.role == 'admin':
+            return True
+        return False
+    return False
+
+
+def _get_session_user():
+    uid = flask_session.get('user_id')
+    if not uid:
+        return None
+    return User.query.get(uid)
+
+
+def _get_token_claw():
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
+        return None
+    token = auth[7:]
+    for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
+        if claw.verify_token(token):
+            return claw
+    return None
+
+
+def _collect_user_project_ids(user):
+    ids = set()
+    if not user:
+        return ids
+    for pid in (user.managed_projects or []):
+        try:
+            ids.add(int(pid))
+        except Exception:
+            continue
+    if user.bound_claw_id:
+        claw = OpenClawInstance.query.get(user.bound_claw_id)
+        if claw:
+            if claw.project_id:
+                ids.add(int(claw.project_id))
+            elif claw.project_name:
+                p = Project.query.filter_by(name=claw.project_name).first()
+                if p:
+                    ids.add(int(p.id))
+    return ids
 
 
 def _compute_init_gate(claw_id: int) -> dict:
@@ -160,8 +238,18 @@ def create_todo(claw_id):
     if not data or not data.get('title'):
         return jsonify({'error': 'title 必填'}), 400
 
-    # created_by 优先取请求体参数，其次取 OpenClaw 名称，兜底 system
-    created_by = data.get('created_by') or claw.name or 'system'
+    # created_by 优先级：请求体显式传入 > 登录用户（Hub 手动下发）> Bearer token 对应 claw（自动任务）> 目标 claw 名 > system
+    created_by = data.get('created_by')
+    if not created_by:
+        session_user = _get_session_user()
+        if session_user:
+            created_by = session_user.display_name or session_user.username
+    if not created_by:
+        token_claw = _get_token_claw()
+        if token_claw:
+            created_by = token_claw.name
+    if not created_by:
+        created_by = claw.name or 'system'
 
     todo = ClawTodo(
         openclaw_id=claw_id,
@@ -269,20 +357,30 @@ def approve_todo(claw_id, todo_id):
       "log_date": "2026-04-13"   // 指定审核哪天的记录，默认今天
     }
     """
-    if not _is_admin_user():
+    if not _can_review_todo_for_claw(claw_id):
         return jsonify({'error': '仅管理员可审核待办'}), 403
 
-    log_date_str = (request.get_json() or {}).get('log_date')
-    target_date = date.fromisoformat(log_date_str) if log_date_str else date.today()
+    payload = request.get_json() or {}
+    log_date_str = payload.get('log_date')
 
     todo = ClawTodo.query.filter_by(id=todo_id, openclaw_id=claw_id).first_or_404()
-    log = ClawTodoLog.query.filter_by(
-        todo_id=todo_id, openclaw_id=claw_id, log_date=target_date
-    ).first()
-    if not log:
-        return jsonify({'error': '未找到该日期的提交记录'}), 404
-    if log.status != 'submitted':
-        return jsonify({'error': f'当前状态为 {log.status}，只能审核 submitted 状态的记录'}), 400
+    if log_date_str:
+        target_date = date.fromisoformat(log_date_str)
+        log = ClawTodoLog.query.filter_by(
+            todo_id=todo_id, openclaw_id=claw_id, log_date=target_date
+        ).first()
+        if not log:
+            return jsonify({'error': '未找到该日期的提交记录'}), 404
+        if log.status != 'submitted':
+            return jsonify({'error': f'当前状态为 {log.status}，只能审核 submitted 状态的记录'}), 400
+    else:
+        # 未指定日期时，默认审核该任务最近一条 submitted 记录
+        log = (ClawTodoLog.query
+               .filter_by(todo_id=todo_id, openclaw_id=claw_id, status='submitted')
+               .order_by(ClawTodoLog.log_date.desc(), ClawTodoLog.created_at.desc())
+               .first())
+        if not log:
+            return jsonify({'error': '未找到可审核的 submitted 记录'}), 404
 
     log.status = 'approved'
     db.session.commit()
@@ -292,6 +390,80 @@ def approve_todo(claw_id, todo_id):
         if gate.get('passed'):
             _notify_registration_pass(claw_id, gate)
     return jsonify({'log': log.to_dict(), 'registration_gate': gate})
+
+
+@api_bp.route('/todos/submitted', methods=['GET'])
+def list_submitted_todos():
+    """全局待审核队列（submitted）"""
+    user = _get_session_user()
+    token_claw = _get_token_claw()
+    if user:
+        if user.role not in ('super_admin', 'admin'):
+            return jsonify({'error': '仅管理员可查看待审核队列'}), 403
+    elif token_claw:
+        if token_claw.role != 'admin':
+            return jsonify({'error': '仅管理员可查看待审核队列'}), 403
+    else:
+        return jsonify({'error': '仅管理员可查看待审核队列'}), 403
+
+    # 默认查询窗口策略：
+    #   - super_admin / admin claw（龙虾王）：默认全量（days=0），避免历史积压被屏蔽
+    #   - 其他 admin（项目管理员）：默认 3 天
+    # 调用方可显式传 days 覆盖；days<=0 表示不限日期
+    is_global = (user and user.role == 'super_admin') or (token_claw and token_claw.role == 'admin')
+    days = request.args.get('days', type=int)
+    if days is None:
+        days = 0 if is_global else 3
+    limit = request.args.get('limit', 500, type=int)
+    since = None if days <= 0 else (date.today() - timedelta(days=max(1, days) - 1))
+
+    logs_query = (ClawTodoLog.query
+                  .filter(ClawTodoLog.status == 'submitted'))
+    if since is not None:
+        logs_query = logs_query.filter(ClawTodoLog.log_date >= since)
+    logs = (logs_query
+            .order_by(ClawTodoLog.completed_at.desc(), ClawTodoLog.created_at.desc())
+            .limit(limit)
+            .all())
+
+    # Web admin 维持项目范围；super_admin 与 admin claw（龙虾王）全量
+    if user and user.role == 'admin':
+        visible_project_ids = _collect_user_project_ids(user)
+    else:
+        visible_project_ids = None
+    project_name_map = {}
+    if visible_project_ids:
+        for p in Project.query.filter(Project.id.in_(list(visible_project_ids))).all():
+            project_name_map[p.name] = p.id
+
+    items = []
+    for log in logs:
+        todo = ClawTodo.query.get(log.todo_id)
+        if not todo:
+            continue
+        claw = OpenClawInstance.query.get(log.openclaw_id)
+        if not claw:
+            continue
+        if visible_project_ids is not None:
+            claw_pid = claw.project_id
+            if not claw_pid and claw.project_name:
+                claw_pid = project_name_map.get(claw.project_name)
+            if not claw_pid or claw_pid not in visible_project_ids:
+                continue
+        items.append({
+            'id': todo.id,
+            'title': todo.title,
+            'description': todo.description or '',
+            'openclaw_name': claw.name,
+            'openclaw_id': claw.id,
+            'created_by': todo.created_by,
+            'today_status': 'submitted',
+            'today_completed_at': str(log.completed_at) if log.completed_at else None,
+            'result_summary': log.result_summary or '',
+            'log_date': str(log.log_date),
+        })
+
+    return jsonify(items)
 
 
 @api_bp.route('/openclaws/<int:claw_id>/todos/<int:todo_id>/skip', methods=['POST'])

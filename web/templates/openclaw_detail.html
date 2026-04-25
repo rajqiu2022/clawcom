@@ -96,7 +96,7 @@
         </div>
         <!-- 页签切换 -->
         <div style="display:flex;gap:0;border-bottom:2px solid var(--border);margin-bottom:12px">
-            <button class="dashboard-subtab active" id="todo-subtab-today" onclick="switchTodoSubTab('today')">📌 今日待办</button>
+            <button class="dashboard-subtab active" id="todo-subtab-today" onclick="switchTodoSubTab('today')">📌 今日待办 <span id="detail-todos-badge" class="tag tag-blue" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
             <button class="dashboard-subtab" id="todo-subtab-submitted" onclick="switchTodoSubTab('submitted')">📝 待审核 <span id="detail-submitted-badge" class="tag tag-yellow" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
             <button class="dashboard-subtab" id="todo-subtab-history" onclick="switchTodoSubTab('history')">📋 近3天记录</button>
         </div>
@@ -189,10 +189,49 @@
 
 <!-- Skills 配置 -->
 <div class="tab-content" id="tab-skills" style="display:none">
-    <div class="skill-grid" id="skills-grid">
+    <div id="skills-grid">
         <div class="loading"><span class="spinner"></span></div>
     </div>
 </div>
+
+<style>
+.skills-section { margin-bottom: 20px; }
+.skills-section-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; margin-bottom: 12px;
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer; user-select: none;
+    transition: background var(--transition), border-color var(--transition);
+}
+.skills-section-header:hover { border-color: var(--accent); }
+.skills-section-title { font-weight: 600; font-size: 0.95rem; color: var(--text-primary); }
+.skills-section-title .count { color: var(--text-muted); font-weight: 400; margin-left: 6px; }
+.skills-section-toggle {
+    color: var(--text-muted); font-size: 0.82rem;
+    display: inline-flex; align-items: center; gap: 4px;
+}
+.skills-section.collapsed .skills-section-body { display: none; }
+.skills-section.collapsed .skills-section-toggle .arrow { transform: rotate(-90deg); }
+.skills-section-toggle .arrow { display: inline-block; transition: transform .15s; }
+.skills-section-empty {
+    padding: 24px; text-align: center; color: var(--text-muted);
+    font-size: 0.88rem; border: 1px dashed var(--border); border-radius: var(--radius);
+}
+.skill-card.skill-card-unassigned {
+    border-style: dashed; opacity: .85;
+}
+.skill-card.skill-card-unassigned:hover { opacity: 1; }
+.rec-badge {
+    display: inline-block; padding: 2px 8px; font-size: 0.7rem;
+    border-radius: 10px; font-weight: 500; line-height: 1.4;
+    white-space: nowrap;
+}
+.rec-strong  { background: rgba(249,115,22,0.16); color: var(--accent);   border: 1px solid rgba(249,115,22,0.35); }
+.rec-role    { background: rgba(34,197,94,0.14);  color: #22c55e;          border: 1px solid rgba(34,197,94,0.35);  }
+.rec-keyword { background: rgba(59,130,246,0.14); color: #3b82f6;          border: 1px solid rgba(59,130,246,0.35); }
+.skill-card-recommend { border-color: rgba(249,115,22,0.5); }
+</style>
 
 <!-- 工作日报 -->
 <div class="tab-content" id="tab-reports" style="display:none">
@@ -201,11 +240,23 @@
     </div>
 </div>
 
-<!-- 工作规范（显示已安装的 Rules） -->
+<!-- 日报详情弹窗 -->
+<div class="modal-overlay" id="report-detail-modal">
+    <div class="modal" style="max-width:780px;max-height:88vh;display:flex;flex-direction:column">
+        <div class="modal-title" id="report-detail-title">📋 日报详情</div>
+        <div id="report-detail-meta" style="font-size:0.82rem;color:var(--text-muted);margin-bottom:12px"></div>
+        <div id="report-detail-body" style="overflow-y:auto;padding-right:6px;flex:1 1 auto"></div>
+        <div class="modal-actions" style="margin-top:12px">
+            <button class="btn btn-ghost" onclick="closeReportDetail()">关闭</button>
+        </div>
+    </div>
+</div>
+
+<!-- 工作规范（与 Skills 配置一致：列出全部规则 + 已装/过期/未装三态 + 重装/移除/分配按钮） -->
 <div class="tab-content" id="tab-config" style="display:none">
     <div class="card">
         <div class="card-header">
-            <h3 class="card-title">已安装的工作规范</h3>
+            <h3 class="card-title">工作规范配置</h3>
             <span id="rules-count" style="font-size:0.82rem;color:var(--text-muted)"></span>
         </div>
         <div id="installed-rules-list">
@@ -266,30 +317,144 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+<style>
+.timeline-item.clickable { cursor: pointer; transition: background .15s, border-color .15s; }
+.timeline-item.clickable:hover { background: var(--bg-hover); border-color: var(--accent); }
+#report-detail-body .markdown-body { line-height:1.8; font-size:0.92rem; color:var(--text-primary); }
+#report-detail-body .markdown-body h1,
+#report-detail-body .markdown-body h2,
+#report-detail-body .markdown-body h3 { margin: 16px 0 8px; }
+#report-detail-body .markdown-body p { margin: 6px 0; }
+#report-detail-body .markdown-body ul,
+#report-detail-body .markdown-body ol { margin: 6px 0; padding-left: 22px; }
+#report-detail-body .markdown-body code {
+    background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px;
+    font-size: 0.86rem; font-family: 'Cascadia Code', monospace;
+}
+#report-detail-body .markdown-body pre {
+    background: var(--bg-secondary); padding: 12px; border-radius: 6px;
+    overflow-x: auto; margin: 8px 0;
+}
+#report-detail-body .markdown-body pre code { background: transparent; padding: 0; }
+#report-detail-body .markdown-body blockquote {
+    margin: 8px 0; padding: 6px 12px;
+    border-left: 3px solid var(--accent); background: var(--bg-secondary); color: var(--text-secondary);
+}
+#report-detail-body .markdown-body table { border-collapse: collapse; margin: 8px 0; }
+#report-detail-body .markdown-body table th,
+#report-detail-body .markdown-body table td { border: 1px solid var(--border); padding: 6px 10px; }
+#report-detail-body .markdown-body img { max-width: 100%; border-radius: 4px; }
+#report-detail-body .report-section { margin-bottom: 18px; }
+#report-detail-body .report-section h4 {
+    margin: 0 0 8px; font-size: 0.95rem;
+    padding-bottom: 4px; border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+#report-detail-body .report-section .empty { color: var(--text-muted); font-size: 0.85rem; padding: 4px 0; }
+#report-detail-body .report-section ol > li { margin-bottom: 6px; }
+</style>
 <script>
 const CLAW_ID = {{ claw_id }};
+let reportsCache = [];
+
+function escapeHtmlReport(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+}
+
+function renderMd(text) {
+    if (text === null || text === undefined || text === '') return '';
+    if (typeof window.marked === 'undefined') {
+        return escapeHtmlReport(String(text)).replace(/\n/g, '<br>');
+    }
+    try {
+        return marked.parse(String(text), { breaks: true, gfm: true });
+    } catch (e) {
+        return escapeHtmlReport(String(text)).replace(/\n/g, '<br>');
+    }
+}
+
+function _itemToText(item) {
+    if (item == null) return '';
+    if (typeof item === 'string') return item;
+    if (typeof item === 'object') {
+        const main = item.task || item.title || item.content || item.name || item.description || '';
+        const extra = [];
+        if (item.duration) extra.push(item.duration);
+        if (item.category) extra.push(item.category);
+        if (item.module) extra.push(item.module);
+        const tail = extra.length ? ` _(${extra.join(' · ')})_` : '';
+        return main ? (main + tail) : JSON.stringify(item);
+    }
+    return String(item);
+}
+
+function _normalizeListForDetail(val) {
+    if (val == null) return [];
+    if (Array.isArray(val)) return val;
+    if (typeof val === 'string') {
+        const s = val.trim();
+        if (!s) return [];
+        try {
+            const parsed = JSON.parse(s);
+            if (Array.isArray(parsed)) return parsed;
+        } catch (e) { /* not JSON */ }
+        let lines = s.replace(/\\n/g, '\n').split('\n').map(l => l.trim()).filter(Boolean);
+        if (lines.length > 1) return lines;
+        const parts = lines[0].split(/[;；]\s*/).map(x => x.trim()).filter(Boolean);
+        if (parts.length > 1) return parts;
+        return [s];
+    }
+    return [val];
+}
+
+function _renderListSection(title, val) {
+    const items = _normalizeListForDetail(val);
+    if (items.length === 0) {
+        return `<div class="report-section"><h4>${title}</h4><div class="empty">无</div></div>`;
+    }
+    const html = items.map(it => `<li><div class="markdown-body">${renderMd(_itemToText(it))}</div></li>`).join('');
+    return `<div class="report-section"><h4>${title}</h4><ol>${html}</ol></div>`;
+}
+
+function showReportDetail(reportId) {
+    const r = reportsCache.find(x => x.id === reportId);
+    if (!r) { showToast('日报数据已过期，正在刷新…', 'warning'); loadReports(); return; }
+    document.getElementById('report-detail-title').textContent =
+        `📋 日报 · ${r.report_date || ''} ${r.report_time || ''}`;
+    document.getElementById('report-detail-meta').textContent =
+        `提交时间：${r.created_at || (r.report_date + ' ' + r.report_time)}`;
+    const body = document.getElementById('report-detail-body');
+    const summaryHtml = r.ai_summary
+        ? `<div class="report-section"><h4>📝 AI 工作小结</h4><div class="markdown-body">${renderMd(r.ai_summary)}</div></div>`
+        : '';
+    body.innerHTML =
+        summaryHtml +
+        _renderListSection('✅ 完成任务', r.tasks_completed) +
+        _renderListSection('💡 新增知识', r.knowledge_recorded) +
+        _renderListSection('🔬 经验记录', r.experience_shared) +
+        _renderListSection('📚 学习的共享知识', r.knowledge_learned);
+    document.getElementById('report-detail-modal').classList.add('active');
+}
+
+function closeReportDetail() {
+    document.getElementById('report-detail-modal').classList.remove('active');
+}
+document.addEventListener('DOMContentLoaded', () => {
+    const m = document.getElementById('report-detail-modal');
+    if (m) m.addEventListener('click', e => { if (e.target === m) closeReportDetail(); });
+});
 let clawData = null;
 let canEditClaw = false;  // 当前用户是否有权编辑此 claw
+let meData = null;
 
 async function loadPermissions() {
     try {
-        const me = await API.request('GET', '/auth/me');
-        const role = me.role || 'guest';
-        if (role === 'super_admin') {
-            canEditClaw = true;
-        } else if (role === 'admin') {
-            // admin 同项目可编辑（这里简化：等 clawData 加载后再判断）
-            canEditClaw = true;  // 先设 true，loadClaw 里精确判断
-        } else if (role === 'user') {
-            canEditClaw = (me.bound_claw_id === CLAW_ID);
-        } else {
-            canEditClaw = false;
-        }
-        // 超管和管理员可删除
-        if (role === 'super_admin' || role === 'admin') {
-            const delBtn = document.getElementById('btn-delete-claw');
-            if (delBtn) delBtn.style.display = '';
-        }
+        meData = await API.request('GET', '/auth/me');
+        const role = meData.role || 'guest';
+        canEditClaw = role === 'super_admin' || role === 'admin' || (role === 'user' && meData.bound_claw_id === CLAW_ID);
     } catch(e) {
         canEditClaw = false;
     }
@@ -309,6 +474,24 @@ function applyPermUI() {
     }
 }
 
+function applyRoleOptions() {
+    const sel = document.getElementById('f-role');
+    if (!sel || !meData) return;
+    const role = meData.role || 'guest';
+    const options = [
+        { value: 'admin', label: '龙虾王(admin)' },
+        { value: 'test_manager', label: '测试经理' },
+        { value: 'module_owner', label: '模块负责人' },
+        { value: 'specialist', label: '专项测试' },
+        { value: 'test_member', label: '测试成员' },
+        { value: 'test_executor', label: '执行成员' },
+    ];
+    const allowed = role === 'super_admin'
+        ? options
+        : options.filter(o => o.value !== 'admin');
+    sel.innerHTML = allowed.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
+}
+
 function switchTab(tab) {
     $$('.tab-item').forEach(t => t.classList.remove('active'));
     $(`.tab-item[data-tab="${tab}"]`).classList.add('active');
@@ -324,26 +507,37 @@ function switchTab(tab) {
 async function loadClaw() {
     try {
         clawData = await API.getClaw(CLAW_ID);
+        applyRoleOptions();
 
-        // 加载项目列表
+        // 加载项目列表（admin claw 额外提供"全平台"选项）
         const projects = await API.listProjects();
         const projectSel = document.getElementById('f-project');
+        const isAdminClaw = (clawData.role === 'admin');
+        const globalOpt = isAdminClaw
+            ? '<option value="__global__">🌐 全平台（admin 专用，跨所有项目）</option>'
+            : '';
         projectSel.innerHTML = '<option value="">-- 未分配项目 --</option>' +
+            globalOpt +
             projects.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
 
         $('#page-claw-name').textContent = clawData.name;
         $('#f-name').value = clawData.name || '';
         $('#f-owner').value = clawData.owner || '';
+        if (!Array.from($('#f-role').options).some(o => o.value === (clawData.role || 'test_member'))) {
+            $('#f-role').appendChild(new Option(clawData.role || 'test_member', clawData.role || 'test_member'));
+        }
         $('#f-role').value = clawData.role || 'test_member';
         $('#f-role-title').value = clawData.role_title || '';
         $('#f-tag').value = clawData.claw_tag || '';
 
-        // 设置项目（通过 project_id 或 project_name 匹配）
+        // 设置项目（通过 project_id 或 project_name 匹配；admin claw 且 project_id=null 视为全平台）
         const projectId = clawData.project_id || '';
         const projectName = clawData.project_name || '';
         let matchedProjectId = projectId;
         if (projectId) {
             projectSel.value = projectId;
+        } else if (isAdminClaw && clawData.project_id === null) {
+            projectSel.value = '__global__';
         } else if (projectName) {
             // 兼容旧数据：尝试通过名称匹配
             const matched = projects.find(p => p.name === projectName);
@@ -368,6 +562,21 @@ async function loadClaw() {
             if (!canEditClaw) statusSelect.disabled = true;
         }
         $('#f-resp').value = clawData.responsibilities || '';
+
+        // 待审核页签仅在龙虾王(role=admin)的详情页显示
+        const submittedTab = document.getElementById('todo-subtab-submitted');
+        if (submittedTab) submittedTab.style.display = clawData.role === 'admin' ? '' : 'none';
+
+        // admin 仅可编辑本项目 claw；普通用户仅可编辑自己绑定 claw
+        if (meData && meData.role === 'admin') {
+            const ownProjects = new Set((meData.managed_projects || []).map(Number));
+            canEditClaw = ownProjects.has(Number(clawData.project_id || 0));
+        } else if (meData && meData.role !== 'super_admin') {
+            canEditClaw = Number(meData.bound_claw_id || 0) === Number(CLAW_ID);
+        }
+        const delBtn = document.getElementById('btn-delete-claw');
+        if (delBtn) delBtn.style.display = canEditClaw ? '' : 'none';
+        applyPermUI();
     } catch (err) {
         showToast('加载失败: ' + err.message, 'error');
     }
@@ -391,6 +600,12 @@ async function loadModulesForDetail(projectId) {
 }
 
 function onProjectChangeDetail(projectId) {
+    // "__global__" 等同于无项目，模块下拉清空
+    if (projectId === '__global__') {
+        const moduleSel = document.getElementById('f-module');
+        moduleSel.innerHTML = '<option value="">全平台 (admin) 不绑定具体模块</option>';
+        return;
+    }
     loadModulesForDetail(projectId);
 }
 
@@ -421,31 +636,94 @@ $('#info-form').addEventListener('submit', async e => {
 
 async function loadInstalledRules() {
     try {
-        const rules = await API.request('GET', `/openclaws/${CLAW_ID}/assigned-rules`);
+        // 一次性拉全量规则（含 used_by_fresh / used_by_stale），与 Skills 配置页一致
+        const allRules = await API.request('GET', '/rules');
         const list = $('#installed-rules-list');
-        const ruleList = rules.rules || [];
-        $('#rules-count').textContent = `${ruleList.length} 条规范`;
+        const clawName = clawData && clawData.name;
 
-        if (!ruleList.length) {
-            list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted)">暂无安装的工作规范，请在 Rules 页面为此 OpenClaw 分配规范</div>';
+        // 状态分组：fresh（已装+最新）/ stale（已装+Hub已更新）/ none（未装）
+        const decorate = (r) => {
+            const fresh = (r.used_by_fresh || []).includes(clawName);
+            const stale = (r.used_by_stale || []).includes(clawName);
+            return { ...r, _state: fresh ? 'fresh' : (stale ? 'stale' : 'none') };
+        };
+        // 仅显示已审核通过、未删除、未下架的规则
+        const visible = (allRules || [])
+            .filter(r => r.review_status === 'approved' && !r.is_deleted)
+            .map(decorate);
+
+        const installed = visible.filter(r => r._state !== 'none');
+        const staleN = visible.filter(r => r._state === 'stale').length;
+        $('#rules-count').textContent = `已装 ${installed.length} 条 / 共 ${visible.length} 条`
+            + (staleN ? ` · ⚠ ${staleN} 条已过期` : '');
+
+        if (!visible.length) {
+            list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted)">暂无可用工作规范</div>';
             return;
         }
-        list.innerHTML = ruleList.map(r => `
+
+        // 排序：stale → fresh → 未装
+        const order = { stale: 0, fresh: 1, none: 2 };
+        visible.sort((a, b) => order[a._state] - order[b._state]
+                            || (a.display_name || '').localeCompare(b.display_name || ''));
+
+        list.innerHTML = visible.map(r => {
+            let stateBadge = '', actionBtn = '';
+            if (r._state === 'fresh') {
+                stateBadge = '<span class="tag tag-green" style="font-size:0.72rem">✓ 已生效</span>';
+                actionBtn = canEditClaw
+                    ? `<button class="btn btn-sm btn-ghost" style="font-size:0.75rem" onclick="reinstallRule(${r.id})" title="强制重新分配（用于安装失败恢复 / 文件被删 / 强制覆盖）">♻️ 重装</button>
+                       <button class="btn btn-sm btn-ghost" style="color:var(--red);font-size:0.75rem" onclick="uninstallRule(${r.id})">移除</button>`
+                    : '';
+            } else if (r._state === 'stale') {
+                stateBadge = '<span class="tag" style="font-size:0.72rem;background:#f59e0b;color:#fff;padding:2px 8px">⚠ 需重装</span>';
+                actionBtn = canEditClaw
+                    ? `<button class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;font-size:0.75rem" onclick="reinstallRule(${r.id})" title="Hub 端已修改，本地为旧版本，建议重新分配">♻️ 重新分配</button>
+                       <button class="btn btn-sm btn-ghost" style="color:var(--red);font-size:0.75rem" onclick="uninstallRule(${r.id})">移除</button>`
+                    : '';
+            } else {
+                actionBtn = canEditClaw
+                    ? `<button class="btn btn-sm btn-primary" style="font-size:0.75rem" onclick="installRule(${r.id})">分配</button>`
+                    : '';
+            }
+            return `
             <div style="padding:14px 0;border-bottom:1px solid var(--border)">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-                    <div style="display:flex;align-items:center;gap:8px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:10px">
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
                         <span style="font-weight:600">${r.display_name}</span>
-                        <span class="tag tag-blue" style="font-size:0.75rem">${r.name}</span>
+                        <span class="tag tag-blue" style="font-size:0.72rem">${r.name}</span>
+                        ${stateBadge}
                     </div>
-                    ${canEditClaw ? `<button class="btn btn-sm btn-ghost" style="color:var(--red);font-size:0.75rem" onclick="uninstallRule(${r.id})">移除</button>` : ''}
+                    <div style="display:flex;gap:6px;flex-shrink:0">${actionBtn}</div>
                 </div>
                 ${r.description ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:8px">${r.description}</div>` : ''}
                 ${r.content_template ? `<details><summary style="font-size:0.82rem;color:var(--accent);cursor:pointer">查看规范内容</summary>
                     <pre style="margin-top:8px;padding:12px;background:var(--bg-secondary);border-radius:var(--radius-sm);font-size:0.82rem;white-space:pre-wrap;max-height:300px;overflow-y:auto">${r.content_template}</pre>
                 </details>` : ''}
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
     } catch(e) { showToast('加载规范失败:'+e.message,'error'); }
+}
+
+async function installRule(ruleId) {
+    try {
+        await API.installRule(CLAW_ID, ruleId);
+        showToast('已分配', 'success');
+        loadInstalledRules();
+    } catch (err) {
+        showToast('分配失败: ' + err.message, 'error');
+    }
+}
+
+async function reinstallRule(ruleId) {
+    try {
+        // 后端：existing 命中即视为重装；带 force=1 跳过去重，确保此次必下发新待办
+        await API.request('POST', `/openclaws/${CLAW_ID}/rules?force=1`, { rule_ids: [ruleId] });
+        showToast('已触发重新分配', 'success');
+        loadInstalledRules();
+    } catch (err) {
+        showToast('重新分配失败: ' + err.message, 'error');
+    }
 }
 
 async function uninstallRule(ruleId) {
@@ -459,36 +737,171 @@ async function uninstallRule(ruleId) {
     }
 }
 
+const SKILLS_AVAILABLE_COLLAPSE_KEY = `claw-${CLAW_ID}-skills-available-collapsed`;
+
+// 不同 OpenClaw 角色 → 偏好的 skill 分类（用于"可分配"区给未装 skill 加推荐徽章）
+const ROLE_CATEGORY_PREF = {
+    test_manager:  ['project', 'standard', 'hub_system'],
+    module_owner:  ['business_test', 'project', 'standard'],
+    specialist:    ['special_test', 'business_test'],
+    test_executor: ['business_test'],
+    test_member:   ['business_test', 'standard'],
+    admin:         ['hub_system', 'project', 'standard'],
+};
+
+/**
+ * 给一个未装的 skill 计算推荐徽章。返回 HTML 串（可能为空）。
+ * 推荐优先级（取最高一级展示，避免一张卡多个徽章）：
+ *   1. rec-strong  ★ 推荐    —— hub_system 类目 / is_standard 标记 → 通用基础能力
+ *   2. rec-role    ✓ 角色匹配 —— skill.category 命中 claw.role 偏好集合
+ *   3. rec-keyword ✓ 职责相关 —— skill 名/描述 token 命中 claw.responsibilities/role_title
+ */
+function _recommendBadge(skill, claw) {
+    if (!claw) return '';
+    const cat = (skill.category || '').toLowerCase();
+
+    if (cat === 'hub_system' || skill.is_standard === true) {
+        return '<span class="rec-badge rec-strong" '
+             + 'title="系统基础能力，所有 OpenClaw 都建议安装">★ 推荐</span>';
+    }
+
+    const prefs = ROLE_CATEGORY_PREF[(claw.role || '').toLowerCase()] || [];
+    if (prefs.indexOf(cat) >= 0) {
+        return '<span class="rec-badge rec-role" '
+             + `title="按 OpenClaw 角色（${claw.role}）推荐">✓ 适合</span>`;
+    }
+
+    // 关键词匹配 responsibilities + role_title
+    const haystack = ((claw.responsibilities || '') + ' '
+                    + (claw.role_title || '')).toLowerCase();
+    if (haystack.trim()) {
+        const tokens = ((skill.display_name || '') + ' '
+                      + (skill.name || ''))
+            .split(/[\s,，、/_\-\.]+/)
+            .filter(t => t && t.length >= 2);
+        for (const t of tokens) {
+            if (haystack.indexOf(t.toLowerCase()) >= 0) {
+                return '<span class="rec-badge rec-keyword" '
+                     + `title="匹配 OpenClaw 职责关键字：${t}">✓ 相关</span>`;
+            }
+        }
+    }
+    return '';
+}
+
+function _renderSkillCard(s, installed, claw) {
+    const tagsHtml = (s.used_by || [])
+        .map(u => `<span class="tag tag-blue">${u}</span>`).join('');
+    const actionHtml = installed
+        ? `<div style="display:flex;gap:6px;align-items:center">
+             <span class="tag tag-green">✓ 已生效</span>
+             ${canEditClaw
+                ? `<button class="btn btn-sm btn-ghost" style="color:var(--red);font-size:0.75rem" onclick="uninstallSkill(${s.id})">移除</button>`
+                : ''}
+           </div>`
+        : (canEditClaw
+            ? `<button class="btn btn-sm btn-primary" onclick="installSkill(${s.id})">分配</button>`
+            : '<span class="tag" style="opacity:.6">未分配</span>');
+
+    // 仅"可分配"卡片显示推荐徽章；已装的不再需要"推荐"
+    const recBadge = installed ? '' : _recommendBadge(s, claw);
+    const cardCls = 'skill-card'
+                  + (installed ? '' : ' skill-card-unassigned')
+                  + (recBadge.indexOf('rec-strong') >= 0 ? ' skill-card-recommend' : '');
+
+    return `
+        <div class="${cardCls}">
+            <div class="skill-card-header" style="gap:6px;flex-wrap:wrap">
+                <span class="skill-name">${s.display_name}</span>
+                <span style="display:inline-flex;gap:6px;align-items:center;flex-shrink:0">
+                    ${recBadge}
+                    <span class="tag tag-blue" style="font-size:0.72rem">#${s.id}</span>
+                </span>
+            </div>
+            <div class="skill-desc">${s.description || ''}</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+                <div class="skill-users">${tagsHtml}</div>
+                ${actionHtml}
+            </div>
+        </div>
+    `;
+}
+
+function toggleSkillsSection(sectionId) {
+    const el = document.getElementById(sectionId);
+    if (!el) return;
+    el.classList.toggle('collapsed');
+    if (sectionId === 'skills-section-available') {
+        try {
+            localStorage.setItem(SKILLS_AVAILABLE_COLLAPSE_KEY,
+                el.classList.contains('collapsed') ? '1' : '0');
+        } catch (_) {}
+    }
+}
+
 async function loadSkills() {
     try {
         const allSkills = await API.listSkills();
-        const clawSkillIds = (clawData.skills || []).map(s => s.id);
+        const clawSkillIds = new Set((clawData.skills || []).map(s => s.id));
         const grid = $('#skills-grid');
 
-        grid.innerHTML = allSkills.map(s => {
-            const installed = clawSkillIds.includes(s.id);
-            return `
-                <div class="skill-card">
-                    <div class="skill-card-header">
-                        <span class="skill-name">${s.display_name}</span>
-                        <span class="tag tag-blue" style="font-size:0.72rem">#${s.id}</span>
+        const installedList = allSkills.filter(s => clawSkillIds.has(s.id));
+        const availableList = allSkills.filter(s => !clawSkillIds.has(s.id));
+
+        const installedHtml = installedList.length
+            ? `<div class="skill-grid">${installedList.map(s => _renderSkillCard(s, true, clawData)).join('')}</div>`
+            : `<div class="skills-section-empty">小云尚未安装任何 Skill。展开下方"可分配"区域来添加。</div>`
+                .replace('小云', clawData && clawData.name ? escapeHtmlReport(clawData.name) : '该 OpenClaw');
+
+        // "可分配"区按推荐优先排序：★ 推荐 → ✓ 适合 → ✓ 相关 → 其他
+        const recOrder = (s) => {
+            const b = _recommendBadge(s, clawData);
+            if (b.indexOf('rec-strong')  >= 0) return 0;
+            if (b.indexOf('rec-role')    >= 0) return 1;
+            if (b.indexOf('rec-keyword') >= 0) return 2;
+            return 3;
+        };
+        availableList.sort((a, b) => recOrder(a) - recOrder(b)
+                                  || (a.display_name || '').localeCompare(b.display_name || ''));
+
+        const availableHtml = availableList.length
+            ? `<div class="skill-grid">${availableList.map(s => _renderSkillCard(s, false, clawData)).join('')}</div>`
+            : `<div class="skills-section-empty">没有更多可分配的 Skill 了。</div>`;
+
+        // 默认折叠"可分配"，但记住用户上次的开关
+        let availCollapsed = true;
+        try {
+            const saved = localStorage.getItem(SKILLS_AVAILABLE_COLLAPSE_KEY);
+            if (saved === '0') availCollapsed = false;
+        } catch (_) {}
+
+        grid.innerHTML = `
+            <div class="skills-section" id="skills-section-installed">
+                <div class="skills-section-header"
+                     onclick="toggleSkillsSection('skills-section-installed')">
+                    <div class="skills-section-title">
+                        ✅ 已安装<span class="count">（${installedList.length}）</span>
                     </div>
-                    <div class="skill-desc">${s.description || ''}</div>
-                    <div style="display:flex;justify-content:space-between;align-items:center">
-                        <div class="skill-users">
-                            ${(s.used_by || []).map(u => `<span class="tag tag-blue">${u}</span>`).join('')}
-                        </div>
-                        ${installed
-                            ? `<div style="display:flex;gap:6px;align-items:center">
-                                <span class="tag tag-green">✓ 已生效</span>
-                                ${canEditClaw ? `<button class="btn btn-sm btn-ghost" style="color:var(--red);font-size:0.75rem" onclick="uninstallSkill(${s.id})">移除</button>` : ''}
-                              </div>`
-                            : (canEditClaw ? `<button class="btn btn-sm btn-primary" onclick="installSkill(${s.id})">分配</button>` : '')
-                        }
+                    <div class="skills-section-toggle">
+                        <span class="arrow">▾</span>收起 / 展开
                     </div>
                 </div>
-            `;
-        }).join('');
+                <div class="skills-section-body">${installedHtml}</div>
+            </div>
+            <div class="skills-section${availCollapsed ? ' collapsed' : ''}"
+                 id="skills-section-available">
+                <div class="skills-section-header"
+                     onclick="toggleSkillsSection('skills-section-available')">
+                    <div class="skills-section-title">
+                        ➕ 可分配<span class="count">（${availableList.length}）</span>
+                    </div>
+                    <div class="skills-section-toggle">
+                        <span class="arrow">▾</span>展开市场挑选
+                    </div>
+                </div>
+                <div class="skills-section-body">${availableHtml}</div>
+            </div>
+        `;
     } catch (err) {
         showToast('Skills 加载失败: ' + err.message, 'error');
     }
@@ -524,6 +937,7 @@ async function uninstallSkill(skillId) {
 async function loadReports() {
     try {
         const reports = await API.getClawReports(CLAW_ID);
+        reportsCache = reports || [];
         const timeline = $('#reports-timeline');
 
         if (reports.length === 0) {
@@ -559,8 +973,8 @@ async function loadReports() {
             const tasks = normalizeList(r.tasks_completed);
             const knowledge = normalizeList(r.knowledge_recorded);
             return `
-            <div class="timeline-item">
-                <div class="timeline-time">${r.report_date} ${r.report_time}</div>
+            <div class="timeline-item clickable" onclick="showReportDetail(${r.id})" title="点击查看完整日报">
+                <div class="timeline-time">${r.report_date} ${r.report_time} <span style="margin-left:8px;font-size:0.75rem;color:var(--text-muted)">点击查看完整内容 →</span></div>
                 ${r.ai_summary ? `<p style="margin-bottom:10px">${r.ai_summary}</p>` : ''}
                 ${tasks.length > 0 ? `
                     <div style="margin-bottom:8px">
@@ -586,7 +1000,7 @@ async function loadReports() {
 }
 
 async function deleteClaw() {
-    if (!confirm(`确定要删除 ${clawData?.name || 'OpenClaw'} 吗？此操作不可撤销。`)) return;
+    if (!await customConfirm(`确定要删除 ${clawData?.name || 'OpenClaw'} 吗？此操作不可撤销。`)) return;
     try {
         await API.deleteClaw(CLAW_ID);
         showToast('已删除', 'success');
@@ -687,17 +1101,65 @@ const urgencyLabels = {
     retry:     {icon:'🔁', label:'可重试',   color:'#9b59b6'},
 };
 
+function _todayDateStr() {
+    return window._localDateToday();
+}
+
+function _datePart(val) {
+    if (!val) return '';
+    return String(val).slice(0, 10);
+}
+
+function _isoWeekdayToday() {
+    const d = new Date();
+    const w = d.getDay(); // 0-6, Sun=0
+    return w === 0 ? 7 : w;
+}
+
+function _isTodoDueToday(t) {
+    const st = t.schedule_type || 'daily';
+    if (st === 'daily') return !!t.enabled;
+    if (st === 'weekly') return !!t.enabled && Number(t.schedule_day || 0) === _isoWeekdayToday();
+    if (st === 'monthly') return !!t.enabled && Number(t.schedule_day || 0) === new Date().getDate();
+    if (st === 'once') {
+        // 一次性任务：仅当天创建时视为“今日待办”；历史未提交的不再占用今日队列
+        return !!t.enabled && _datePart(t.created_at) === _todayDateStr();
+    }
+    return !!t.enabled;
+}
+
 async function loadTodos() {
     try {
-        const todos = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos`).then(r=>r.json());
+        const todos = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos?enabled_only=false`).then(r=>r.json());
         window._detailAllTodos = todos;
         const list = $('#todo-list');
-        const pending = todos.filter(t => !t.today_status || t.today_status === 'pending');
-        const submitted = todos.filter(t => t.today_status === 'submitted');
-        const approved = todos.filter(t => t.today_status === 'approved' || t.today_status === 'completed');
+        const pending = todos.filter(t => _isTodoDueToday(t) && (!t.today_status || t.today_status === 'pending'));
+        let submitted = todos.filter(t => t.today_status === 'submitted');
+        const approved = todos.filter(t => _isTodoDueToday(t) && (t.today_status === 'approved' || t.today_status === 'completed'));
+
+        // 龙虾王查看全局待审核（跨 OpenClaw）
+        if (clawData?.role === 'admin') {
+            try {
+                const queue = await API.request('GET', '/todos/submitted?days=3&limit=200');
+                if (Array.isArray(queue)) {
+                    submitted = queue;
+                }
+            } catch (_) {}
+        }
         window._detailSubmittedTodos = submitted;
 
         $('#todo-stats').textContent = `待完成 ${pending.length} / 已提交 ${submitted.length} / 已审核 ${approved.length}`;
+
+        // 更新今日待办badge
+        const todayBadge = document.getElementById('detail-todos-badge');
+        if (todayBadge) {
+            if (pending.length > 0) {
+                todayBadge.style.display = '';
+                todayBadge.textContent = pending.length;
+            } else {
+                todayBadge.style.display = 'none';
+            }
+        }
 
         // 待完成列表
         if (!pending.length && !submitted.length && !approved.length) {
@@ -736,12 +1198,12 @@ async function loadTodos() {
                             <span class="tag tag-yellow" style="font-size:0.72rem">已提交</span>
                         </div>
                         <div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px">
-                            🤖 ${t.created_by || clawData?.name || '未知'}
+                            🤖 ${t.openclaw_name || t.created_by || clawData?.name || '未知'}
                             ${t.today_completed_at ? ` · 提交于 ${t.today_completed_at.substring(11,16)}` : ''}
                         </div>
                         ${t.result_summary ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px;white-space:pre-line;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${summaryShort}</div>` : ''}
                     </div>
-                    <button class="btn btn-primary btn-sm" style="font-size:0.78rem" onclick="event.stopPropagation();approveDetailTodo(${t.id})">✅ 审核通过</button>
+                    <button class="btn btn-primary btn-sm" style="font-size:0.78rem" onclick="event.stopPropagation();approveDetailTodo(${t.openclaw_id || CLAW_ID}, ${t.id})">✅ 审核通过</button>
                 </div>
             `}).join('');
         }
@@ -804,7 +1266,7 @@ async function loadCompletedTodos() {
             let dateHeader = '';
             if (log.log_date !== lastDate) {
                 lastDate = log.log_date;
-                const isToday = log.log_date === new Date().toISOString().slice(0,10);
+                const isToday = log.log_date === _todayDateStr();
                 dateHeader = `<div style="padding:8px 0 4px;font-size:0.82rem;font-weight:600;color:var(--text-secondary);border-top:1px solid var(--border);margin-top:8px">${isToday ? '📅 今天' : '📅 '+log.log_date}</div>`;
             }
             return `${dateHeader}<div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
@@ -853,11 +1315,11 @@ function showDetailTodoModal(type, index) {
                 <div style="font-size:0.84rem;color:var(--text-secondary);line-height:1.6;white-space:pre-wrap;background:var(--bg-secondary);padding:10px 14px;border-radius:6px">${summary}</div>
             </div>` : ''}
             <div style="font-size:0.78rem;color:var(--text-muted);display:flex;flex-direction:column;gap:4px">
-                <div>🤖 ${t.created_by || clawData?.name || '未知'}</div>
+                <div>🤖 ${t.openclaw_name || t.created_by || clawData?.name || '未知'}</div>
                 ${t.today_completed_at ? `<div>提交于 ${t.today_completed_at.substring(0,16)}</div>` : ''}
             </div>
             <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">
-                <button class="btn btn-primary btn-sm" onclick="approveDetailTodo(${t.id});$('#todo-detail-modal').classList.remove('active')">✅ 审核通过</button>
+                <button class="btn btn-primary btn-sm" onclick="approveDetailTodo(${t.openclaw_id || CLAW_ID}, ${t.id});$('#todo-detail-modal').classList.remove('active')">✅ 审核通过</button>
             </div>
         `;
     } else if (type === 'pending') {
@@ -892,11 +1354,23 @@ function showDetailTodoModal(type, index) {
     modal.classList.add('active');
 }
 
-async function approveDetailTodo(todoId) {
+async function approveDetailTodo(clawId, todoId) {
+    if (todoId === undefined) {
+        todoId = clawId;
+        clawId = CLAW_ID;
+    }
     try {
-        await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${todoId}/approve`, {
+        const resp = await fetch(`/api/v1/openclaws/${clawId}/todos/${todoId}/approve`, {
             method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
         });
+        if (!resp.ok) {
+            let msg = '审核失败';
+            try {
+                const data = await resp.json();
+                if (data && data.error) msg = data.error;
+            } catch (_) {}
+            throw new Error(msg);
+        }
         showToast('审核通过', 'success');
         loadTodos();
     } catch(e) { showToast('审核失败: ' + e.message, 'error'); }

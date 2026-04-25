@@ -34,10 +34,34 @@ def _get_visible_claws():
     user = User.query.get(uid) if uid else None
     user_role = user.role if user else 'guest'
 
-    # 非 super_admin/admin 隐藏 admin 角色（龙虾王）
-    if user_role in ('super_admin', 'admin'):
-        return all_claws
-    return [c for c in all_claws if c.role != 'admin']
+    # 仅 super_admin 可见 admin 角色（龙虾王）
+    visible = all_claws if user_role == 'super_admin' else [c for c in all_claws if c.role != 'admin']
+
+    # 非超管仅看自己项目
+    if user_role != 'super_admin' and user:
+        project_ids = set()
+        for pid in (user.managed_projects or []):
+            try:
+                project_ids.add(int(pid))
+            except Exception:
+                continue
+        if user.bound_claw_id:
+            b = OpenClawInstance.query.get(user.bound_claw_id)
+            if b:
+                if b.project_id:
+                    project_ids.add(int(b.project_id))
+                elif b.project_name:
+                    p = Project.query.filter_by(name=b.project_name).first()
+                    if p:
+                        project_ids.add(int(p.id))
+        project_names = {p.name for p in Project.query.filter(Project.id.in_(list(project_ids))).all()} if project_ids else set()
+        if project_ids or project_names:
+            visible = [c for c in visible if (c.project_id in project_ids) or (c.project_name in project_names)]
+        elif user.bound_claw_id:
+            visible = [c for c in visible if c.id == user.bound_claw_id]
+        else:
+            visible = []
+    return visible
 
 
 @api_bp.route('/dashboard/stats', methods=['GET'])
@@ -122,7 +146,7 @@ def dashboard_stats():
         _user = User.query.get(_uid) if _uid else None
         _urole = _user.role if _user else 'guest'
         agent_query = Agent.query
-        if _urole not in ('super_admin', 'admin'):
+        if _urole != 'super_admin':
             agent_query = agent_query.filter(Agent.role != 'admin')
         agents = agent_query.all()
         online_statuses = {}
@@ -240,8 +264,7 @@ def dashboard_stats():
     submitted_todos = []      # 今日已提交（待审核）
     if visible_ids:
         todos_q = ClawTodo.query.filter(
-            ClawTodo.openclaw_id.in_(visible_ids),
-            ClawTodo.enabled == True
+            ClawTodo.openclaw_id.in_(visible_ids)
         ).order_by(ClawTodo.created_at.desc()).all()
         claw_name_map = {c.id: c.name for c in visible_claws}
         for todo in todos_q:
@@ -252,6 +275,13 @@ def dashboard_stats():
             today_log = ClawTodoLog.query.filter_by(
                 todo_id=todo.id, log_date=today
             ).first()
+            if not today_log:
+                latest_log = (ClawTodoLog.query
+                              .filter_by(todo_id=todo.id)
+                              .order_by(ClawTodoLog.log_date.desc(), ClawTodoLog.created_at.desc())
+                              .first())
+                if latest_log and latest_log.status == 'submitted':
+                    today_log = latest_log
             todo_base = {
                 'id': todo.id,
                 'title': todo.title,
@@ -268,11 +298,11 @@ def dashboard_stats():
                 'result_summary': today_log.result_summary if today_log else None,
                 'created_at': str(todo.created_at) if todo.created_at else None,
             }
-            if not today_log or today_log.status == 'pending':
+            if (not today_log or today_log.status == 'pending') and todo.enabled:
                 upcoming_todos.append(todo_base)
-            elif today_log.status == 'submitted':
+            elif today_log and today_log.status == 'submitted':
                 submitted_todos.append(todo_base)
-            # approved/completed 不在这两个列表中
+            # approved/completed 以及 enabled=False 且无 today_log 的情况不在这两个列表中
     upcoming_todos = upcoming_todos[:30]
     submitted_todos = submitted_todos[:30]
 

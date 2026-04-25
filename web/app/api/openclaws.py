@@ -13,6 +13,102 @@ from app.api import api_bp
 logger = logging.getLogger(__name__)
 
 
+def _get_user():
+    from app.api.skills import _get_current_user
+    return _get_current_user()
+
+
+def _actor_display_name(user):
+    """统一返回操作者展示名：OpenClaw 名 优先，其次 display_name / username。"""
+    if not user:
+        return 'system'
+    # _ClawAdminProxy（admin claw）和 owner（被附加 _claw_name 的 User）都可能带 claw 名
+    claw_name = getattr(user, '_claw_name', None)
+    if claw_name:
+        return claw_name
+    bound_id = getattr(user, 'bound_claw_id', None)
+    if bound_id:
+        try:
+            c = OpenClawInstance.query.get(bound_id)
+            if c and c.name:
+                return c.name
+        except Exception:
+            pass
+    return (getattr(user, 'display_name', None)
+            or getattr(user, 'username', None)
+            or 'system')
+
+
+def _user_project_ids(user):
+    ids = set()
+    if not user:
+        return ids
+    for pid in (getattr(user, 'managed_projects', None) or []):
+        try:
+            ids.add(int(pid))
+        except Exception:
+            continue
+    bound_claw_id = getattr(user, 'bound_claw_id', None)
+    if bound_claw_id:
+        claw = OpenClawInstance.query.get(bound_claw_id)
+        if claw and claw.project_id:
+            ids.add(int(claw.project_id))
+    return ids
+
+
+def _is_global_actor(user):
+    """是否拥有全平台权限：super_admin 用户，或 project_id IS NULL 的 admin claw（如龙虾王）。"""
+    if not user:
+        return False
+    if user.role == 'super_admin':
+        return True
+    return bool(getattr(user, 'is_global', False))
+
+
+def _can_read_claw(user, claw):
+    if not user:
+        return False
+    if _is_global_actor(user):
+        return True
+    if claw.role == 'admin':
+        return False
+    if getattr(user, 'bound_claw_id', None) == claw.id:
+        return True
+    if user.role == 'admin':
+        return claw.project_id in _user_project_ids(user)
+    return claw.project_id in _user_project_ids(user)
+
+
+def _can_manage_claw(user, claw):
+    if not _can_read_claw(user, claw):
+        return False
+    if _is_global_actor(user):
+        return True
+    if user.role == 'admin':
+        return claw.project_id in _user_project_ids(user)
+    return getattr(user, 'bound_claw_id', None) == claw.id
+
+
+def _parse_project_id(raw):
+    """解析项目 id：'__global__' / 'global' / 'all' / 空 / 0 / None → None（"全平台"或未关联），其它正整数 → int。"""
+    if raw is None or raw == '':
+        return None
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in ('__global__', 'global', 'all', '__all__'):
+            return None
+        try:
+            v = int(s)
+        except ValueError:
+            return None
+    else:
+        try:
+            v = int(raw)
+        except (TypeError, ValueError):
+            return None
+    return v if v > 0 else None
+
+
 def require_claw_token(f):
     """OpenClaw API Token 认证装饰器
 
@@ -50,11 +146,21 @@ def list_openclaws():
     if not include_deleted:
         query = query.filter(OpenClawInstance.status != 'deleted')
 
-    # 非 super_admin/admin 隐藏 admin 角色（龙虾王）
-    from app.api.skills import _get_current_user
-    user = _get_current_user()
-    if not user or user.role not in ('super_admin', 'admin'):
+    user = _get_user()
+    if not _is_global_actor(user):
+        # 非全平台：隐藏 admin 角色（龙虾王等）
         query = query.filter(OpenClawInstance.role != 'admin')
+        # 非全平台：仅可见自己项目（统一 project_id）
+        if user:
+            proj_ids = list(_user_project_ids(user))
+            if proj_ids:
+                query = query.filter(OpenClawInstance.project_id.in_(proj_ids))
+            elif getattr(user, 'bound_claw_id', None):
+                query = query.filter(OpenClawInstance.id == int(user.bound_claw_id))
+            else:
+                query = query.filter(OpenClawInstance.id == -1)
+        else:
+            query = query.filter(OpenClawInstance.id == -1)
 
     claws = query.order_by(OpenClawInstance.created_at.desc()).all()
     today = date.today()
@@ -76,6 +182,9 @@ def list_openclaws():
 @api_bp.route('/openclaws', methods=['POST'])
 def create_openclaw():
     """注册新 OpenClaw 或通过旧 Token 恢复已归档的实例"""
+    user = _get_user()
+    if not user or user.role not in ('super_admin', 'admin'):
+        return jsonify({'error': '需要管理员权限'}), 403
     data = request.get_json()
 
     # === 模式1：通过旧 Token 恢复 ===
@@ -93,8 +202,9 @@ def create_openclaw():
                               'report_schedule', 'web_system_url']:
                     if field in data:
                         setattr(claw, field, data[field])
-                if 'project_id' in data and data['project_id']:
-                    claw.project_id = int(data['project_id'])
+                if 'project_id' in data:
+                    claw.project_id = _parse_project_id(data.get('project_id'))
+                claw.last_modified_by = _actor_display_name(user)
                 db.session.commit()
 
                 result = claw.to_dict()
@@ -134,12 +244,13 @@ def create_openclaw():
                           'web_system_url', 'soul_config', 'workflow_config']:
                 if field in data:
                     setattr(existing, field, data[field])
-            if 'project_id' in data and data['project_id']:
-                existing.project_id = int(data['project_id'])
+            if 'project_id' in data:
+                existing.project_id = _parse_project_id(data.get('project_id'))
             # 生成新 Token
             raw_token = generate_api_token()
             existing.api_token_hash = hash_token(raw_token)
             existing.api_token_plain = _simple_encrypt(raw_token)
+            existing.last_modified_by = _actor_display_name(user)
             db.session.commit()
 
             result = existing.to_dict()
@@ -163,10 +274,8 @@ def create_openclaw():
     token_hash = hash_token(raw_token)
     token_encrypted = _simple_encrypt(raw_token)
 
-    # 处理 project_id
-    project_id = data.get('project_id')
-    if project_id:
-        project_id = int(project_id)
+    # 处理 project_id（支持 '__global__' = NULL，仅 admin 角色才有"全平台"语义）
+    project_id = _parse_project_id(data.get('project_id'))
 
     claw = OpenClawInstance(
         name=data['name'],
@@ -186,6 +295,7 @@ def create_openclaw():
         web_system_url=data.get('web_system_url'),
         api_token_hash=token_hash,
         api_token_plain=token_encrypted,
+        last_modified_by=_actor_display_name(user),
     )
     db.session.add(claw)
     db.session.commit()
@@ -273,6 +383,9 @@ def create_openclaw():
 def get_openclaw(claw_id):
     """获取 OpenClaw 详情"""
     claw = OpenClawInstance.query.get_or_404(claw_id)
+    user = _get_user()
+    if not _can_read_claw(user, claw):
+        return jsonify({'error': '无权访问该 OpenClaw'}), 403
     return jsonify(claw.to_dict())
 
 
@@ -280,7 +393,14 @@ def get_openclaw(claw_id):
 def update_openclaw(claw_id):
     """更新 OpenClaw 信息"""
     claw = OpenClawInstance.query.get_or_404(claw_id)
+    user = _get_user()
+    if not _can_manage_claw(user, claw):
+        return jsonify({'error': '无权修改该 OpenClaw'}), 403
     data = request.get_json()
+
+    # 只有 super_admin 可将 OpenClaw 设置为 admin（龙虾王）
+    if 'role' in data and data.get('role') == 'admin' and user.role != 'super_admin':
+        return jsonify({'error': '仅超级管理员可设置为 admin 角色'}), 403
 
     updatable_fields = [
         'name', 'role', 'role_title', 'responsibilities', 'project_name',
@@ -291,10 +411,11 @@ def update_openclaw(claw_id):
         if field in data:
             setattr(claw, field, data[field])
 
-    # 处理 project_id
+    # 处理 project_id（支持 '__global__' = NULL）
     if 'project_id' in data:
-        claw.project_id = int(data['project_id']) if data['project_id'] else None
+        claw.project_id = _parse_project_id(data.get('project_id'))
 
+    claw.last_modified_by = _actor_display_name(user)
     db.session.commit()
     return jsonify(claw.to_dict())
 
@@ -303,10 +424,14 @@ def update_openclaw(claw_id):
 def regenerate_token(claw_id):
     """重新生成 API Token（旧 Token 立即失效）"""
     claw = OpenClawInstance.query.get_or_404(claw_id)
+    user = _get_user()
+    if not _can_manage_claw(user, claw):
+        return jsonify({'error': '无权操作该 OpenClaw'}), 403
 
     raw_token = generate_api_token()
     claw.api_token_hash = hash_token(raw_token)
     claw.api_token_plain = _simple_encrypt(raw_token)
+    claw.last_modified_by = _actor_display_name(user)
     db.session.commit()
 
     return jsonify({
@@ -326,6 +451,9 @@ def get_claw_token(claw_id):
     注意：需要管理员权限或验证操作者身份
     """
     claw = OpenClawInstance.query.get_or_404(claw_id)
+    user = _get_user()
+    if not _can_read_claw(user, claw):
+        return jsonify({'error': '无权查看该 Token'}), 403
 
     return jsonify({
         'id': claw.id,
@@ -339,6 +467,13 @@ def get_claw_token(claw_id):
 def delete_openclaw(claw_id):
     """软删除 OpenClaw（保留所有配置、记忆和关联数据，支持后续恢复）"""
     claw = OpenClawInstance.query.get_or_404(claw_id)
+    user = _get_user()
+    if not user or user.role not in ('super_admin', 'admin'):
+        return jsonify({'error': '需要管理员权限'}), 403
+    if not _can_manage_claw(user, claw):
+        return jsonify({'error': '无权删除该 OpenClaw'}), 403
+    if claw.role == 'admin' and user.role != 'super_admin':
+        return jsonify({'error': '仅超级管理员可删除 admin OpenClaw'}), 403
 
     claw.status = 'deleted'
     claw.deleted_at = datetime.now()
@@ -352,49 +487,53 @@ def delete_openclaw(claw_id):
 
 @api_bp.route('/openclaws/<int:claw_id>/registration-skill', methods=['GET'])
 def get_registration_skill_for_claw(claw_id):
-    """生成该 OpenClaw 专属的注册 Skill（已填好 CLAW_ID、TOKEN、Hub 地址）
+    """生成该 OpenClaw 专属的"完整自部署"Markdown / JSON
 
-    从数据库 hub-connect skill 的 template_content 读取最新内容，
-    替换占位符后返回，确保注册链接始终使用最新版 Skill。
+    默认（``?format=markdown`` 或不带参数）：返回一份覆盖 7 步自部署
+    流程的 Markdown 文档，AI 拿到即可在 shell 里跑完所有安装步骤。
+    流程见 :mod:`app.api.registration_bootstrap`。
+
+    ``?format=json`` ：除了完整 Markdown，再附带：
+
+    - ``api_token`` / ``hub_url`` / ``claw_id`` / ``claw_name``
+    - ``mcp_config_snippets``：三种 host 的 mcp.json 片段
+    - ``skill_links`` / ``rule_links``：已分配 skill / rule 的直链
+
+    已移除 legacy 回退逻辑，统一走 sidecar-only 的 bootstrap 文档。
     """
     from flask import Response
+    from app.api.registration_bootstrap import (
+        build_bootstrap_markdown,
+        build_mcp_config_snippets,
+    )
+
     claw = OpenClawInstance.query.get_or_404(claw_id)
-    token = claw.get_token_plain()
+    token = claw.get_token_plain() or ''
     hub_url = 'http://9.134.11.169:8088'
-    project_name = claw.project.name if claw.project else claw.project_name or '未指定'
+    project_name = claw.project.name if claw.project else (claw.project_name or '未指定')
 
-    # 从数据库读取 hub-connect skill 的 template_content
-    hub_skill = Skill.query.filter_by(name='hub-connect').first()
-    if hub_skill and hub_skill.template_content:
-        md = hub_skill.template_content
-        # 替换占位符为实际值
-        md = md.replace('{HUB_URL}', hub_url)
-        md = md.replace('{CLAW_ID}', str(claw.id))
-        md = md.replace('{HUB_API_TOKEN}', token or '')
-        md = md.replace('{NAME}', claw.name or '')
-        md = md.replace('{PROJECT}', project_name)
-        md = md.replace('{ROLE}', claw.role or 'test_member')
-    else:
-        # 回退：如果数据库中没有 hub-connect skill，用简化模板
-        md = f"""# OpenClaw 注册配置 - {claw.name}
+    skill_links = [
+        f"{hub_url}/api/v1/skills/{s.skill.id}/raw"
+        for s in claw.skills if s.enabled and s.skill
+    ]
+    rule_links = [
+        f"{hub_url}/api/v1/rules/{r.rule.id}/raw"
+        for r in OpenClawRule.query.filter_by(
+            openclaw_id=claw_id, enabled=True).all()
+        if r.rule
+    ]
 
-> 此文件由 Hub 自动生成，已配置好连接信息。
-
-## 连接信息
-
-```
-Hub 地址: {hub_url}
-CLAW_ID: {claw.id}
-HUB_API_TOKEN: {token}
-OpenClaw 名称: {claw.name}
-```
-
-## 快速开始
-
-1. 验证连接：curl -H "Authorization: Bearer {token}" {hub_url}/api/v1/openclaws/{claw.id}/config
-2. 拉取 Skills：curl -H "Authorization: Bearer {token}" {hub_url}/api/v1/openclaws/{claw.id}/assigned-skills
-3. 建立 SSE：curl -H "Authorization: Bearer {token}" -H "Accept: text/event-stream" {hub_url}/api/openclaws/{claw.id}/events
-"""
+    # 统一新逻辑：完整 7 步自部署文档
+    md = build_bootstrap_markdown(
+        hub_url=hub_url,
+        claw_id=claw.id,
+        claw_name=claw.name or '',
+        role=claw.role or 'test_member',
+        project_name=project_name,
+        api_token=token,
+        skill_links=skill_links,
+        rule_links=rule_links,
+    )
 
     fmt = request.args.get('format', 'markdown')
     if fmt == 'json':
@@ -404,12 +543,21 @@ OpenClaw 名称: {claw.name}
             'hub_url': hub_url,
             'api_token': token,
             'skill_content': md,
-            'skill_links': [f"{hub_url}/api/v1/skills/{s.skill.id}/raw" for s in claw.skills if s.enabled and s.skill],
-            'rule_links': [f"{hub_url}/api/v1/rules/{r.rule.id}/raw" for r in OpenClawRule.query.filter_by(openclaw_id=claw_id, enabled=True).all() if r.rule],
+            'skill_links': skill_links,
+            'rule_links': rule_links,
+            'mcp_config_snippets': build_mcp_config_snippets(
+                hub_url, claw.id, token,
+            ),
+            'mode': 'bootstrap',
         })
 
-    return Response(md, mimetype='text/markdown; charset=utf-8',
-                    headers={'Content-Disposition': f'inline; filename="registration-claw-{claw.id}.md"'})
+    return Response(
+        md,
+        mimetype='text/markdown; charset=utf-8',
+        headers={
+            'Content-Disposition': f'inline; filename="registration-claw-{claw.id}.md"',
+        },
+    )
 
 
 @api_bp.route('/openclaws/<int:claw_id>/config', methods=['GET'])
@@ -708,6 +856,7 @@ def update_report_schedule(claw_id):
         return jsonify({'error': 'report_schedule 为必填项'}), 400
 
     claw.report_schedule = data['report_schedule']
+    claw.last_modified_by = _actor_display_name(_get_user())
     db.session.commit()
     return jsonify({
         'id': claw.id,

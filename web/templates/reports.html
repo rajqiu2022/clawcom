@@ -186,7 +186,7 @@ function toList(val) {
 
 async function loadTimeline() {
     try {
-        const dateVal = document.querySelector('#filter-date').value || new Date().toISOString().slice(0,10);
+        const dateVal = document.querySelector('#filter-date').value || window._localDateToday();
         const projectFilter = document.querySelector('#filter-project').value;
         let url = `/reports/timeline?date=${dateVal}`;
         if (projectFilter) url += `&project=${encodeURIComponent(projectFilter)}`;
@@ -340,7 +340,7 @@ function closeModal() {
 
 async function initPage() {
     // 设置默认日期为今天
-    const today = new Date().toISOString().slice(0, 10);
+    const today = window._localDateToday();
     document.querySelector('#filter-date').value = today;
 
     // 加载项目筛选列表

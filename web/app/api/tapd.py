@@ -16,7 +16,7 @@ def _get_tapd_credentials():
     """获取 TAPD API 凭证（存储在 system_config 中）"""
     try:
         rows = db.session.execute(
-            text("SELECT config_key, config_value FROM system_config WHERE config_key LIKE 'tapd_%'")
+            text("SELECT config_key, value FROM system_config WHERE config_key LIKE 'tapd_%'")
         ).fetchall()
         cfg = {r[0]: r[1] for r in rows}
         return cfg.get('tapd_api_user', ''), cfg.get('tapd_api_password', '')
@@ -48,6 +48,57 @@ def _tapd_request(method, url, params=None, api_user='', api_password=''):
     return data.get('data', [])
 
 
+@api_bp.route('/tapd/story-title', methods=['GET'])
+def get_tapd_story_title():
+    """根据 story_id 获取 TAPD 需求标题
+
+    查询参数：
+    - story_id: TAPD 需求 ID
+    - workspace_id: TAPD 项目 workspace_id（可选，从 story URL 中解析）
+    - story_url: 完整 TAPD 需求链接（可选，自动解析 workspace_id 和 story_id）
+    """
+    story_url = request.args.get('story_url', '')
+    story_id = request.args.get('story_id', '')
+    workspace_id = request.args.get('workspace_id', '')
+
+    # 从完整 URL 解析 workspace_id 和 story_id
+    # 格式: https://www.tapd.cn/{workspace_id}/stories/view/{story_id}
+    import re
+    if story_url and (not workspace_id or not story_id):
+        m = re.match(r'https?://www\.tapd\.cn/(\d+)/stories/view/(\d+)', story_url)
+        if m:
+            workspace_id = workspace_id or m.group(1)
+            story_id = story_id or m.group(2)
+
+    if not story_id:
+        return jsonify({'error': '缺少 story_id 或 story_url'}), 400
+
+    try:
+        params = {'id': story_id}
+        if workspace_id:
+            params['workspace_id'] = workspace_id
+            params['limit'] = 1
+
+        data = _tapd_request('GET', 'https://api.tapd.cn/stories', params)
+
+        for item in data:
+            story = item.get('Story', {})
+            return jsonify({
+                'id': story.get('id'),
+                'title': story.get('name', ''),
+                'status': story.get('status', ''),
+                'priority': story.get('priority', ''),
+                'owner': story.get('owner', ''),
+            })
+
+        return jsonify({'error': '未找到该需求', 'title': ''}), 404
+
+    except ValueError as e:
+        return jsonify({'error': str(e), 'title': ''}), 400
+    except Exception as e:
+        return jsonify({'error': f'TAPD API 调用失败: {str(e)}', 'title': ''}), 500
+
+
 @api_bp.route('/tapd/config', methods=['GET'])
 def get_tapd_config():
     """获取 TAPD 配置"""
@@ -71,11 +122,11 @@ def update_tapd_config():
                 ), {'k': key}).fetchone()
                 if existing:
                     db.session.execute(text(
-                        "UPDATE system_config SET config_value=:v, updated_at=CURRENT_TIMESTAMP WHERE config_key=:k"
+                        "UPDATE system_config SET value=:v, updated_at=CURRENT_TIMESTAMP WHERE config_key=:k"
                     ), {'k': key, 'v': data[key]})
                 else:
                     db.session.execute(text(
-                        "INSERT INTO system_config (config_key, config_value, updated_at) VALUES (:k, :v, CURRENT_TIMESTAMP)"
+                        "INSERT INTO system_config (config_key, value, updated_at) VALUES (:k, :v, CURRENT_TIMESTAMP)"
                     ), {'k': key, 'v': data[key]})
         db.session.commit()
     except Exception as e:
@@ -187,38 +238,43 @@ def list_tapd_bugs():
 
 @api_bp.route('/tapd/iterations', methods=['GET'])
 def list_tapd_iterations():
-    """获取 TAPD 迭代列表"""
+    """获取 TAPD 迭代列表
+
+    重构（2026-04）：Hub 不再直连 TAPD，改读 tapd_iterations_cache 本地缓存。
+    缓存由 OpenClaw Agent 经 mcporter-internal/MCP 推送维护。
+    用户可通过"实时刷新"按钮 POST /requirements/tapd-refresh-requests 触发更新。
+    """
     workspace_id = request.args.get('workspace_id')
     if not workspace_id:
         return jsonify({'error': '缺少 workspace_id'}), 400
 
-    try:
-        params = {
-            'workspace_id': workspace_id,
-            'limit': 30,
-            'order': 'created desc',
-        }
+    from app.models import TapdIterationsCache
+    from sqlalchemy import desc as _desc, func as _func
 
-        data = _tapd_request('GET', 'https://api.tapd.cn/iterations', params)
+    rows = (TapdIterationsCache.query
+            .filter_by(tapd_workspace_id=workspace_id)
+            .order_by(_desc(TapdIterationsCache.startdate))
+            .all())
+    last_synced = (db.session.query(_func.max(TapdIterationsCache.last_synced_at))
+                   .filter(TapdIterationsCache.tapd_workspace_id == workspace_id)
+                   .scalar())
 
-        iterations = []
-        for item in data:
-            it = item.get('Iteration', {})
-            iterations.append({
-                'id': it.get('id'),
-                'name': it.get('name'),
-                'status': it.get('status'),
-                'startdate': it.get('startdate'),
-                'enddate': it.get('enddate'),
-                'creator': it.get('creator'),
-            })
+    iterations = [{
+        'id': r.tapd_iteration_id,
+        'name': r.name or '',
+        'status': r.status,
+        'startdate': str(r.startdate) if r.startdate else None,
+        'enddate': str(r.enddate) if r.enddate else None,
+        'creator': r.creator or '',
+    } for r in rows]
 
-        return jsonify({'iterations': iterations, 'count': len(iterations)})
-
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': f'TAPD API 调用失败: {str(e)}'}), 500
+    return jsonify({
+        'iterations': iterations,
+        'count': len(iterations),
+        'data_source': 'local_cache',
+        'last_synced_at': str(last_synced) if last_synced else None,
+        'hint': '本地缓存为空，请点击"需求分析"页面的"实时刷新"按钮通知 Agent 同步 TAPD 数据' if not iterations else None,
+    })
 
 
 @api_bp.route('/tapd/dashboard', methods=['GET'])

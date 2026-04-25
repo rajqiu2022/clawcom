@@ -11,6 +11,15 @@ from app.models import Rule, Skill, TestCaseLibrary, TestCase
 from app.api import api_bp
 
 
+def _is_missing(v):
+    """统一的"必填"判定，避免 `if not x` 把合法的整数 0 当作缺失。"""
+    if v is None:
+        return True
+    if isinstance(v, str) and not v.strip():
+        return True
+    return False
+
+
 # ==================== 通用 AI 调用 ====================
 
 def call_llm(prompt, system_prompt=None, model=None):
@@ -22,7 +31,7 @@ def call_llm(prompt, system_prompt=None, model=None):
 
     try:
         result = db.session.execute(
-            text("SELECT config_key, config_value FROM system_config")
+            text("SELECT config_key, value FROM system_config")
         ).fetchall()
         rows = {r[0]: r[1] for r in result}
 
@@ -287,13 +296,12 @@ def testcases_ai_chat():
     """
     data = request.get_json()
 
-    if not data or not data.get('library_id') or not data.get('message'):
+    if not data or _is_missing(data.get('library_id')) or _is_missing(data.get('message')):
         return jsonify({'error': 'library_id 和 message 为必填项'}), 400
 
     library_id = data['library_id']
     message = data['message']
 
-    # 获取用例库
     library = TestCaseLibrary.query.get(library_id)
     if not library:
         return jsonify({'error': '用例库不存在'}), 404
@@ -367,7 +375,7 @@ def generate_testcases():
     """
     data = request.get_json()
 
-    if not data or not data.get('library_id') or not data.get('requirement'):
+    if not data or _is_missing(data.get('library_id')) or _is_missing(data.get('requirement')):
         return jsonify({'error': 'library_id 和 requirement 为必填项'}), 400
 
     library_id = data['library_id']

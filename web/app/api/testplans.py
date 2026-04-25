@@ -8,7 +8,7 @@ from datetime import datetime, date
 from flask import request, jsonify, session
 from sqlalchemy import func
 from app import db
-from app.models import (TestPlan, TestTask, TestTaskCase,
+from app.models import (TestPlan, TestTask, TestTaskCase, TestIteration,
                         Project, OpenClawInstance, TestCaseLibrary, TestCase)
 from app.api import api_bp
 
@@ -26,6 +26,138 @@ def _can_edit_plan(user, plan):
     if user.role in ('super_admin', 'admin'):
         return True
     return plan.created_by == user.username
+
+
+# ==================== 测试迭代 CRUD ====================
+
+@api_bp.route('/test-iterations', methods=['GET'])
+def list_test_iterations():
+    """获取测试迭代列表
+
+    查询参数：
+    - project_id: 按项目筛选
+    - status: 按状态筛选
+    - search: 搜索名称
+    """
+    query = TestIteration.query
+
+    project_id = request.args.get('project_id', type=int)
+    status = request.args.get('status')
+    search = request.args.get('search')
+
+    if project_id is not None:
+        query = query.filter_by(project_id=project_id)
+    if status:
+        query = query.filter_by(status=status)
+    if search:
+        query = query.filter(TestIteration.name.ilike(f'%{search}%'))
+
+    iterations = query.order_by(TestIteration.created_at.desc()).all()
+    return jsonify([it.to_dict() for it in iterations])
+
+
+@api_bp.route('/test-iterations', methods=['POST'])
+def create_test_iteration():
+    """创建测试迭代"""
+    data = request.get_json()
+    if not data or not data.get('name'):
+        return jsonify({'error': 'name 为必填项'}), 400
+
+    from datetime import date as date_type
+    start_date = None
+    end_date = None
+    if data.get('start_date'):
+        try:
+            start_date = date_type.fromisoformat(data['start_date'])
+        except (ValueError, TypeError):
+            pass
+    if data.get('end_date'):
+        try:
+            end_date = date_type.fromisoformat(data['end_date'])
+        except (ValueError, TypeError):
+            pass
+
+    user = _get_current_user()
+    created_by = ''
+    if user:
+        created_by = getattr(user, 'username', '') or getattr(user, 'name', '')
+
+    iteration = TestIteration(
+        name=data['name'],
+        description=data.get('description', ''),
+        version_name=data.get('version_name', ''),
+        version_type=data.get('version_type', 'regular'),
+        start_date=start_date,
+        end_date=end_date,
+        project_id=data.get('project_id'),
+        tapd_iteration_ids=data.get('tapd_iteration_ids', []),
+        tapd_iteration_names=data.get('tapd_iteration_names', []),
+        tapd_workspace_id=data.get('tapd_workspace_id'),
+        status=data.get('status', 'draft'),
+        created_by=created_by,
+    )
+    db.session.add(iteration)
+    db.session.commit()
+    return jsonify(iteration.to_dict()), 201
+
+
+@api_bp.route('/test-iterations/<int:iteration_id>', methods=['GET'])
+def get_test_iteration(iteration_id):
+    """获取测试迭代详情（含计划和任务）"""
+    iteration = TestIteration.query.get_or_404(iteration_id)
+    return jsonify(iteration.to_dict(with_plans=True))
+
+
+@api_bp.route('/test-iterations/<int:iteration_id>', methods=['PUT'])
+def update_test_iteration(iteration_id):
+    """更新测试迭代"""
+    iteration = TestIteration.query.get_or_404(iteration_id)
+    data = request.get_json()
+
+    updatable_fields = ['name', 'description', 'version_name', 'version_type',
+                        'project_id', 'tapd_iteration_ids', 'tapd_iteration_names',
+                        'tapd_workspace_id', 'status']
+    for field in updatable_fields:
+        if field in data:
+            setattr(iteration, field, data[field])
+
+    # 日期字段单独处理（支持传 null 清除）
+    from datetime import date as date_type
+    for date_field in ('start_date', 'end_date'):
+        if date_field in data:
+            try:
+                setattr(iteration, date_field, date_type.fromisoformat(data[date_field]) if data[date_field] else None)
+            except (ValueError, TypeError):
+                pass
+
+    _recalc_iteration_stats(iteration)
+    db.session.commit()
+    return jsonify(iteration.to_dict())
+
+
+@api_bp.route('/test-iterations/<int:iteration_id>', methods=['DELETE'])
+def delete_test_iteration(iteration_id):
+    """删除测试迭代（级联删除下属计划和任务）"""
+    iteration = TestIteration.query.get_or_404(iteration_id)
+    db.session.delete(iteration)
+    db.session.commit()
+    return jsonify({'message': f'测试迭代 "{iteration.name}" 已删除'})
+
+
+def _recalc_iteration_stats(iteration):
+    """重新计算迭代的统计数字"""
+    plans = TestPlan.query.filter_by(iteration_id=iteration.id).all()
+    iteration.total_plans = len(plans)
+    total_tasks = 0
+    completed_tasks = 0
+    total_bugs = 0
+    for p in plans:
+        total_tasks += p.total_tasks or 0
+        completed_tasks += p.completed_tasks or 0
+        total_bugs += p.total_bugs or 0
+    iteration.total_tasks = total_tasks
+    iteration.completed_tasks = completed_tasks
+    iteration.total_bugs = total_bugs
 
 
 # ==================== 测试计划 CRUD ====================
@@ -47,7 +179,7 @@ def list_test_plans():
     version_type = request.args.get('version_type')
     search = request.args.get('search')
 
-    if project_id:
+    if project_id is not None:
         query = query.filter_by(project_id=project_id)
     if status:
         query = query.filter_by(status=status)
@@ -103,6 +235,7 @@ def create_test_plan():
     plan = TestPlan(
         name=data['name'],
         description=data.get('description', ''),
+        iteration_id=data.get('iteration_id'),
         version_type=data.get('version_type', 'regular'),
         version_name=data.get('version_name', ''),
         start_date=start_date,
@@ -116,6 +249,13 @@ def create_test_plan():
     )
     db.session.add(plan)
     db.session.commit()
+
+    # 更新迭代统计
+    if plan.iteration_id:
+        iteration = TestIteration.query.get(plan.iteration_id)
+        if iteration:
+            _recalc_iteration_stats(iteration)
+            db.session.commit()
 
     return jsonify(plan.to_dict()), 201
 
@@ -133,8 +273,10 @@ def update_test_plan(plan_id):
     plan = TestPlan.query.get_or_404(plan_id)
     data = request.get_json()
 
+    old_iteration_id = plan.iteration_id
+
     updatable_fields = ['name', 'description', 'version_type', 'version_name',
-                        'start_date', 'end_date', 'project_id',
+                        'start_date', 'end_date', 'project_id', 'iteration_id',
                         'tapd_iteration_ids', 'tapd_iteration_names', 'tapd_workspace_id', 'status']
     for field in updatable_fields:
         if field in data:
@@ -148,6 +290,19 @@ def update_test_plan(plan_id):
                 setattr(plan, field, data[field])
 
     _recalc_plan_stats(plan)
+
+    # 联动更新迭代统计（新旧迭代都要更新）
+    new_iteration_id = plan.iteration_id
+    iter_ids_to_update = set()
+    if old_iteration_id:
+        iter_ids_to_update.add(old_iteration_id)
+    if new_iteration_id:
+        iter_ids_to_update.add(new_iteration_id)
+    for iid in iter_ids_to_update:
+        it = TestIteration.query.get(iid)
+        if it:
+            _recalc_iteration_stats(it)
+
     db.session.commit()
     return jsonify(plan.to_dict())
 
@@ -156,7 +311,15 @@ def update_test_plan(plan_id):
 def delete_test_plan(plan_id):
     """删除测试计划"""
     plan = TestPlan.query.get_or_404(plan_id)
+    iteration_id = plan.iteration_id
     db.session.delete(plan)
+
+    # 联动更新迭代统计
+    if iteration_id:
+        iteration = TestIteration.query.get(iteration_id)
+        if iteration:
+            _recalc_iteration_stats(iteration)
+
     db.session.commit()
     return jsonify({'message': f'测试计划 "{plan.name}" 已删除'})
 
@@ -620,9 +783,16 @@ def report_task_progress(claw_id, task_id):
 
 @api_bp.route('/test-plans/tapd-iterations', methods=['GET'])
 def get_tapd_iterations_for_plans():
-    """获取可关联的 TAPD 迭代列表（根据项目绑定的 workspace_id）"""
+    """获取可关联的 TAPD 迭代列表（根据项目绑定的 workspace_id）
+
+    重构（2026-04）：Hub 不再直连 TAPD，改读 tapd_iterations_cache 本地缓存。
+    缓存由 OpenClaw Agent 经 mcporter-internal/MCP 推送维护。
+    """
+    from app.models import TapdIterationsCache
+    from sqlalchemy import desc as _desc, func as _func
+
     project_id = request.args.get('project_id', type=int)
-    if not project_id:
+    if project_id is None:
         projects = Project.query.filter(
             Project.tapd_workspace_id.isnot(None),
             Project.tapd_workspace_id != ''
@@ -633,35 +803,28 @@ def get_tapd_iterations_for_plans():
 
     result = []
     for p in projects:
-        try:
-            from app.api.tapd import _tapd_request
-            data = _tapd_request('GET', 'https://api.tapd.cn/iterations',
-                                 {'workspace_id': p.tapd_workspace_id, 'limit': 10,
-                                  'order': 'created desc'})
-            iterations = []
-            for item in data:
-                it = item.get('Iteration', {})
-                iterations.append({
-                    'id': it.get('id'),
-                    'name': it.get('name'),
-                    'status': it.get('status'),
-                    'startdate': it.get('startdate'),
-                    'enddate': it.get('enddate'),
-                })
-            result.append({
-                'project_id': p.id,
-                'project_name': p.name,
-                'workspace_id': p.tapd_workspace_id,
-                'iterations': iterations,
-            })
-        except Exception as e:
-            result.append({
-                'project_id': p.id,
-                'project_name': p.name,
-                'workspace_id': p.tapd_workspace_id,
-                'error': str(e),
-                'iterations': [],
-            })
+        rows = (TapdIterationsCache.query
+                .filter_by(tapd_workspace_id=p.tapd_workspace_id)
+                .order_by(_desc(TapdIterationsCache.startdate))
+                .all())
+        last_synced = (db.session.query(_func.max(TapdIterationsCache.last_synced_at))
+                       .filter(TapdIterationsCache.tapd_workspace_id == p.tapd_workspace_id)
+                       .scalar())
+        iterations = [{
+            'id': r.tapd_iteration_id,
+            'name': r.name or '',
+            'status': r.status,
+            'startdate': str(r.startdate) if r.startdate else None,
+            'enddate': str(r.enddate) if r.enddate else None,
+        } for r in rows]
+        result.append({
+            'project_id': p.id,
+            'project_name': p.name,
+            'workspace_id': p.tapd_workspace_id,
+            'iterations': iterations,
+            'data_source': 'local_cache',
+            'last_synced_at': str(last_synced) if last_synced else None,
+        })
 
     return jsonify(result)
 

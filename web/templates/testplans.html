@@ -5,102 +5,115 @@
 
 {% block top_actions %}
 <div style="display:flex;gap:10px;align-items:center">
-    <select class="form-select" id="filter-project" onchange="loadPlans()" style="min-width:140px">
+    <select class="form-select" id="filter-project" onchange="loadIterations()" style="min-width:140px">
         <option value="">全部项目</option>
     </select>
-    <select class="form-select" id="filter-status" onchange="loadPlans()" style="min-width:120px">
+    <select class="form-select" id="filter-status" onchange="loadIterations()" style="min-width:120px">
         <option value="">全部状态</option>
         <option value="draft">草稿</option>
         <option value="active">进行中</option>
         <option value="completed">已完成</option>
         <option value="archived">已归档</option>
     </select>
-    <select class="form-select" id="filter-version-type" onchange="loadPlans()" style="min-width:130px">
-        <option value="">全部版本类型</option>
-        <option value="regular">常规版本</option>
-        <option value="resource">资源版本</option>
-        <option value="hotfix">紧急补丁</option>
-    </select>
-    <button class="btn btn-primary" onclick="openPlanModal()">+ 新建计划</button>
+    <button class="btn btn-primary" onclick="openIterationModal()">+ 新建迭代</button>
 </div>
 {% endblock %}
 
 {% block head %}
 <style>
-/* ===== 布局 ===== */
+/* ===== 三栏布局 ===== */
 .tp-layout { display: flex; gap: 0; min-height: calc(100vh - 120px); }
 
-/* 左侧计划列表 */
-.tp-sidebar {
-    width: 360px; min-width: 300px; border-right: 1px solid var(--border);
+/* 左侧迭代列表 */
+.tp-iter-sidebar {
+    width: 280px; min-width: 260px; border-right: 1px solid var(--border);
     display: flex; flex-direction: column; background: var(--bg-card);
     border-radius: var(--radius) 0 0 var(--radius);
 }
-.tp-sidebar-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
-.tp-sidebar-header h3 { font-size: 0.92rem; margin: 0; color: var(--text-primary); }
-.tp-sidebar-list { flex: 1; overflow-y: auto; padding: 8px; }
-.tp-sidebar-empty { padding: 40px 20px; text-align: center; color: var(--text-muted); font-size: 0.88rem; }
+.tp-iter-header { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+.tp-iter-header h3 { font-size: 0.88rem; margin: 0; color: var(--text-primary); }
+.tp-iter-list { flex: 1; overflow-y: auto; padding: 8px; }
+.tp-iter-empty { padding: 40px 16px; text-align: center; color: var(--text-muted); font-size: 0.85rem; }
+
+.tp-iter-card {
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 6px; cursor: pointer; transition: all 0.15s;
+    background: var(--bg-secondary);
+}
+.tp-iter-card:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(108,92,231,0.1); }
+.tp-iter-card.active { border-color: var(--accent); background: var(--accent-dim); }
+.tp-iter-card .tp-iter-name { font-size: 0.86rem; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+.tp-iter-card .tp-iter-meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 0.72rem; color: var(--text-muted); }
+.tp-iter-card .tp-iter-progress { margin-top: 6px; }
+
+/* 中间：计划列表 + 右侧详情 */
+.tp-main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+/* 计划列表区 */
+.tp-plan-area { display: flex; flex-direction: column; height: 100%; }
+.tp-plan-header { padding: 12px 18px; border-bottom: 1px solid var(--border); background: var(--bg-card); display: flex; justify-content: space-between; align-items: center; }
+.tp-plan-header h3 { font-size: 0.92rem; margin: 0; color: var(--text-primary); }
+.tp-plan-content { flex: 1; overflow-y: auto; padding: 12px 18px; }
 
 /* 计划卡片 */
 .tp-plan-card {
-    padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px;
     margin-bottom: 8px; cursor: pointer; transition: all 0.15s;
-    background: var(--bg-secondary);
+    background: var(--bg-card);
 }
-.tp-plan-card:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(108,92,231,0.1); }
+.tp-plan-card:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(108,92,231,0.08); }
 .tp-plan-card.active { border-color: var(--accent); background: var(--accent-dim); }
 .tp-plan-card .tp-plan-name { font-size: 0.9rem; font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
 .tp-plan-card .tp-plan-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 0.75rem; color: var(--text-muted); }
-.tp-plan-card .tp-plan-progress { margin-top: 8px; }
 .tp-plan-card .tp-plan-dates { font-size: 0.78rem; color: var(--text-secondary); margin-top: 4px; }
+.tp-plan-card .tp-plan-progress { margin-top: 8px; }
 
 /* 进度条 */
 .tp-progress-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
 .tp-progress-bar .tp-progress-fill { height: 100%; border-radius: 2px; transition: width 0.3s; }
 
-/* 右侧详情 */
-.tp-main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; }
-.tp-detail-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); font-size: 0.95rem; }
-.tp-detail-header { padding: 20px 24px; border-bottom: 1px solid var(--border); background: var(--bg-card); }
-.tp-detail-header h2 { font-size: 1.2rem; margin: 0 0 8px; color: var(--text-primary); }
-.tp-detail-header .tp-detail-desc { font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 12px; }
-.tp-detail-header .tp-detail-info { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 0.82rem; }
-.tp-detail-body { padding: 16px 24px; flex: 1; }
+/* 详情区域 */
+.tp-detail-empty { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--text-muted); font-size: 0.9rem; }
+.tp-detail-header { padding: 16px 20px; border-bottom: 1px solid var(--border); background: var(--bg-card); }
+.tp-detail-header h2 { font-size: 1.1rem; margin: 0 0 6px; color: var(--text-primary); }
+.tp-detail-header .tp-detail-desc { font-size: 0.83rem; color: var(--text-secondary); margin-bottom: 10px; }
+.tp-detail-header .tp-detail-info { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; font-size: 0.8rem; }
+.tp-detail-body { padding: 14px 20px; flex: 1; }
 
 /* 统计卡片 */
-.tp-stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.tp-stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 16px; }
 .tp-stat-card {
     background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
-    padding: 14px 16px; text-align: center;
+    padding: 12px 14px; text-align: center;
 }
-.tp-stat-card .tp-stat-val { font-size: 1.6rem; font-weight: 700; margin-bottom: 2px; }
-.tp-stat-card .tp-stat-label { font-size: 0.75rem; color: var(--text-muted); }
+.tp-stat-card .tp-stat-val { font-size: 1.4rem; font-weight: 700; margin-bottom: 2px; }
+.tp-stat-card .tp-stat-label { font-size: 0.72rem; color: var(--text-muted); }
 
 /* 任务列表 */
-.tp-tasks-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-.tp-tasks-header h3 { font-size: 0.95rem; margin: 0; color: var(--text-primary); }
+.tp-tasks-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.tp-tasks-header h3 { font-size: 0.92rem; margin: 0; color: var(--text-primary); }
 .tp-task-list { display: flex; flex-direction: column; gap: 8px; }
 
 .tp-task-card {
     background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
-    padding: 14px 18px; transition: all 0.15s;
+    padding: 12px 16px; transition: all 0.15s;
 }
 .tp-task-card:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(108,92,231,0.08); }
-.tp-task-card .tp-task-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
-.tp-task-card .tp-task-name { font-size: 0.9rem; font-weight: 600; color: var(--text-primary); flex: 1; }
-.tp-task-card .tp-task-actions { display: flex; gap: 6px; opacity: 0; transition: opacity 0.15s; }
+.tp-task-card .tp-task-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
+.tp-task-card .tp-task-name { font-size: 0.88rem; font-weight: 600; color: var(--text-primary); flex: 1; }
+.tp-task-card .tp-task-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.15s; }
 .tp-task-card:hover .tp-task-actions { opacity: 1; }
-.tp-task-card .tp-task-bottom { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; font-size: 0.78rem; color: var(--text-muted); }
+.tp-task-card .tp-task-bottom { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-size: 0.76rem; color: var(--text-muted); }
 
 /* 用例执行面板 */
-.tp-case-panel { margin-top: 16px; }
-.tp-case-panel h4 { font-size: 0.88rem; color: var(--text-primary); margin: 0 0 10px; }
+.tp-case-panel { margin-top: 12px; }
+.tp-case-panel h4 { font-size: 0.86rem; color: var(--text-primary); margin: 0 0 8px; }
 .tp-case-list { display: flex; flex-direction: column; gap: 4px; }
 .tp-case-row {
     display: grid; grid-template-columns: 40px 1fr 90px 90px 80px 48px;
-    align-items: center; gap: 8px; padding: 8px 12px;
+    align-items: center; gap: 8px; padding: 6px 10px;
     background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px;
-    font-size: 0.82rem;
+    font-size: 0.8rem;
 }
 .tp-case-row:hover { border-color: var(--accent); }
 .tp-case-row .tp-case-id { color: var(--text-muted); font-family: monospace; }
@@ -149,42 +162,155 @@
 /* Modal 表单 */
 .tp-form-group { margin-bottom: 14px; }
 .tp-form-group label { display: block; font-size: 0.82rem; color: var(--text-secondary); margin-bottom: 4px; font-weight: 500; }
-.tp-form-group input, .tp-form-group select, .tp-form-group textarea {
-    width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
-    background: var(--bg-secondary); color: var(--text-primary); font-size: 0.86rem;
+/* 注意：限定到文本类输入，避免误伤 checkbox/radio（曾导致 .tp-multi-option 里的复选框被撑成 100% 宽） */
+.tp-form-group > input:not([type=checkbox]):not([type=radio]),
+.tp-form-group > select,
+.tp-form-group > textarea,
+.tp-form-group input[type=text],
+.tp-form-group input[type=date],
+.tp-form-group input[type=number],
+.tp-form-group input[type=email],
+.tp-form-group input[type=password],
+.tp-form-group input[type=search],
+.tp-form-group input[type=url] {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-input, var(--bg-secondary)); color: var(--text-primary); font-size: 0.88rem;
     font-family: inherit;
+    transition: border-color var(--transition), box-shadow var(--transition);
 }
-.tp-form-group input:focus, .tp-form-group select:focus, .tp-form-group textarea:focus {
-    outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim);
+.tp-form-group > input:not([type=checkbox]):not([type=radio]):focus,
+.tp-form-group > select:focus,
+.tp-form-group > textarea:focus,
+.tp-form-group input[type=text]:focus,
+.tp-form-group input[type=date]:focus,
+.tp-form-group input[type=number]:focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim);
 }
 .tp-form-group textarea { min-height: 60px; resize: vertical; }
 .tp-form-row { display: flex; gap: 12px; }
 .tp-form-row > * { flex: 1; }
+
+/* ===== 下拉式多选（对齐设计系统：input-wrap + dropdown-menu + check） ===== */
+.tp-multi { position: relative; }
+.tp-multi-trigger {
+    width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-input, var(--bg-secondary)); color: var(--text-primary); font-size: 0.88rem;
+    cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+    text-align: left; gap: 8px; min-height: 38px;
+    transition: border-color var(--transition), box-shadow var(--transition);
+}
+.tp-multi-trigger:hover { border-color: var(--accent); }
+.tp-multi-trigger.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.tp-multi-trigger:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.tp-multi-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.tp-multi-label.placeholder { color: var(--text-muted); }
+.tp-multi-count {
+    background: var(--accent); color: var(--accent-fg, #fff); font-size: 0.72rem; font-weight: 500;
+    padding: 1px 8px; border-radius: 10px; line-height: 1.5; flex-shrink: 0;
+}
+.tp-multi-arrow {
+    color: var(--text-muted); transition: transform 0.18s; flex-shrink: 0;
+    width: 14px; height: 14px; display: inline-flex;
+}
+.tp-multi-arrow::before {
+    content: ''; display: block; width: 100%; height: 100%;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238a8780' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+    background-repeat: no-repeat; background-position: center;
+}
+.tp-multi-trigger.active .tp-multi-arrow { transform: rotate(180deg); }
+
+.tp-multi-panel {
+    position: absolute; top: calc(100% + 6px); left: 0; right: 0;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: var(--shadow-lg, 0 12px 32px rgba(0,0,0,0.35));
+    z-index: 10001;
+    max-height: 320px; display: flex; flex-direction: column;
+    overflow: hidden;
+}
+.tp-multi-toolbar {
+    display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--border);
+    background: var(--bg-card);
+}
+.tp-multi-toolbar input {
+    flex: 1; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg-input, var(--bg-secondary)); color: var(--text-primary); font-size: 0.82rem; width: auto;
+    transition: border-color var(--transition);
+}
+.tp-multi-toolbar input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
+.tp-multi-toolbar button {
+    padding: 5px 12px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg-card); color: var(--text-secondary); font-size: 0.78rem; cursor: pointer;
+    white-space: nowrap;
+    transition: all var(--transition);
+}
+.tp-multi-toolbar button:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft, var(--bg-hover)); }
+
+.tp-multi-options { overflow-y: auto; padding: 4px 0; flex: 1; min-height: 0; }
+.tp-multi-option {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+    cursor: pointer; font-size: 0.86rem; user-select: none; line-height: 1.4;
+    transition: background var(--transition);
+}
+.tp-multi-option:hover { background: var(--bg-hover, var(--bg-secondary)); }
+.tp-multi-option.selected { background: var(--accent-soft, var(--accent-dim)); }
+/* 自定义复选框样式（对齐设计系统的 .check） */
+.tp-multi-option input[type=checkbox] {
+    appearance: none; -webkit-appearance: none;
+    width: 16px; height: 16px; margin: 0; padding: 0;
+    flex-shrink: 0;
+    background: var(--bg-card);
+    border: 1.5px solid var(--border-light, var(--border));
+    border-radius: 4px;
+    cursor: pointer;
+    position: relative;
+    transition: all var(--transition);
+}
+.tp-multi-option input[type=checkbox]:hover { border-color: var(--accent); }
+.tp-multi-option input[type=checkbox]:checked {
+    background: var(--accent); border-color: var(--accent);
+}
+.tp-multi-option input[type=checkbox]:checked::after {
+    content: ''; position: absolute;
+    left: 4px; top: 1px;
+    width: 4px; height: 8px;
+    border: solid var(--accent-fg, #fff);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+.tp-multi-option input[type=checkbox]:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.tp-multi-option .opt-name { flex: 1; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-multi-option .opt-meta { color: var(--text-muted); font-size: 0.74rem; flex-shrink: 0; }
+.tp-multi-empty { padding: 16px; color: var(--text-muted); font-size: 0.82rem; text-align: center; }
 
 /* 用例状态选择 */
 .tp-case-status-select {
     padding: 2px 6px; font-size: 0.78rem; border: 1px solid var(--border); border-radius: 4px;
     background: var(--bg-secondary); color: var(--text-primary); cursor: pointer;
 }
+
+/* 无计划选中时的空状态 */
+.tp-no-iter-selected { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); font-size: 0.92rem; }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="tp-layout">
-    <!-- 左侧计划列表 -->
-    <div class="tp-sidebar">
-        <div class="tp-sidebar-header">
-            <h3>📋 测试计划</h3>
-            <span id="plan-count" style="font-size:0.78rem;color:var(--text-muted)">0</span>
+    <!-- 左侧：迭代列表 -->
+    <div class="tp-iter-sidebar">
+        <div class="tp-iter-header">
+            <h3>🔄 测试迭代</h3>
+            <span id="iter-count" style="font-size:0.78rem;color:var(--text-muted)">0</span>
         </div>
-        <div class="tp-sidebar-list" id="plan-list">
-            <div class="tp-sidebar-empty">暂无测试计划，点击右上角新建</div>
+        <div class="tp-iter-list" id="iter-list">
+            <div class="tp-iter-empty">暂无迭代，点击右上角新建</div>
         </div>
     </div>
 
-    <!-- 右侧详情 -->
-    <div class="tp-main" id="plan-detail">
-        <div class="tp-detail-empty">← 选择一个测试计划查看详情</div>
+    <!-- 右侧：计划与任务 -->
+    <div class="tp-main" id="main-area">
+        <div class="tp-no-iter-selected">← 选择一个测试迭代查看详情</div>
     </div>
 </div>
 {% endblock %}
@@ -192,7 +318,9 @@
 {% block scripts %}
 <script>
 // ===== 数据 =====
-let plans = [];
+let iterations = [];
+let currentIterId = null;
+let currentIterDetail = null;  // 含 plans
 let currentPlanId = null;
 let projects = [];
 let claws = [];
@@ -208,7 +336,7 @@ const PRIORITY_MAP = { P0:'P0-紧急', P1:'P1-高', P2:'P2-中', P3:'P3-低' };
 // ===== 初始化 =====
 (async function init() {
     await Promise.all([loadProjects(), loadClaws(), loadLibraries()]);
-    await loadPlans();
+    await loadIterations();
 })();
 
 async function loadProjects() {
@@ -237,57 +365,56 @@ async function loadLibraries() {
     } catch(e) { console.error('加载用例库失败', e); }
 }
 
-// ===== 计划列表 =====
-async function loadPlans() {
+// ===== 迭代列表 =====
+async function loadIterations() {
     const params = [];
     const pid = document.getElementById('filter-project').value;
     const st = document.getElementById('filter-status').value;
-    const vt = document.getElementById('filter-version-type').value;
     if (pid) params.push(`project_id=${pid}`);
     if (st) params.push(`status=${st}`);
-    if (vt) params.push(`version_type=${vt}`);
 
     try {
-        plans = await API.get('/test-plans' + (params.length ? '?' + params.join('&') : ''));
+        iterations = await API.get('/test-iterations' + (params.length ? '?' + params.join('&') : ''));
     } catch(e) {
-        showToast('加载计划失败: ' + e.message, 'error');
-        plans = [];
+        showToast('加载迭代失败: ' + e.message, 'error');
+        iterations = [];
     }
 
-    renderPlanList();
-    document.getElementById('plan-count').textContent = plans.length;
+    renderIterList();
+    document.getElementById('iter-count').textContent = iterations.length;
 
-    // 重新加载当前选中计划
-    if (currentPlanId) {
-        const still = plans.find(p => p.id === currentPlanId);
-        if (still) await showPlanDetail(currentPlanId);
-        else { currentPlanId = null; document.getElementById('plan-detail').innerHTML = '<div class="tp-detail-empty">← 选择一个测试计划查看详情</div>'; }
+    if (currentIterId) {
+        const still = iterations.find(it => it.id === currentIterId);
+        if (still) await showIterDetail(currentIterId);
+        else { currentIterId = null; document.getElementById('main-area').innerHTML = '<div class="tp-no-iter-selected">← 选择一个测试迭代查看详情</div>'; }
     }
 }
 
-function renderPlanList() {
-    const el = document.getElementById('plan-list');
-    if (!plans.length) {
-        el.innerHTML = '<div class="tp-sidebar-empty">暂无测试计划</div>';
+function renderIterList() {
+    const el = document.getElementById('iter-list');
+    if (!iterations.length) {
+        el.innerHTML = '<div class="tp-iter-empty">暂无测试迭代</div>';
         return;
     }
-    el.innerHTML = plans.map(p => {
-        const prog = p.progress || 0;
+    el.innerHTML = iterations.map(it => {
+        const prog = it.progress || 0;
         const color = prog >= 100 ? '#22c55e' : prog > 0 ? '#3b82f6' : 'var(--text-muted)';
         return `
-        <div class="tp-plan-card ${currentPlanId === p.id ? 'active' : ''}" onclick="showPlanDetail(${p.id})">
-            <div class="tp-plan-name">${esc(p.name)}</div>
-            <div class="tp-plan-meta">
-                <span class="tp-tag tp-tag-${p.version_type}">${VERSION_TYPE_MAP[p.version_type] || p.version_type}</span>
-                <span class="tp-tag tp-tag-${p.status}">${STATUS_MAP[p.status] || p.status}</span>
-                ${p.version_name ? `<span style="color:var(--accent)">${esc(p.version_name)}</span>` : ''}
+        <div class="tp-iter-card ${currentIterId === it.id ? 'active' : ''}" onclick="showIterDetail(${it.id})">
+            <div class="tp-iter-name">
+                <span class="tp-tag tp-tag-${it.version_type}" style="font-size:0.68rem">${VERSION_TYPE_MAP[it.version_type] || it.version_type}</span>
+                ${esc(it.name)}
             </div>
-            ${(p.tapd_iteration_names && p.tapd_iteration_names.length) ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-top:3px">🔗 ${p.tapd_iteration_names.map(n => esc(n)).join(', ')}</div>` : ''}
-            <div class="tp-plan-dates">📅 ${p.start_date || '?'} ~ ${p.end_date || '?'}</div>
-            <div class="tp-plan-progress">
+            <div class="tp-iter-meta">
+                <span class="tp-tag tp-tag-${it.status}">${STATUS_MAP[it.status] || it.status}</span>
+                ${it.version_name ? `<span style="color:var(--accent)">${esc(it.version_name)}</span>` : ''}
+                <span>📋 ${it.total_plans || 0} 计划</span>
+            </div>
+            ${it.start_date ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-top:3px">📅 ${it.start_date} ~ ${it.end_date || '?'}</div>` : ''}
+            <div class="tp-iter-progress">
                 <div class="tp-progress-bar"><div class="tp-progress-fill" style="width:${prog}%;background:${color}"></div></div>
-                <div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--text-muted);margin-top:2px">
-                    <span>${p.completed_tasks}/${p.total_tasks} 任务</span>
+                <div style="display:flex;justify-content:space-between;font-size:0.68rem;color:var(--text-muted);margin-top:2px">
+                    <span>${it.completed_tasks || 0}/${it.total_tasks || 0} 任务</span>
                     <span>${prog}%</span>
                 </div>
             </div>
@@ -295,10 +422,124 @@ function renderPlanList() {
     }).join('');
 }
 
-// ===== 计划详情 =====
+// ===== 迭代详情（含计划列表） =====
+async function showIterDetail(iterId) {
+    currentIterId = iterId;
+    currentPlanId = null;
+    renderIterList();
+
+    try {
+        currentIterDetail = await API.get(`/test-iterations/${iterId}`);
+        renderIterDetailArea(currentIterDetail);
+    } catch(e) {
+        showToast('加载迭代详情失败', 'error');
+    }
+}
+
+function renderIterDetailArea(iter) {
+    const el = document.getElementById('main-area');
+    const plans = iter.plans || [];
+    const prog = iter.progress || 0;
+    const progColor = prog >= 100 ? '#22c55e' : prog > 0 ? '#3b82f6' : 'var(--text-muted)';
+
+    el.innerHTML = `
+    <div class="tp-plan-area">
+        <!-- 迭代信息头 -->
+        <div class="tp-detail-header">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <h2>${esc(iter.name)}${iter.version_name ? ` <span style="font-size:0.82rem;color:var(--accent)">${esc(iter.version_name)}</span>` : ''}</h2>
+                <div style="display:flex;gap:6px">
+                    <button class="tp-btn-sm" onclick="openIterationModal(${iter.id})">✏️ 编辑</button>
+                    <button class="tp-btn-sm danger" onclick="deleteIteration(${iter.id})">🗑️ 删除</button>
+                </div>
+            </div>
+            ${iter.description ? `<div class="tp-detail-desc">${esc(iter.description)}</div>` : ''}
+            <div class="tp-detail-info">
+                <span class="tp-tag tp-tag-${iter.version_type}">${VERSION_TYPE_MAP[iter.version_type] || iter.version_type}</span>
+                <span class="tp-tag tp-tag-${iter.status}">${STATUS_MAP[iter.status] || iter.status}</span>
+                ${iter.start_date ? `<span>📅 ${iter.start_date} ~ ${iter.end_date || '?'}</span>` : ''}
+                ${iter.project_name ? `<span>📁 ${esc(iter.project_name)}</span>` : ''}
+                ${iter.created_by ? `<span>👤 ${esc(iter.created_by)}</span>` : ''}
+            </div>
+        </div>
+
+        <!-- 统计 -->
+        <div style="padding:14px 18px">
+            <div class="tp-stats-row">
+                <div class="tp-stat-card">
+                    <div class="tp-stat-val" style="color:var(--accent)">${iter.total_plans || 0}</div>
+                    <div class="tp-stat-label">测试计划</div>
+                </div>
+                <div class="tp-stat-card">
+                    <div class="tp-stat-val" style="color:#3b82f6">${iter.total_tasks || 0}</div>
+                    <div class="tp-stat-label">总任务</div>
+                </div>
+                <div class="tp-stat-card">
+                    <div class="tp-stat-val" style="color:#22c55e">${iter.completed_tasks || 0}</div>
+                    <div class="tp-stat-label">已完成</div>
+                </div>
+                <div class="tp-stat-card">
+                    <div class="tp-stat-val" style="color:${progColor}">${prog}%</div>
+                    <div class="tp-stat-label">总进度</div>
+                </div>
+                <div class="tp-stat-card">
+                    <div class="tp-stat-val" style="color:#ef4444">${iter.total_bugs || 0}</div>
+                    <div class="tp-stat-label">Bug 数</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 计划列表 -->
+        <div class="tp-plan-header">
+            <h3>📋 测试计划 (${plans.length})</h3>
+            <button class="btn btn-primary" style="font-size:0.82rem;padding:6px 14px" onclick="openPlanModal(0, ${iter.id})">+ 新建计划</button>
+        </div>
+        <div class="tp-plan-content">
+            ${plans.length ? plans.map(p => renderPlanCard(p)).join('') : '<div class="tp-detail-empty" style="height:120px">暂无测试计划，点击上方新建</div>'}
+            
+            <!-- 当前选中计划的详情 -->
+            <div id="plan-detail-area"></div>
+        </div>
+    </div>`;
+
+    // 自动选中第一个计划
+    if (plans.length && !currentPlanId) {
+        showPlanDetail(plans[0].id);
+    }
+}
+
+function renderPlanCard(p) {
+    const prog = p.progress || 0;
+    const color = prog >= 100 ? '#22c55e' : prog > 0 ? '#3b82f6' : 'var(--text-muted)';
+    return `
+    <div class="tp-plan-card ${currentPlanId === p.id ? 'active' : ''}" onclick="showPlanDetail(${p.id})">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div class="tp-plan-name">${esc(p.name)}</div>
+            <div style="display:flex;gap:4px">
+                <button class="tp-btn-sm" onclick="event.stopPropagation();openPlanModal(${p.id}, ${currentIterId})" title="编辑">✏️</button>
+                <button class="tp-btn-sm danger" onclick="event.stopPropagation();deletePlan(${p.id})" title="删除">🗑️</button>
+            </div>
+        </div>
+        <div class="tp-plan-meta">
+            <span class="tp-tag tp-tag-${p.status}">${STATUS_MAP[p.status] || p.status}</span>
+            ${p.version_name ? `<span style="color:var(--accent)">${esc(p.version_name)}</span>` : ''}
+            <span>${p.completed_tasks || 0}/${p.total_tasks || 0} 任务</span>
+        </div>
+        <div class="tp-plan-dates">📅 ${p.start_date || '?'} ~ ${p.end_date || '?'}</div>
+        <div class="tp-plan-progress">
+            <div class="tp-progress-bar"><div class="tp-progress-fill" style="width:${prog}%;background:${color}"></div></div>
+            <div style="text-align:right;font-size:0.68rem;color:var(--text-muted);margin-top:1px">${prog}%</div>
+        </div>
+    </div>`;
+}
+
+// ===== 计划详情（含任务列表） =====
 async function showPlanDetail(planId) {
     currentPlanId = planId;
-    renderPlanList();  // 高亮当前
+    // 高亮计划卡片
+    document.querySelectorAll('.tp-plan-card').forEach(c => c.classList.remove('active'));
+    const activeCard = document.querySelector(`.tp-plan-card[onclick*="showPlanDetail(${planId})"]`);
+    if (activeCard) activeCard.classList.add('active');
 
     try {
         const plan = await API.get(`/test-plans/${planId}`);
@@ -309,35 +550,26 @@ async function showPlanDetail(planId) {
 }
 
 function renderPlanDetail(plan) {
-    const el = document.getElementById('plan-detail');
+    const el = document.getElementById('plan-detail-area');
+    if (!el) return;
     const prog = plan.progress || 0;
     const progColor = prog >= 100 ? '#22c55e' : prog > 0 ? '#3b82f6' : 'var(--text-muted)';
+    const tasks = plan.tasks || [];
 
     el.innerHTML = `
-    <div class="tp-detail-header">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start">
-            <h2>${esc(plan.name)}</h2>
-            <div style="display:flex;gap:6px">
-                <button class="tp-btn-sm" onclick="openPlanModal(${plan.id})">✏️ 编辑</button>
-                <button class="tp-btn-sm danger" onclick="deletePlan(${plan.id})">🗑️ 删除</button>
+    <div style="margin-top:20px;border-top:2px solid var(--accent);padding-top:16px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
+            <div>
+                <h3 style="margin:0;font-size:1rem;color:var(--text-primary)">${esc(plan.name)}</h3>
+                ${plan.description ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-top:4px">${esc(plan.description)}</div>` : ''}
             </div>
         </div>
-        ${plan.description ? `<div class="tp-detail-desc">${esc(plan.description)}</div>` : ''}
-        <div class="tp-detail-info">
-            <span class="tp-tag tp-tag-${plan.version_type}">${VERSION_TYPE_MAP[plan.version_type] || plan.version_type}</span>
-            <span class="tp-tag tp-tag-${plan.status}">${STATUS_MAP[plan.status] || plan.status}</span>
-            ${plan.version_name ? `<span>📌 ${esc(plan.version_name)}</span>` : ''}
-            <span>📅 ${plan.start_date} ~ ${plan.end_date}</span>
-            ${plan.project_name ? `<span>📁 ${esc(plan.project_name)}</span>` : ''}
-            ${plan.created_by ? `<span>👤 ${esc(plan.created_by)}</span>` : ''}
-        </div>
-    </div>
-    <div class="tp-detail-body">
-        <!-- 统计 -->
-        <div class="tp-stats-row">
+
+        <!-- 计划统计 -->
+        <div class="tp-stats-row" style="grid-template-columns:repeat(4,1fr)">
             <div class="tp-stat-card">
                 <div class="tp-stat-val" style="color:#3b82f6">${plan.total_tasks}</div>
-                <div class="tp-stat-label">总任务</div>
+                <div class="tp-stat-label">任务数</div>
             </div>
             <div class="tp-stat-card">
                 <div class="tp-stat-val" style="color:#22c55e">${plan.completed_tasks}</div>
@@ -345,27 +577,27 @@ function renderPlanDetail(plan) {
             </div>
             <div class="tp-stat-card">
                 <div class="tp-stat-val" style="color:${progColor}">${prog}%</div>
-                <div class="tp-stat-label">总进度</div>
+                <div class="tp-stat-label">进度</div>
             </div>
             <div class="tp-stat-card">
-                <div class="tp-stat-val" style="color:#ef4444">${plan.total_bugs}</div>
-                <div class="tp-stat-label">Bug 数</div>
+                <div class="tp-stat-val" style="color:#ef4444">${plan.total_bugs || 0}</div>
+                <div class="tp-stat-label">Bug</div>
             </div>
         </div>
 
         <!-- 任务列表 -->
         <div class="tp-tasks-header">
-            <h3>📝 测试任务</h3>
-            <button class="btn btn-primary" style="font-size:0.82rem;padding:6px 14px" onclick="openTaskModal(${plan.id})">+ 新建任务</button>
+            <h3>📝 测试任务 (${tasks.length})</h3>
+            <button class="btn btn-primary" style="font-size:0.8rem;padding:5px 12px" onclick="openTaskModal(${plan.id})">+ 新建任务</button>
         </div>
         <div class="tp-task-list" id="task-list">
-            ${renderTaskList(plan.tasks || [])}
+            ${renderTaskList(tasks)}
         </div>
     </div>`;
 }
 
 function renderTaskList(tasks) {
-    if (!tasks.length) return '<div style="color:var(--text-muted);text-align:center;padding:24px;font-size:0.88rem">暂无任务</div>';
+    if (!tasks.length) return '<div style="color:var(--text-muted);text-align:center;padding:20px;font-size:0.86rem">暂无任务</div>';
     return tasks.map(t => {
         const prog = t.progress || 0;
         const progColor = prog >= 100 ? '#22c55e' : prog > 0 ? '#3b82f6' : 'var(--text-muted)';
@@ -387,9 +619,9 @@ function renderTaskList(tasks) {
                 ${t.library_name ? `<span>📚 ${esc(t.library_name)}</span>` : ''}
                 ${t.bug_count ? `<span style="color:#ef4444">🐛 ${t.bug_count}</span>` : ''}
             </div>
-            <div style="margin-top:8px">
+            <div style="margin-top:6px">
                 <div class="tp-progress-bar"><div class="tp-progress-fill" style="width:${prog}%;background:${progColor}"></div></div>
-                <div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--text-muted);margin-top:2px">
+                <div style="display:flex;justify-content:space-between;font-size:0.68rem;color:var(--text-muted);margin-top:2px">
                     <span>${t.passed_cases||0}✓ ${t.failed_cases||0}✕ ${t.blocked_cases||0}⊘ ${t.skipped_cases||0}⏭</span>
                     <span>${prog}%</span>
                 </div>
@@ -402,25 +634,16 @@ function renderTaskList(tasks) {
 // ===== 用例执行面板 =====
 async function toggleCasePanel(taskId) {
     const panel = document.getElementById(`case-panel-${taskId}`);
-    if (panel.style.display !== 'none') {
-        panel.style.display = 'none';
-        return;
-    }
+    if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
     panel.style.display = 'block';
     panel.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem">加载中...</div>';
 
     try {
-        // 找到当前 planId 和 task
-        const plan = await API.get(`/test-plans/${currentPlanId}`);
-        const task = (plan.tasks || []).find(t => t.id === taskId);
-        if (!task) { panel.innerHTML = '<div style="color:var(--red)">任务不存在</div>'; return; }
-
         const cases = await API.get(`/test-plans/${currentPlanId}/tasks/${taskId}/cases`);
         if (!cases.length) {
             panel.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem;padding:8px">未关联用例</div>';
             return;
         }
-
         panel.innerHTML = `
         <h4>🧪 用例执行情况 (${cases.length})</h4>
         <div class="tp-case-list">
@@ -429,7 +652,7 @@ async function toggleCasePanel(taskId) {
             </div>
             ${cases.map(c => `
             <div class="tp-case-row">
-                <span class="tp-case-id">${c.case_id}</span>
+                <span class="tp-case-id">${c.case_id || c.id}</span>
                 <span class="tp-case-title" title="${esc(c.case_title || '')}">${esc(c.case_title || '-')}</span>
                 <select class="tp-case-status-select" onchange="updateCaseStatus(${currentPlanId},${taskId},${c.id},this.value)">
                     ${Object.entries(CASE_STATUS_MAP).map(([k,v]) => `<option value="${k}" ${c.status===k?'selected':''}>${v}</option>`).join('')}
@@ -448,14 +671,10 @@ async function updateCaseStatus(planId, taskId, tcId, status) {
     try {
         await API.put(`/test-plans/${planId}/tasks/${taskId}/cases/${tcId}`, { status });
         showToast('用例状态已更新', 'success');
-        // 刷新详情
         await showPlanDetail(planId);
-        // 重新展开面板
         const panel = document.getElementById(`case-panel-${taskId}`);
-        if (panel) panel.style.display = 'block';
-    } catch(e) {
-        showToast('更新失败: ' + e.message, 'error');
-    }
+        if (panel) { panel.style.display = 'block'; await toggleCasePanel(taskId); panel.style.display = 'block'; }
+    } catch(e) { showToast('更新失败: ' + e.message, 'error'); }
 }
 
 async function addCaseNote(planId, taskId, tcId) {
@@ -465,38 +684,29 @@ async function addCaseNote(planId, taskId, tcId) {
         await API.put(`/test-plans/${planId}/tasks/${taskId}/cases/${tcId}`, { note });
         showToast('备注已保存', 'success');
         await showPlanDetail(planId);
-        const panel = document.getElementById(`case-panel-${taskId}`);
-        if (panel) panel.style.display = 'block';
-    } catch(e) {
-        showToast('保存失败: ' + e.message, 'error');
-    }
+    } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
 }
 
-// ===== TAPD 迭代多选 =====
-let _iterationsCache = {};  // project_id -> {iterations, workspace_id}
+// ===== TAPD 迭代多选（下拉式） =====
+let _iterationsCache = {};
 
-async function onProjectChangeForPlan() {
-    const projectId = document.getElementById('pm-project').value;
-    const group = document.getElementById('pm-iteration-group');
-    const list = document.getElementById('pm-iteration-list');
-
-    if (!projectId) {
+async function onProjectChangeForIter() {
+    const projectId = document.getElementById('im-project').value;
+    const group = document.getElementById('im-tapd-group');
+    const optionsBox = document.getElementById('im-tapd-options');
+    if (projectId === '' || projectId === null || projectId === undefined) {
         group.style.display = 'none';
         return;
     }
-
     group.style.display = 'block';
-    list.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem">加载中...</div>';
+    optionsBox.innerHTML = '<div class="tp-multi-empty">加载中...</div>';
+    setTapdLabel('加载中...', 0, true);
 
     try {
         if (!_iterationsCache[projectId]) {
             const data = await API.get(`/test-plans/tapd-iterations?project_id=${projectId}`);
-            // data 是数组，每项有 project_id/project_name/workspace_id/iterations
             if (Array.isArray(data) && data.length > 0) {
-                _iterationsCache[projectId] = {
-                    iterations: data[0].iterations || [],
-                    workspace_id: data[0].workspace_id || '',
-                };
+                _iterationsCache[projectId] = { iterations: data[0].iterations || [], workspace_id: data[0].workspace_id || '' };
             } else {
                 _iterationsCache[projectId] = { iterations: [], workspace_id: '' };
             }
@@ -505,49 +715,124 @@ async function onProjectChangeForPlan() {
         const iters = cache.iterations;
 
         if (!iters.length) {
-            list.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem">该项目未配置 TAPD 或无迭代</div>';
+            optionsBox.innerHTML = '<div class="tp-multi-empty">该项目未配置 TAPD 或无迭代</div>';
+            setTapdLabel('该项目未配置 TAPD 或无迭代', 0, true);
             return;
         }
 
-        // 获取已选中的迭代（编辑模式）
-        const planId = document.querySelector('.modal-overlay.active [onclick*="savePlan"]')
-            ? (document.querySelector('.modal-overlay.active [onclick*="savePlan"]').onclick.toString().match(/savePlan\((\d+)/) || [])[1]
-            : null;
-        const editingPlan = planId ? plans.find(p => p.id === parseInt(planId)) : null;
-        const selectedIds = editingPlan ? (editingPlan.tapd_iteration_ids || []) : [];
+        const editIter = currentIterId ? iterations.find(it => it.id === currentIterId) : null;
+        const selectedIds = editIter ? (editIter.tapd_iteration_ids || []) : [];
 
-        list.innerHTML = iters.map(it => `
-            <label style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:0.82rem;cursor:pointer">
-                <input type="checkbox" class="pm-iter-cb" value="${it.id}" data-name="${esc(it.name)}" ${selectedIds.includes(it.id)?'checked':''}>
-                <span>${esc(it.name)}</span>
-                <span style="color:var(--text-muted);font-size:0.72rem;margin-left:auto">${it.status || ''} ${it.startdate || ''}</span>
-            </label>
-        `).join('');
+        optionsBox.innerHTML = iters.map(it => {
+            const checked = selectedIds.includes(String(it.id)) || selectedIds.includes(it.id);
+            return `
+            <label class="tp-multi-option ${checked?'selected':''}" data-search="${esc((it.name||'').toLowerCase())}">
+                <input type="checkbox" class="im-tapd-cb" value="${esc(it.id)}" data-name="${esc(it.name||'')}" ${checked?'checked':''} onchange="onTapdOptionChange(this)">
+                <span class="opt-name">${esc(it.name||'')}</span>
+                <span class="opt-meta">${esc(it.status||'')} ${esc(it.startdate||'')}</span>
+            </label>`;
+        }).join('');
+        updateTapdLabel();
     } catch (e) {
-        list.innerHTML = `<div style="color:var(--red);font-size:0.82rem">加载失败: ${e.message}</div>`;
+        optionsBox.innerHTML = `<div class="tp-multi-empty" style="color:var(--red,#f5564a)">加载失败: ${esc(e.message)}</div>`;
+        setTapdLabel('加载失败', 0, true);
     }
 }
 
-function getSelectedIterations() {
-    const cbs = document.querySelectorAll('.pm-iter-cb:checked');
-    return Array.from(cbs).map(cb => cb.value);
+function setTapdLabel(text, count, placeholder) {
+    const label = document.getElementById('im-tapd-label');
+    const badge = document.getElementById('im-tapd-count');
+    if (!label || !badge) return;
+    label.textContent = text;
+    label.classList.toggle('placeholder', !!placeholder);
+    if (count > 0) {
+        badge.textContent = count;
+        badge.style.display = '';
+    } else {
+        badge.style.display = 'none';
+    }
 }
 
-function getSelectedIterationNames() {
-    const cbs = document.querySelectorAll('.pm-iter-cb:checked');
-    return Array.from(cbs).map(cb => cb.dataset.name);
+function updateTapdLabel() {
+    const checked = document.querySelectorAll('#im-tapd-options .im-tapd-cb:checked');
+    if (!checked.length) {
+        setTapdLabel('请选择 TAPD 迭代...', 0, true);
+        return;
+    }
+    const names = Array.from(checked).map(cb => cb.dataset.name).filter(Boolean);
+    setTapdLabel(names.join('、'), checked.length, false);
 }
 
-function getCurrentWorkspaceId() {
-    const projectId = document.getElementById('pm-project').value;
-    if (!projectId || !_iterationsCache[projectId]) return '';
-    return _iterationsCache[projectId].workspace_id || '';
+function onTapdOptionChange(cb) {
+    const opt = cb.closest('.tp-multi-option');
+    if (opt) opt.classList.toggle('selected', cb.checked);
+    updateTapdLabel();
 }
 
-// ===== 计划 CRUD =====
-function openPlanModal(planId) {
-    const isEdit = !!planId;
-    const plan = isEdit ? plans.find(p => p.id === planId) : {};
+function toggleTapdDropdown(e) {
+    if (e) e.stopPropagation();
+    const trigger = document.getElementById('im-tapd-trigger');
+    const panel = document.getElementById('im-tapd-panel');
+    if (!trigger || !panel) return;
+    const open = !panel.hasAttribute('hidden');
+    if (open) {
+        panel.setAttribute('hidden', '');
+        trigger.classList.remove('active');
+    } else {
+        panel.removeAttribute('hidden');
+        trigger.classList.add('active');
+        setTimeout(() => {
+            const s = document.getElementById('im-tapd-search');
+            if (s) s.focus();
+        }, 0);
+    }
+}
+
+function filterTapdOptions(kw) {
+    const k = (kw || '').trim().toLowerCase();
+    document.querySelectorAll('#im-tapd-options .tp-multi-option').forEach(el => {
+        const hit = !k || (el.dataset.search || '').includes(k);
+        el.style.display = hit ? '' : 'none';
+    });
+}
+
+function selectAllTapd(checked) {
+    document.querySelectorAll('#im-tapd-options .tp-multi-option').forEach(el => {
+        if (el.style.display === 'none') return;  // 仅作用于当前可见项
+        const cb = el.querySelector('.im-tapd-cb');
+        if (cb && cb.checked !== checked) {
+            cb.checked = checked;
+            el.classList.toggle('selected', checked);
+        }
+    });
+    updateTapdLabel();
+}
+
+// 全局：点击下拉框外部时收起面板
+document.addEventListener('click', function(e) {
+    const multi = document.getElementById('im-tapd-multi');
+    const panel = document.getElementById('im-tapd-panel');
+    if (!multi || !panel || panel.hasAttribute('hidden')) return;
+    if (!multi.contains(e.target)) {
+        panel.setAttribute('hidden', '');
+        const t = document.getElementById('im-tapd-trigger');
+        if (t) t.classList.remove('active');
+    }
+});
+document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Escape') return;
+    const panel = document.getElementById('im-tapd-panel');
+    if (panel && !panel.hasAttribute('hidden')) {
+        panel.setAttribute('hidden', '');
+        const t = document.getElementById('im-tapd-trigger');
+        if (t) t.classList.remove('active');
+    }
+});
+
+// ===== 迭代 CRUD =====
+function openIterationModal(iterId) {
+    const isEdit = !!iterId;
+    const iter = isEdit ? iterations.find(it => it.id === iterId) : {};
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
@@ -555,30 +840,164 @@ function openPlanModal(planId) {
     overlay.innerHTML = `
     <div class="modal" style="max-width:560px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+            <h3 style="margin:0;font-size:1.05rem">${isEdit ? '编辑测试迭代' : '新建测试迭代'}</h3>
+            <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
+        </div>
+        <div class="tp-form-group">
+            <label>迭代名称 *</label>
+            <input id="im-name" value="${esc(iter.name || '')}" placeholder="例：v3.2 常规版本迭代">
+        </div>
+        <div class="tp-form-group">
+            <label>描述</label>
+            <textarea id="im-desc" placeholder="可选">${esc(iter.description || '')}</textarea>
+        </div>
+        <div class="tp-form-row">
+            <div class="tp-form-group">
+                <label>版本类型</label>
+                <select id="im-vtype">
+                    <option value="regular" ${iter.version_type==='regular'?'selected':''}>常规版本</option>
+                    <option value="resource" ${iter.version_type==='resource'?'selected':''}>资源版本</option>
+                    <option value="hotfix" ${iter.version_type==='hotfix'?'selected':''}>紧急补丁</option>
+                </select>
+            </div>
+            <div class="tp-form-group">
+                <label>版本号</label>
+                <input id="im-vname" value="${esc(iter.version_name || '')}" placeholder="例：v3.2.1">
+            </div>
+        </div>
+        <div class="tp-form-row">
+            <div class="tp-form-group">
+                <label>开始日期</label>
+                <input type="date" id="im-start" value="${iter.start_date || ''}">
+            </div>
+            <div class="tp-form-group">
+                <label>结束日期</label>
+                <input type="date" id="im-end" value="${iter.end_date || ''}">
+            </div>
+        </div>
+        <div class="tp-form-row">
+            <div class="tp-form-group">
+                <label>关联项目</label>
+                <select id="im-project" onchange="onProjectChangeForIter()">
+                    <option value="">不关联</option>
+                    ${projects.map(p => `<option value="${p.id}" ${iter.project_id===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}
+                </select>
+            </div>
+            <div class="tp-form-group">
+                <label>状态</label>
+                <select id="im-status">
+                    <option value="draft" ${iter.status==='draft'?'selected':''}>草稿</option>
+                    <option value="active" ${iter.status==='active'?'selected':''}>进行中</option>
+                    <option value="completed" ${iter.status==='completed'?'selected':''}>已完成</option>
+                    <option value="archived" ${iter.status==='archived'?'selected':''}>已归档</option>
+                </select>
+            </div>
+        </div>
+        <div class="tp-form-group" id="im-tapd-group" style="display:none">
+            <label>TAPD 迭代 <span style="color:var(--text-muted);font-size:0.78rem">(可多选)</span></label>
+            <div class="tp-multi" id="im-tapd-multi">
+                <button type="button" class="tp-multi-trigger" id="im-tapd-trigger" onclick="toggleTapdDropdown(event)">
+                    <span class="tp-multi-label placeholder" id="im-tapd-label">请先选择项目</span>
+                    <span class="tp-multi-count" id="im-tapd-count" style="display:none">0</span>
+                    <span class="tp-multi-arrow">▼</span>
+                </button>
+                <div class="tp-multi-panel" id="im-tapd-panel" hidden>
+                    <div class="tp-multi-toolbar">
+                        <input type="text" id="im-tapd-search" placeholder="搜索迭代..." oninput="filterTapdOptions(this.value)" onclick="event.stopPropagation()">
+                        <button type="button" onclick="selectAllTapd(true);event.stopPropagation()">全选</button>
+                        <button type="button" onclick="selectAllTapd(false);event.stopPropagation()">清空</button>
+                    </div>
+                    <div class="tp-multi-options" id="im-tapd-options">
+                        <div class="tp-multi-empty">请先选择项目</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div style="display:flex;gap:12px;justify-content:center;margin-top:18px">
+            <button class="btn btn-ghost" onclick="this.closest('.modal-overlay').remove()">关闭</button>
+            <button class="btn btn-primary" onclick="saveIteration(${iterId || 0})">${isEdit ? '保存' : '创建'}</button>
+        </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    if (isEdit && iter.project_id) setTimeout(() => onProjectChangeForIter(), 100);
+}
+
+async function saveIteration(iterId) {
+    const name = document.getElementById('im-name').value.trim();
+    if (!name) { showToast('请输入迭代名称', 'warning'); return; }
+
+    const tapdCbs = document.querySelectorAll('.im-tapd-cb:checked');
+    const projectId = document.getElementById('im-project').value;
+
+    const data = {
+        name,
+        description: document.getElementById('im-desc').value.trim(),
+        version_type: document.getElementById('im-vtype').value,
+        version_name: document.getElementById('im-vname').value.trim(),
+        start_date: document.getElementById('im-start').value || null,
+        end_date: document.getElementById('im-end').value || null,
+        project_id: projectId ? parseInt(projectId) : null,
+        tapd_iteration_ids: Array.from(tapdCbs).map(cb => cb.value),
+        tapd_iteration_names: Array.from(tapdCbs).map(cb => cb.dataset.name),
+        tapd_workspace_id: (projectId && _iterationsCache[projectId]) ? _iterationsCache[projectId].workspace_id : '',
+        status: document.getElementById('im-status').value,
+    };
+
+    try {
+        if (iterId) {
+            await API.put(`/test-iterations/${iterId}`, data);
+            showToast('迭代已更新', 'success');
+        } else {
+            const res = await API.post('/test-iterations', data);
+            showToast('迭代已创建', 'success');
+            currentIterId = res.id;
+        }
+        document.querySelector('.modal-overlay.active').remove();
+        await loadIterations();
+        if (currentIterId) await showIterDetail(currentIterId);
+    } catch(e) {
+        showToast('保存失败: ' + e.message, 'error');
+    }
+}
+
+async function deleteIteration(iterId) {
+    const ok = await customConfirm('确定删除该测试迭代？下属的所有测试计划和任务也会一并删除。');
+    if (!ok) return;
+    try {
+        await API.del(`/test-iterations/${iterId}`);
+        showToast('迭代已删除', 'success');
+        currentIterId = null;
+        currentPlanId = null;
+        document.getElementById('main-area').innerHTML = '<div class="tp-no-iter-selected">← 选择一个测试迭代查看详情</div>';
+        await loadIterations();
+    } catch(e) { showToast('删除失败: ' + e.message, 'error'); }
+}
+
+// ===== 计划 CRUD =====
+function openPlanModal(planId, iterId) {
+    const isEdit = !!planId;
+    let plan = {};
+    if (isEdit && currentIterDetail && currentIterDetail.plans) {
+        plan = currentIterDetail.plans.find(p => p.id === planId) || {};
+    }
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.style.zIndex = '9999';
+    overlay.innerHTML = `
+    <div class="modal" style="max-width:520px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
             <h3 style="margin:0;font-size:1.05rem">${isEdit ? '编辑测试计划' : '新建测试计划'}</h3>
             <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
         </div>
         <div class="tp-form-group">
             <label>计划名称 *</label>
-            <input id="pm-name" value="${esc(plan.name || '')}" placeholder="例：v3.2 常规版本测试计划">
+            <input id="pm-name" value="${esc(plan.name || '')}" placeholder="例：第1轮转测 / 回归测试">
         </div>
         <div class="tp-form-group">
             <label>描述</label>
-            <textarea id="pm-desc" placeholder="可选，描述测试计划内容">${esc(plan.description || '')}</textarea>
-        </div>
-        <div class="tp-form-row">
-            <div class="tp-form-group">
-                <label>版本类型</label>
-                <select id="pm-vtype">
-                    <option value="regular" ${plan.version_type==='regular'?'selected':''}>常规版本</option>
-                    <option value="resource" ${plan.version_type==='resource'?'selected':''}>资源版本</option>
-                    <option value="hotfix" ${plan.version_type==='hotfix'?'selected':''}>紧急补丁</option>
-                </select>
-            </div>
-            <div class="tp-form-group">
-                <label>版本号</label>
-                <input id="pm-vname" value="${esc(plan.version_name || '')}" placeholder="例：v3.2.1">
-            </div>
+            <textarea id="pm-desc" placeholder="可选">${esc(plan.description || '')}</textarea>
         </div>
         <div class="tp-form-row">
             <div class="tp-form-group">
@@ -592,11 +1011,8 @@ function openPlanModal(planId) {
         </div>
         <div class="tp-form-row">
             <div class="tp-form-group">
-                <label>关联项目</label>
-                <select id="pm-project" onchange="onProjectChangeForPlan()">
-                    <option value="">不关联</option>
-                    ${projects.map(p => `<option value="${p.id}" ${plan.project_id===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}
-                </select>
+                <label>版本号</label>
+                <input id="pm-vname" value="${esc(plan.version_name || '')}" placeholder="可选">
             </div>
             <div class="tp-form-group">
                 <label>状态</label>
@@ -608,44 +1024,32 @@ function openPlanModal(planId) {
                 </select>
             </div>
         </div>
-        <div class="tp-form-group" id="pm-iteration-group" style="display:none">
-            <label>TAPD 迭代 <span style="color:var(--text-muted);font-size:0.78rem">(可多选)</span></label>
-            <div id="pm-iteration-list" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg-secondary)">
-                <div style="color:var(--text-muted);font-size:0.82rem">请先选择项目</div>
-            </div>
-        </div>
-        <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:18px">
-            <button class="btn btn-ghost" onclick="this.closest('.modal-overlay').remove()">取消</button>
-            <button class="btn btn-primary" onclick="savePlan(${planId || 0})">${isEdit ? '保存' : '创建'}</button>
+        <div style="display:flex;gap:12px;justify-content:center;margin-top:18px">
+            <button class="btn btn-ghost" onclick="this.closest('.modal-overlay').remove()">关闭</button>
+            <button class="btn btn-primary" onclick="savePlan(${planId || 0}, ${iterId || 0})">${isEdit ? '保存' : '创建'}</button>
         </div>
     </div>`;
     document.body.appendChild(overlay);
     overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-
-    // 编辑模式下，如果已选项目则加载迭代
-    if (isEdit && plan.project_id) {
-        setTimeout(() => onProjectChangeForPlan(), 100);
-    }
 }
 
-async function savePlan(planId) {
+async function savePlan(planId, iterId) {
     const name = document.getElementById('pm-name').value.trim();
     const startDate = document.getElementById('pm-start').value;
     const endDate = document.getElementById('pm-end').value;
     if (!name) { showToast('请输入计划名称', 'warning'); return; }
     if (!startDate || !endDate) { showToast('请选择开始和结束日期', 'warning'); return; }
 
+    const iter = currentIterDetail || {};
     const data = {
         name,
         description: document.getElementById('pm-desc').value.trim(),
-        version_type: document.getElementById('pm-vtype').value,
         version_name: document.getElementById('pm-vname').value.trim(),
         start_date: startDate,
         end_date: endDate,
-        project_id: document.getElementById('pm-project').value ? parseInt(document.getElementById('pm-project').value) : null,
-        tapd_iteration_ids: getSelectedIterations(),
-        tapd_iteration_names: getSelectedIterationNames(),
-        tapd_workspace_id: getCurrentWorkspaceId(),
+        iteration_id: iterId || null,
+        project_id: iter.project_id || null,
+        version_type: iter.version_type || 'regular',
         status: document.getElementById('pm-status').value,
     };
 
@@ -654,12 +1058,13 @@ async function savePlan(planId) {
             await API.put(`/test-plans/${planId}`, data);
             showToast('计划已更新', 'success');
         } else {
-            await API.post('/test-plans', data);
+            const res = await API.post('/test-plans', data);
             showToast('计划已创建', 'success');
+            currentPlanId = res.id;
         }
         document.querySelector('.modal-overlay.active').remove();
-        await loadPlans();
-        if (planId) await showPlanDetail(planId);
+        await loadIterations();
+        if (currentIterId) await showIterDetail(currentIterId);
     } catch(e) {
         showToast('保存失败: ' + e.message, 'error');
     }
@@ -671,16 +1076,14 @@ async function deletePlan(planId) {
     try {
         await API.del(`/test-plans/${planId}`);
         showToast('计划已删除', 'success');
-        currentPlanId = null;
-        document.getElementById('plan-detail').innerHTML = '<div class="tp-detail-empty">← 选择一个测试计划查看详情</div>';
-        await loadPlans();
-    } catch(e) {
-        showToast('删除失败: ' + e.message, 'error');
-    }
+        if (currentPlanId === planId) currentPlanId = null;
+        await loadIterations();
+        if (currentIterId) await showIterDetail(currentIterId);
+    } catch(e) { showToast('删除失败: ' + e.message, 'error'); }
 }
 
 // ===== 用例库节点选择 =====
-let _libraryTreeCache = {};  // library_id -> tree data
+let _libraryTreeCache = {};
 
 async function onLibraryChangeForTask() {
     const libId = document.getElementById('tm-lib').value;
@@ -688,45 +1091,23 @@ async function onLibraryChangeForTask() {
     const prioGroup = document.getElementById('tm-priority-filter-group');
     const nodesList = document.getElementById('tm-nodes-list');
 
-    if (!libId) {
-        nodesGroup.style.display = 'none';
-        prioGroup.style.display = 'none';
-        return;
-    }
-
+    if (!libId) { nodesGroup.style.display = 'none'; prioGroup.style.display = 'none'; return; }
     nodesGroup.style.display = 'block';
     prioGroup.style.display = 'block';
     nodesList.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem">加载中...</div>';
 
     try {
         if (!_libraryTreeCache[libId]) {
-            const data = await API.get(`/testcase-libraries/${libId}/tree`);
-            _libraryTreeCache[libId] = data;
+            _libraryTreeCache[libId] = await API.get(`/testcase-libraries/${libId}/tree`);
         }
         const tree = _libraryTreeCache[libId];
         const dirs = tree.directories || [];
 
-        // 获取编辑中的 task 的已有 case_filter
-        const editTaskId = document.querySelector('.modal-overlay.active [onclick*="saveTask"]')
-            ? (document.querySelector('.modal-overlay.active [onclick*="saveTask"]').onclick.toString().match(/saveTask\(\d+,\s*(\d+)/) || [])[1]
-            : null;
-        let selectedPaths = [];
-        if (editTaskId) {
-            try {
-                const planId = (document.querySelector('.modal-overlay.active [onclick*="saveTask"]').onclick.toString().match(/saveTask\((\d+)/) || [])[1];
-                const taskData = await API.get(`/test-plans/${planId}/tasks/${editTaskId}`);
-                if (taskData.case_filter && taskData.case_filter.module_paths) {
-                    selectedPaths = taskData.case_filter.module_paths;
-                }
-            } catch(e) {}
-        }
-
         if (!dirs.length) {
-            nodesList.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem">该用例库暂无目录结构（所有用例在同一层级）</div>';
+            nodesList.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem">无目录结构</div>';
             return;
         }
 
-        // 渲染目录多选
         nodesList.innerHTML = `
             <label style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:0.82rem;cursor:pointer;font-weight:600;color:var(--accent)">
                 <input type="checkbox" id="tm-node-all" onchange="toggleAllNodes(this.checked)"> 全部目录
@@ -734,9 +1115,8 @@ async function onLibraryChangeForTask() {
             <hr style="border:none;border-top:1px solid var(--border);margin:4px 0">
         ` + dirs.map(d => `
             <label style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:0.82rem;cursor:pointer">
-                <input type="checkbox" class="tm-node-cb" value="${esc(d)}" ${selectedPaths.includes(d)?'checked':''}>
+                <input type="checkbox" class="tm-node-cb" value="${esc(d)}">
                 <span>📁 ${esc(d)}</span>
-                <span style="color:var(--text-muted);font-size:0.72rem;margin-left:auto">${(tree.total_cases || 0)}用例</span>
             </label>
         `).join('');
     } catch(e) {
@@ -751,22 +1131,16 @@ function toggleAllNodes(checked) {
 function getTaskCaseFilter() {
     const libId = document.getElementById('tm-lib').value;
     if (!libId) return null;
-
     const filter = {};
     const selectedNodes = Array.from(document.querySelectorAll('.tm-node-cb:checked')).map(cb => cb.value);
-    if (selectedNodes.length > 0) {
-        filter.module_paths = selectedNodes;
-    }
+    if (selectedNodes.length > 0) filter.module_paths = selectedNodes;
     const selectedPrios = Array.from(document.querySelectorAll('.tm-prio-cb:checked')).map(cb => cb.value);
-    if (selectedPrios.length > 0) {
-        filter.priorities = selectedPrios;
-    }
+    if (selectedPrios.length > 0) filter.priorities = selectedPrios;
     return Object.keys(filter).length > 0 ? filter : null;
 }
 
 // ===== 任务 CRUD =====
 async function openTaskModal(planId, taskId) {
-    // 获取最新任务数据
     let task = {};
     if (taskId) {
         try {
@@ -778,7 +1152,7 @@ async function openTaskModal(planId, taskId) {
     overlay.className = 'modal-overlay active';
     overlay.style.zIndex = '9999';
     overlay.innerHTML = `
-    <div class="modal" style="max-width:560px">
+    <div class="modal" style="max-width:560px;max-height:90vh;overflow-y:auto">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
             <h3 style="margin:0;font-size:1.05rem">${taskId ? '编辑测试任务' : '新建测试任务'}</h3>
             <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
@@ -822,13 +1196,13 @@ async function openTaskModal(planId, taskId) {
             </div>
         </div>
         <div class="tp-form-group" id="tm-nodes-group" style="display:none">
-            <label>关联目录节点 <span style="color:var(--text-muted);font-size:0.78rem">(不选则关联全部用例)</span></label>
-            <div id="tm-nodes-list" style="max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg-secondary)">
+            <label>关联目录节点 <span style="color:var(--text-muted);font-size:0.78rem">(不选则全部)</span></label>
+            <div id="tm-nodes-list" style="max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg-secondary)">
                 <div style="color:var(--text-muted);font-size:0.82rem">请先选择用例库</div>
             </div>
         </div>
         <div class="tp-form-group" id="tm-priority-filter-group" style="display:none">
-            <label>优先级筛选 <span style="color:var(--text-muted);font-size:0.78rem">(不选则不限优先级)</span></label>
+            <label>优先级筛选</label>
             <div style="display:flex;gap:10px;flex-wrap:wrap">
                 ${['P0','P1','P2','P3'].map(p => `
                     <label style="display:flex;align-items:center;gap:4px;font-size:0.82rem;cursor:pointer">
@@ -836,7 +1210,6 @@ async function openTaskModal(planId, taskId) {
                     </label>
                 `).join('')}
             </div>
-        </div>
         </div>
         <div class="tp-form-row">
             <div class="tp-form-group">
@@ -860,12 +1233,8 @@ async function openTaskModal(planId, taskId) {
                 <input type="number" id="tm-progress" min="0" max="100" value="${task.progress || 0}">
             </div>
         </div>
-        <div class="tp-form-group">
-            <label>结果摘要</label>
-            <textarea id="tm-summary" placeholder="可选">${esc(task.result_summary || '')}</textarea>
-        </div>
-        <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:18px">
-            <button class="btn btn-ghost" onclick="this.closest('.modal-overlay').remove()">取消</button>
+        <div style="display:flex;gap:12px;justify-content:center;margin-top:18px">
+            <button class="btn btn-ghost" onclick="this.closest('.modal-overlay').remove()">关闭</button>
             <button class="btn btn-primary" onclick="saveTask(${planId}, ${taskId || 0})">${taskId ? '保存' : '创建'}</button>
         </div>
     </div>`;
@@ -889,7 +1258,6 @@ async function saveTask(planId, taskId) {
         end_date: document.getElementById('tm-end').value || null,
         status: document.getElementById('tm-status').value,
         progress: parseInt(document.getElementById('tm-progress').value) || 0,
-        result_summary: document.getElementById('tm-summary').value.trim(),
     };
 
     try {
@@ -901,8 +1269,9 @@ async function saveTask(planId, taskId) {
             showToast('任务已创建', 'success');
         }
         document.querySelector('.modal-overlay.active').remove();
-        await showPlanDetail(planId);
-        await loadPlans();  // 刷新左侧统计
+        await loadIterations();
+        if (currentIterId) await showIterDetail(currentIterId);
+        if (currentPlanId) await showPlanDetail(currentPlanId);
     } catch(e) {
         showToast('保存失败: ' + e.message, 'error');
     }
@@ -914,11 +1283,10 @@ async function deleteTask(planId, taskId) {
     try {
         await API.del(`/test-plans/${planId}/tasks/${taskId}`);
         showToast('任务已删除', 'success');
-        await showPlanDetail(planId);
-        await loadPlans();
-    } catch(e) {
-        showToast('删除失败: ' + e.message, 'error');
-    }
+        await loadIterations();
+        if (currentIterId) await showIterDetail(currentIterId);
+        if (currentPlanId) await showPlanDetail(currentPlanId);
+    } catch(e) { showToast('删除失败: ' + e.message, 'error'); }
 }
 
 // ===== 工具函数 =====
