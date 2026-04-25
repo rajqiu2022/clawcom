@@ -1,0 +1,30 @@
+{
+  "test_suite": "{{测试集名称}}",
+  "generated_at": "{{生成时间 ISO8601}}",
+  "total_count": 0,
+  "cases": [
+    {
+      "case_id": "TC_001",
+      "title": "{{模块/功能点}} - {{场景描述}} - {{正向/逆向/边界}}",
+      "priority": "P0|P1|P2|P3",
+      "type": "functional|interface|performance|security",
+      "tags": ["冒烟", "回归", "核心流程"],
+      "content": {
+        "module_name": "外围系统|核心单局|商业化|客户端性能|服务器专项|其他专项",
+        "status": "normal|pending|deprecated",
+        "preconditions": "1. 前置条件1\n2. 前置条件2",
+        "steps": [
+          "步骤1：以动词开头，描述具体操作",
+          "步骤2：以动词开头，描述具体操作",
+          "步骤3：以动词开头，描述具体操作"
+        ],
+        "expected_results": [
+          "预期结果1：与步骤1对应的可观测结果",
+          "预期结果2：与步骤2对应的可观测结果",
+          "预期结果3：与步骤3对应的可观测结果"
+        ],
+        "notes": ""
+      }
+    }
+  ]
+}

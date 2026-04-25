@@ -1,0 +1,1628 @@
+{% extends "base.html" %}
+{% block title %}工程分析中心 - OpenClaw{% endblock %}
+{% block page_title %}工程分析中心{% endblock %}
+{% block nav_engineering %}active{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <select class="form-select" id="filter-project" onchange="onProjectChange()" style="min-width:160px">
+        <option value="">全部项目</option>
+    </select>
+    <button class="btn btn-ghost" onclick="openBaselineModal()">+ 新建基线</button>
+    <button class="btn btn-primary" onclick="openRefreshModal()">+ 录入刷新结果</button>
+</div>
+{% endblock %}
+
+{% block head %}
+<style>
+.eng-layout { display:flex; gap:0; min-height:calc(100vh - 120px); }
+.eng-left {
+    width:300px; min-width:280px; border-right:1px solid var(--border);
+    background:var(--bg-card); display:flex; flex-direction:column;
+    border-radius: var(--radius) 0 0 var(--radius);
+}
+.eng-section-title {
+    padding:10px 14px; font-size:0.78rem; color:var(--text-muted);
+    text-transform:uppercase; letter-spacing:0.5px;
+    border-bottom:1px solid var(--border); background:var(--bg-secondary);
+}
+.eng-list { flex:1; overflow-y:auto; padding:8px; }
+.eng-card {
+    padding:10px 12px; border:1px solid var(--border); border-radius:8px;
+    margin-bottom:6px; cursor:pointer; background:var(--bg-secondary);
+    transition:all 0.15s;
+}
+.eng-card:hover { border-color:var(--accent); }
+.eng-card.active { border-color:var(--accent); background:var(--accent-dim); }
+.eng-card .name { font-size:0.86rem; font-weight:600; color:var(--text-primary); margin-bottom:3px; }
+.eng-card .meta { font-size:0.72rem; color:var(--text-muted); display:flex; gap:6px; flex-wrap:wrap; }
+.eng-card .badge { padding:1px 6px; border-radius:4px; font-size:0.68rem; }
+.eng-empty { padding:30px 14px; text-align:center; color:var(--text-muted); font-size:0.84rem; }
+
+.eng-main { flex:1; min-width:0; display:flex; flex-direction:column; overflow:hidden; }
+.eng-header { padding:14px 18px; border-bottom:1px solid var(--border); background:var(--bg-card); display:flex; justify-content:space-between; align-items:center; }
+.eng-header h2 { font-size:1.05rem; margin:0; color:var(--text-primary); }
+.eng-header .subtitle { font-size:0.78rem; color:var(--text-muted); margin-top:2px; }
+.eng-tabs { display:flex; gap:0; border-bottom:1px solid var(--border); background:var(--bg-card); padding:0 18px; }
+.eng-tab {
+    padding:10px 16px; cursor:pointer; font-size:0.85rem; color:var(--text-muted);
+    border-bottom:2px solid transparent; transition:all 0.15s;
+}
+.eng-tab:hover { color:var(--text-primary); }
+.eng-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+
+.eng-body { flex:1; overflow-y:auto; padding:16px 18px; }
+
+.eng-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; margin-bottom:18px; }
+.eng-stat {
+    background:var(--bg-card); border:1px solid var(--border); border-radius:8px;
+    padding:12px 14px; text-align:center;
+}
+.eng-stat .val { font-size:1.4rem; font-weight:700; }
+.eng-stat .label { font-size:0.72rem; color:var(--text-muted); margin-top:2px; }
+
+.batch-row {
+    display:grid; grid-template-columns: 60px 90px 1fr 80px 80px 100px 130px 60px;
+    gap:10px; padding:10px 12px; border:1px solid var(--border);
+    border-radius:6px; background:var(--bg-card); margin-bottom:6px;
+    font-size:0.83rem; align-items:center;
+}
+.batch-row:hover { border-color:var(--accent); }
+.batch-row .commits { font-family:monospace; font-size:0.78rem; color:var(--text-secondary); }
+
+.risk-low { background:#22c55e22; color:#16a34a; }
+.risk-medium { background:#eab30822; color:#b45309; }
+.risk-high { background:#f9731622; color:#c2410c; }
+.risk-critical { background:#ef444422; color:#b91c1c; }
+
+.status-pill { padding:2px 8px; border-radius:99px; font-size:0.72rem; }
+.status-queued, .status-running { background:#3b82f622; color:#1d4ed8; }
+.status-success { background:#22c55e22; color:#16a34a; }
+.status-failed, .status-rejected { background:#ef444422; color:#b91c1c; }
+.status-approved { background:#a855f722; color:#7e22ce; }
+
+.impact-row {
+    border:1px solid var(--border); border-radius:8px; background:var(--bg-card);
+    padding:12px 14px; margin-bottom:8px;
+}
+.impact-row .top { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:6px; }
+.impact-row .feature { font-size:0.92rem; font-weight:600; color:var(--text-primary); }
+.impact-row .meta { display:flex; gap:8px; flex-wrap:wrap; font-size:0.74rem; color:var(--text-muted); margin-bottom:6px; }
+.impact-row .suggestion { font-size:0.83rem; color:var(--text-secondary); white-space:pre-wrap; line-height:1.55; }
+.impact-row .actions { display:flex; gap:6px; margin-top:8px; }
+.impact-row .links { margin-top:8px; padding-top:8px; border-top:1px dashed var(--border); }
+.impact-row .links .case-link { font-size:0.78rem; color:var(--text-secondary); display:flex; gap:6px; align-items:center; padding:3px 0; }
+
+.priority-P0 { background:#ef444422; color:#b91c1c; padding:1px 6px; border-radius:4px; font-size:0.7rem; }
+.priority-P1 { background:#f9731622; color:#c2410c; padding:1px 6px; border-radius:4px; font-size:0.7rem; }
+.priority-P2 { background:#eab30822; color:#b45309; padding:1px 6px; border-radius:4px; font-size:0.7rem; }
+.priority-P3 { background:#94a3b822; color:#475569; padding:1px 6px; border-radius:4px; font-size:0.7rem; }
+
+.change-row {
+    display:grid; grid-template-columns: 70px 1fr 110px 90px 60px;
+    gap:10px; padding:8px 12px; border:1px solid var(--border);
+    border-radius:6px; background:var(--bg-card); margin-bottom:5px;
+    font-size:0.8rem; align-items:center;
+}
+.change-row .file { font-family:monospace; color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+textarea.json-input {
+    width:100%; min-height:240px; font-family:monospace; font-size:0.78rem;
+    padding:10px; background:var(--bg-secondary); color:var(--text-primary);
+    border:1px solid var(--border); border-radius:6px; resize:vertical;
+}
+.help-text { font-size:0.76rem; color:var(--text-muted); margin-top:4px; line-height:1.5; }
+
+/* ============ 架构分析双子模块 ============ */
+.arch-layout {
+    display:grid; grid-template-columns: 280px 1fr; gap:14px;
+    height:calc(100vh - 230px); min-height:480px;
+}
+.arch-aside {
+    border:1px solid var(--border); border-radius:8px; background:var(--bg-card);
+    display:flex; flex-direction:column; overflow:hidden;
+}
+.arch-aside .head {
+    padding:10px 12px; border-bottom:1px solid var(--border);
+    background:var(--bg-secondary); display:flex; flex-direction:column; gap:6px;
+}
+.arch-aside .head .lru-tip {
+    font-size:0.7rem; color:var(--text-muted);
+}
+.arch-aside .actions { display:flex; gap:6px; }
+.arch-aside .list { flex:1; overflow-y:auto; padding:6px; }
+.arch-snap-card {
+    padding:9px 10px; border:1px solid var(--border); border-radius:6px;
+    margin-bottom:6px; cursor:pointer; background:var(--bg-secondary);
+    transition:all 0.15s;
+}
+.arch-snap-card:hover { border-color:var(--accent); }
+.arch-snap-card.active { border-color:var(--accent); background:var(--accent-dim); }
+.arch-snap-card .row1 {
+    display:flex; gap:6px; align-items:center; margin-bottom:4px;
+}
+.arch-snap-card .scope-tag {
+    padding:1px 6px; border-radius:3px; font-size:0.66rem; font-weight:600;
+}
+.arch-snap-card .scope-full { background:#3b82f622; color:#1d4ed8; }
+.arch-snap-card .scope-module { background:#a855f722; color:#7e22ce; }
+.arch-snap-card .src-tag {
+    padding:1px 5px; border-radius:3px; font-size:0.62rem; color:var(--text-muted);
+    border:1px solid var(--border);
+}
+.arch-snap-card .title {
+    font-size:0.83rem; font-weight:600; color:var(--text-primary);
+    line-height:1.35; word-break:break-all;
+}
+.arch-snap-card .meta {
+    font-size:0.68rem; color:var(--text-muted); margin-top:3px;
+    display:flex; gap:5px; flex-wrap:wrap;
+}
+
+.arch-main {
+    border:1px solid var(--border); border-radius:8px; background:var(--bg-card);
+    display:flex; flex-direction:column; overflow:hidden;
+}
+.arch-main .head {
+    padding:12px 16px; border-bottom:1px solid var(--border);
+    display:flex; justify-content:space-between; align-items:flex-start; gap:10px;
+}
+.arch-main .head .title { font-size:1.05rem; font-weight:600; color:var(--text-primary); }
+.arch-main .head .meta { font-size:0.74rem; color:var(--text-muted); margin-top:4px; display:flex; gap:8px; flex-wrap:wrap; }
+.arch-main .head .actions { display:flex; gap:6px; flex-shrink:0; }
+.arch-main .body { flex:1; overflow-y:auto; padding:18px 22px; }
+
+/* Markdown 内容渲染 */
+.markdown-body { color:var(--text-primary); line-height:1.7; font-size:0.92rem; }
+.markdown-body h1 { font-size:1.5rem; margin:0.6em 0 0.4em; padding-bottom:0.3em; border-bottom:1px solid var(--border); }
+.markdown-body h2 { font-size:1.25rem; margin:1em 0 0.4em; padding-bottom:0.25em; border-bottom:1px solid var(--border); }
+.markdown-body h3 { font-size:1.05rem; margin:0.9em 0 0.3em; }
+.markdown-body h4 { font-size:0.95rem; margin:0.8em 0 0.25em; }
+.markdown-body p { margin:0.55em 0; }
+.markdown-body ul, .markdown-body ol { padding-left:1.6em; margin:0.4em 0; }
+.markdown-body li { margin:0.18em 0; }
+.markdown-body code {
+    background:var(--bg-secondary); padding:1px 5px; border-radius:3px;
+    font-family:Menlo,Consolas,monospace; font-size:0.85em;
+}
+.markdown-body pre {
+    background:var(--bg-secondary); padding:12px 14px; border-radius:6px;
+    overflow:auto; font-size:0.82rem; line-height:1.55;
+}
+.markdown-body pre code { background:transparent; padding:0; }
+.markdown-body table {
+    border-collapse:collapse; margin:0.6em 0; width:auto;
+}
+.markdown-body th, .markdown-body td {
+    border:1px solid var(--border); padding:6px 10px; font-size:0.85rem;
+}
+.markdown-body th { background:var(--bg-secondary); }
+.markdown-body blockquote {
+    border-left:3px solid var(--accent); padding:0.2em 0.9em; margin:0.6em 0;
+    color:var(--text-secondary); background:var(--bg-secondary);
+}
+.markdown-body .mermaid {
+    background:var(--bg-secondary); border:1px solid var(--border);
+    border-radius:6px; padding:14px; margin:0.8em 0; text-align:center;
+    overflow-x:auto;
+}
+.markdown-body .mermaid-error {
+    border-color:#ef4444; background:#ef444411; color:#b91c1c;
+}
+.markdown-body .mermaid-error::before {
+    content:'⚠️ Mermaid 渲染失败，原始代码如下：';
+    display:block; font-size:0.78rem; margin-bottom:6px;
+}
+
+.arch-empty {
+    padding:60px 20px; text-align:center; color:var(--text-muted);
+    font-size:0.9rem;
+}
+
+.arch-edit-area {
+    width:100%; min-height:420px; font-family:Menlo,Consolas,monospace;
+    font-size:0.82rem; padding:12px; background:var(--bg-secondary);
+    color:var(--text-primary); border:1px solid var(--border);
+    border-radius:6px; resize:vertical; line-height:1.55;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="eng-layout">
+    <!-- 左侧：基线列表 -->
+    <aside class="eng-left">
+        <div class="eng-section-title">基线列表</div>
+        <div class="eng-list" id="baseline-list">
+            <div class="eng-empty">加载中...</div>
+        </div>
+    </aside>
+
+    <!-- 主区域 -->
+    <main class="eng-main">
+        <header class="eng-header">
+            <div>
+                <h2 id="header-title">请选择基线</h2>
+                <div class="subtitle" id="header-subtitle"></div>
+            </div>
+            <div id="header-actions"></div>
+        </header>
+
+        <div class="eng-tabs" id="eng-tabs" style="display:none">
+            <div class="eng-tab active" data-tab="architecture" onclick="switchTab('architecture')">架构分析</div>
+            <div class="eng-tab" data-tab="batches" onclick="switchTab('batches')">代码提交分析</div>
+            <div class="eng-tab" data-tab="impacts" onclick="switchTab('impacts')">影响项</div>
+            <div class="eng-tab" data-tab="changes" onclick="switchTab('changes')">变更明细</div>
+        </div>
+
+        <div class="eng-body" id="eng-body">
+            <div class="eng-empty">在左侧选择一个基线，或点击右上角"新建基线"</div>
+        </div>
+    </main>
+</div>
+
+<!-- 新建基线弹窗 -->
+<div class="modal-overlay" id="baseline-modal">
+    <div class="modal" style="max-width:560px">
+        <h3 style="margin-top:0">新建工程分析基线</h3>
+        <div class="form-group">
+            <label>所属项目 <span style="color:var(--red)">*</span></label>
+            <select class="form-select" id="bl-project"></select>
+        </div>
+        <div class="form-group">
+            <label>基线名称 <span style="color:var(--red)">*</span></label>
+            <input class="form-input" id="bl-name" placeholder="如 RacingGoUnity-dev-baseline">
+        </div>
+        <div class="form-group">
+            <label>Git 仓库 URL <span style="color:var(--red)">*</span></label>
+            <input class="form-input" id="bl-repo" placeholder="https://git.woa.com/RacingGo/RacingGoUnity">
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div class="form-group">
+                <label>分支</label>
+                <input class="form-input" id="bl-branch" value="dev">
+            </div>
+            <div class="form-group">
+                <label>基线 commit（可空）</label>
+                <input class="form-input" id="bl-commit" placeholder="abc1234">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>架构文档 URL（可空）</label>
+            <input class="form-input" id="bl-doc" placeholder="知识库链接 / Memos URL">
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+            <button class="btn btn-ghost" onclick="closeBaselineModal()">取消</button>
+            <button class="btn btn-primary" onclick="submitBaseline()">创建</button>
+        </div>
+    </div>
+</div>
+
+<!-- 录入刷新结果弹窗 -->
+<div class="modal-overlay" id="refresh-modal">
+    <div class="modal" style="max-width:780px">
+        <h3 style="margin-top:0">录入工程分析刷新结果（直录模式）</h3>
+        <div class="help-text" style="margin-bottom:10px">
+            MVP 阶段：先由你/AI 在外部完成工程分析，把 changes 与 impacts 一次性录入此处。<br>
+            阶段 2 上线后会改为派发任务给 OpenClaw Agent 自动跑。
+        </div>
+        <div class="form-group">
+            <label>基线 <span style="color:var(--red)">*</span></label>
+            <select class="form-select" id="rf-baseline"></select>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+            <div class="form-group">
+                <label>关联迭代</label>
+                <select class="form-select" id="rf-iteration">
+                    <option value="">不绑定</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>From commit</label>
+                <input class="form-input" id="rf-from" placeholder="abc1234">
+            </div>
+            <div class="form-group">
+                <label>To commit</label>
+                <input class="form-input" id="rf-to" placeholder="def5678">
+            </div>
+        </div>
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
+            <div class="form-group">
+                <label>风险摘要</label>
+                <input class="form-input" id="rf-summary" placeholder="本次主要影响登录与房间匹配">
+            </div>
+            <div class="form-group">
+                <label>风险等级</label>
+                <select class="form-select" id="rf-risk">
+                    <option value="">未评估</option>
+                    <option value="low">低</option>
+                    <option value="medium" selected>中</option>
+                    <option value="high">高</option>
+                    <option value="critical">关键</option>
+                </select>
+            </div>
+        </div>
+        <div class="form-group">
+            <label>变更明细 changes（JSON 数组）</label>
+            <textarea class="json-input" id="rf-changes" placeholder='[
+  {
+    "file_path": "Assets/Scripts/Network/Login.cs",
+    "change_type": "modify",
+    "module_name": "network",
+    "symbol_names": ["LoginManager.OnReceive"],
+    "impact_tags": ["login","network"],
+    "risk_score": 70,
+    "reason": "断线重连逻辑改动",
+    "tapd_story_ids": ["1234567890"]
+  }
+]'></textarea>
+        </div>
+        <div class="form-group">
+            <label>用例影响建议 impacts（JSON 数组）</label>
+            <textarea class="json-input" id="rf-impacts" placeholder='[
+  {
+    "module_name": "network",
+    "feature_chain": "登录 > 断线重连",
+    "action_type": "update_case",
+    "priority": "P1",
+    "suggestion": "补充弱网下连续 3 次重连后切换协议的回归用例",
+    "acceptance_criteria": "断网 30s 内不出现卡死黑屏"
+  }
+]'></textarea>
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:6px">
+            <button class="btn btn-ghost" onclick="closeRefreshModal()">取消</button>
+            <button class="btn btn-primary" onclick="submitRefresh()">录入</button>
+        </div>
+    </div>
+</div>
+
+<!-- 新建/编辑 架构分析快照弹窗 -->
+<div class="modal-overlay" id="arch-modal">
+    <div class="modal" style="max-width:900px">
+        <h3 style="margin-top:0" id="arch-modal-title">新建架构分析</h3>
+        <input type="hidden" id="arch-edit-id">
+        <div style="display:grid;grid-template-columns:160px 1fr 1fr;gap:10px">
+            <div class="form-group">
+                <label>分析方式 <span style="color:var(--red)">*</span></label>
+                <select class="form-select" id="arch-scope" onchange="onArchScopeChange()">
+                    <option value="full">全工程</option>
+                    <option value="module">单模块深度</option>
+                </select>
+            </div>
+            <div class="form-group" id="arch-target-group" style="display:none">
+                <label>目标模块 <span style="color:var(--red)">*</span></label>
+                <input class="form-input" id="arch-target" list="arch-target-list" placeholder="如 登录 / 网络通信 / 匹配">
+                <datalist id="arch-target-list"></datalist>
+            </div>
+            <div class="form-group">
+                <label>分析 commit</label>
+                <input class="form-input" id="arch-commit" placeholder="abc1234">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>标题 <span style="color:var(--red)">*</span></label>
+            <input class="form-input" id="arch-title" placeholder='如 "v1.2.0 全工程总览" / "登录模块深度分析"'>
+        </div>
+        <div class="form-group">
+            <label>简要摘要（1-2 句）</label>
+            <input class="form-input" id="arch-summary" placeholder="本次架构分析覆盖 8 个一级模块，重点关注网络栈解耦...">
+        </div>
+        <div class="form-group">
+            <label>Markdown 正文（支持 ```mermaid 架构图 / 时序图 / 流程图） <span style="color:var(--red)">*</span></label>
+            <textarea class="arch-edit-area" id="arch-content" placeholder='# 标题
+
+## 模块依赖图
+
+```mermaid
+flowchart LR
+    Login --> Network
+    Network --> Server
+```
+
+## 启动时序
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant C as 客户端
+    participant S as 服务器
+    U->>C: 打开 App
+    C->>S: 登录请求
+    S-->>C: token
+```
+
+## 关键逻辑
+
+- ...
+'></textarea>
+            <div class="help-text">
+                推荐三件套：<code>flowchart LR</code> 模块依赖 / <code>sequenceDiagram</code> 时序 / <code>flowchart TD</code> 流程。
+                上限 ~60KB；超出请改用「单模块深度」拆解。
+            </div>
+        </div>
+        <div class="form-group">
+            <label>结构化数据 structured（可空，JSON 对象）</label>
+            <textarea class="json-input" id="arch-structured" style="min-height:120px" placeholder='{
+  "modules": [{"name":"登录","files":["..."],"description":"..."}],
+  "communications": [{"protocol":"IRPC","desc":"..."}],
+  "key_logic": [],
+  "risks": [],
+  "suggestions": []
+}'></textarea>
+        </div>
+        <div style="display:flex;gap:10px;justify-content:space-between;align-items:center;margin-top:10px">
+            <span class="help-text" id="arch-modal-hint">每条基线最多保留 10 个快照，超出会自动删最旧。</span>
+            <div style="display:flex;gap:10px">
+                <button class="btn btn-ghost" onclick="closeArchModal()">取消</button>
+                <button class="btn btn-primary" onclick="submitArch()">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 创建测试任务弹窗 -->
+<div class="modal-overlay" id="create-task-modal">
+    <div class="modal" style="max-width:520px">
+        <h3 style="margin-top:0">把影响项写入测试任务</h3>
+        <div class="help-text" style="margin-bottom:10px">
+            将在该批次绑定的迭代下创建/复用测试计划，并在计划下生成一个新任务，自动绑定已关联的用例。
+        </div>
+        <input type="hidden" id="ct-impact-id">
+        <div class="form-group">
+            <label>任务名称</label>
+            <input class="form-input" id="ct-name" placeholder="留空则自动生成">
+        </div>
+        <div class="form-group">
+            <label>任务类型</label>
+            <select class="form-select" id="ct-type">
+                <option value="regression">回归</option>
+                <option value="functional">功能</option>
+                <option value="performance">性能</option>
+                <option value="other">其他</option>
+            </select>
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+            <button class="btn btn-ghost" onclick="closeCreateTaskModal()">取消</button>
+            <button class="btn btn-primary" onclick="submitCreateTask()">创建</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>
+const INITIAL_BASELINE_ID = {% if initial_baseline_id %}{{ initial_baseline_id }}{% else %}null{% endif %};
+const INITIAL_BATCH_ID = {% if initial_batch_id %}{{ initial_batch_id }}{% else %}null{% endif %};
+const INITIAL_ARCH_SNAP_ID = {% if initial_arch_snap_id %}{{ initial_arch_snap_id }}{% else %}null{% endif %};
+
+if (typeof mermaid !== 'undefined') {
+    mermaid.initialize({ startOnLoad: false, theme: 'default', securityLevel: 'loose' });
+}
+if (typeof marked !== 'undefined') {
+    marked.setOptions({ gfm: true, breaks: false });
+}
+
+const State = {
+    projects: [],
+    baselines: [],
+    iterations: [],
+    selectedBaseline: null,
+    selectedBatch: null,
+    activeTab: 'architecture',
+    batches: [],
+    impacts: [],
+    changes: [],
+    archSnapshots: [],
+    selectedArch: null,
+};
+
+async function init() {
+    await loadProjects();
+    await loadBaselines();
+    if (INITIAL_BASELINE_ID) {
+        const b = State.baselines.find(b => b.id === INITIAL_BASELINE_ID);
+        if (b) selectBaseline(b);
+    }
+    if (INITIAL_BATCH_ID) {
+        await openBatchById(INITIAL_BATCH_ID);
+    }
+    // /engineering/architecture/<id> 直链：先解析快照拿 baseline_id，再选基线 + 打开快照详情
+    if (INITIAL_ARCH_SNAP_ID) {
+        await openArchSnapshotByDeepLink(INITIAL_ARCH_SNAP_ID);
+    }
+}
+
+async function openArchSnapshotByDeepLink(snapId) {
+    try {
+        const snap = await API.get('/engineering/architecture/' + snapId);
+        if (snap && snap.baseline_id) {
+            const b = State.baselines.find(x => x.id === snap.baseline_id);
+            if (b) {
+                await selectBaseline(b);
+                // 等架构 tab 异步加载完成
+                await new Promise(r => setTimeout(r, 200));
+            }
+        }
+        await openArchSnapshot(snapId);
+    } catch (e) {
+        showToast('打开架构快照失败：' + (e.message || e), 'error');
+    }
+}
+
+async function loadProjects() {
+    try {
+        const r = await API.get('/engineering/lookups/projects');
+        State.projects = r.projects || [];
+        const sel = document.getElementById('filter-project');
+        sel.innerHTML = '<option value="">全部项目</option>' +
+            State.projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
+    } catch (e) {
+        showToast('加载项目失败：' + e.message, 'error');
+    }
+}
+
+async function loadBaselines() {
+    const projectId = document.getElementById('filter-project').value;
+    const params = projectId ? '?project_id=' + projectId : '';
+    try {
+        const r = await API.get('/engineering/baselines' + params);
+        State.baselines = r.baselines || [];
+        renderBaselineList();
+    } catch (e) {
+        showToast('加载基线失败：' + e.message, 'error');
+    }
+}
+
+function renderBaselineList() {
+    const el = document.getElementById('baseline-list');
+    if (!State.baselines.length) {
+        el.innerHTML = '<div class="eng-empty">暂无基线<br><br>点击右上角"+ 新建基线"开始</div>';
+        return;
+    }
+    el.innerHTML = State.baselines.map(b => {
+        const active = State.selectedBaseline && State.selectedBaseline.id === b.id;
+        return `<div class="eng-card ${active?'active':''}" onclick="selectBaselineById(${b.id})">
+            <div class="name">${escapeHtml(b.name)}</div>
+            <div class="meta">
+                <span>${escapeHtml(b.project_name||'')}</span>
+                <span>· ${escapeHtml(b.branch||'main')}</span>
+                ${b.status==='inactive'?'<span class="badge" style="background:#94a3b822;color:#475569">已停用</span>':''}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function selectBaselineById(id) {
+    const b = State.baselines.find(x => x.id === id);
+    if (b) selectBaseline(b);
+}
+
+async function selectBaseline(b) {
+    State.selectedBaseline = b;
+    State.selectedBatch = null;
+    State.selectedArch = null;
+    State.activeTab = 'architecture';
+    renderBaselineList();
+    document.getElementById('header-title').textContent = b.name;
+    document.getElementById('header-subtitle').textContent =
+        `${b.project_name || ''} · ${b.repo_url} · ${b.branch}`;
+    document.getElementById('header-actions').innerHTML = `
+        <button class="btn btn-ghost" onclick="copyResourceLink('baseline', ${b.id})" title="复制此基线的可分享链接">🔗 复制链接</button>
+        <button class="btn btn-ghost" onclick="openShareDialog('baseline', ${b.id})" title="管理跨项目共享授权">👥 共享</button>
+        <button class="btn btn-ghost" onclick='editBaseline(${b.id})'>编辑</button>
+        <button class="btn btn-ghost" style="color:var(--red)" onclick='deactivateBaseline(${b.id})'>停用</button>
+    `;
+    document.getElementById('eng-tabs').style.display = '';
+    document.querySelectorAll('.eng-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.tab === 'architecture');
+    });
+    history.replaceState(null, '', `/engineering/baselines/${b.id}`);
+    await loadArchSnapshots();
+    renderActiveTab();
+}
+
+async function loadBatches() {
+    const b = State.selectedBaseline;
+    if (!b) return;
+    try {
+        const r = await API.get('/engineering/refresh?baseline_id=' + b.id);
+        State.batches = r.batches || [];
+        renderBatches();
+    } catch (e) {
+        showToast('加载批次失败：' + e.message, 'error');
+    }
+}
+
+function renderBatches() {
+    const body = document.getElementById('eng-body');
+    if (!State.batches.length) {
+        body.innerHTML = '<div class="eng-empty">该基线还没有刷新批次<br><br>点击右上角"+ 录入刷新结果"创建一次</div>';
+        return;
+    }
+    body.innerHTML = `
+        <div class="eng-stats">
+            <div class="eng-stat"><div class="val">${State.batches.length}</div><div class="label">总批次</div></div>
+            <div class="eng-stat"><div class="val">${State.batches.filter(b=>b.status==='approved').length}</div><div class="label">已审批</div></div>
+            <div class="eng-stat"><div class="val">${State.batches.filter(b=>b.status==='success').length}</div><div class="label">待审批</div></div>
+            <div class="eng-stat"><div class="val">${State.batches.filter(b=>b.risk_level==='high'||b.risk_level==='critical').length}</div><div class="label">高/关键风险</div></div>
+        </div>
+        ${State.batches.map(renderBatchRow).join('')}
+    `;
+}
+
+function _canDeleteBatch(b) {
+    if (!currentUser || !b) return false;
+    // admin / super_admin 可删任何
+    if (currentUser.role === 'super_admin' || currentUser.role === 'admin') return true;
+    // 提交者本人可删自己的（_operator() 优先返回 claw_name 再 username，前端 currentUser 是 web 用户）
+    if (b.triggered_by && (b.triggered_by === currentUser.username
+                           || b.triggered_by === currentUser.display_name)) return true;
+    return false;
+}
+
+function renderBatchRow(b) {
+    const risk = b.risk_level ? `<span class="status-pill risk-${b.risk_level}">${b.risk_level}</span>` : '';
+    const canDel = _canDeleteBatch(b);
+    // approved 状态需要先驳回再删，按钮变灰提示
+    const delDisabled = b.status === 'approved';
+    const delBtn = canDel
+        ? `<button class="btn btn-ghost" style="padding:2px 8px;font-size:0.74rem;color:${delDisabled?'var(--text-muted)':'var(--red,#ef4444)'}" onclick="event.stopPropagation();deleteBatch(${b.id})" title="${delDisabled?'已审批批次需先驳回再删':'删除该批次（含变更/影响项级联）'}">删除</button>`
+        : '';
+    return `<div class="batch-row" onclick="openBatchByIdLocal(${b.id})" style="cursor:pointer">
+        <div>#${b.id}</div>
+        <div>${b.refresh_type}</div>
+        <div class="commits">${escapeHtml(b.from_commit||'')} → ${escapeHtml(b.to_commit||'')}</div>
+        <div>变更 ${b.commit_count||0}</div>
+        <div>${risk}</div>
+        <div><span class="status-pill status-${b.status}">${b.status}</span></div>
+        <div style="font-size:0.74rem;color:var(--text-muted)">
+            ${b.created_at?b.created_at.slice(5,16):''}
+            ${b.triggered_by?`<br><span style="font-size:0.72rem;color:var(--text-secondary)">@${escapeHtml(b.triggered_by)}</span>`:''}
+        </div>
+        <div style="text-align:right">${delBtn}</div>
+    </div>`;
+}
+
+function openBatchByIdLocal(id) {
+    const b = State.batches.find(x => x.id === id);
+    if (b) openBatch(b);
+}
+
+async function openBatch(b) {
+    State.selectedBatch = b;
+    State.activeTab = 'impacts';
+    document.querySelectorAll('.eng-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.tab === 'impacts');
+    });
+    history.replaceState(null, '', `/engineering/refresh/${b.id}`);
+    document.getElementById('header-title').textContent =
+        `${State.selectedBaseline.name} · 批次 #${b.id}`;
+    document.getElementById('header-subtitle').textContent =
+        `${b.from_commit||''} → ${b.to_commit||''} · ${b.summary||''}`;
+    const canDel = _canDeleteBatch(b);
+    const delDisabled = b.status === 'approved';
+    document.getElementById('header-actions').innerHTML = `
+        <button class="btn btn-ghost" onclick="backToBaseline()">返回</button>
+        <button class="btn btn-ghost" onclick="copyResourceLink('batch', ${b.id})" title="复制此批次的可分享链接">🔗 复制链接</button>
+        <button class="btn btn-ghost" onclick="openShareDialog('batch', ${b.id})" title="管理共享授权">👥 共享</button>
+        ${b.status==='success' ? `<button class="btn btn-primary" onclick="approveBatch(${b.id})">审批通过</button>
+            <button class="btn btn-ghost" style="color:var(--red)" onclick="rejectBatch(${b.id})">驳回</button>` : ''}
+        ${canDel ? `<button class="btn btn-ghost" style="color:${delDisabled?'var(--text-muted)':'var(--red,#ef4444)'}"
+                            onclick="deleteBatch(${b.id})"
+                            title="${delDisabled?'已审批批次需先驳回再删':'删除该批次（含变更项 / 影响项 / 用例关联级联删除）'}">
+                        删除批次
+                    </button>` : ''}
+    `;
+    await loadBatchDetail();
+}
+
+async function openBatchById(batchId) {
+    try {
+        const b = await API.get('/engineering/refresh/' + batchId);
+        if (!State.selectedBaseline) {
+            const bl = State.baselines.find(x => x.id === b.baseline_id);
+            if (bl) selectBaseline(bl);
+        }
+        await openBatch(b);
+    } catch (e) {
+        showToast('打开批次失败：' + e.message, 'error');
+    }
+}
+
+async function loadBatchDetail() {
+    const b = State.selectedBatch;
+    if (!b) return;
+    try {
+        const [impactsRes, changesRes] = await Promise.all([
+            API.get(`/engineering/refresh/${b.id}/impacts`),
+            API.get(`/engineering/refresh/${b.id}/changes`),
+        ]);
+        State.impacts = impactsRes.impacts || [];
+        State.changes = changesRes.changes || [];
+        renderActiveTab();
+    } catch (e) {
+        showToast('加载详情失败：' + e.message, 'error');
+    }
+}
+
+function switchTab(tab) {
+    State.activeTab = tab;
+    document.querySelectorAll('.eng-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.tab === tab);
+    });
+    // 架构 / 批次 列表 tab 直接渲染；影响项 / 变更明细需要先选 batch
+    if (!State.selectedBatch && (tab === 'impacts' || tab === 'changes')) {
+        document.getElementById('eng-body').innerHTML =
+            '<div class="eng-empty">请先在「代码提交分析」选中一个批次</div>';
+        return;
+    }
+    if (tab === 'architecture') {
+        loadArchSnapshots().then(() => renderActiveTab());
+        return;
+    }
+    if (tab === 'batches') {
+        loadBatches();
+        return;
+    }
+    renderActiveTab();
+}
+
+function renderActiveTab() {
+    const body = document.getElementById('eng-body');
+    if (State.activeTab === 'architecture') {
+        renderArchTab();
+    } else if (State.activeTab === 'batches') {
+        renderBatches();
+    } else if (State.activeTab === 'impacts') {
+        body.innerHTML = renderImpacts();
+    } else if (State.activeTab === 'changes') {
+        body.innerHTML = renderChanges();
+    }
+}
+
+function renderImpacts() {
+    if (!State.impacts.length) return '<div class="eng-empty">该批次没有用例影响项</div>';
+    return State.impacts.map(im => `
+        <div class="impact-row">
+            <div class="top">
+                <div>
+                    <div class="feature">
+                        <span class="priority-${im.priority||'P2'}">${im.priority||'P2'}</span>
+                        ${escapeHtml(im.feature_chain||'未命名链路')}
+                    </div>
+                    <div class="meta">
+                        <span>${im.action_type||''}</span>
+                        <span>· 模块：${escapeHtml(im.module_name||'')}</span>
+                        <span>· 用例库：${escapeHtml(im.library_name||'未指定')}</span>
+                        <span>· 状态：${im.status}</span>
+                        ${im.owner?`<span>· 认领：${escapeHtml(im.owner)}</span>`:''}
+                    </div>
+                </div>
+            </div>
+            <div class="suggestion">${escapeHtml(im.suggestion||'')}</div>
+            ${im.acceptance_criteria?`<div class="suggestion" style="margin-top:6px;color:var(--text-muted);font-size:0.78rem">验收：${escapeHtml(im.acceptance_criteria)}</div>`:''}
+            <div class="actions">
+                <button class="btn btn-ghost btn-sm" onclick="claimImpact(${im.id})">认领</button>
+                <button class="btn btn-ghost btn-sm" onclick="changeImpactStatus(${im.id})">改状态</button>
+                <button class="btn btn-ghost btn-sm" onclick="linkCase(${im.id})">关联用例</button>
+                <button class="btn btn-primary btn-sm" onclick="openCreateTask(${im.id})">→ 写入任务</button>
+                ${im.linked_test_task_id?`<a class="btn btn-ghost btn-sm" href="/testplans" target="_blank">已生成任务 #${im.linked_test_task_id}</a>`:''}
+            </div>
+            ${im.linked_cases && im.linked_cases.length ? `
+                <div class="links">
+                    ${im.linked_cases.map(l=>`
+                        <div class="case-link">
+                            <span>🔗 [${l.test_case_priority||''}] ${escapeHtml(l.test_case_title||'用例 #'+l.test_case_id)}</span>
+                            <span style="color:var(--text-muted)">(${l.link_type})</span>
+                            <a href="#" onclick="unlinkCase(${im.id},${l.id});return false" style="color:var(--red);font-size:0.72rem">移除</a>
+                        </div>
+                    `).join('')}
+                </div>
+            ` : ''}
+        </div>
+    `).join('');
+}
+
+function renderChanges() {
+    if (!State.changes.length) return '<div class="eng-empty">该批次没有变更明细</div>';
+    return `<div style="margin-bottom:8px;font-size:0.78rem;color:var(--text-muted)">按风险评分降序</div>` +
+        State.changes.map(c => `
+            <div class="change-row">
+                <div>${c.change_type}</div>
+                <div class="file" title="${escapeHtml(c.file_path)}">${escapeHtml(c.file_path)}</div>
+                <div>${escapeHtml(c.module_name||'')}</div>
+                <div>${(c.impact_tags||[]).join(', ')}</div>
+                <div style="text-align:right"><b>${c.risk_score}</b></div>
+            </div>
+        `).join('');
+}
+
+function backToBaseline() {
+    State.selectedBatch = null;
+    State.activeTab = 'batches';
+    document.querySelectorAll('.eng-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.tab === 'batches');
+    });
+    selectBaseline(State.selectedBaseline);
+}
+
+// ===== 基线 CRUD =====
+function openBaselineModal() {
+    if (!State.projects.length) { showToast('请先创建项目', 'warning'); return; }
+    const sel = document.getElementById('bl-project');
+    sel.innerHTML = State.projects.map(p =>
+        `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
+    document.getElementById('bl-name').value = '';
+    document.getElementById('bl-repo').value = '';
+    document.getElementById('bl-branch').value = 'dev';
+    document.getElementById('bl-commit').value = '';
+    document.getElementById('bl-doc').value = '';
+    document.getElementById('baseline-modal').classList.add('active');
+}
+function closeBaselineModal() {
+    document.getElementById('baseline-modal').classList.remove('active');
+}
+async function submitBaseline() {
+    const data = {
+        project_id: parseInt(document.getElementById('bl-project').value),
+        name: document.getElementById('bl-name').value.trim(),
+        repo_url: document.getElementById('bl-repo').value.trim(),
+        branch: document.getElementById('bl-branch').value.trim() || 'main',
+        baseline_commit: document.getElementById('bl-commit').value.trim(),
+        architecture_doc_url: document.getElementById('bl-doc').value.trim() || null,
+    };
+    if (!data.name || !data.repo_url) { showToast('名称和仓库 URL 必填', 'warning'); return; }
+    try {
+        await API.post('/engineering/baselines', data);
+        showToast('基线已创建', 'success');
+        closeBaselineModal();
+        await loadBaselines();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+async function deactivateBaseline(id) {
+    if (!await customConfirm('确定停用此基线？历史批次仍保留。')) return;
+    try {
+        await API.del('/engineering/baselines/' + id);
+        showToast('已停用', 'success');
+        State.selectedBaseline = null;
+        document.getElementById('header-title').textContent = '请选择基线';
+        document.getElementById('header-subtitle').textContent = '';
+        document.getElementById('header-actions').innerHTML = '';
+        document.getElementById('eng-tabs').style.display = 'none';
+        document.getElementById('eng-body').innerHTML = '<div class="eng-empty">在左侧选择一个基线</div>';
+        await loadBaselines();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+async function editBaseline(id) {
+    const newName = await customPrompt('编辑基线名称', State.selectedBaseline.name);
+    if (newName === null) return;
+    try {
+        await API.put('/engineering/baselines/' + id, { name: newName });
+        showToast('已更新', 'success');
+        await loadBaselines();
+        const b = State.baselines.find(x => x.id === id);
+        if (b) selectBaseline(b);
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ===== 录入刷新 =====
+async function openRefreshModal() {
+    if (!State.baselines.length) { showToast('请先创建基线', 'warning'); return; }
+    const sel = document.getElementById('rf-baseline');
+    sel.innerHTML = State.baselines.filter(b=>b.status==='active').map(b =>
+        `<option value="${b.id}">${escapeHtml(b.name)}</option>`).join('');
+    if (State.selectedBaseline) sel.value = State.selectedBaseline.id;
+
+    // 加载迭代下拉
+    const projectId = State.selectedBaseline ? State.selectedBaseline.project_id : null;
+    const params = projectId ? '?project_id=' + projectId : '';
+    try {
+        const r = await API.get('/engineering/lookups/iterations' + params);
+        const iSel = document.getElementById('rf-iteration');
+        iSel.innerHTML = '<option value="">不绑定</option>' +
+            (r.iterations||[]).map(i =>
+                `<option value="${i.id}">${escapeHtml(i.name)} (${i.status})</option>`).join('');
+    } catch (e) {}
+
+    document.getElementById('rf-from').value = '';
+    document.getElementById('rf-to').value = '';
+    document.getElementById('rf-summary').value = '';
+    document.getElementById('rf-changes').value = '';
+    document.getElementById('rf-impacts').value = '';
+    document.getElementById('refresh-modal').classList.add('active');
+}
+function closeRefreshModal() {
+    document.getElementById('refresh-modal').classList.remove('active');
+}
+async function submitRefresh() {
+    let changes = [], impacts = [];
+    try {
+        const cs = document.getElementById('rf-changes').value.trim();
+        if (cs) changes = JSON.parse(cs);
+        const is = document.getElementById('rf-impacts').value.trim();
+        if (is) impacts = JSON.parse(is);
+    } catch (e) {
+        showToast('JSON 解析失败：' + e.message, 'error'); return;
+    }
+    const iterationVal = document.getElementById('rf-iteration').value;
+    const data = {
+        baseline_id: parseInt(document.getElementById('rf-baseline').value),
+        refresh_type: 'direct',
+        iteration_id: iterationVal ? parseInt(iterationVal) : null,
+        from_commit: document.getElementById('rf-from').value.trim() || null,
+        to_commit: document.getElementById('rf-to').value.trim() || null,
+        summary: document.getElementById('rf-summary').value.trim() || null,
+        risk_level: document.getElementById('rf-risk').value || null,
+        changes,
+        impacts,
+    };
+    try {
+        const r = await API.post('/engineering/refresh', data);
+        showToast(`批次已创建 #${r.id}`, 'success');
+        closeRefreshModal();
+        const bl = State.baselines.find(b => b.id === r.baseline_id);
+        if (bl) {
+            await selectBaseline(bl);
+            await openBatch(r);
+        }
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+// ===== 批次审批 =====
+async function approveBatch(id) {
+    if (!await customConfirm('审批通过该批次？')) return;
+    try {
+        await API.post(`/engineering/refresh/${id}/approve`);
+        showToast('已审批', 'success');
+        await loadBatches();
+        const b = State.batches.find(x => x.id === id);
+        if (b) await openBatch(b);
+    } catch (e) { showToast(e.message, 'error'); }
+}
+async function rejectBatch(id) {
+    const reason = await customPrompt('驳回原因', '');
+    if (reason === null) return;
+    try {
+        await API.post(`/engineering/refresh/${id}/reject`, { reason });
+        showToast('已驳回', 'success');
+        await loadBatches();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function deleteBatch(id) {
+    const b = State.batches.find(x => x.id === id) || State.selectedBatch;
+    if (!b) { showToast('未找到批次', 'error'); return; }
+
+    if (b.status === 'approved') {
+        showToast('该批次已审批通过，请先驳回再删除', 'warn');
+        return;
+    }
+
+    const ok = await customConfirm(
+        `确认删除批次 #${id}？\n\n` +
+        `提交人：${b.triggered_by || '-'}\n` +
+        `状态：${b.status}\n` +
+        `commit：${b.from_commit||'-'} → ${b.to_commit||'-'}\n` +
+        `摘要：${(b.summary||'').slice(0,80)}\n\n` +
+        `⚠️ 该批次的所有变更项 / 影响项 / 用例关联将一并永久删除（不可恢复）。\n` +
+        `如果有 impact 已经写入测试任务，删除会被服务端拒绝。`,
+        '删除批次'
+    );
+    if (!ok) return;
+
+    try {
+        const r = await API.del(`/engineering/refresh/${id}`);
+        const c = r.cascaded || {};
+        showToast(`已删除 batch#${id}（changes=${c.change_items||0} impacts=${c.impact_items||0} links=${c.case_links||0}）`, 'success');
+
+        // 如果当前正在看这个 batch，回退到基线视图
+        if (State.selectedBatch && State.selectedBatch.id === id) {
+            State.selectedBatch = null;
+            backToBaseline();
+        }
+        await loadBatches();
+    } catch (e) {
+        // 后端 409 / 403 都会带详细原因
+        showToast('删除失败：' + (e.message || ''), 'error');
+    }
+}
+
+// ===== 架构分析（双子模块）=====
+async function loadArchSnapshots() {
+    const b = State.selectedBaseline;
+    if (!b) return;
+    try {
+        const r = await API.get(`/engineering/baselines/${b.id}/architecture`);
+        State.archSnapshots = r.snapshots || [];
+        // 默认选中最新一条
+        if (State.archSnapshots.length && !State.selectedArch) {
+            State.selectedArch = State.archSnapshots[0];
+        } else if (State.selectedArch) {
+            // 刷新后保留同一条
+            const same = State.archSnapshots.find(x => x.id === State.selectedArch.id);
+            State.selectedArch = same || State.archSnapshots[0] || null;
+        }
+    } catch (e) {
+        showToast('加载架构快照失败：' + e.message, 'error');
+        State.archSnapshots = [];
+    }
+}
+
+function renderArchTab() {
+    const body = document.getElementById('eng-body');
+    const lru = 10;
+    const snaps = State.archSnapshots;
+
+    body.innerHTML = `
+      <div class="arch-layout">
+        <aside class="arch-aside">
+            <div class="head">
+                <div class="actions">
+                    <button class="btn btn-primary btn-sm" onclick="openCreateArch('full')" style="flex:1">+ 全工程分析</button>
+                    <button class="btn btn-ghost btn-sm" onclick="openCreateArch('module')" style="flex:1">+ 单模块深度</button>
+                </div>
+                <div class="lru-tip">每条基线最多 ${lru} 个快照，超出自动 LRU 删最旧 · 当前 ${snaps.length}/${lru}</div>
+            </div>
+            <div class="list" id="arch-list">${renderArchList(snaps)}</div>
+        </aside>
+        <main class="arch-main" id="arch-main">${renderArchDetailPlaceholder()}</main>
+      </div>
+    `;
+
+    if (State.selectedArch) {
+        openArchSnapshot(State.selectedArch.id, /*skipFetch=*/false);
+    }
+}
+
+function renderArchList(snaps) {
+    if (!snaps.length) {
+        return '<div class="arch-empty" style="padding:24px 12px">暂无架构快照<br><br>点击上方按钮，由 AI 或手工生成第一份架构分析</div>';
+    }
+    return snaps.map(s => {
+        const active = State.selectedArch && State.selectedArch.id === s.id;
+        const scopeLabel = s.scope === 'full' ? '全工程' : '单模块';
+        const scopeCls = s.scope === 'full' ? 'scope-full' : 'scope-module';
+        const target = s.scope === 'module' && s.target_module ? ` · ${escapeHtml(s.target_module)}` : '';
+        return `<div class="arch-snap-card ${active?'active':''}" onclick="openArchSnapshot(${s.id})">
+            <div class="row1">
+                <span class="scope-tag ${scopeCls}">${scopeLabel}${target}</span>
+                <span class="src-tag">${escapeHtml(s.source_type||'agent')}</span>
+            </div>
+            <div class="title">${escapeHtml(s.title || ('快照 #' + s.id))}</div>
+            <div class="meta">
+                <span>#${s.id}</span>
+                <span>${s.created_at ? s.created_at.slice(5,16) : ''}</span>
+                ${s.triggered_by ? `<span>@${escapeHtml(s.triggered_by)}</span>` : ''}
+                ${s.analyzed_commit ? `<span>${escapeHtml(s.analyzed_commit.slice(0,7))}</span>` : ''}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function renderArchDetailPlaceholder() {
+    return `<div class="arch-empty">
+        请选择左侧的快照查看，或点击「+ 全工程分析」/「+ 单模块深度」创建新快照<br><br>
+        <span style="font-size:0.78rem">提示：内容支持 Markdown + Mermaid（架构图 / 时序图 / 流程图）</span>
+    </div>`;
+}
+
+function _canDeleteArch(s) {
+    if (!currentUser || !s) return false;
+    if (currentUser.role === 'super_admin' || currentUser.role === 'admin') return true;
+    if (s.triggered_by && (s.triggered_by === currentUser.username
+                          || s.triggered_by === currentUser.display_name)) return true;
+    return false;
+}
+
+async function openArchSnapshot(id, skipFetch=false) {
+    const main = document.getElementById('arch-main');
+    if (!main) return;
+    main.innerHTML = '<div class="arch-empty">加载中...</div>';
+    let snap;
+    try {
+        snap = await API.get('/engineering/architecture/' + id);
+    } catch (e) {
+        main.innerHTML = `<div class="arch-empty" style="color:var(--red)">加载失败：${escapeHtml(e.message||'')}</div>`;
+        return;
+    }
+    State.selectedArch = snap;
+    // 高亮列表
+    document.querySelectorAll('.arch-snap-card').forEach(el => el.classList.remove('active'));
+    const list = document.getElementById('arch-list');
+    if (list) {
+        // 重渲染列表（保留滚动）
+        list.innerHTML = renderArchList(State.archSnapshots);
+    }
+
+    const scopeLabel = snap.scope === 'full' ? '全工程总览' : `单模块深度 · ${escapeHtml(snap.target_module||'')}`;
+    const canDel = _canDeleteArch(snap);
+    const canEdit = canDel; // 复用相同权限
+
+    main.innerHTML = `
+        <div class="head">
+            <div style="min-width:0;flex:1">
+                <div class="title">${escapeHtml(snap.title || ('快照 #' + snap.id))}</div>
+                <div class="meta">
+                    <span>${scopeLabel}</span>
+                    <span>· #${snap.id}</span>
+                    ${snap.analyzed_commit ? `<span>· commit ${escapeHtml(snap.analyzed_commit)}</span>` : ''}
+                    <span>· 来源 ${escapeHtml(snap.source_type||'agent')}</span>
+                    ${snap.triggered_by ? `<span>· @${escapeHtml(snap.triggered_by)}</span>` : ''}
+                    <span>· ${snap.created_at ? snap.created_at.slice(0,16) : ''}</span>
+                </div>
+                ${snap.summary ? `<div style="margin-top:8px;font-size:0.86rem;color:var(--text-secondary);line-height:1.55">${escapeHtml(snap.summary)}</div>` : ''}
+            </div>
+            <div class="actions">
+                <button class="btn btn-ghost btn-sm" onclick="copyResourceLink('snapshot', ${snap.id})" title="复制此架构快照的可分享链接">🔗 复制链接</button>
+                <button class="btn btn-ghost btn-sm" onclick="openShareDialog('snapshot', ${snap.id})" title="管理共享授权（指定人 / 指定 OpenClaw / 全部开放）">👥 共享</button>
+                ${canEdit ? `<button class="btn btn-ghost btn-sm" onclick="editArch(${snap.id})">编辑</button>` : ''}
+                ${canDel ? `<button class="btn btn-ghost btn-sm" style="color:var(--red,#ef4444)" onclick="deleteArch(${snap.id})">删除</button>` : ''}
+            </div>
+        </div>
+        <div class="body">
+            <div class="markdown-body" id="arch-md-body"></div>
+        </div>
+    `;
+    renderMarkdownWithMermaid('arch-md-body', snap.content_md || '*（内容为空）*');
+}
+
+/**
+ * 渲染 Markdown + Mermaid 三件套，单图渲染失败回退到 <pre>
+ */
+async function renderMarkdownWithMermaid(elId, md) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+
+    // 1) marked → html
+    if (typeof marked === 'undefined') {
+        el.innerHTML = '<pre style="white-space:pre-wrap">' + escapeHtml(md) + '</pre>';
+        return;
+    }
+    let html;
+    try {
+        html = marked.parse(md);
+    } catch (e) {
+        el.innerHTML = '<pre style="white-space:pre-wrap">' + escapeHtml(md) + '</pre>';
+        return;
+    }
+
+    // 2) <pre><code class="language-mermaid">...</code></pre>  →  <div class="mermaid">...</div>
+    el.innerHTML = html;
+    el.querySelectorAll('pre > code.language-mermaid, pre > code[class*="mermaid"]').forEach(code => {
+        const div = document.createElement('div');
+        div.className = 'mermaid';
+        div.textContent = code.textContent;
+        const pre = code.parentElement;
+        pre.parentElement.replaceChild(div, pre);
+    });
+
+    // 3) mermaid 渲染（每图独立 try，失败回退）
+    if (typeof mermaid === 'undefined') return;
+    const blocks = el.querySelectorAll('.mermaid');
+    let idx = 0;
+    for (const b of blocks) {
+        const src = b.textContent;
+        const tmpId = `mmd-${Date.now()}-${idx++}`;
+        try {
+            const { svg } = await mermaid.render(tmpId, src);
+            b.innerHTML = svg;
+        } catch (e) {
+            b.classList.add('mermaid-error');
+            b.innerHTML = '<pre style="white-space:pre-wrap;margin:0">'
+                + escapeHtml(src) + '</pre>'
+                + '<div style="font-size:0.74rem;margin-top:6px">错误：'
+                + escapeHtml((e && e.message) || String(e)) + '</div>';
+        }
+    }
+}
+
+function onArchScopeChange() {
+    const scope = document.getElementById('arch-scope').value;
+    document.getElementById('arch-target-group').style.display =
+        scope === 'module' ? '' : 'none';
+}
+
+function _populateModuleSuggestions() {
+    // 从当前 baseline 的 module_mapping 取建议（如果有），失败安静降级
+    try {
+        const b = State.selectedBaseline;
+        const dl = document.getElementById('arch-target-list');
+        dl.innerHTML = '';
+        if (!b) return;
+        // module_mapping 可能是 LONGTEXT JSON，从 batches/changes 里反推不准；直接拉模块字典
+        API.get('/engineering/lookups/modules?project_id=' + b.project_id).then(r => {
+            const names = new Set();
+            (r.modules || []).forEach(m => { if (m.name) names.add(m.name); });
+            // 同时把已有快照里出现过的 target_module 也加进去
+            State.archSnapshots.forEach(s => { if (s.target_module) names.add(s.target_module); });
+            dl.innerHTML = Array.from(names).map(n =>
+                `<option value="${escapeHtml(n)}"></option>`).join('');
+        }).catch(() => {});
+    } catch (e) {}
+}
+
+function openCreateArch(scope) {
+    if (!State.selectedBaseline) { showToast('请先选择基线', 'warning'); return; }
+    document.getElementById('arch-modal-title').textContent =
+        scope === 'full' ? '新建全工程分析' : '新建单模块深度分析';
+    document.getElementById('arch-edit-id').value = '';
+    document.getElementById('arch-scope').value = scope;
+    document.getElementById('arch-target').value = '';
+    document.getElementById('arch-commit').value = '';
+    document.getElementById('arch-title').value = '';
+    document.getElementById('arch-summary').value = '';
+    document.getElementById('arch-content').value = '';
+    document.getElementById('arch-structured').value = '';
+    onArchScopeChange();
+    _populateModuleSuggestions();
+    document.getElementById('arch-modal').classList.add('active');
+}
+
+function editArch(id) {
+    const snap = State.selectedArch;
+    if (!snap || snap.id !== id) {
+        // 编辑前先抓一下完整内容
+        API.get('/engineering/architecture/' + id).then(s => {
+            State.selectedArch = s;
+            editArch(id);
+        });
+        return;
+    }
+    document.getElementById('arch-modal-title').textContent = '编辑架构快照 #' + id;
+    document.getElementById('arch-edit-id').value = id;
+    document.getElementById('arch-scope').value = snap.scope || 'full';
+    document.getElementById('arch-scope').disabled = true; // 不允许改 scope（影响一致性）
+    document.getElementById('arch-target').value = snap.target_module || '';
+    document.getElementById('arch-commit').value = snap.analyzed_commit || '';
+    document.getElementById('arch-title').value = snap.title || '';
+    document.getElementById('arch-summary').value = snap.summary || '';
+    document.getElementById('arch-content').value = snap.content_md || '';
+    document.getElementById('arch-structured').value =
+        snap.structured ? JSON.stringify(snap.structured, null, 2) : '';
+    onArchScopeChange();
+    _populateModuleSuggestions();
+    document.getElementById('arch-modal').classList.add('active');
+}
+
+function closeArchModal() {
+    document.getElementById('arch-modal').classList.remove('active');
+    document.getElementById('arch-scope').disabled = false;
+}
+
+async function submitArch() {
+    const editId = document.getElementById('arch-edit-id').value;
+    const scope = document.getElementById('arch-scope').value;
+    const target = document.getElementById('arch-target').value.trim();
+    const title = document.getElementById('arch-title').value.trim();
+    const content = document.getElementById('arch-content').value;
+    const structuredText = document.getElementById('arch-structured').value.trim();
+
+    if (!title) { showToast('标题必填', 'warning'); return; }
+    if (!content || content.length < 10) { showToast('Markdown 正文至少 10 字符', 'warning'); return; }
+    if (scope === 'module' && !target) { showToast('单模块深度分析必须填 target_module', 'warning'); return; }
+
+    let structured = {};
+    if (structuredText) {
+        try { structured = JSON.parse(structuredText); }
+        catch (e) { showToast('structured JSON 解析失败：' + e.message, 'error'); return; }
+    }
+
+    const payload = {
+        scope,
+        target_module: scope === 'module' ? target : '',
+        title,
+        summary: document.getElementById('arch-summary').value.trim(),
+        analyzed_commit: document.getElementById('arch-commit').value.trim(),
+        content_md: content,
+        structured,
+        source_type: 'manual',
+    };
+
+    try {
+        let resp;
+        if (editId) {
+            resp = await API.put('/engineering/architecture/' + editId, payload);
+            showToast('已更新快照 #' + resp.id, 'success');
+        } else {
+            resp = await API.post(
+                `/engineering/baselines/${State.selectedBaseline.id}/architecture`,
+                payload);
+            const trim = resp.lru_trimmed || 0;
+            showToast(`已创建快照 #${resp.id}` + (trim ? `（LRU 删除 ${trim} 个旧快照）` : ''), 'success');
+        }
+        closeArchModal();
+        State.selectedArch = { id: resp.id };
+        await loadArchSnapshots();
+        renderActiveTab();
+    } catch (e) {
+        showToast('保存失败：' + (e.message || ''), 'error');
+    }
+}
+
+async function deleteArch(id) {
+    const snap = State.archSnapshots.find(x => x.id === id) || State.selectedArch;
+    if (!snap) return;
+    const ok = await customConfirm(
+        `确认删除架构快照 #${id}？\n\n` +
+        `标题：${snap.title || '-'}\n` +
+        `范围：${snap.scope}${snap.target_module ? ' / '+snap.target_module : ''}\n` +
+        `提交人：${snap.triggered_by || '-'}\n\n` +
+        `⚠️ 永久删除（不可恢复）。`,
+        '删除架构快照');
+    if (!ok) return;
+    try {
+        await API.del('/engineering/architecture/' + id);
+        showToast('已删除快照 #' + id, 'success');
+        if (State.selectedArch && State.selectedArch.id === id) State.selectedArch = null;
+        await loadArchSnapshots();
+        renderActiveTab();
+    } catch (e) {
+        showToast('删除失败：' + (e.message || ''), 'error');
+    }
+}
+
+// ===== 影响项操作 =====
+async function claimImpact(id) {
+    const owner = await customPrompt('认领人', currentUser ? (currentUser.display_name || currentUser.username) : '');
+    if (owner === null || !owner) return;
+    try {
+        await API.put('/engineering/impacts/' + id, { owner, status: 'in_progress' });
+        showToast('已认领', 'success');
+        await loadBatchDetail();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+async function changeImpactStatus(id) {
+    const status = await customPrompt('新状态（todo / in_progress / done / rejected）', 'done');
+    if (!status) return;
+    try {
+        await API.put('/engineering/impacts/' + id, { status });
+        showToast('已更新', 'success');
+        await loadBatchDetail();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+async function linkCase(impactId) {
+    const idStr = await customPrompt('要关联的 Hub 用例 ID', '');
+    if (!idStr) return;
+    const test_case_id = parseInt(idStr);
+    if (!test_case_id) { showToast('无效 ID', 'warning'); return; }
+    try {
+        await API.post(`/engineering/impacts/${impactId}/links`, { test_case_id });
+        showToast('已关联', 'success');
+        await loadBatchDetail();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+async function unlinkCase(impactId, linkId) {
+    if (!await customConfirm('移除此关联？')) return;
+    try {
+        await API.del(`/engineering/impacts/${impactId}/links/${linkId}`);
+        await loadBatchDetail();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+function openCreateTask(impactId) {
+    const im = State.impacts.find(x => x.id === impactId);
+    document.getElementById('ct-impact-id').value = impactId;
+    document.getElementById('ct-name').value = '';
+    document.getElementById('ct-type').value = 'regression';
+    document.getElementById('create-task-modal').classList.add('active');
+}
+function closeCreateTaskModal() {
+    document.getElementById('create-task-modal').classList.remove('active');
+}
+async function submitCreateTask() {
+    const id = parseInt(document.getElementById('ct-impact-id').value);
+    const data = {
+        task_name: document.getElementById('ct-name').value.trim() || null,
+        task_type: document.getElementById('ct-type').value,
+    };
+    try {
+        const r = await API.post(`/engineering/impacts/${id}/create-task`, data);
+        showToast(`已写入任务 #${r.task.id}，绑定用例 ${r.linked_case_count} 条`, 'success');
+        closeCreateTaskModal();
+        await loadBatchDetail();
+    } catch (e) { showToast(e.message, 'error'); }
+}
+
+function onProjectChange() { loadBaselines(); }
+
+function escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// ==================== 复制链接 + 共享面板 ====================
+//
+// 这块覆盖三类资源：baseline / batch / snapshot。
+// 后端权限不通过时返回 403，对话框会展示错误，不需要前端再做权限判断。
+
+const RESOURCE_LABEL = {
+    baseline: '基线',
+    batch: '刷新批次',
+    snapshot: '架构快照',
+};
+
+function _resourceWebUrl(resourceType, id) {
+    if (resourceType === 'baseline') return `/engineering/baselines/${id}`;
+    if (resourceType === 'batch') return `/engineering/refresh/${id}`;
+    if (resourceType === 'snapshot') return `/engineering/architecture/${id}`;
+    return `/engineering`;
+}
+
+async function copyResourceLink(resourceType, id) {
+    const url = `${location.origin}${_resourceWebUrl(resourceType, id)}`;
+    try {
+        await navigator.clipboard.writeText(url);
+        showToast(`已复制${RESOURCE_LABEL[resourceType]||''}链接：${url}`, 'success');
+    } catch (e) {
+        // 退化到 prompt（部分浏览器无 clipboard 权限）
+        try { window.prompt('复制以下链接：', url); } catch (_) {}
+    }
+}
+
+function _shareDialogHtml(resourceType, id) {
+    return `
+    <div class="modal-overlay" id="share-modal-overlay" onclick="closeShareDialog(event)">
+      <div class="modal-content" style="max-width:720px;width:92vw;max-height:88vh;display:flex;flex-direction:column"
+           onclick="event.stopPropagation()">
+        <div class="modal-header" style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--border)">
+          <div>
+            <div style="font-weight:600;font-size:1.02rem">共享 ${RESOURCE_LABEL[resourceType]||resourceType} #${id}</div>
+            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:2px">
+              授权后跨项目用户/OpenClaw 可只读查看；点"全部开放"开放给所有登录账号
+            </div>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="closeShareDialog()">✕</button>
+        </div>
+
+        <div style="padding:14px 18px;border-bottom:1px solid var(--border);background:var(--bg-secondary,transparent)">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+            <button class="btn btn-primary btn-sm" onclick="togglePublicShare('${resourceType}', ${id}, true)">🌐 全部开放（讨论用）</button>
+            <button class="btn btn-ghost btn-sm" onclick="togglePublicShare('${resourceType}', ${id}, false)" style="color:var(--red,#ef4444)">关闭全部开放</button>
+            <span style="font-size:0.78rem;color:var(--text-muted)">→ 一键开关公开权限</span>
+          </div>
+
+          <div style="display:grid;grid-template-columns:90px 1fr;gap:8px;align-items:center;font-size:0.86rem">
+            <label>授权类型</label>
+            <select id="share-form-type" onchange="onShareTypeChange()" class="form-control">
+              <option value="user">指定用户（其名下 OpenClaw 自动继承）</option>
+              <option value="claw">指定 OpenClaw（仅该实例）</option>
+            </select>
+
+            <label id="share-target-label">用户 ID</label>
+            <input id="share-form-target" type="text" placeholder="输入 user_id 或 openclaw_id" class="form-control"/>
+
+            <label>过期时间</label>
+            <input id="share-form-expires" type="datetime-local" class="form-control" title="不填 = 永久（手动撤销）"/>
+
+            <label>备注</label>
+            <input id="share-form-note" type="text" placeholder="（可选）授权原因，如：课题 #45 临时讨论" class="form-control"/>
+
+            <div></div>
+            <div>
+              <button class="btn btn-primary btn-sm" onclick="submitNewShare('${resourceType}', ${id})">+ 添加授权</button>
+            </div>
+          </div>
+        </div>
+
+        <div style="flex:1;overflow:auto;padding:14px 18px">
+          <div style="font-size:0.85rem;font-weight:600;margin-bottom:8px">当前授权</div>
+          <div id="share-list" style="font-size:0.86rem">加载中...</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function onShareTypeChange() {
+    const t = document.getElementById('share-form-type').value;
+    document.getElementById('share-target-label').textContent =
+        t === 'user' ? '用户 ID' : 'OpenClaw ID';
+    document.getElementById('share-form-target').placeholder =
+        '输入 ' + (t === 'user' ? 'user_id' : 'openclaw_id');
+}
+
+async function openShareDialog(resourceType, id) {
+    closeShareDialog();
+    document.body.insertAdjacentHTML('beforeend', _shareDialogHtml(resourceType, id));
+    await loadShareList(resourceType, id);
+}
+
+function closeShareDialog(ev) {
+    if (ev && ev.target && ev.target.id !== 'share-modal-overlay') return;
+    const m = document.getElementById('share-modal-overlay');
+    if (m) m.remove();
+}
+
+async function loadShareList(resourceType, id) {
+    const el = document.getElementById('share-list');
+    if (!el) return;
+    el.innerHTML = '加载中...';
+    try {
+        const r = await API.get(`/engineering/${resourceType}/${id}/shares`);
+        const items = r.shares || [];
+        if (!items.length) {
+            el.innerHTML = '<div style="color:var(--text-muted)">尚未授权给任何用户/OpenClaw</div>';
+            return;
+        }
+        el.innerHTML = items.map(s => {
+            const stateBadge = s.is_active
+                ? '<span style="color:var(--green,#10b981)">● 生效</span>'
+                : '<span style="color:var(--text-muted)">○ 已过期</span>';
+            const target = s.share_type === 'public'
+                ? '🌐 全部登录用户/OpenClaw'
+                : (s.share_type === 'user'
+                    ? `👤 用户 #${s.target_user_id} ${escapeHtml(s.target_user_name||'')}`
+                    : `🤖 OpenClaw #${s.target_claw_id} ${escapeHtml(s.target_claw_name||'')}`);
+            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px">
+                <div style="min-width:0;flex:1">
+                  <div>${target} ${stateBadge}</div>
+                  <div style="font-size:0.76rem;color:var(--text-muted);margin-top:2px">
+                    by ${escapeHtml(s.granted_by||'-')}
+                    ${s.expires_at ? ` · 至 ${escapeHtml(s.expires_at.slice(0,16))}` : ' · 永久'}
+                    ${s.note ? ` · ${escapeHtml(s.note)}` : ''}
+                  </div>
+                </div>
+                <button class="btn btn-ghost btn-sm" style="color:var(--red,#ef4444)" onclick="revokeShare(${s.id}, '${resourceType}', ${id})">撤销</button>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        el.innerHTML = `<div style="color:var(--red,#ef4444)">加载失败：${escapeHtml(e.message||'')}</div>`;
+    }
+}
+
+async function submitNewShare(resourceType, id) {
+    const share_type = document.getElementById('share-form-type').value;
+    const target = document.getElementById('share-form-target').value.trim();
+    const expires = document.getElementById('share-form-expires').value.trim();
+    const note = document.getElementById('share-form-note').value.trim();
+    if (!target) { showToast('请填写 ID', 'warning'); return; }
+    const tid = parseInt(target, 10);
+    if (Number.isNaN(tid)) { showToast('ID 必须是数字', 'warning'); return; }
+
+    const body = { share_type, note };
+    if (share_type === 'user') body.target_user_id = tid;
+    else if (share_type === 'claw') body.target_claw_id = tid;
+    if (expires) body.expires_at = expires.replace('T', ' ') + ':00';
+
+    try {
+        const r = await API.post(`/engineering/${resourceType}/${id}/shares`, body);
+        showToast(r.idempotent ? '已存在相同授权（已刷新）' : '授权已添加', 'success');
+        document.getElementById('share-form-target').value = '';
+        document.getElementById('share-form-note').value = '';
+        await loadShareList(resourceType, id);
+    } catch (e) {
+        showToast('添加失败：' + (e.message||''), 'error');
+    }
+}
+
+async function revokeShare(shareId, resourceType, id) {
+    if (!confirm('确认撤销该授权？撤销后对应账号/OpenClaw 将立即失去查看权限。')) return;
+    try {
+        await API.del(`/engineering/shares/${shareId}`);
+        showToast('已撤销', 'success');
+        await loadShareList(resourceType, id);
+    } catch (e) {
+        showToast('撤销失败：' + (e.message||''), 'error');
+    }
+}
+
+async function togglePublicShare(resourceType, id, on) {
+    try {
+        if (on) {
+            const r = await API.post(`/engineering/${resourceType}/${id}/shares/public`, {});
+            showToast(r.idempotent ? '已是全部开放状态' : '已对所有登录用户/OpenClaw 开放', 'success');
+        } else {
+            const r = await API.del(`/engineering/${resourceType}/${id}/shares/public`);
+            showToast(`已关闭全部开放（移除 ${r.deleted||0} 条公开授权）`, 'success');
+        }
+        await loadShareList(resourceType, id);
+    } catch (e) {
+        showToast('操作失败：' + (e.message||''), 'error');
+    }
+}
+
+init();
+</script>
+{% endblock %}

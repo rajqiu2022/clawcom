@@ -1,0 +1,576 @@
+{% extends "base.html" %}
+{% block title %}需求分析中心 - OpenClaw{% endblock %}
+{% block page_title %}需求分析中心{% endblock %}
+{% block nav_requirements %}active{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <select class="form-select" id="filter-iteration" onchange="onIterationChange()" style="min-width:220px">
+        <option value="">请选择迭代...</option>
+    </select>
+    <button class="btn btn-ghost" id="btn-refresh" onclick="triggerRefresh()" title="通知 OpenClaw Agent 刷新 TAPD 数据">
+        🔄 实时刷新
+    </button>
+    <span id="refresh-status" style="font-size:0.78rem;color:var(--text-muted)"></span>
+</div>
+{% endblock %}
+
+{% block head %}
+<style>
+.req-layout { display:flex; gap:0; min-height:calc(100vh - 120px); }
+.req-col {
+    background:var(--bg-card); border-right:1px solid var(--border);
+    display:flex; flex-direction:column;
+}
+.req-col.left { width:340px; min-width:300px; border-radius:var(--radius) 0 0 var(--radius); }
+.req-col.mid { flex:1; min-width:0; }
+.req-col.right { width:380px; min-width:340px; border-right:none; border-radius:0 var(--radius) var(--radius) 0; }
+
+.req-section-title {
+    padding:10px 14px; font-size:0.78rem; color:var(--text-muted);
+    text-transform:uppercase; letter-spacing:0.5px;
+    border-bottom:1px solid var(--border); background:var(--bg-secondary);
+    display:flex; justify-content:space-between; align-items:center;
+}
+.req-list { flex:1; overflow-y:auto; padding:8px; }
+.req-empty { padding:30px 14px; text-align:center; color:var(--text-muted); font-size:0.84rem; }
+
+.req-card {
+    padding:10px 12px; border:1px solid var(--border); border-radius:8px;
+    margin-bottom:6px; cursor:pointer; background:var(--bg-secondary);
+    transition:all 0.15s;
+}
+.req-card:hover { border-color:var(--accent); }
+.req-card.active { border-color:var(--accent); background:var(--accent-dim); }
+.req-card .title { font-size:0.86rem; font-weight:600; color:var(--text-primary); margin-bottom:4px; line-height:1.35; }
+.req-card .meta { font-size:0.72rem; color:var(--text-muted); display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+.req-card .badge { padding:1px 6px; border-radius:4px; font-size:0.68rem; }
+
+.status-pill { padding:2px 8px; border-radius:99px; font-size:0.72rem; white-space:nowrap; }
+.status-status_3   { background:#3b82f622; color:#1d4ed8; }
+.status-status_22  { background:#eab30822; color:#b45309; }
+.status-status_4   { background:#22c55e22; color:#16a34a; }
+.status-status_resolved { background:#22c55e22; color:#16a34a; }
+.status-status_closed   { background:#94a3b822; color:#475569; }
+.status-default    { background:#94a3b822; color:#475569; }
+
+.risk-low      { background:#22c55e22; color:#16a34a; }
+.risk-medium   { background:#eab30822; color:#b45309; }
+.risk-high     { background:#f9731622; color:#c2410c; }
+.risk-critical { background:#ef444422; color:#b91c1c; }
+
+.priority-High        { background:#ef444422; color:#b91c1c; }
+.priority-Middle      { background:#eab30822; color:#b45309; }
+.priority-Low         { background:#94a3b822; color:#475569; }
+.priority-Nice        { background:#a3e63522; color:#65a30d; }
+
+.req-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; padding:12px; border-bottom:1px solid var(--border); background:var(--bg-card); }
+.req-stat { background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:10px; text-align:center; }
+.req-stat .val { font-size:1.3rem; font-weight:700; }
+.req-stat .label { font-size:0.72rem; color:var(--text-muted); margin-top:2px; }
+
+.req-tabs { display:flex; gap:0; border-bottom:1px solid var(--border); background:var(--bg-card); padding:0 14px; }
+.req-tab { padding:10px 14px; cursor:pointer; font-size:0.84rem; color:var(--text-muted); border-bottom:2px solid transparent; }
+.req-tab:hover { color:var(--text-primary); }
+.req-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+.req-body { flex:1; overflow-y:auto; padding:14px; }
+
+.req-detail-block { margin-bottom:16px; }
+.req-detail-block h4 {
+    font-size:0.78rem; color:var(--text-muted); text-transform:uppercase;
+    letter-spacing:0.5px; margin:0 0 8px; padding-bottom:4px;
+    border-bottom:1px solid var(--border);
+}
+.req-detail-block .row { display:flex; gap:10px; padding:4px 0; font-size:0.84rem; }
+.req-detail-block .row .k { width:90px; color:var(--text-muted); flex-shrink:0; }
+.req-detail-block .row .v { flex:1; word-break:break-word; }
+.req-detail-block .text-content {
+    background:var(--bg-secondary); border:1px solid var(--border);
+    border-radius:6px; padding:10px; font-size:0.84rem;
+    max-height:240px; overflow-y:auto; white-space:pre-wrap;
+}
+
+.change-row {
+    display:grid; grid-template-columns:90px 90px 110px 1fr 70px;
+    gap:8px; padding:8px 10px; border:1px solid var(--border);
+    border-radius:6px; margin-bottom:5px; font-size:0.8rem;
+    background:var(--bg-secondary); align-items:center;
+}
+.change-row .field { font-weight:600; }
+.change-row .old { color:var(--red); text-decoration:line-through; opacity:0.7; }
+.change-row .new { color:var(--green); }
+.change-row .change-type { font-size:0.7rem; padding:2px 6px; border-radius:4px; text-align:center; }
+.ct-added         { background:#22c55e22; color:#16a34a; }
+.ct-modified      { background:#3b82f622; color:#1d4ed8; }
+.ct-status_changed{ background:#eab30822; color:#b45309; }
+.ct-removed       { background:#ef444422; color:#b91c1c; }
+
+.impact-high   { color:#c2410c; font-weight:600; }
+.impact-medium { color:#b45309; }
+.impact-low    { color:var(--text-muted); }
+
+.eng-link-row, .case-link-row {
+    padding:8px 10px; border:1px solid var(--border);
+    border-radius:6px; margin-bottom:5px; font-size:0.82rem;
+    background:var(--bg-secondary);
+}
+.eng-link-row .file { font-family:monospace; font-size:0.78rem; color:var(--text-secondary); }
+.eng-link-row .meta { font-size:0.72rem; color:var(--text-muted); margin-top:3px; }
+
+.req-search { padding:8px; border-bottom:1px solid var(--border); }
+.req-search input {
+    width:100%; padding:6px 10px; border:1px solid var(--border);
+    border-radius:6px; background:var(--bg-secondary); color:var(--text-primary);
+    font-size:0.84rem;
+}
+.req-filter-bar { display:flex; gap:6px; padding:8px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+.req-filter-bar select {
+    flex:1; min-width:100px; padding:5px 8px; font-size:0.78rem;
+    border:1px solid var(--border); border-radius:6px;
+    background:var(--bg-secondary); color:var(--text-primary);
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="req-layout" id="req-root">
+    <!-- 左栏：变更日志（按当前迭代） -->
+    <div class="req-col left">
+        <div class="req-section-title">
+            <span>📈 近期变更</span>
+            <select id="changes-days" onchange="loadChanges()" style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:0.72rem; color:var(--text-primary)">
+                <option value="3">近 3 天</option>
+                <option value="7" selected>近 7 天</option>
+                <option value="14">近 14 天</option>
+                <option value="30">近 30 天</option>
+                <option value="">全部</option>
+            </select>
+        </div>
+        <div class="req-list" id="changes-list">
+            <div class="req-empty">请先选择迭代</div>
+        </div>
+    </div>
+
+    <!-- 中栏：需求列表 -->
+    <div class="req-col mid">
+        <div class="req-stats" id="req-stats" style="display:none">
+            <div class="req-stat"><div class="val" id="stat-total">-</div><div class="label">需求总数</div></div>
+            <div class="req-stat"><div class="val" id="stat-recent-changes">-</div><div class="label">近 7 天变更</div></div>
+            <div class="req-stat"><div class="val" id="stat-high-pending">-</div><div class="label">高影响待处理</div></div>
+            <div class="req-stat"><div class="val" id="stat-versions">-</div><div class="label">版本数</div></div>
+            <div class="req-stat"><div class="val" id="stat-baselines">-</div><div class="label">转测基线数</div></div>
+        </div>
+        <div class="req-search">
+            <input type="text" id="req-search-input" placeholder="搜索标题 / Story ID / 处理人..." oninput="onSearch()">
+        </div>
+        <div class="req-filter-bar">
+            <select id="filter-status" onchange="loadItems()"><option value="">全部状态</option></select>
+            <select id="filter-version" onchange="loadItems()"><option value="">全部版本</option></select>
+            <select id="filter-baseline" onchange="loadItems()"><option value="">全部基线</option></select>
+            <select id="filter-risk" onchange="loadItems()">
+                <option value="">全部风险</option>
+                <option value="critical">极高</option>
+                <option value="high">高</option>
+                <option value="medium">中</option>
+                <option value="low">低</option>
+            </select>
+        </div>
+        <div class="req-list" id="items-list">
+            <div class="req-empty">请先选择迭代</div>
+        </div>
+    </div>
+
+    <!-- 右栏：需求详情 -->
+    <div class="req-col right">
+        <div class="req-section-title"><span>📄 需求详情</span></div>
+        <div class="req-tabs">
+            <div class="req-tab active" data-tab="basic" onclick="switchTab('basic')">基础</div>
+            <div class="req-tab" data-tab="testing" onclick="switchTab('testing')">测试</div>
+            <div class="req-tab" data-tab="engineering" onclick="switchTab('engineering')">工程关联</div>
+            <div class="req-tab" data-tab="cases" onclick="switchTab('cases')">用例</div>
+            <div class="req-tab" data-tab="logs" onclick="switchTab('logs')">变更</div>
+        </div>
+        <div class="req-body" id="detail-body">
+            <div class="req-empty">请从中栏选择需求</div>
+        </div>
+    </div>
+</div>
+
+<script>
+const State = {
+    iterations: [],
+    currentIterationId: {% if initial_iteration_id %}{{ initial_iteration_id }}{% else %}null{% endif %},
+    items: [],
+    currentItem: null,
+    summary: null,
+    changes: [],
+    currentTab: 'basic',
+    activeRefreshReqId: null,
+    refreshPollTimer: null,
+};
+
+const API = {
+    base: '/api/v1',
+    async _req(method, url, body) {
+        const opts = { method, headers: {'Content-Type': 'application/json'} };
+        if (body !== undefined) opts.body = JSON.stringify(body);
+        const r = await fetch(this.base + url, opts);
+        const t = await r.text();
+        let data; try { data = t ? JSON.parse(t) : {}; } catch(e) { data = {raw:t}; }
+        if (!r.ok) throw new Error(data.error || r.statusText);
+        return data;
+    },
+    get(u){ return this._req('GET', u); },
+    post(u,b){ return this._req('POST', u, b); },
+    del(u){ return this._req('DELETE', u); },
+};
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function pillStatus(s){ if(!s) return ''; const cls = `status-${esc(s)}`; return `<span class="status-pill ${cls.match(/status-status_/) ? cls : 'status-default'}">${esc(s)}</span>`; }
+function pillRisk(r){ const cls = `risk-${r||'low'}`; return `<span class="status-pill ${cls}">${esc(r||'low')}</span>`; }
+function pillPriority(p){ if(!p) return ''; const k = String(p).split(' ')[0]; return `<span class="status-pill priority-${k}">${esc(p)}</span>`; }
+
+// =================== 入口 ===================
+async function init(){
+    await loadIterations();
+    if (State.currentIterationId) {
+        document.getElementById('filter-iteration').value = State.currentIterationId;
+        await onIterationChange();
+    }
+}
+
+async function loadIterations(){
+    try {
+        const data = await API.get('/test-iterations');
+        const list = data.iterations || data || [];
+        State.iterations = list;
+        const sel = document.getElementById('filter-iteration');
+        sel.innerHTML = '<option value="">请选择迭代...</option>' + list.map(it =>
+            `<option value="${it.id}">${esc(it.name)} ${it.version_name ? '· '+esc(it.version_name) : ''}</option>`
+        ).join('');
+    } catch(e) {
+        console.error(e);
+    }
+}
+
+async function onIterationChange(){
+    const id = document.getElementById('filter-iteration').value;
+    State.currentIterationId = id ? parseInt(id) : null;
+    State.currentItem = null;
+    document.getElementById('detail-body').innerHTML = '<div class="req-empty">请从中栏选择需求</div>';
+    if (!State.currentIterationId) {
+        document.getElementById('items-list').innerHTML = '<div class="req-empty">请先选择迭代</div>';
+        document.getElementById('changes-list').innerHTML = '<div class="req-empty">请先选择迭代</div>';
+        document.getElementById('req-stats').style.display = 'none';
+        return;
+    }
+    history.replaceState(null,'',`/requirements/iterations/${State.currentIterationId}`);
+    await Promise.all([loadSummary(), loadItems(), loadChanges()]);
+}
+
+async function loadSummary(){
+    if (!State.currentIterationId) return;
+    try {
+        const s = await API.get(`/requirements/iterations/${State.currentIterationId}/summary`);
+        State.summary = s;
+        document.getElementById('req-stats').style.display = 'grid';
+        document.getElementById('stat-total').textContent = s.total;
+        document.getElementById('stat-recent-changes').textContent = s.recent_change_count_7d;
+        document.getElementById('stat-high-pending').textContent = s.high_impact_pending;
+        document.getElementById('stat-versions').textContent = Object.keys(s.version_distribution||{}).length;
+        document.getElementById('stat-baselines').textContent = Object.keys(s.baseline_distribution||{}).length;
+
+        // 填充过滤下拉
+        const fs = document.getElementById('filter-status');
+        const cur = fs.value;
+        fs.innerHTML = '<option value="">全部状态</option>' + Object.entries(s.status_distribution||{}).sort((a,b)=>b[1]-a[1])
+            .map(([k,v]) => `<option value="${esc(k)}">${esc(k)} (${v})</option>`).join('');
+        fs.value = cur;
+
+        const fv = document.getElementById('filter-version');
+        const cv = fv.value;
+        fv.innerHTML = '<option value="">全部版本</option>' + Object.entries(s.version_distribution||{})
+            .map(([k,v]) => `<option value="${esc(k)}">${esc(k)} (${v})</option>`).join('');
+        fv.value = cv;
+
+        const fb = document.getElementById('filter-baseline');
+        const cb = fb.value;
+        fb.innerHTML = '<option value="">全部基线</option>' + Object.entries(s.baseline_distribution||{})
+            .map(([k,v]) => `<option value="${esc(k)}">${esc(k)} (${v})</option>`).join('');
+        fb.value = cb;
+    } catch(e){ console.error(e); }
+}
+
+let _searchTimer = null;
+function onSearch(){
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(loadItems, 250);
+}
+
+async function loadItems(){
+    if (!State.currentIterationId) return;
+    const params = new URLSearchParams();
+    const q = document.getElementById('req-search-input').value.trim();
+    if (q) params.set('q', q);
+    const status = document.getElementById('filter-status').value; if (status) params.set('status', status);
+    const version = document.getElementById('filter-version').value; if (version) params.set('tapd_version', version);
+    const baseline = document.getElementById('filter-baseline').value; if (baseline) params.set('tapd_baseline_id', baseline);
+    const risk = document.getElementById('filter-risk').value; if (risk) params.set('risk_level', risk);
+
+    const list = document.getElementById('items-list');
+    list.innerHTML = '<div class="req-empty">加载中...</div>';
+    try {
+        const data = await API.get(`/requirements/iterations/${State.currentIterationId}/items?${params}`);
+        State.items = data.items || [];
+        renderItemsList();
+    } catch(e){
+        list.innerHTML = `<div class="req-empty">加载失败: ${esc(e.message)}</div>`;
+    }
+}
+
+function renderItemsList(){
+    const list = document.getElementById('items-list');
+    if (!State.items.length) { list.innerHTML = '<div class="req-empty">暂无需求，等待 OpenClaw Agent 推送快照</div>'; return; }
+    list.innerHTML = State.items.map(it => `
+        <div class="req-card ${State.currentItem && State.currentItem.id === it.id ? 'active' : ''}" onclick="selectItem(${it.id})">
+            <div class="title">${esc(it.title || '(无标题)')}</div>
+            <div class="meta">
+                <span style="font-family:monospace; color:var(--text-secondary)">#${esc(it.tapd_story_id)}</span>
+                ${pillStatus(it.status)}
+                ${pillPriority(it.priority_label)}
+                ${it.tapd_version ? `<span class="badge" style="background:var(--bg-card); border:1px solid var(--border)">${esc(it.tapd_version)}</span>` : ''}
+                ${it.risk_level && it.risk_level !== 'low' ? pillRisk(it.risk_level) : ''}
+            </div>
+            <div class="meta" style="margin-top:3px">
+                <span>👤 ${esc(it.owner || '-')}</span>
+                ${it.tapd_module ? `<span>📦 ${esc(it.tapd_module)}</span>` : ''}
+            </div>
+        </div>
+    `).join('');
+}
+
+async function selectItem(id){
+    try {
+        State.currentItem = await API.get(`/requirements/items/${id}`);
+        renderItemsList();
+        renderDetail();
+    } catch(e){
+        document.getElementById('detail-body').innerHTML = `<div class="req-empty">加载失败: ${esc(e.message)}</div>`;
+    }
+}
+
+function switchTab(t){
+    State.currentTab = t;
+    document.querySelectorAll('.req-tab').forEach(el => el.classList.toggle('active', el.dataset.tab === t));
+    renderDetail();
+}
+
+function renderDetail(){
+    const body = document.getElementById('detail-body');
+    const it = State.currentItem;
+    if (!it) { body.innerHTML = '<div class="req-empty">请从中栏选择需求</div>'; return; }
+    const t = State.currentTab;
+
+    if (t === 'basic') {
+        body.innerHTML = `
+            <div class="req-detail-block">
+                <h4>${esc(it.title || '(无标题)')}</h4>
+                <div class="row"><span class="k">Story ID</span><span class="v" style="font-family:monospace">${esc(it.tapd_story_id)}</span></div>
+                <div class="row"><span class="k">状态</span><span class="v">${pillStatus(it.status)}</span></div>
+                <div class="row"><span class="k">优先级</span><span class="v">${pillPriority(it.priority_label) || '-'}</span></div>
+                <div class="row"><span class="k">处理人</span><span class="v">${esc(it.owner || '-')}</span></div>
+                <div class="row"><span class="k">开发</span><span class="v">${esc(it.developer || '-')}</span></div>
+                <div class="row"><span class="k">创建人</span><span class="v">${esc(it.creator || '-')}</span></div>
+                <div class="row"><span class="k">模块</span><span class="v">${esc(it.tapd_module || '-')}</span></div>
+                <div class="row"><span class="k">特性</span><span class="v">${esc(it.feature || '-')}</span></div>
+                <div class="row"><span class="k">版本</span><span class="v">${esc(it.tapd_version || '-')}</span></div>
+                <div class="row"><span class="k">基线</span><span class="v" style="font-family:monospace">${esc(it.tapd_baseline_id || '-')}</span></div>
+                <div class="row"><span class="k">需测试</span><span class="v">${esc(it.need_test || '-')}</span></div>
+                <div class="row"><span class="k">评审进度</span><span class="v">${esc(it.review_progress || '-')}</span></div>
+            </div>
+            <div class="req-detail-block">
+                <h4>📝 描述</h4>
+                <div class="text-content">${esc(it.description_text || it.description || '(空)')}</div>
+            </div>
+        `;
+    } else if (t === 'testing') {
+        body.innerHTML = `
+            <div class="req-detail-block">
+                <h4>✅ 测试验收（custom_field_eight）</h4>
+                <div class="text-content">${esc(it.acceptance_criteria || '(空)')}</div>
+            </div>
+            <div class="req-detail-block">
+                <h4>🎯 测试关注点</h4>
+                <div class="text-content">${esc(it.test_focus || '(空)')}</div>
+            </div>
+            <div class="req-detail-block">
+                <h4>📊 测试结果</h4>
+                <div class="text-content">${esc(it.test_result || '(空)')}</div>
+            </div>
+            <div class="req-detail-block">
+                <h4>🤖 AI 用例设计</h4>
+                <button class="btn btn-primary" onclick="alert('阶段 2 接入：从此需求一键调用 ai_generator.by_requirement')">从该需求生成用例（待开发）</button>
+            </div>
+        `;
+    } else if (t === 'engineering') {
+        body.innerHTML = `<div class="req-empty">加载中...</div>`;
+        API.get(`/requirements/items/${it.id}/engineering-changes`).then(data => {
+            const changes = data.changes || [];
+            if (!changes.length) { body.innerHTML = '<div class="req-empty">该需求当前无关联工程变更</div>'; return; }
+            body.innerHTML = `
+                <div class="req-detail-block">
+                    <h4>🛠️ 关联工程变更（共 ${changes.length} 项）</h4>
+                    ${changes.map(c => `
+                        <div class="eng-link-row">
+                            <div class="file">${esc(c.change ? c.change.file_path : '(已删除)')}</div>
+                            <div class="meta">
+                                ${c.change ? `<span>变更=${esc(c.change.change_type)}</span> · <span>风险=${c.change.risk_score}</span> · <span>模块=${esc(c.change.module_name||'-')}</span>` : ''}
+                                · 来源=${esc(c.link.link_source)} · 可信度=${c.link.confidence}%
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }).catch(e => { body.innerHTML = `<div class="req-empty">加载失败: ${esc(e.message)}</div>`; });
+    } else if (t === 'cases') {
+        const links = it.testcase_links || [];
+        body.innerHTML = `
+            <div class="req-detail-block">
+                <h4>🧪 已绑定用例（共 ${links.length} 条）</h4>
+                ${links.length ? links.map(l => `
+                    <div class="case-link-row">
+                        <span style="font-family:monospace">case#${l.test_case_id}</span> ·
+                        <span>${esc(l.link_type)}</span> ·
+                        <span>覆盖=${esc(l.coverage_status)}</span>
+                        <button class="btn btn-ghost" style="float:right; padding:2px 8px; font-size:0.75rem" onclick="deleteCaseLink(${l.id})">解绑</button>
+                    </div>
+                `).join('') : '<div class="req-empty">尚未绑定用例</div>'}
+                <div style="margin-top:10px">
+                    <input type="number" id="bind-case-id" placeholder="输入 test_case_id" style="padding:6px; border:1px solid var(--border); border-radius:6px; background:var(--bg-secondary); color:var(--text-primary); width:160px">
+                    <button class="btn btn-primary" onclick="bindCase()">手动绑定</button>
+                </div>
+            </div>
+        `;
+    } else if (t === 'logs') {
+        const logs = it.change_logs || [];
+        body.innerHTML = `
+            <div class="req-detail-block">
+                <h4>📜 字段变更日志（共 ${logs.length} 条）</h4>
+                ${logs.length ? logs.map(l => `
+                    <div class="change-row">
+                        <span class="change-type ct-${esc(l.change_type)}">${esc(l.change_type)}</span>
+                        <span class="impact-${l.impact_level}">${esc(l.impact_level)}</span>
+                        <span class="field">${esc(l.field_name || '-')}</span>
+                        <span>
+                            ${l.old_value ? `<span class="old">${esc(l.old_value).slice(0,60)}</span> → ` : ''}
+                            <span class="new">${esc(l.new_value || '').slice(0,60)}</span>
+                        </span>
+                        <span style="font-size:0.7rem; color:var(--text-muted)">${esc(l.change_date)}</span>
+                    </div>
+                `).join('') : '<div class="req-empty">无变更</div>'}
+            </div>
+        `;
+    }
+}
+
+async function bindCase(){
+    const id = document.getElementById('bind-case-id').value;
+    if (!id) return;
+    try {
+        await API.post(`/requirements/items/${State.currentItem.id}/testcase-links`, {test_case_id: parseInt(id)});
+        await selectItem(State.currentItem.id);
+    } catch(e){ alert(e.message); }
+}
+
+async function deleteCaseLink(id){
+    if (!confirm('解绑该用例？')) return;
+    try {
+        await API.del(`/requirements/testcase-links/${id}`);
+        await selectItem(State.currentItem.id);
+    } catch(e){ alert(e.message); }
+}
+
+async function loadChanges(){
+    if (!State.currentIterationId) return;
+    const days = document.getElementById('changes-days').value;
+    const params = new URLSearchParams();
+    if (days) params.set('days', days);
+    const list = document.getElementById('changes-list');
+    list.innerHTML = '<div class="req-empty">加载中...</div>';
+    try {
+        const data = await API.get(`/requirements/iterations/${State.currentIterationId}/changes?${params}`);
+        const logs = data.changes || [];
+        if (!logs.length) { list.innerHTML = '<div class="req-empty">该时段暂无变更</div>'; return; }
+        // 按 requirement_item_id 聚合，按日期倒序
+        list.innerHTML = logs.slice(0, 200).map(l => `
+            <div class="req-card" onclick="selectItem(${l.requirement_item_id})">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px">
+                    <span class="change-type ct-${esc(l.change_type)}" style="font-size:0.7rem; padding:1px 6px; border-radius:4px">${esc(l.change_type)}</span>
+                    <span class="impact-${l.impact_level}" style="font-size:0.7rem">${esc(l.impact_level)}</span>
+                </div>
+                <div style="font-size:0.78rem; color:var(--text-primary); margin-bottom:2px">
+                    <strong>${esc(l.field_name || '新增/移除')}</strong>
+                </div>
+                <div style="font-size:0.72rem; color:var(--text-muted)">
+                    ${l.old_value ? `<span class="old" style="text-decoration:line-through">${esc(String(l.old_value).slice(0,40))}</span> → ` : ''}
+                    <span style="color:var(--green)">${esc(String(l.new_value||'').slice(0,40))}</span>
+                </div>
+                <div style="font-size:0.7rem; color:var(--text-muted); margin-top:3px">${esc(l.change_date)} · req#${l.requirement_item_id}</div>
+            </div>
+        `).join('');
+    } catch(e){
+        list.innerHTML = `<div class="req-empty">加载失败: ${esc(e.message)}</div>`;
+    }
+}
+
+// =================== 实时刷新（R1 polling） ===================
+async function triggerRefresh(){
+    const btn = document.getElementById('btn-refresh');
+    const statusEl = document.getElementById('refresh-status');
+    btn.disabled = true;
+    statusEl.textContent = '已请求 Agent，等待领取...';
+    try {
+        const payload = { scope: 'iterations' };
+        if (State.currentIterationId) {
+            payload.iteration_id = State.currentIterationId;
+            payload.scope = 'stories';
+        }
+        const req = await API.post('/requirements/tapd-refresh-requests', payload);
+        State.activeRefreshReqId = req.id;
+        pollRefresh();
+    } catch(e){
+        statusEl.textContent = `请求失败: ${e.message}`;
+        btn.disabled = false;
+    }
+}
+
+function pollRefresh(){
+    if (State.refreshPollTimer) clearTimeout(State.refreshPollTimer);
+    State.refreshPollTimer = setTimeout(async () => {
+        if (!State.activeRefreshReqId) return;
+        try {
+            const r = await API.get(`/requirements/tapd-refresh-requests/${State.activeRefreshReqId}`);
+            const statusEl = document.getElementById('refresh-status');
+            if (r.status === 'pending') { statusEl.textContent = '等待 Agent 领取...'; pollRefresh(); }
+            else if (r.status === 'picked') { statusEl.textContent = 'Agent 处理中...'; pollRefresh(); }
+            else if (r.status === 'done') {
+                statusEl.textContent = `✓ 刷新完成 (${r.finished_at || ''})`;
+                document.getElementById('btn-refresh').disabled = false;
+                State.activeRefreshReqId = null;
+                await Promise.all([loadSummary(), loadItems(), loadChanges()]);
+            } else if (r.status === 'failed') {
+                statusEl.textContent = `✗ 刷新失败: ${r.error_message || '-'}`;
+                document.getElementById('btn-refresh').disabled = false;
+                State.activeRefreshReqId = null;
+            }
+        } catch(e){
+            document.getElementById('refresh-status').textContent = `轮询异常: ${e.message}`;
+            document.getElementById('btn-refresh').disabled = false;
+            State.activeRefreshReqId = null;
+        }
+    }, 3000);
+}
+
+init();
+</script>
+{% endblock %}
