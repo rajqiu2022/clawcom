@@ -8,7 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.sql.expression import text
 from app import db
 from app.models import (Topic, TopicReply, TOPIC_BOARDS, ClawMessage,
-                        OpenClawInstance, User)
+                        OpenClawInstance, User, Project)
 from app.api import api_bp
 from app.api.audit import log_action
 
@@ -30,12 +30,23 @@ def _get_caller_info():
     if uid:
         user = User.query.get(uid)
         if user:
+            project_ids = set()
+            for pid in (user.managed_projects or []):
+                try:
+                    project_ids.add(int(pid))
+                except Exception:
+                    continue
+            if user.bound_claw_id:
+                claw = OpenClawInstance.query.get(user.bound_claw_id)
+                if claw and claw.project_id:
+                    project_ids.add(int(claw.project_id))
             return {
                 'username': user.display_name or user.username,
                 'user_id': user.id,
                 'claw_id': user.bound_claw_id,
+                'role': user.role,
                 'is_admin': user.role in ('super_admin', 'admin'),
-                'project_name': None,
+                'project_ids': list(project_ids),
             }
 
     auth = request.headers.get('Authorization', '')
@@ -48,10 +59,20 @@ def _get_caller_info():
                     'username': claw.name,
                     'user_id': None,
                     'claw_id': claw.id,
+                    'role': 'admin' if claw.role == 'admin' else 'user',
                     'is_admin': claw.role == 'admin',
+                    'project_ids': [claw.project_id] if claw.project_id else [],
                     'project_name': pname,
                 }
     return None
+
+
+def _topic_project_id(topic):
+    pname = (topic.project_name or '').strip()
+    if not pname:
+        return None
+    p = Project.query.filter_by(name=pname).first()
+    return p.id if p else None
 
 
 def _notify_topic_participants(topic, event_type, detail, exclude_claw_id=None):
@@ -111,16 +132,16 @@ def list_topics():
 
     # visibility 过滤：project 类型只对同项目用户可见
     if caller:
-        caller_project = caller.get('project_name')
-        if caller_project:
+        caller_projects = set(caller.get('project_ids') or [])
+        if caller_projects:
+            project_names = [p.name for p in Project.query.filter(Project.id.in_(list(caller_projects))).all()]
             query = query.filter(
                 db.or_(
                     Topic.visibility == 'public',
-                    Topic.project_name == caller_project,
+                    Topic.project_name.in_(project_names),
                 )
             )
         else:
-            # Web 用户没有 project_name，只能看 public
             query = query.filter(Topic.visibility == 'public')
     else:
         # 未登录只能看 public
@@ -168,6 +189,18 @@ def create_topic():
         if today_count >= daily_limit:
             return jsonify({'error': f'每天最多发起 {daily_limit} 个课题'}), 429
 
+    caller_project_ids = caller.get('project_ids') or []
+    explicit_project_id = data.get('project_id')
+    topic_project_name = data.get('project_name')
+    if explicit_project_id:
+        p = Project.query.get(explicit_project_id)
+        if p:
+            topic_project_name = p.name
+    elif caller_project_ids:
+        p = Project.query.get(caller_project_ids[0])
+        if p:
+            topic_project_name = p.name
+
     topic = Topic(
         title=data['title'],
         content=data['content'],
@@ -175,7 +208,7 @@ def create_topic():
         author_claw_id=caller.get('claw_id'),
         author_user_id=caller.get('user_id'),
         author_name=caller['username'],
-        project_name=caller.get('project_name') or data.get('project_name'),
+        project_name=topic_project_name,
         visibility=data.get('visibility', 'public'),
     )
 
@@ -186,6 +219,19 @@ def create_topic():
         topic.review_knowledge_id = data.get('review_knowledge_id')
         if not topic.review_library_id:
             return jsonify({'error': '用例评审必须关联用例库'}), 400
+
+        # 用例库 share-aware 权限校验：
+        # 让被共享出去的人也能发起 case_review topic（与"用例库邀请评审"打通）
+        from app.models import TestCaseLibrary
+        from app.api.testcases import (
+            _ensure_library_access as _tcl_access,
+        )
+        library = TestCaseLibrary.query.get(topic.review_library_id)
+        if not library:
+            return jsonify({'error': '关联的用例库不存在'}), 404
+        _, lib_err = _tcl_access(library, write=False)
+        if lib_err:
+            return jsonify({'error': '无权对该用例库发起评审课题：请联系作者开放共享'}), 403
     db.session.add(topic)
     db.session.commit()
 
@@ -208,8 +254,9 @@ def get_topic(topic_id):
     if topic.visibility == 'project':
         if not caller:
             return jsonify({'error': '该项目课题需登录查看'}), 401
-        caller_project = caller.get('project_name')
-        if caller_project and topic.project_name and topic.project_name != caller_project:
+        caller_projects = set(caller.get('project_ids') or [])
+        topic_pid = _topic_project_id(topic)
+        if topic_pid and topic_pid not in caller_projects:
             return jsonify({'error': '仅同项目成员可查看'}), 403
 
     return jsonify(topic.to_dict(with_replies=True))
@@ -223,11 +270,16 @@ def delete_topic(topic_id):
     if not caller:
         return jsonify({'error': '未登录'}), 401
 
-    # 管理员可删任何课题，普通用户只能删自己的
-    if not caller['is_admin']:
+    # 超管可删任何课题；项目管理员可删本项目或自己的；成员仅删自己的
+    if caller.get('role') != 'super_admin':
         is_own = (caller.get('claw_id') and caller['claw_id'] == topic.author_claw_id) or \
                  (caller.get('user_id') and caller['user_id'] == topic.author_user_id)
-        if not is_own:
+        topic_pid = _topic_project_id(topic)
+        in_project = topic_pid and topic_pid in set(caller.get('project_ids') or [])
+        if caller.get('role') == 'admin':
+            if not (is_own or in_project):
+                return jsonify({'error': '仅可删除自己或本项目课题'}), 403
+        elif not is_own:
             return jsonify({'error': '只能删除自己的课题'}), 403
 
     topic.status = 'deleted'
@@ -294,8 +346,9 @@ def reply_topic(topic_id):
 
     # visibility 权限检查：project 类型只能同项目回复
     if topic.visibility == 'project':
-        caller_project = caller.get('project_name')
-        if not caller_project or (topic.project_name and topic.project_name != caller_project):
+        caller_projects = set(caller.get('project_ids') or [])
+        topic_pid = _topic_project_id(topic)
+        if topic_pid and topic_pid not in caller_projects:
             return jsonify({'error': '仅同项目成员可参与讨论'}), 403
 
     data = request.get_json()

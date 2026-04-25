@@ -1,23 +1,197 @@
 """
 测试用例库 API
-支持用例库的 CRUD 和脑图结构管理
+支持用例库的 CRUD、脑图结构管理、共享授权（开放权限）、评审流程
 """
 
 import uuid
 import json
+from datetime import datetime
 from flask import request, jsonify
+from sqlalchemy import desc, or_
 from app import db
-from app.models import TestCaseLibrary, TestCase
+from app.models import (
+    TestCaseLibrary, TestCase, Project, OpenClawInstance, User,
+    TestCaseLibraryShare, TestCaseLibraryReview, _now,
+)
 from app.api import api_bp
+from app.api.audit import log_action
 
 
-def _require_admin_for_library(library):
-    """删除用例库需要管理员权限（admin 和 super_admin 同等权限）"""
+def _get_current_user():
     from app.api.skills import _get_current_user
+    return _get_current_user()
+
+
+def _operator():
     user = _get_current_user()
-    if not user or user.role not in ('super_admin', 'admin'):
-        return jsonify({'error': '只有管理员可以删除用例库'}), 403
-    return jsonify({'error': '只有管理员可以删除用例库'}), 403
+    if not user:
+        return 'system'
+    return getattr(user, '_claw_name', None) or user.username or 'system'
+
+
+def _collect_user_project_ids(user):
+    ids = set()
+    if not user:
+        return ids
+    for pid in (getattr(user, 'managed_projects', None) or []):
+        try:
+            ids.add(int(pid))
+        except Exception:
+            continue
+    bound_claw_id = getattr(user, 'bound_claw_id', None)
+    if bound_claw_id:
+        claw = OpenClawInstance.query.get(bound_claw_id)
+        if claw and claw.project_id:
+            ids.add(int(claw.project_id))
+    return ids
+
+
+def _library_project_id(library):
+    pname = (library.project_name or '').strip()
+    if not pname:
+        return None
+    p = Project.query.filter_by(name=pname).first()
+    return p.id if p else None
+
+
+# ====================================================================
+# 共享授权 / 评审权限工具（参考 engineering.py 的 _can_view 等同形）
+# ====================================================================
+
+def _user_managed_claw_ids(user):
+    """该用户名下绑定的 OpenClaw ID 集合（共享给用户时，自动覆盖名下 claw）。"""
+    if not user:
+        return set()
+    username = getattr(user, 'username', None)
+    if not username:
+        return set()
+    rows = (OpenClawInstance.query
+            .filter(OpenClawInstance.owner == username,
+                    OpenClawInstance.status != 'deleted')
+            .with_entities(OpenClawInstance.id).all())
+    return {r[0] for r in rows}
+
+
+def _list_active_library_share_grants(user):
+    """构建当前调用方对所有用例库的「显式共享授权」索引。
+    返回 dict: {library_id: permission}（permission 取最高权限）。
+
+    覆盖：
+      - public 共享（任何已登录用户/claw 可见）
+      - 授权给当前用户的（target_user_id == user.id）
+      - 授权给当前用户名下任意 claw 的（target_claw_id ∈ managed claws）
+      - 授权给当前 token 绑定 claw 的（target_claw_id == bound_claw_id）
+    自动剔除已过期记录。
+    """
+    if not user:
+        return {}
+
+    now = _now()
+    user_id = getattr(user, 'id', None)
+    bound_claw_id = getattr(user, 'bound_claw_id', None)
+    managed_claw_ids = _user_managed_claw_ids(user)
+    if bound_claw_id:
+        managed_claw_ids.add(bound_claw_id)
+
+    conds = [TestCaseLibraryShare.share_type == 'public']
+    if user_id:
+        conds.append(db.and_(TestCaseLibraryShare.share_type == 'user',
+                             TestCaseLibraryShare.target_user_id == user_id))
+    if managed_claw_ids:
+        conds.append(db.and_(TestCaseLibraryShare.share_type == 'claw',
+                             TestCaseLibraryShare.target_claw_id.in_(
+                                 list(managed_claw_ids))))
+
+    rows = (TestCaseLibraryShare.query
+            .filter(or_(*conds))
+            .filter(or_(TestCaseLibraryShare.expires_at == None,  # noqa: E711
+                        TestCaseLibraryShare.expires_at > now))
+            .with_entities(TestCaseLibraryShare.library_id,
+                           TestCaseLibraryShare.permission).all())
+
+    rank = {'readonly': 1, 'reviewer': 2, 'editor': 3}
+    grants = {}
+    for lib_id, perm in rows:
+        perm = perm or 'reviewer'
+        if rank.get(perm, 1) > rank.get(grants.get(lib_id, 'readonly'), 1):
+            grants[lib_id] = perm
+        elif lib_id not in grants:
+            grants[lib_id] = perm
+    return grants
+
+
+def _can_manage_library(user, library):
+    if not user:
+        return False
+    if user.role == 'super_admin':
+        return True
+    if user.role == 'admin':
+        pid = _library_project_id(library)
+        return pid is not None and pid in _collect_user_project_ids(user)
+    owner = (library.owner or '').strip()
+    if owner == user.username:
+        return True
+    claw_name = getattr(user, '_claw_name', None)
+    return bool(claw_name and owner == claw_name)
+
+
+def _can_share_library(user, library):
+    """共享授权权限：与"管理"对齐（作者/项目 admin/super_admin）。"""
+    return _can_manage_library(user, library)
+
+
+def _can_review_library(user, library, share_grants=None):
+    """是否能对该库发表评审意见 / 通过 / 驳回。
+    标准：可管理 + 被授权为 reviewer/editor。
+    """
+    if _can_manage_library(user, library):
+        return True
+    if share_grants is None:
+        share_grants = _list_active_library_share_grants(user)
+    perm = share_grants.get(library.id)
+    return perm in ('reviewer', 'editor')
+
+
+def _ensure_library_access(library, write=False, share_grants=None):
+    user = _get_current_user()
+    if not user:
+        return None, (jsonify({'error': '未登录'}), 401)
+    if write:
+        if not _can_manage_library(user, library):
+            return user, (jsonify({'error': '无权操作该用例库'}), 403)
+        return user, None
+
+    if user.role == 'super_admin':
+        return user, None
+    own_names = {user.username, getattr(user, '_claw_name', None)}
+    own_names.discard(None)
+    if (library.owner or '') in own_names:
+        return user, None
+    pid = _library_project_id(library)
+    if pid is not None and pid in _collect_user_project_ids(user):
+        return user, None
+    # 显式共享命中（reviewer/editor/readonly 均放行只读）
+    if share_grants is None:
+        share_grants = _list_active_library_share_grants(user)
+    if library.id in share_grants:
+        return user, None
+    return user, (jsonify({'error': '无权访问该用例库'}), 403)
+
+
+def _parse_expires_at(raw):
+    """允许字符串 'YYYY-MM-DD HH:MM:SS' 或 ISO8601；返回 datetime 或 None；非法抛 ValueError。"""
+    if raw in (None, '', 'null'):
+        return None
+    if isinstance(raw, datetime):
+        return raw
+    s = str(raw).strip()
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%dT%H:%M',
+                '%Y-%m-%d'):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f'expires_at 格式不识别: {raw}')
 
 
 def generate_mindmap_node_id():
@@ -87,6 +261,9 @@ def build_mindmap_from_cases(cases):
 @api_bp.route('/testcase-libraries', methods=['GET'])
 def list_testcase_libraries():
     """获取用例库列表"""
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
     project_name = request.args.get('project_name')
     search = request.args.get('search')
 
@@ -103,23 +280,59 @@ def list_testcase_libraries():
         )
 
     libraries = query.order_by(TestCaseLibrary.updated_at.desc()).all()
-    return jsonify([lib.to_dict() for lib in libraries])
+    share_grants = {} if user.role == 'super_admin' else _list_active_library_share_grants(user)
+    if user.role != 'super_admin':
+        user_projects = _collect_user_project_ids(user)
+        own_names = {user.username, getattr(user, '_claw_name', None)}
+        own_names.discard(None)
+        filtered = []
+        for lib in libraries:
+            if (lib.owner or '') in own_names:
+                filtered.append(lib)
+                continue
+            pid = _library_project_id(lib)
+            if user_projects and pid in user_projects:
+                filtered.append(lib)
+                continue
+            # 被共享出去的库：放行（前端打"共享给我"标签）
+            if lib.id in share_grants:
+                filtered.append(lib)
+        libraries = filtered
+
+    out = []
+    for lib in libraries:
+        d = lib.to_dict()
+        d['shared_with_me'] = lib.id in share_grants
+        d['my_share_permission'] = share_grants.get(lib.id) if lib.id in share_grants else None
+        d['can_manage'] = _can_manage_library(user, lib)
+        d['can_share'] = _can_share_library(user, lib)
+        # 列表展示用：共享出去的总条数（只统计 active）
+        d['active_share_count'] = TestCaseLibraryShare.query.filter_by(
+            library_id=lib.id
+        ).filter(or_(TestCaseLibraryShare.expires_at == None,  # noqa: E711
+                     TestCaseLibraryShare.expires_at > _now())).count()
+        out.append(d)
+    return jsonify(out)
 
 
 @api_bp.route('/testcase-libraries', methods=['POST'])
 def create_testcase_library():
     """创建用例库"""
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
     data = request.get_json()
 
     if not data or not data.get('name'):
         return jsonify({'error': 'name 为必填项'}), 400
 
+    owner = getattr(user, '_claw_name', None) or user.username
     library = TestCaseLibrary(
         name=data['name'],
         description=data.get('description', ''),
         project_name=data.get('project_name'),
         module_name=data.get('module_name'),
-        owner=data.get('owner'),
+        owner=owner,
         mindmap={'id': 'root', 'text': data['name'], 'children': []},
     )
     db.session.add(library)
@@ -165,13 +378,26 @@ def get_or_create_library_by_project():
 def get_testcase_library(library_id):
     """获取用例库详情"""
     library = TestCaseLibrary.query.get_or_404(library_id)
-    return jsonify(library.to_dict(with_cases=True))
+    user, err = _ensure_library_access(library, write=False)
+    if err:
+        return err
+    data = library.to_dict(with_cases=True)
+    share_grants = _list_active_library_share_grants(user)
+    data['shared_with_me'] = library.id in share_grants
+    data['my_share_permission'] = share_grants.get(library.id)
+    data['can_manage'] = _can_manage_library(user, library)
+    data['can_share'] = _can_share_library(user, library)
+    data['can_review'] = _can_review_library(user, library, share_grants)
+    return jsonify(data)
 
 
 @api_bp.route('/testcase-libraries/<int:library_id>', methods=['PUT'])
 def update_testcase_library(library_id):
     """更新用例库"""
     library = TestCaseLibrary.query.get_or_404(library_id)
+    user = _get_current_user()
+    if not _can_manage_library(user, library):
+        return jsonify({'error': '无权修改该用例库'}), 403
     data = request.get_json()
 
     updatable_fields = ['name', 'description', 'project_name', 'module_name', 'owner', 'status']
@@ -189,12 +415,11 @@ def update_testcase_library(library_id):
 
 @api_bp.route('/testcase-libraries/<int:library_id>', methods=['DELETE'])
 def delete_testcase_library(library_id):
-    """删除用例库 — 仅管理员"""
+    """删除用例库"""
     library = TestCaseLibrary.query.get_or_404(library_id)
-
-    perm_err = _require_admin_for_library(library)
-    if perm_err:
-        return perm_err
+    user = _get_current_user()
+    if not _can_manage_library(user, library):
+        return jsonify({'error': '无权删除该用例库'}), 403
 
     # 自动快照：删库前保存（最后的安全网）
     from app.api.snapshots import auto_snapshot
@@ -448,6 +673,9 @@ def update_library_mindmap(library_id):
     支持拖拽调整节点
     """
     library = TestCaseLibrary.query.get_or_404(library_id)
+    _, err = _ensure_library_access(library, write=True)
+    if err:
+        return err
     data = request.get_json()
 
     if 'mindmap' not in data:
@@ -469,6 +697,9 @@ def list_library_cases(library_id):
     默认不含占位用例（用于用例列表展示）
     """
     library = TestCaseLibrary.query.get_or_404(library_id)
+    _, err = _ensure_library_access(library, write=False)
+    if err:
+        return err
 
     priority = request.args.get('priority')
     case_type = request.args.get('type')
@@ -507,6 +738,9 @@ def list_library_cases(library_id):
 def create_case(library_id):
     """创建用例"""
     library = TestCaseLibrary.query.get_or_404(library_id)
+    user, err = _ensure_library_access(library, write=True)
+    if err:
+        return err
     data = request.get_json()
 
     if not data or not data.get('title'):
@@ -526,7 +760,7 @@ def create_case(library_id):
         mindmap_node_id=generate_mindmap_node_id(),
         tags=data.get('tags', []),
         module_path=data.get('module_path', ''),
-        created_by=data.get('created_by', ''),
+        created_by=(data.get('created_by') or getattr(user, '_claw_name', None) or user.username),
     )
     db.session.add(case)
 
@@ -550,6 +784,9 @@ def create_case(library_id):
 def get_case(library_id, case_id):
     """获取用例详情"""
     library = TestCaseLibrary.query.get_or_404(library_id)
+    _, err = _ensure_library_access(library, write=False)
+    if err:
+        return err
     case = TestCase.query.filter_by(library_id=library_id, id=case_id).first_or_404()
     return jsonify(case.to_dict())
 
@@ -558,10 +795,14 @@ def get_case(library_id, case_id):
 def update_case(library_id, case_id):
     """更新用例"""
     library = TestCaseLibrary.query.get_or_404(library_id)
+    _, err = _ensure_library_access(library, write=True)
+    if err:
+        return err
     case = TestCase.query.filter_by(library_id=library_id, id=case_id).first_or_404()
     data = request.get_json()
 
-    updatable_fields = ['title', 'priority', 'type', 'content', 'tags', 'module_path', 'created_by']
+    updatable_fields = ['title', 'priority', 'type', 'content', 'tags', 'module_path', 'created_by',
+                        'tapd_story_url', 'tapd_story_title']
     for field in updatable_fields:
         if field in data:
             setattr(case, field, data[field])
@@ -585,6 +826,9 @@ def update_case(library_id, case_id):
 def delete_case(library_id, case_id):
     """删除用例"""
     library = TestCaseLibrary.query.get_or_404(library_id)
+    _, err = _ensure_library_access(library, write=True)
+    if err:
+        return err
     case = TestCase.query.filter_by(library_id=library_id, id=case_id).first_or_404()
     db.session.delete(case)
     db.session.commit()
@@ -601,12 +845,15 @@ def batch_create_cases(library_id):
     请求体：
     {
         "cases": [
-            {"title": "...", "priority": "P1", ...},
+            {"title": "...", "priority": "P1", "module_path": "模块/子模块", ...},
             ...
         ]
     }
     """
     library = TestCaseLibrary.query.get_or_404(library_id)
+    user, err = _ensure_library_access(library, write=True)
+    if err:
+        return err
     data = request.get_json()
 
     if not data or 'cases' not in data:
@@ -623,8 +870,12 @@ def batch_create_cases(library_id):
             priority=case_data.get('priority', 'P2'),
             type=case_data.get('type', 'functional'),
             content=case_data.get('content', {}),
+            module_path=case_data.get('module_path', ''),
             mindmap_node_id=generate_mindmap_node_id(),
             tags=case_data.get('tags', []),
+            tapd_story_url=case_data.get('tapd_story_url', ''),
+            tapd_story_title=case_data.get('tapd_story_title', ''),
+            created_by=(case_data.get('created_by') or getattr(user, '_claw_name', None) or user.username),
         )
         db.session.add(case)
         created_cases.append(case)
@@ -648,6 +899,9 @@ def batch_delete_cases(library_id):
     }
     """
     library = TestCaseLibrary.query.get_or_404(library_id)
+    _, err = _ensure_library_access(library, write=True)
+    if err:
+        return err
     data = request.get_json()
 
     if not data or 'case_ids' not in data:
@@ -763,6 +1017,81 @@ def import_cases_yaml(library_id):
 
 # ==================== XMind 导出 ====================
 
+# ==================== TAPD 需求绑定 ====================
+
+@api_bp.route('/testcase-libraries/<int:library_id>/cases/<int:case_id>/tapd-bind', methods=['PUT'])
+def bind_case_tapd(library_id, case_id):
+    """绑定单条用例到 TAPD 需求
+
+    请求体：
+    {
+        "tapd_story_url": "https://www.tapd.cn/...",
+        "tapd_story_title": "需求标题（可选，自动提取）"
+    }
+    """
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    case = TestCase.query.filter_by(library_id=library_id, id=case_id).first_or_404()
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': '请求体不能为空'}), 400
+
+    if 'tapd_story_url' in data:
+        case.tapd_story_url = data['tapd_story_url'] or ''
+    if 'tapd_story_title' in data:
+        case.tapd_story_title = data['tapd_story_title'] or ''
+
+    db.session.commit()
+    return jsonify(case.to_dict())
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/cases/tapd-bind-batch', methods=['POST'])
+def batch_bind_tapd(library_id):
+    """批量绑定 TAPD 需求（按目录或用例集）
+
+    请求体：
+    {
+        "tapd_story_url": "https://www.tapd.cn/...",
+        "tapd_story_title": "需求标题",
+        "module_path": "登录模块/手机号登录",   // 按目录批量绑定（二选一）
+        "case_ids": [1, 2, 3]                    // 按用例 ID 批量绑定（二选一）
+    }
+    """
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    data = request.get_json()
+
+    if not data or not data.get('tapd_story_url'):
+        return jsonify({'error': 'tapd_story_url 必填'}), 400
+
+    tapd_url = data['tapd_story_url']
+    tapd_title = data.get('tapd_story_title', '')
+    module_path = data.get('module_path')
+    case_ids = data.get('case_ids')
+
+    query = TestCase.query.filter_by(library_id=library_id).filter(TestCase.is_placeholder != True)
+
+    if case_ids:
+        query = query.filter(TestCase.id.in_(case_ids))
+    elif module_path is not None:
+        if module_path == '':
+            query = query.filter(db.or_(TestCase.module_path == '', TestCase.module_path == None))
+        else:
+            query = query.filter(db.or_(
+                TestCase.module_path == module_path,
+                TestCase.module_path.like(f'{module_path}/%')
+            ))
+    else:
+        return jsonify({'error': '请指定 module_path 或 case_ids'}), 400
+
+    cases = query.all()
+    for c in cases:
+        c.tapd_story_url = tapd_url
+        c.tapd_story_title = tapd_title
+
+    db.session.commit()
+    return jsonify({'message': f'已为 {len(cases)} 条用例绑定 TAPD 需求', 'count': len(cases)})
+
+
 @api_bp.route('/testcase-libraries/<int:library_id>/export/xmind', methods=['GET'])
 def export_cases_xmind(library_id):
     """导出为 XMind 格式（.xmind 文件）"""
@@ -854,3 +1183,461 @@ def export_cases_xmind(library_id):
     return Response(buf.getvalue(),
                     mimetype='application/octet-stream',
                     headers={'Content-Disposition': f'attachment; filename="testcases-{library_id}.xmind"'})
+
+
+# ====================================================================
+# 共享授权 API（开放权限/邀请评审）
+# 与 engineering /shares 五件套一一对应：list / create / revoke / public on / public off
+# ====================================================================
+
+_VALID_PERMISSIONS = ('readonly', 'reviewer', 'editor')
+
+
+def _share_forbidden(action_zh):
+    return jsonify({
+        'error': f'无权{action_zh}该用例库：仅作者 / 项目管理员 / super_admin 可操作',
+    }), 403
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/shares', methods=['GET'])
+def list_library_shares(library_id):
+    """列出该用例库当前所有共享授权（含已过期，前端按 is_active 区分）。"""
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    user, err = _ensure_library_access(library, write=False)
+    if err:
+        return err
+    shares = (TestCaseLibraryShare.query
+              .filter_by(library_id=library_id)
+              .order_by(desc(TestCaseLibraryShare.created_at)).all())
+    return jsonify({
+        'library_id': library_id,
+        'shares': [s.to_dict() for s in shares],
+        'total': len(shares),
+        'can_share': _can_share_library(user, library),
+    })
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/shares', methods=['POST'])
+def create_library_share(library_id):
+    """新增一条共享授权。
+    请求体：
+    {
+      "share_type": "user" | "claw" | "public",
+      "target_user_id":   123,    // share_type=user 时必填（互斥）
+      "target_claw_id":   45,     // share_type=claw 时必填（互斥）
+      "permission": "reviewer",   // readonly/reviewer/editor，默认 reviewer
+      "expires_at": "2026-04-30 18:00:00",   // 可选；不填=永久
+      "note": "邀请评审登录模块"               // 可选
+    }
+    幂等：相同 (library, share_type, target) 已存在且仍有效 → 刷新 permission/expires_at/note 后返回 200。
+    """
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    if not _can_share_library(user, library):
+        return _share_forbidden('共享')
+
+    data = request.get_json() or {}
+    share_type = data.get('share_type')
+    if share_type not in ('user', 'claw', 'public'):
+        return jsonify({'error': 'share_type 必须是 user/claw/public'}), 400
+
+    permission = (data.get('permission') or 'reviewer').strip()
+    if permission not in _VALID_PERMISSIONS:
+        return jsonify({
+            'error': f'permission 非法：{permission}（合法：{_VALID_PERMISSIONS}）'
+        }), 400
+
+    target_user_id = data.get('target_user_id')
+    target_claw_id = data.get('target_claw_id')
+    if share_type == 'user':
+        if target_user_id is None or target_user_id == '':
+            return jsonify({'error': 'share_type=user 时 target_user_id 必填'}), 400
+        if not User.query.get(target_user_id):
+            return jsonify({'error': '目标用户不存在'}), 404
+        target_claw_id = None
+    elif share_type == 'claw':
+        if target_claw_id is None or target_claw_id == '':
+            return jsonify({'error': 'share_type=claw 时 target_claw_id 必填'}), 400
+        if not OpenClawInstance.query.get(target_claw_id):
+            return jsonify({'error': '目标 OpenClaw 不存在'}), 404
+        target_user_id = None
+    else:  # public
+        target_user_id = None
+        target_claw_id = None
+
+    try:
+        expires_at = _parse_expires_at(data.get('expires_at'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    note = (data.get('note') or '').strip()[:500]
+
+    # 幂等：相同维度已存在且未过期 → 刷新后直接返回
+    existing = (TestCaseLibraryShare.query
+                .filter_by(library_id=library_id,
+                           share_type=share_type,
+                           target_user_id=target_user_id,
+                           target_claw_id=target_claw_id)
+                .all())
+    for ex in existing:
+        if ex.is_active():
+            updated = False
+            if expires_at and ex.expires_at != expires_at:
+                ex.expires_at = expires_at
+                updated = True
+            if note and ex.note != note:
+                ex.note = note
+                updated = True
+            if permission and ex.permission != permission:
+                ex.permission = permission
+                updated = True
+            if updated:
+                db.session.commit()
+                log_action('share_grant', 'test_case_library', library_id,
+                           library.name, operator=_operator(),
+                           detail=(f'刷新共享 share_type={share_type} '
+                                   f'permission={permission}'))
+            return jsonify({**ex.to_dict(), 'idempotent': True}), 200
+
+    share = TestCaseLibraryShare(
+        library_id=library_id,
+        share_type=share_type,
+        target_user_id=target_user_id,
+        target_claw_id=target_claw_id,
+        permission=permission,
+        granted_by=(getattr(user, 'username', None)
+                    or getattr(user, '_claw_name', None) or 'system'),
+        note=note,
+        expires_at=expires_at,
+    )
+    db.session.add(share)
+    db.session.commit()
+
+    log_action('share_grant', 'test_case_library', library_id, library.name,
+               operator=_operator(),
+               detail=(f'share_type={share_type} '
+                       f'target_user={target_user_id or "-"} '
+                       f'target_claw={target_claw_id or "-"} '
+                       f'permission={permission} '
+                       f'expires_at={expires_at or "永久"} '
+                       f'note={note[:80]}'))
+    return jsonify(share.to_dict()), 201
+
+
+@api_bp.route('/testcase-libraries/shares/<int:share_id>', methods=['DELETE'])
+def revoke_library_share(share_id):
+    """撤销共享授权。权限：原资源的可共享方。"""
+    share = TestCaseLibraryShare.query.get_or_404(share_id)
+    library = TestCaseLibrary.query.get(share.library_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    if library is None or not _can_share_library(user, library):
+        return _share_forbidden('撤销共享授权')
+
+    info = (f'share_type={share.share_type} '
+            f'target_user={share.target_user_id or "-"} '
+            f'target_claw={share.target_claw_id or "-"} '
+            f'permission={share.permission}')
+    lib_id = share.library_id
+    db.session.delete(share)
+    db.session.commit()
+
+    log_action('share_revoke', 'test_case_library', lib_id, library.name,
+               operator=_operator(), detail=info)
+    return jsonify({'status': 'revoked', 'share_id': share_id})
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/shares/public', methods=['POST'])
+def toggle_library_public_on(library_id):
+    """一键全部开放（语义：所有登录用户/claw 可见）。幂等。
+    可选 body: {"expires_at": "...", "note": "...", "permission": "reviewer"}
+    """
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    if not _can_share_library(user, library):
+        return _share_forbidden('开放')
+
+    data = request.get_json() or {}
+    permission = (data.get('permission') or 'reviewer').strip()
+    if permission not in _VALID_PERMISSIONS:
+        return jsonify({'error': f'permission 非法：{permission}'}), 400
+    try:
+        expires_at = _parse_expires_at(data.get('expires_at'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    note = (data.get('note') or '').strip()[:500]
+
+    existing = (TestCaseLibraryShare.query
+                .filter_by(library_id=library_id,
+                           share_type='public',
+                           target_user_id=None, target_claw_id=None)
+                .first())
+    if existing and existing.is_active():
+        changed = False
+        if expires_at and existing.expires_at != expires_at:
+            existing.expires_at = expires_at
+            changed = True
+        if permission and existing.permission != permission:
+            existing.permission = permission
+            changed = True
+        if changed:
+            db.session.commit()
+        return jsonify({**existing.to_dict(), 'idempotent': True}), 200
+
+    if existing:  # 已过期 → 复用记录刷新
+        existing.expires_at = expires_at
+        existing.permission = permission
+        existing.granted_by = (getattr(user, 'username', None)
+                               or getattr(user, '_claw_name', None) or 'system')
+        existing.note = note
+        db.session.commit()
+        log_action('share_grant', 'test_case_library', library_id, library.name,
+                   operator=_operator(),
+                   detail=f'public 开放（复用过期记录）permission={permission} expires_at={expires_at or "永久"}')
+        return jsonify(existing.to_dict()), 200
+
+    share = TestCaseLibraryShare(
+        library_id=library_id,
+        share_type='public',
+        permission=permission,
+        granted_by=(getattr(user, 'username', None)
+                    or getattr(user, '_claw_name', None) or 'system'),
+        note=note,
+        expires_at=expires_at,
+    )
+    db.session.add(share)
+    db.session.commit()
+    log_action('share_grant', 'test_case_library', library_id, library.name,
+               operator=_operator(),
+               detail=f'public 开放 permission={permission} expires_at={expires_at or "永久"}')
+    return jsonify(share.to_dict()), 201
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/shares/public', methods=['DELETE'])
+def toggle_library_public_off(library_id):
+    """一键关闭全部开放（删除该库所有 share_type=public 记录）。"""
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    if not _can_share_library(user, library):
+        return _share_forbidden('关闭全部开放')
+
+    deleted = (TestCaseLibraryShare.query
+               .filter_by(library_id=library_id, share_type='public')
+               .delete(synchronize_session=False))
+    db.session.commit()
+    log_action('share_revoke', 'test_case_library', library_id, library.name,
+               operator=_operator(),
+               detail=f'关闭 public 开放 deleted={deleted}')
+    return jsonify({'status': 'closed', 'deleted': deleted})
+
+
+# ====================================================================
+# 评审流程 API
+# ====================================================================
+
+_VALID_REVIEW_STATUSES = ('draft', 'pending_review', 'approved', 'rejected')
+
+
+def _set_library_review_status(library, new_status, current_review_id=None):
+    """统一更新 library.review_status + review_status_at + current_review_id。"""
+    library.review_status = new_status
+    library.review_status_at = _now()
+    if current_review_id is not None:
+        library.current_review_id = current_review_id
+    elif new_status != 'pending_review':
+        library.current_review_id = None
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/reviews', methods=['GET'])
+def list_library_reviews(library_id):
+    """列出某用例库的全部评审记录（含历史）。"""
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    _, err = _ensure_library_access(library, write=False)
+    if err:
+        return err
+    reviews = (TestCaseLibraryReview.query
+               .filter_by(library_id=library_id)
+               .order_by(desc(TestCaseLibraryReview.created_at)).all())
+    return jsonify({
+        'library_id': library_id,
+        'review_status': library.review_status or 'draft',
+        'current_review_id': library.current_review_id,
+        'reviews': [r.to_dict() for r in reviews],
+        'total': len(reviews),
+    })
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/reviews', methods=['POST'])
+def submit_library_review(library_id):
+    """发起一次评审请求。
+    请求体（全部可选）：
+    {
+      "submit_note": "本次重点评审登录与支付模块",
+      "scope_summary": "登录 / 支付",
+      "invited_reviewers": [{"type":"user","id":12,"name":"alice"}, ...],
+      "related_topic_id": 87
+    }
+    权限：作者 / 项目 admin / super_admin。
+    """
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    if not _can_manage_library(user, library):
+        return jsonify({'error': '无权对该用例库发起评审：仅作者/项目管理员/super_admin'}), 403
+
+    if (library.review_status or 'draft') == 'pending_review':
+        cur = library.current_review_id
+        return jsonify({
+            'error': '当前已有进行中的评审，请先撤回或等待审批',
+            'current_review_id': cur,
+        }), 409
+
+    data = request.get_json() or {}
+    review = TestCaseLibraryReview(
+        library_id=library_id,
+        status='submitted',
+        submitted_by=_operator(),
+        submitted_at=_now(),
+        submit_note=(data.get('submit_note') or '').strip(),
+        scope_summary=(data.get('scope_summary') or '').strip()[:500],
+        invited_reviewers=data.get('invited_reviewers') or [],
+        related_topic_id=data.get('related_topic_id'),
+    )
+    db.session.add(review)
+    db.session.flush()
+
+    _set_library_review_status(library, 'pending_review',
+                               current_review_id=review.id)
+    db.session.commit()
+
+    log_action('submit_review', 'test_case_library', library_id, library.name,
+               operator=_operator(),
+               detail=(f'review#{review.id} scope={review.scope_summary[:60]} '
+                       f'invited={len(review.invited_reviewers or [])}'))
+    return jsonify(review.to_dict()), 201
+
+
+@api_bp.route('/testcase-libraries/reviews/<int:review_id>/approve',
+              methods=['POST'])
+def approve_library_review(review_id):
+    """通过评审。权限：可管理 OR 被授权为 reviewer/editor。"""
+    review = TestCaseLibraryReview.query.get_or_404(review_id)
+    library = TestCaseLibrary.query.get_or_404(review.library_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    share_grants = _list_active_library_share_grants(user)
+    if not _can_review_library(user, library, share_grants):
+        return jsonify({
+            'error': '无权审批该评审：需具备评审权限（作者 / 项目管理员 / super_admin / 被授权 reviewer）',
+        }), 403
+    if review.status != 'submitted':
+        return jsonify({
+            'error': f'当前评审状态 {review.status} 不可审批通过'
+        }), 400
+
+    data = request.get_json() or {}
+    review.status = 'approved'
+    review.decided_by = _operator()
+    review.decided_at = _now()
+    review.decision_note = (data.get('decision_note') or '').strip()
+    _set_library_review_status(library, 'approved')
+    db.session.commit()
+
+    log_action('approve_review', 'test_case_library', library.id, library.name,
+               operator=_operator(),
+               detail=(f'review#{review.id} note={review.decision_note[:80]}'))
+    return jsonify(review.to_dict())
+
+
+@api_bp.route('/testcase-libraries/reviews/<int:review_id>/reject',
+              methods=['POST'])
+def reject_library_review(review_id):
+    """驳回评审。权限：同 approve。"""
+    review = TestCaseLibraryReview.query.get_or_404(review_id)
+    library = TestCaseLibrary.query.get_or_404(review.library_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    share_grants = _list_active_library_share_grants(user)
+    if not _can_review_library(user, library, share_grants):
+        return jsonify({
+            'error': '无权驳回该评审：需具备评审权限',
+        }), 403
+    if review.status != 'submitted':
+        return jsonify({
+            'error': f'当前评审状态 {review.status} 不可驳回'
+        }), 400
+
+    data = request.get_json() or {}
+    review.status = 'rejected'
+    review.decided_by = _operator()
+    review.decided_at = _now()
+    review.decision_note = (data.get('decision_note') or '').strip()
+    _set_library_review_status(library, 'rejected')
+    db.session.commit()
+
+    log_action('reject_review', 'test_case_library', library.id, library.name,
+               operator=_operator(),
+               detail=(f'review#{review.id} reason={review.decision_note[:80]}'))
+    return jsonify(review.to_dict())
+
+
+@api_bp.route('/testcase-libraries/reviews/<int:review_id>/withdraw',
+              methods=['POST'])
+def withdraw_library_review(review_id):
+    """撤回评审请求。仅发起者本人 / 库管理者可操作。"""
+    review = TestCaseLibraryReview.query.get_or_404(review_id)
+    library = TestCaseLibrary.query.get_or_404(review.library_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+
+    candidates = {user.username, getattr(user, '_claw_name', None), _operator()}
+    candidates.discard(None)
+    is_submitter = review.submitted_by in candidates
+    if not (is_submitter or _can_manage_library(user, library)):
+        return jsonify({'error': '无权撤回该评审：仅发起人 / 用例库管理者'}), 403
+    if review.status != 'submitted':
+        return jsonify({
+            'error': f'当前评审状态 {review.status} 不可撤回'
+        }), 400
+
+    review.status = 'withdrawn'
+    review.decided_by = _operator()
+    review.decided_at = _now()
+    # 库状态回到上一个稳定态：之前没批准过 → draft；之前批准过 → 仍 approved
+    prev_approved = TestCaseLibraryReview.query.filter_by(
+        library_id=library.id, status='approved').first()
+    if prev_approved:
+        _set_library_review_status(library, 'approved')
+    else:
+        _set_library_review_status(library, 'draft')
+    db.session.commit()
+
+    log_action('withdraw_review', 'test_case_library', library.id, library.name,
+               operator=_operator(),
+               detail=f'review#{review.id} 撤回')
+    return jsonify(review.to_dict())
+
+
+@api_bp.route('/testcase-libraries/reviews/<int:review_id>', methods=['GET'])
+def get_library_review(review_id):
+    """单条评审详情（含发起说明、邀请名单、审批意见）。"""
+    review = TestCaseLibraryReview.query.get_or_404(review_id)
+    library = TestCaseLibrary.query.get_or_404(review.library_id)
+    user, err = _ensure_library_access(library, write=False)
+    if err:
+        return err
+    data = review.to_dict()
+    data['library_name'] = library.name
+    data['can_decide'] = _can_review_library(user, library)
+    return jsonify(data)

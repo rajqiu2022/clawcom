@@ -5,25 +5,66 @@
 
 {% block content %}
 <div class="tab-bar">
-    <div class="tab-item active" data-tab="rules" onclick="switchTab('rules')">Rules <span id="count-rules" class="tag tag-yellow" style="margin-left:4px">0</span></div>
-    <div class="tab-item" data-tab="skills" onclick="switchTab('skills')">Skills <span id="count-skills" class="tag tag-yellow" style="margin-left:4px">0</span></div>
-    <div class="tab-item" data-tab="knowledge" onclick="switchTab('knowledge')">知识条目 <span id="count-knowledge" class="tag tag-yellow" style="margin-left:4px">0</span></div>
+    <div class="tab-item active" data-tab="pending" onclick="switchTab('pending')">⏳ 待审核 <span id="count-pending" class="tag tag-yellow" style="margin-left:4px">0</span></div>
+    <div class="tab-item" data-tab="revise" onclick="switchTab('revise')">↩️ 整改中 <span id="count-revise" class="tag tag-yellow" style="margin-left:4px">0</span></div>
+    <div class="tab-item" data-tab="approved" onclick="switchTab('approved')">✅ 已通过 <span id="count-approved" class="tag tag-green" style="margin-left:4px">0</span></div>
+    <div class="tab-item" data-tab="rejected" onclick="switchTab('rejected')">❌ 已废弃 <span id="count-rejected" class="tag tag-red" style="margin-left:4px">0</span></div>
+    <div class="tab-item" data-tab="mine" onclick="switchTab('mine')">📤 我的提交 <span id="count-mine" class="tag tag-accent" style="margin-left:4px">0</span></div>
 </div>
 
-<div id="tab-rules" class="tab-content">
-    <div id="rules-list"><div class="loading"><span class="spinner"></span></div></div>
+<div id="tab-pending" class="tab-content">
+    <h4 style="margin:0 0 12px;color:var(--text-secondary)">Rules</h4>
+    <div id="pending-rules-list"></div>
+    <h4 style="margin:16px 0 12px;color:var(--text-secondary)">Skills</h4>
+    <div id="pending-skills-list"></div>
+    <h4 style="margin:16px 0 12px;color:var(--text-secondary)">知识条目</h4>
+    <div id="pending-knowledge-list"></div>
 </div>
-<div id="tab-skills" class="tab-content" style="display:none">
-    <div id="skills-list"><div class="loading"><span class="spinner"></span></div></div>
+<div id="tab-revise" class="tab-content" style="display:none">
+    <div id="revise-list"><div class="loading"><span class="spinner"></span></div></div>
 </div>
-<div id="tab-knowledge" class="tab-content" style="display:none">
-    <div id="knowledge-list"><div class="loading"><span class="spinner"></span></div></div>
+<div id="tab-approved" class="tab-content" style="display:none">
+    <div id="approved-list"><div class="loading"><span class="spinner"></span></div></div>
+</div>
+<div id="tab-rejected" class="tab-content" style="display:none">
+    <div id="rejected-list"><div class="loading"><span class="spinner"></span></div></div>
+</div>
+<div id="tab-mine" class="tab-content" style="display:none">
+    <div id="mine-list"><div class="loading"><span class="spinner"></span></div></div>
+</div>
+
+<!-- 评审意见模态框 -->
+<div id="review-modal" class="modal-overlay" style="display:none">
+    <div class="modal" style="max-width:520px">
+        <div class="modal-header">
+            <h3 id="review-modal-title">审核意见</h3>
+            <button class="btn-close" onclick="closeReviewModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div style="margin-bottom:8px;color:var(--text-secondary);font-size:0.9rem" id="review-modal-target"></div>
+            <label style="display:block;margin-bottom:6px;color:var(--text-secondary);font-size:0.85rem">
+                <span id="review-modal-comment-label">评审意见</span>
+            </label>
+            <textarea id="review-comment-input" rows="4"
+                      style="width:100%;padding:8px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-input);color:var(--text-primary);resize:vertical"
+                      placeholder="请说明意见，整改 / 废弃 必填..."></textarea>
+        </div>
+        <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end">
+            <button class="btn btn-ghost btn-sm" onclick="closeReviewModal()">取消</button>
+            <button class="btn btn-primary btn-sm" id="review-modal-confirm" onclick="confirmReviewAction()">确认</button>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-let currentTab = 'rules';
+let currentTab = 'pending';
+const _loaded = { approved:false, rejected:false, revise:false, mine:false };
+let canReviewOperate = false;
+
+// 等待提交的审核操作
+let _pendingAction = null;  // { type, id, status, name }
 
 function switchTab(tab) {
     currentTab = tab;
@@ -31,32 +72,208 @@ function switchTab(tab) {
     $(`.tab-item[data-tab="${tab}"]`).classList.add('active');
     $$('.tab-content').forEach(c => c.style.display = 'none');
     $(`#tab-${tab}`).style.display = '';
+    if (tab === 'approved' && !_loaded.approved) { loadApprovedItems(); _loaded.approved = true; }
+    if (tab === 'rejected' && !_loaded.rejected) { loadRejectedItems(); _loaded.rejected = true; }
+    if (tab === 'revise' && !_loaded.revise) { loadReviseItems(); _loaded.revise = true; }
+    if (tab === 'mine' && !_loaded.mine) { loadMyItems(); _loaded.mine = true; }
+}
+
+// ===== 评审意见模态框 =====
+function openReviewModal(type, id, status, name) {
+    _pendingAction = { type, id, status, name };
+    const labels = { approved: '通过', revise: '打回整改', rejected: '废弃' };
+    $('#review-modal-title').textContent = `${labels[status] || status} - ${type}`;
+    $('#review-modal-target').textContent = `目标: ${name || '#' + id}`;
+    $('#review-modal-comment-label').textContent =
+        status === 'approved' ? '评审意见（可选）' : '评审意见（必填）';
+    $('#review-comment-input').value = '';
+    $('#review-modal').style.display = 'flex';
+    setTimeout(() => $('#review-comment-input').focus(), 50);
+}
+function closeReviewModal() {
+    $('#review-modal').style.display = 'none';
+    _pendingAction = null;
+}
+async function confirmReviewAction() {
+    if (!_pendingAction) return;
+    const comment = ($('#review-comment-input').value || '').trim();
+    if (_pendingAction.status !== 'approved' && !comment) {
+        showToast('整改 / 废弃 时必须填写评审意见', 'warning');
+        return;
+    }
+    const { type, id, status } = _pendingAction;
+    closeReviewModal();
+    await doReviewSubmit(type, id, status, comment);
+}
+
+async function doReviewSubmit(type, id, status, comment) {
+    if (!canReviewOperate) {
+        showToast('仅超级管理员可执行审核操作', 'warning');
+        return;
+    }
+    try {
+        if (type === 'Rule') {
+            await API.post(`/rules/${id}/review`, { review_status: status, review_comment: comment });
+        } else if (type === 'Skill') {
+            await API.post(`/skills/${id}/review`, { review_status: status, review_comment: comment });
+        } else if (type === '知识') {
+            const actionMap = { approved: 'approve', revise: 'revise', rejected: 'reject' };
+            await API.post(`/knowledge/${id}/review`, { action: actionMap[status], comment });
+        }
+        const labels = { approved: '已通过', revise: '已打回整改', rejected: '已废弃' };
+        showToast(labels[status] || '已处理', 'success');
+        // 同步刷新全部 5 个 tab 的列表 + 计数（避免切换 tab 才看到旧数据）
+        loadPendingItems();
+        loadReviseItems();   _loaded.revise = true;
+        loadApprovedItems(); _loaded.approved = true;
+        loadRejectedItems(); _loaded.rejected = true;
+        loadMyItems();       _loaded.mine = true;
+    } catch (err) {
+        showToast('操作失败: ' + err.message, 'error');
+    }
+}
+
+// 兼容旧入口（如果有）
+function reviewAction(type, id, status, name) {
+    openReviewModal(type, id, status, name);
+}
+
+// ===== 卡片渲染 =====
+function _resourceTypeOf(type) {
+    if (type === 'Skill') return 'skill';
+    if (type === 'Rule') return 'rule';
+    if (type === '知识') return 'knowledge';
+    return type;
 }
 
 function renderReviewCard(item, type) {
+    const name = item.display_name || item.title || item.name || '';
+    const safeName = (name || '').replace(/'/g, "\\'");
+    const actionBtns = canReviewOperate ? `
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" onclick="openReviewModal('${type}', ${item.id}, 'approved', '${safeName}')">✅ 通过</button>
+            <button class="btn btn-ghost btn-sm" style="color:var(--orange,#f59e0b)" onclick="openReviewModal('${type}', ${item.id}, 'revise', '${safeName}')">↩️ 打回整改</button>
+            <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="openReviewModal('${type}', ${item.id}, 'rejected', '${safeName}')">❌ 废弃</button>
+            <button class="btn btn-ghost btn-sm" onclick="toggleTimeline('${_resourceTypeOf(type)}', ${item.id}, this)">🕒 评审记录</button>
+        </div>` : `
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+            <button class="btn btn-ghost btn-sm" onclick="toggleTimeline('${_resourceTypeOf(type)}', ${item.id}, this)">🕒 评审记录</button>
+            <span style="font-size:0.82rem;color:var(--text-muted)">仅超级管理员可执行审核操作</span>
+        </div>`;
     return `
-    <div class="skill-card" style="margin-bottom:12px">
+    <div class="skill-card" style="margin-bottom:12px" data-resource-card="${_resourceTypeOf(type)}-${item.id}">
         <div class="skill-card-header">
-            <span class="skill-name">${item.display_name || item.title || item.name}</span>
+            <span class="skill-name">${name}</span>
             <span class="tag tag-yellow">待评审</span>
+            <span class="tag tag-accent">${type}</span>
             ${item.category ? `<span class="tag tag-accent">${item.category}</span>` : ''}
         </div>
         <div class="skill-desc">${item.description || ''}</div>
         <div style="margin-top:8px;font-size:0.82rem;color:var(--text-muted)">
-            提交人: ${item.created_by || 'system'} · ${item.created_at ? timeAgo(item.created_at) : ''}
+            提交人: ${item.created_by || item.source_openclaw_name || 'system'} · 最近修改 ${item.updated_at ? timeAgo(item.updated_at) : '-'}
         </div>
-        <div style="margin-top:10px;display:flex;gap:8px">
-            <button class="btn btn-primary btn-sm" onclick="reviewAction('${type}', ${item.id}, 'approved')">✅ 通过</button>
-            <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="reviewAction('${type}', ${item.id}, 'rejected')">❌ 废弃</button>
-        </div>
+        ${actionBtns}
+        <div class="review-timeline-box" style="display:none;margin-top:10px"></div>
     </div>`;
 }
 
+function renderStatusCard(item, type, status) {
+    const name = item.display_name || item.title || item.name || '';
+    const tagMap = {
+        approved: '<span class="tag tag-green">已通过</span>',
+        revise: '<span class="tag tag-yellow" style="background:rgba(245,158,11,.15);color:#f59e0b">↩️ 整改中</span>',
+        rejected: '<span class="tag tag-red">已废弃</span>',
+    };
+    const statusTag = tagMap[status] || `<span class="tag tag-accent">${status}</span>`;
+    const lastNote = item.review_comment || item.reviewer_notes || '';
+    const commentHtml = lastNote
+        ? `<div style="margin-top:6px;font-size:0.82rem;color:var(--text-muted);padding:6px 8px;background:var(--bg-secondary);border-radius:6px">最近审核意见: ${lastNote}</div>`
+        : '';
+    const reviseBtn = (status === 'revise' && canReviewOperate)
+        ? `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="openReviewModal('${type}', ${item.id}, 'rejected', '${(name||'').replace(/'/g,"\\'")}')">❌ 废弃</button>` : '';
+    return `
+    <div class="skill-card" style="margin-bottom:12px" data-resource-card="${_resourceTypeOf(type)}-${item.id}">
+        <div class="skill-card-header">
+            <span class="skill-name">${name}</span>
+            ${statusTag}
+            <span class="tag tag-accent">${type}</span>
+            ${item.category ? `<span class="tag tag-accent">${item.category}</span>` : ''}
+        </div>
+        <div class="skill-desc">${item.description || ''}</div>
+        <div style="margin-top:8px;font-size:0.82rem;color:var(--text-muted)">
+            提交人: ${item.created_by || item.source_openclaw_name || 'system'} · 最近修改 ${item.updated_at ? timeAgo(item.updated_at) : '-'}
+        </div>
+        ${commentHtml}
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" onclick="toggleTimeline('${_resourceTypeOf(type)}', ${item.id}, this)">🕒 评审记录</button>
+            ${reviseBtn}
+        </div>
+        <div class="review-timeline-box" style="display:none;margin-top:10px"></div>
+    </div>`;
+}
+
+// ===== 评审记录时间线 =====
+async function toggleTimeline(resourceType, resourceId, btn) {
+    const card = btn.closest('[data-resource-card]');
+    if (!card) return;
+    const box = card.querySelector('.review-timeline-box');
+    if (!box) return;
+    if (box.style.display !== 'none') {
+        box.style.display = 'none';
+        return;
+    }
+    box.style.display = 'block';
+    box.innerHTML = '<div style="padding:8px;color:var(--text-muted)">加载中...</div>';
+    try {
+        const rows = await API.request('GET',
+            `/review-comments?resource_type=${resourceType}&resource_id=${resourceId}`);
+        if (!Array.isArray(rows) || rows.length === 0) {
+            box.innerHTML = '<div style="padding:8px;color:var(--text-muted);font-size:0.85rem">暂无评审记录</div>';
+            return;
+        }
+        box.innerHTML = renderTimeline(rows);
+    } catch (err) {
+        box.innerHTML = `<div style="padding:8px;color:var(--red);font-size:0.85rem">加载失败: ${err.message}</div>`;
+    }
+}
+
+function renderTimeline(rows) {
+    const actionLabels = {
+        submit: { txt: '📤 提交', color: '#3b82f6' },
+        approve: { txt: '✅ 通过', color: '#10b981' },
+        revise: { txt: '↩️ 打回整改', color: '#f59e0b' },
+        reject: { txt: '❌ 废弃', color: '#ef4444' },
+        withdraw: { txt: '🔙 撤回', color: '#6b7280' },
+        comment: { txt: '💬 评论', color: '#8b5cf6' },
+    };
+    const items = rows.map(r => {
+        const meta = actionLabels[r.action] || { txt: r.action, color: '#9ca3af' };
+        const transition = (r.from_status || r.to_status)
+            ? `<span style="color:var(--text-muted);margin-left:8px;font-size:0.78rem">${r.from_status || '-'} → ${r.to_status || '-'}</span>`
+            : '';
+        const authorIcon = r.author_type === 'openclaw' ? '🤖' : (r.author_type === 'system' ? '⚙️' : '👤');
+        return `
+        <div style="border-left:3px solid ${meta.color};padding:6px 10px;margin-bottom:6px;background:var(--bg-secondary);border-radius:0 6px 6px 0">
+            <div style="display:flex;align-items:center;justify-content:space-between;font-size:0.85rem">
+                <span><span style="color:${meta.color};font-weight:600">${meta.txt}</span> ${transition}</span>
+                <span style="color:var(--text-muted);font-size:0.78rem">${authorIcon} ${r.author || '-'} · ${r.created_at ? timeAgo(r.created_at) : '-'}</span>
+            </div>
+            ${r.content ? `<div style="margin-top:4px;color:var(--text-primary);font-size:0.85rem;white-space:pre-wrap">${escapeHtml(r.content)}</div>` : ''}
+        </div>`;
+    }).join('');
+    return `<div style="padding:6px 0">${items}</div>`;
+}
+
+function escapeHtml(s) {
+    return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ===== 列表加载 =====
 async function loadPendingItems() {
     try {
         const [rules, skills, knowledge] = await Promise.all([
             API.request('GET', '/rules?include_admin=true&review_status=pending'),
-            API.request('GET', '/skills?review_status=pending'),
+            API.request('GET', '/skills?review_status=pending&include_admin=true'),
             API.request('GET', '/knowledge?status=pending_review').catch(() => []),
         ]);
 
@@ -64,59 +281,154 @@ async function loadPendingItems() {
         const pendingSkills = Array.isArray(skills) ? skills.filter(s => s.review_status === 'pending') : [];
         const pendingKnowledge = Array.isArray(knowledge) ? knowledge.filter(k => k.status === 'pending_review') : [];
 
-        $('#count-rules').textContent = pendingRules.length;
-        $('#count-skills').textContent = pendingSkills.length;
-        $('#count-knowledge').textContent = pendingKnowledge.length;
+        const pendingTotal = pendingRules.length + pendingSkills.length + pendingKnowledge.length;
+        $('#count-pending').textContent = pendingTotal;
 
-        $('#rules-list').innerHTML = pendingRules.length
-            ? pendingRules.map(r => renderReviewCard(r, 'rule')).join('')
-            : '<div class="empty-state"><div class="empty-state-text">暂无待评审的 Rules</div></div>';
+        $('#pending-rules-list').innerHTML = pendingRules.length
+            ? pendingRules.map(r => renderReviewCard(r, 'Rule')).join('')
+            : '<div class="empty-state-text" style="padding:8px;color:var(--text-muted)">暂无</div>';
 
-        $('#skills-list').innerHTML = pendingSkills.length
-            ? pendingSkills.map(s => renderReviewCard(s, 'skill')).join('')
-            : '<div class="empty-state"><div class="empty-state-text">暂无待评审的 Skills</div></div>';
+        $('#pending-skills-list').innerHTML = pendingSkills.length
+            ? pendingSkills.map(s => renderReviewCard(s, 'Skill')).join('')
+            : '<div class="empty-state-text" style="padding:8px;color:var(--text-muted)">暂无</div>';
 
-        $('#knowledge-list').innerHTML = pendingKnowledge.length
-            ? pendingKnowledge.map(k => renderReviewCard(k, 'knowledge')).join('')
-            : '<div class="empty-state"><div class="empty-state-text">暂无待评审的知识条目</div></div>';
+        $('#pending-knowledge-list').innerHTML = pendingKnowledge.length
+            ? pendingKnowledge.map(k => renderReviewCard(k, '知识')).join('')
+            : '<div class="empty-state-text" style="padding:8px;color:var(--text-muted)">暂无</div>';
     } catch (err) {
         showToast('加载失败: ' + err.message, 'error');
     }
 }
 
-async function reviewAction(type, id, status) {
+async function loadReviseItems() {
     try {
-        if (type === 'rule') {
-            await API.request('PUT', `/rules/${id}`, { review_status: status });
-        } else if (type === 'skill') {
-            await API.request('PUT', `/skills/${id}`, { review_status: status });
-        } else if (type === 'knowledge') {
-            const action = status === 'approved' ? 'approved' : 'rejected';
-            await API.post(`/knowledge/${id}/review`, { action, notes: '' });
-        }
-        showToast(status === 'approved' ? '已通过' : '已废弃', 'success');
-        loadPendingItems();
+        const [rules, skills, knowledge] = await Promise.all([
+            API.request('GET', '/rules?include_admin=true&review_status=revise').catch(() => []),
+            API.request('GET', '/skills?include_admin=true&review_status=revise').catch(() => []),
+            API.request('GET', '/knowledge?status=revise').catch(() => []),
+        ]);
+        const items = [
+            ...(Array.isArray(rules) ? rules.filter(r => r.review_status === 'revise').map(r => ({...r, _type:'Rule'})) : []),
+            ...(Array.isArray(skills) ? skills.filter(s => s.review_status === 'revise').map(s => ({...s, _type:'Skill'})) : []),
+            ...(Array.isArray(knowledge) ? knowledge.filter(k => k.status === 'revise').map(k => ({...k, _type:'知识'})) : []),
+        ].sort((a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || ''));
+        $('#count-revise').textContent = items.length;
+        $('#revise-list').innerHTML = items.length
+            ? items.map(i => renderStatusCard(i, i._type, 'revise')).join('')
+            : '<div class="empty-state"><div class="empty-state-text">暂无整改中的记录</div></div>';
     } catch (err) {
-        showToast('操作失败: ' + err.message, 'error');
+        showToast('加载失败: ' + err.message, 'error');
     }
 }
 
-// 权限检查：等 currentUser 异步加载完成后再判断
+async function loadApprovedItems() {
+    try {
+        const [rules, skills] = await Promise.all([
+            API.request('GET', '/rules?include_admin=true&review_status=approved'),
+            API.request('GET', '/skills?review_status=approved&include_admin=true'),
+        ]);
+        const approvedRules = Array.isArray(rules) ? rules.filter(r => r.review_status === 'approved') : [];
+        const approvedSkills = Array.isArray(skills) ? skills.filter(s => s.review_status === 'approved') : [];
+
+        const allItems = [
+            ...approvedRules.map(r => ({...r, _type: 'Rule'})),
+            ...approvedSkills.map(s => ({...s, _type: 'Skill'})),
+        ].sort((a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || '')).slice(0, 30);
+
+        $('#count-approved').textContent = allItems.length;
+        $('#approved-list').innerHTML = allItems.length
+            ? allItems.map(i => renderStatusCard(i, i._type, 'approved')).join('')
+            : '<div class="empty-state"><div class="empty-state-text">暂无已通过的记录</div></div>';
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+async function loadRejectedItems() {
+    try {
+        const [rules, skills] = await Promise.all([
+            API.request('GET', '/rules?include_admin=true&review_status=rejected'),
+            API.request('GET', '/skills?review_status=rejected&include_admin=true'),
+        ]);
+        const rejectedRules = Array.isArray(rules) ? rules.filter(r => r.review_status === 'rejected') : [];
+        const rejectedSkills = Array.isArray(skills) ? skills.filter(s => s.review_status === 'rejected') : [];
+
+        const allItems = [
+            ...rejectedRules.map(r => ({...r, _type: 'Rule'})),
+            ...rejectedSkills.map(s => ({...s, _type: 'Skill'})),
+        ].sort((a, b) => (b.updated_at || b.created_at || '').localeCompare(a.updated_at || a.created_at || '')).slice(0, 30);
+
+        $('#count-rejected').textContent = allItems.length;
+        $('#rejected-list').innerHTML = allItems.length
+            ? allItems.map(i => renderStatusCard(i, i._type, 'rejected')).join('')
+            : '<div class="empty-state"><div class="empty-state-text">暂无已废弃的记录</div></div>';
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
+async function loadMyItems() {
+    try {
+        const items = await API.request('GET', '/review-comments/my-submissions');
+        $('#count-mine').textContent = items.length || 0;
+        if (!items || !items.length) {
+            $('#mine-list').innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无我的提交</div></div>';
+            return;
+        }
+        const typeLabel = {
+            skill: 'Skill', rule: 'Rule', knowledge: '知识',
+            testcase_library: '用例库',
+        };
+        const statusTagFn = (s) => {
+            const map = {
+                approved: '<span class="tag tag-green">已通过</span>',
+                pending: '<span class="tag tag-yellow">待审核</span>',
+                pending_review: '<span class="tag tag-yellow">待审核</span>',
+                revise: '<span class="tag tag-yellow" style="background:rgba(245,158,11,.15);color:#f59e0b">↩️ 整改中</span>',
+                rejected: '<span class="tag tag-red">已废弃</span>',
+                draft: '<span class="tag tag-accent">草稿</span>',
+            };
+            return map[s] || `<span class="tag tag-accent">${s}</span>`;
+        };
+        $('#mine-list').innerHTML = items.map(it => {
+            const lc = it.latest_comment;
+            const lcHtml = lc
+                ? `<div style="margin-top:6px;font-size:0.82rem;color:var(--text-muted)">
+                       最近: <b>${lc.action}</b> by ${lc.author || '-'} · ${lc.created_at ? timeAgo(lc.created_at) : '-'}
+                       ${lc.content ? `<div style="margin-top:4px;padding:6px;background:var(--bg-secondary);border-radius:6px;white-space:pre-wrap">${escapeHtml(lc.content)}</div>` : ''}
+                   </div>`
+                : '<div style="margin-top:6px;font-size:0.82rem;color:var(--text-muted)">暂无评审记录</div>';
+            return `
+            <div class="skill-card" style="margin-bottom:12px" data-resource-card="${it.resource_type}-${it.resource_id}">
+                <div class="skill-card-header">
+                    <span class="skill-name">${escapeHtml(it.name || '')}</span>
+                    ${statusTagFn(it.status)}
+                    <span class="tag tag-accent">${typeLabel[it.resource_type] || it.resource_type}</span>
+                    <span class="tag tag-accent">${it.comment_count} 条记录</span>
+                </div>
+                ${lcHtml}
+                <div style="margin-top:10px">
+                    <button class="btn btn-ghost btn-sm" onclick="toggleTimeline('${it.resource_type}', ${it.resource_id}, this)">🕒 完整评审记录</button>
+                </div>
+                <div class="review-timeline-box" style="display:none;margin-top:10px"></div>
+            </div>`;
+        }).join('');
+    } catch (err) {
+        showToast('加载失败: ' + err.message, 'error');
+    }
+}
+
 function checkReviewPermission() {
-    if (!currentUser || (currentUser.role !== 'super_admin' && currentUser.role !== 'admin')) {
-        document.querySelector('.tab-bar').style.display = 'none';
-        $$('.tab-content').forEach(c => c.style.display = 'none');
-        const msg = document.createElement('div');
-        msg.className = 'empty-state';
-        msg.style.padding = '60px 20px';
-        msg.innerHTML = '<div class="empty-state-icon">🔒</div><div class="empty-state-text">仅管理员可访问评审中心</div>';
-        document.querySelector('.content-area').appendChild(msg);
-    } else {
-        loadPendingItems();
-    }
+    canReviewOperate = !!currentUser && currentUser.role === 'super_admin';
+    // 初始化时并行加载全部 5 个 tab，让计数立刻显示真实数量；同时把 _loaded 标志置 true，
+    // 避免点击切换时再触发重复请求。
+    loadPendingItems();
+    loadReviseItems();   _loaded.revise = true;
+    loadApprovedItems(); _loaded.approved = true;
+    loadRejectedItems(); _loaded.rejected = true;
+    loadMyItems();       _loaded.mine = true;
 }
 
-// 轮询等待 currentUser 加载（base.html 中异步获取）
 if (currentUser) {
     checkReviewPermission();
 } else {

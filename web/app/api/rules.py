@@ -26,19 +26,46 @@ def _get_current_user():
         from app.models import OpenClawInstance
         for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
             if claw.verify_token(token):
-                # admin claw 视为 super_admin 权限
+                # admin claw 继承 admin 权限（不等同 super_admin）
                 if claw.role == 'admin':
-                    class _AdminProxy:
-                        role = 'super_admin'
+                    class _ClawAdminProxy:
+                        role = 'admin'
                         username = claw.name
-                        managed_projects = []
-                    return _AdminProxy()
+                        managed_projects = [claw.project_id] if claw.project_id else []
+                    return _ClawAdminProxy()
                 # 非 admin 角色：返回 owner 用户（继承其权限），附带 claw_name 供 _can_edit 使用
                 owner = User.query.filter_by(username=claw.owner).first()
                 if owner:
                     owner._claw_name = claw.name
                     return owner
     return None
+
+
+def _user_project_ids(user):
+    ids = set()
+    if not user:
+        return ids
+    for pid in (getattr(user, 'managed_projects', None) or []):
+        try:
+            ids.add(int(pid))
+        except Exception:
+            continue
+    bound_claw_id = getattr(user, 'bound_claw_id', None)
+    if bound_claw_id:
+        claw = OpenClawInstance.query.get(bound_claw_id)
+        if claw and claw.project_id:
+            ids.add(int(claw.project_id))
+    return ids
+
+
+def _rule_project_ids(rule):
+    ids = set()
+    for pid in (getattr(rule, 'applicable_projects', None) or []):
+        try:
+            ids.add(int(pid))
+        except Exception:
+            continue
+    return ids
 
 
 def _can_edit(user, resource):
@@ -48,7 +75,7 @@ def _can_edit(user, resource):
     """
     if not user:
         return False
-    if user.role in ('super_admin', 'admin'):
+    if user.role == 'super_admin':
         return True
     created_by = getattr(resource, 'created_by', None) or ''
     if created_by == user.username:
@@ -57,11 +84,10 @@ def _can_edit(user, resource):
     claw_name = getattr(user, '_claw_name', None)
     if claw_name and created_by == claw_name:
         return True
-    # admin 可编辑自己管理项目下的资源
     if user.role == 'admin':
-        managed_projects = getattr(user, 'managed_projects', None) or []
-        res_projects = getattr(resource, 'applicable_projects', None) or []
-        if managed_projects and res_projects and any(p in managed_projects for p in res_projects):
+        managed_projects = _user_project_ids(user)
+        res_projects = _rule_project_ids(resource)
+        if managed_projects and res_projects and (managed_projects & res_projects):
             return True
     return False
 
@@ -101,8 +127,8 @@ def list_rules():
 
     rules = query.order_by(Rule.created_at.desc()).all()
 
-    # 如果指定了项目ID，过滤适用项目
-    if project_id:
+    # 如果指定了项目ID，过滤适用项目（注意 project_id=0 也合法，例如 RacingGO）
+    if project_id is not None:
         rules = [r for r in rules if r.scope in ('global', 'project') and (
             r.scope == 'global' or
             (r.applicable_projects and project_id in r.applicable_projects)
@@ -112,15 +138,27 @@ def list_rules():
 
 
 def _rule_with_usage(r):
-    """Rule 字典 + 使用者信息"""
+    """Rule 字典 + 使用者信息（含 used_by_stale，用于'重新分配'UI）"""
     d = r.to_dict()
-    users = (db.session.query(OpenClawInstance.name)
-             .join(OpenClawRule)
-             .filter(OpenClawRule.rule_id == r.id,
-                     OpenClawRule.enabled == True)
-             .all())
-    d['used_by'] = [u[0] for u in users]
+    rows = (db.session.query(OpenClawInstance.name,
+                             OpenClawRule.applied_at)
+            .join(OpenClawRule)
+            .filter(OpenClawRule.rule_id == r.id,
+                    OpenClawRule.enabled == True)
+            .all())
+    fresh, stale = [], []
+    rule_updated = r.updated_at
+    for name, ap in rows:
+        # stale 判定：applied_at 为空（从未确认）或早于 rule.updated_at（rule 改过）
+        if ap and rule_updated and ap >= rule_updated:
+            fresh.append(name)
+        else:
+            stale.append(name)
+    d['used_by'] = [row[0] for row in rows]
+    d['used_by_fresh'] = fresh
+    d['used_by_stale'] = stale
     d['install_count'] = len(d['used_by'])
+    d['stale_count'] = len(stale)
     return d
 
 
@@ -229,6 +267,55 @@ def review_rule(rule_id):
         rule.review_comment = comment
     elif status in ('revise', 'rejected'):
         rule.review_comment = comment
+
+    # 审核通过时：将镜像内容应用到原内容
+    if status == 'approved' and rule.mirror_content:
+        import json
+        try:
+            mirror_data = json.loads(rule.mirror_content)
+        except (ValueError, TypeError):
+            mirror_data = {}
+        # 保存当前内容到历史记录（最多10条）
+        from app.models import _now as _model_now
+        history = rule.content_history or []
+        history_entry = {
+            'content_template': rule.content_template or '',
+            'display_name': rule.display_name or '',
+            'description': rule.description or '',
+            'updated_by': rule.mirror_updated_by or 'system',
+            'updated_at': str(rule.mirror_updated_at) if rule.mirror_updated_at else str(_model_now()),
+            'summary': f'审核通过前自动备份（修改人: {rule.mirror_updated_by or "未知"}）',
+        }
+        history.insert(0, history_entry)
+        rule.content_history = history[:10]
+
+        # 应用镜像内容到原字段
+        for field in ['display_name', 'description', 'category', 'scope',
+                      'applicable_projects', 'applicable_modules', 'content_template']:
+            if field in mirror_data:
+                setattr(rule, field, mirror_data[field])
+
+        # 审核通过 = 镜像合入主体，最后修改人取自镜像提交人
+        if rule.mirror_updated_by:
+            rule.last_modified_by = rule.mirror_updated_by
+            try:
+                from app.models import OpenClawInstance as _Inst
+                inst = _Inst.query.filter_by(name=rule.mirror_updated_by).first()
+                rule.last_modified_source = 'openclaw' if inst else 'web'
+            except Exception:
+                rule.last_modified_source = 'web'
+            rule.last_modified_at = _model_now()
+
+        # 清空镜像
+        rule.mirror_content = None
+        rule.mirror_updated_by = None
+        rule.mirror_updated_at = None
+
+    # 审核打回时：清空镜像（提交人需要重新修改）
+    if status == 'revise':
+        rule.mirror_content = None
+        rule.mirror_updated_by = None
+        rule.mirror_updated_at = None
     
     status_labels = {'approved': '通过', 'revise': '打回待修改', 'rejected': '废弃'}
     action = status_labels.get(status, status)
@@ -271,7 +358,7 @@ def review_rule(rule_id):
 
 @api_bp.route('/rules/<int:rule_id>', methods=['PUT'])
 def update_rule(rule_id):
-    """更新 Rule（非管理员修改后自动重置为待评审状态，通知龙虾王审核）"""
+    """更新 Rule（非管理员修改时写入镜像内容，审核通过后替换）"""
     rule = Rule.query.get_or_404(rule_id)
 
     # 已软删除的 Rule 不可编辑
@@ -288,34 +375,72 @@ def update_rule(rule_id):
 
     data = request.get_json()
     old_review_status = rule.review_status
+    is_super_admin = user and user.role == 'super_admin'
 
-    updatable_fields = [
+    # 内容类字段
+    content_fields = [
         'display_name', 'description', 'category', 'scope',
         'applicable_projects', 'applicable_modules', 'content_template'
     ]
-    for field in updatable_fields:
-        if field in data:
-            setattr(rule, field, data[field])
+    # 非内容类字段
+    meta_fields = ['is_standard']
 
-    if 'is_standard' in data:
-        rule.is_standard = bool(data['is_standard'])
+    if is_super_admin:
+        # 超级管理员直接修改原内容
+        for field in content_fields:
+            if field in data:
+                setattr(rule, field, data[field])
+        for field in meta_fields:
+            if field in data:
+                setattr(rule, field, data[field])
+        from app.api.skills import _notify_admin_claws
+        notified_ids = _notify_admin_claws('Rule', '更新', rule.display_name,
+                            f'更新字段: {", ".join(data.keys())}')
+    else:
+        # 非超级管理员：内容字段写入镜像
+        from app.models import _now
+        modifier = user.bound_claw_name or user.display_name or user.username if user else 'unknown'
+        mirror_data = {}
+        for field in content_fields:
+            if field in data:
+                mirror_data[field] = data[field]
+        # 元数据字段直接修改
+        for field in meta_fields:
+            if field in data:
+                setattr(rule, field, data[field])
+        # 内容字段写入镜像
+        if mirror_data:
+            import json
+            rule.mirror_content = json.dumps(mirror_data, ensure_ascii=False)
+            rule.mirror_updated_by = modifier
+            rule.mirror_updated_at = _now()
+
+        # 非管理员编辑后，自动重置为待评审状态
+        if old_review_status != 'pending':
+            rule.review_status = 'pending'
+            rule.review_comment = None
+        from app.api.skills import _notify_admin_claws, _create_review_todo_for_admin_claws
+        notified_ids = _notify_admin_claws('Rule', '待审核（修改后重新提交）', rule.display_name,
+                            f'类型: {rule.category}, 作用域: {rule.scope}, 提交人: {modifier}\n请审核后通过或拒绝。')
+        _create_review_todo_for_admin_claws('Rule', rule.display_name, modifier, rule.category, rule.scope)
 
     # review_status 只能通过专用审核接口修改
     if 'review_status' in data:
         return jsonify({'error': '请使用 POST /rules/<id>/review 接口修改审核状态'}), 403
 
-    # 非管理员编辑 Rule 后，自动重置为待评审状态，通知龙虾王审核
-    if user and user.role != 'super_admin' and old_review_status != 'pending':
-        rule.review_status = 'pending'
-        rule.review_comment = None
-        from app.api.skills import _notify_admin_claws, _create_review_todo_for_admin_claws
-        notified_ids = _notify_admin_claws('Rule', '待审核（修改后重新提交）', rule.display_name,
-                            f'类型: {rule.category}, 作用域: {rule.scope}, 提交人: {rule.created_by}\n请审核后通过或拒绝。')
-        _create_review_todo_for_admin_claws('Rule', rule.display_name, rule.created_by, rule.category, rule.scope)
-    else:
-        from app.api.skills import _notify_admin_claws
-        notified_ids = _notify_admin_claws('Rule', '更新', rule.display_name,
-                            f'更新字段: {", ".join(data.keys())}')
+    # 记录最后修改人 + 来源
+    if data:
+        from app.models import _now as _record_now
+        claw_name = getattr(user, '_claw_name', None) if user else None
+        if claw_name:
+            rule.last_modified_by = claw_name
+            rule.last_modified_source = 'openclaw'
+        elif user:
+            rule.last_modified_by = (user.bound_claw_name
+                                     or user.display_name
+                                     or user.username)
+            rule.last_modified_source = 'web'
+        rule.last_modified_at = _record_now()
 
     db.session.commit()
     from app.api.agent_client import notify_claw
@@ -323,6 +448,60 @@ def update_rule(rule_id):
         notify_claw(cid)
 
     return jsonify(rule.to_dict())
+
+
+@api_bp.route('/rules/<int:rule_id>/history', methods=['GET'])
+def get_rule_history(rule_id):
+    """获取 Rule 修改历史（最近10条）"""
+    rule = Rule.query.get_or_404(rule_id)
+    return jsonify({'history': rule.content_history or [], 'total': len(rule.content_history or [])})
+
+
+@api_bp.route('/rules/<int:rule_id>/restore', methods=['POST'])
+def restore_rule_history(rule_id):
+    """从历史记录恢复 Rule 内容（仅 super_admin）
+
+    请求体：{"index": 0}  — 0 表示最新一条历史
+    """
+    from app.api.skills import _get_current_user
+    from app.models import _now
+    user = _get_current_user()
+    if not user or user.role != 'super_admin':
+        return jsonify({'error': '只有超级管理员可以恢复历史版本'}), 403
+
+    rule = Rule.query.get_or_404(rule_id)
+    data = request.get_json()
+    idx = (data or {}).get('index', -1)
+    history = rule.content_history or []
+
+    if idx < 0 or idx >= len(history):
+        return jsonify({'error': f'无效的索引，历史记录共 {len(history)} 条'}), 400
+
+    entry = history[idx]
+
+    # 保存当前内容到历史（作为恢复前的备份）
+    current_entry = {
+        'content_template': rule.content_template or '',
+        'display_name': rule.display_name or '',
+        'description': rule.description or '',
+        'updated_by': user.username,
+        'updated_at': str(_now()),
+        'summary': f'恢复前自动备份（恢复到索引 {idx}）',
+    }
+    history.insert(0, current_entry)
+
+    # 恢复内容
+    if entry.get('content_template'):
+        rule.content_template = entry['content_template']
+    if entry.get('display_name'):
+        rule.display_name = entry['display_name']
+    if entry.get('description'):
+        rule.description = entry['description']
+
+    rule.content_history = history[:10]
+    db.session.commit()
+
+    return jsonify({'message': f'已恢复到历史版本 #{idx}', 'rule': rule.to_dict()})
 
 
 @api_bp.route('/rules/<int:rule_id>', methods=['DELETE'])
@@ -346,8 +525,12 @@ def delete_rule(rule_id):
 
     # 权限检查
     can_delete = False
-    if user.role in ('super_admin', 'admin'):
+    if user.role == 'super_admin':
         can_delete = True
+    elif user.role == 'admin':
+        managed = _user_project_ids(user)
+        scoped = _rule_project_ids(rule)
+        can_delete = bool(managed and scoped and (managed & scoped))
     else:
         created_by = rule.created_by or ''
         if created_by == user.username:
@@ -419,9 +602,10 @@ def update_claw_rules(claw_id):
         if rule and rule.scope == 'admin' and rule.owner_claw_id and rule.owner_claw_id != claw_id:
             return jsonify({'error': f'Rule "{rule.display_name}" 为管理员专属，不能安装到其他 OpenClaw'}), 403
 
-    # 增量安装（已有的跳过）
-    from app.models import ClawTodo
+    # 增量安装 / 重新分配（已有且 rule 已修改 → 视为 reinstall）
+    from app.models import ClawTodo, _now as _model_now
     installed_names = []
+    reinstalled_names = []
     for rule_id in rule_ids:
         rule = Rule.query.get(rule_id)
         if not rule:
@@ -432,20 +616,53 @@ def update_claw_rules(claw_id):
         existing = OpenClawRule.query.filter_by(
             openclaw_id=claw_id, rule_id=rule_id
         ).first()
+        is_reinstall = False
+        reinstall_reason = ''  # 'content_updated' | 'forced' | ''
         if existing:
             existing.enabled = True
+            # existing 命中 = 重装。区分两种 reason：
+            #   content_updated: rule 本体改过
+            #   forced: 用户手工再点一次（用于安装失败恢复 / 强制覆盖）
+            is_reinstall = True
+            if (existing.applied_at and rule.updated_at
+                    and existing.applied_at < rule.updated_at):
+                reinstall_reason = 'content_updated'
+            else:
+                reinstall_reason = 'forced'
+            # 一律刷新 applied_at —— used_by_stale 立即清零
+            existing.applied_at = _model_now()
+            existing.applied = True
         else:
             db.session.add(OpenClawRule(
-                openclaw_id=claw_id, rule_id=rule_id, enabled=True
+                openclaw_id=claw_id, rule_id=rule_id,
+                enabled=True, applied=True, applied_at=_model_now()
             ))
+        if is_reinstall:
+            reinstalled_names.append(rule.display_name)
         installed_names.append(rule.display_name)
 
-        # 下发安装待办
+        # 下发安装/重装待办
+        action_label = '重新安装' if is_reinstall else '安装'
+        action_hint = '重新拉取并覆盖' if is_reinstall else '拉取并安装'
+        if is_reinstall:
+            if reinstall_reason == 'content_updated':
+                reinstall_note = (
+                    f'\n⚠️ 这是 **重新分配（内容已更新）**：本 Rule 在 Hub 端已修改（updated_at={rule.updated_at}），'
+                    f'你之前的安装版本已过期，必须重新拉取并**全量覆盖** `~/.qclaw/rules/{rule.name}.md`。\n'
+                )
+            else:
+                reinstall_note = (
+                    f'\n🔁 这是 **强制重新分配（内容未变）**：通常用于安装失败恢复 / 文件被误删 / 强制覆盖场景。'
+                    f'请重新拉取并**全量覆盖** `~/.qclaw/rules/{rule.name}.md`，不要假定本地已有的就是对的。\n'
+                )
+        else:
+            reinstall_note = ''
         todo = ClawTodo(
             openclaw_id=claw_id,
-            title=f'安装 Rule：{rule.display_name}',
+            title=f'{action_label} Rule：{rule.display_name}',
             description=(
-                f'Hub 已分配 Rule「{rule.display_name}」(id={rule.id})，请拉取并安装到本地。\n\n'
+                f'Hub 已{action_label.replace("安装","分配")} Rule「{rule.display_name}」(id={rule.id})，请{action_hint}到本地。\n'
+                f'{reinstall_note}\n'
                 f'执行步骤：\n'
                 f'1. GET /api/v1/openclaws/{claw_id}/assigned-rules 获取最新 Rules 列表\n'
                 f'2. 找到 name="{rule.name}" 的 Rule，获取 content_template\n'
@@ -456,7 +673,7 @@ def update_claw_rules(claw_id):
             urgency_level='interrupt',
             priority='P0',
             task_category='routine',
-            verification_target=f'install-rule:{rule.name}',
+            verification_target=f'{"reinstall" if is_reinstall else "install"}-rule:{rule.name}',
             enabled=True,
             created_by='hub',
         )
@@ -464,9 +681,17 @@ def update_claw_rules(claw_id):
 
     # 通知 OpenClaw 同步配置
     from app.models import ClawMessage
+    if reinstalled_names:
+        notice_head = f'[重新分配 Rules] 已重装 {len(reinstalled_names)} 条规则：{", ".join(reinstalled_names)}'
+        if len(installed_names) > len(reinstalled_names):
+            extra = [n for n in installed_names if n not in reinstalled_names]
+            notice_head += f'；新装 {len(extra)} 条：{", ".join(extra)}'
+        notice_head += '，请同步配置'
+    else:
+        notice_head = f'[安装 Rules] 已分配 {len(installed_names)} 条规则：{", ".join(installed_names)}，请同步配置'
     msg = ClawMessage(
         claw_id=claw_id, sender_name='Hub',
-        content=f'[安装 Rules] 已分配 {len(installed_names)} 条规则：{", ".join(installed_names)}，请同步配置',
+        content=notice_head,
         msg_type='sync_config', direction='to_claw', status='pending',
     )
     db.session.add(msg)
