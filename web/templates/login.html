@@ -3,54 +3,94 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OpenClaw 管理系统 - 登录</title>
+    <title>ClawTeam 管理系统 - 登录</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=20260418c">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23c2410c'/><path fill='%23ffffff' d='M16 6c-5.523 0-10 4.477-10 10s4.477 10 10 10c2.652 0 5.06-1.033 6.85-2.717l-3.55-3.55c-.93.79-2.13 1.267-3.45 1.267-2.946 0-5.333-2.387-5.333-5.333s2.387-5.333 5.333-5.333c1.32 0 2.52.477 3.45 1.267l3.55-3.55C21.06 7.033 18.652 6 16 6z'/></svg>">
+    <script>
+    (function(){ try { var t = localStorage.getItem('openclaw-theme'); if (t==='light'||t==='dark') document.documentElement.setAttribute('data-theme', t); } catch(e){} })();
+    </script>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: #0c0e14; color: #edf0f7; min-height: 100vh;
+            min-height: 100vh;
             display: flex; align-items: center; justify-content: center;
+            background: var(--bg-primary);
+            background-image:
+                radial-gradient(circle at 18% 12%, var(--accent-soft) 0, transparent 38%),
+                radial-gradient(circle at 82% 88%, var(--rose-soft) 0, transparent 42%);
         }
         .login-card {
-            background: #12141c; border-radius: 18px; padding: 44px;
-            width: 390px; box-shadow: 0 24px 64px rgba(0,0,0,0.5);
-            border: 1px solid #252838;
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 40px 36px 32px;
+            width: 400px;
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--border);
         }
-        .login-logo { text-align: center; margin-bottom: 28px; }
-        .login-logo span { font-size: 2.8rem; }
-        .login-title { text-align: center; font-size: 1.2rem; font-weight: 700; margin-bottom: 6px; letter-spacing: -0.01em; }
-        .login-subtitle { text-align: center; font-size: 0.78rem; color: #5c6178; margin-bottom: 32px; text-transform: uppercase; letter-spacing: 0.08em; }
-        .form-group { margin-bottom: 18px; }
-        .form-label { display: block; font-size: 0.82rem; font-weight: 600; color: #8b91a8; margin-bottom: 6px; }
-        .form-input {
-            width: 100%; padding: 11px 14px; background: #1e2130; border: 1px solid #252838;
-            border-radius: 8px; color: #edf0f7; font-size: 0.95rem; outline: none;
-            transition: border-color 0.18s, box-shadow 0.18s; font-family: inherit;
+        .login-logo { text-align: center; margin-bottom: 18px; display: flex; justify-content: center; }
+        .login-logo .brand-badge {
+            width: 56px; height: 56px;
+            border-radius: 14px;
+            display: inline-flex; align-items: center; justify-content: center;
+            box-shadow: 0 6px 20px var(--accent-glow);
+            background: linear-gradient(135deg, var(--accent), var(--accent-hover));
         }
-        .form-input:focus { border-color: #5b5ff0; box-shadow: 0 0 0 3px rgba(91,95,240,0.12); }
+        .login-logo .brand-badge svg { width: 56px; height: 56px; }
+        .login-title {
+            text-align: center;
+            font-family: 'EB Garamond', Georgia, serif;
+            font-size: 1.6rem; font-weight: 600;
+            margin-bottom: 4px; letter-spacing: -0.005em;
+            color: var(--text-primary);
+        }
+        .login-subtitle {
+            text-align: center;
+            font-size: 0.78rem; color: var(--text-muted);
+            margin-bottom: 28px;
+            letter-spacing: 0.04em;
+        }
         .btn-login {
-            width: 100%; padding: 12px; background: #5b5ff0; color: #fff; border: none;
-            border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer;
-            transition: all 0.18s; margin-top: 8px; font-family: inherit;
-            box-shadow: 0 1px 3px rgba(91,95,240,0.2);
+            width: 100%; padding: 11px 16px;
+            background: var(--accent); color: var(--accent-fg, #fff);
+            border: none; border-radius: 8px;
+            font-size: 0.95rem; font-weight: 600;
+            cursor: pointer; transition: all 0.18s;
+            margin-top: 6px; font-family: inherit;
+            box-shadow: 0 1px 2px var(--accent-glow);
         }
-        .btn-login:hover { background: #6e72ff; box-shadow: 0 2px 8px rgba(91,95,240,0.35); transform: translateY(-1px); }
+        .btn-login:hover { background: var(--accent-hover); transform: translateY(-1px); box-shadow: 0 4px 12px var(--accent-glow); }
         .btn-login:active { transform: translateY(0); }
-        .btn-login:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
-        .toggle-mode {
-            text-align: center; margin-top: 18px; font-size: 0.85rem; color: #5c6178;
-        }
-        .toggle-mode a { color: #5b5ff0; cursor: pointer; text-decoration: none; font-weight: 500; }
-        .toggle-mode a:hover { color: #6e72ff; }
-        .error-msg { color: #f06060; font-size: 0.85rem; margin-top: 8px; text-align: center; display: none; }
+        .btn-login:disabled { opacity: 0.55; cursor: not-allowed; transform: none; box-shadow: none; }
+        .toggle-mode { text-align: center; margin-top: 18px; font-size: 0.85rem; color: var(--text-muted); }
+        .toggle-mode a { color: var(--accent); cursor: pointer; text-decoration: none; font-weight: 500; }
+        .toggle-mode a:hover { color: var(--accent-hover); }
+        .error-msg { color: var(--red); font-size: 0.85rem; margin-top: 8px; text-align: center; display: none; }
         .display-name-group { display: none; }
+        .theme-mini {
+            position: fixed; top: 18px; right: 18px;
+        }
     </style>
 </head>
 <body>
+<button type="button" class="theme-toggle theme-mini" onclick="toggleTheme()" title="切换主题">
+    <span id="theme-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+    </span>
+    <span id="theme-label">浅色</span>
+</button>
 <div class="login-card">
-    <div class="login-logo"><span>🦞</span></div>
-    <div class="login-title" id="page-title">登录 OpenClaw</div>
-    <div class="login-subtitle">Team Management System</div>
+    <div class="login-logo">
+        <span class="brand-badge" aria-hidden="true">
+            <svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+                <rect width="32" height="32" rx="8" fill="transparent"/>
+                <path fill="#ffffff" d="M16 6c-5.523 0-10 4.477-10 10s4.477 10 10 10c2.652 0 5.06-1.033 6.85-2.717l-3.55-3.55c-.93.79-2.13 1.267-3.45 1.267-2.946 0-5.333-2.387-5.333-5.333s2.387-5.333 5.333-5.333c1.32 0 2.52.477 3.45 1.267l3.55-3.55C21.06 7.033 18.652 6 16 6z"/>
+            </svg>
+        </span>
+    </div>
+    <div class="login-title display" id="page-title">登录 ClawTeam</div>
+    <div class="login-subtitle">天美J1·质量管理一组</div>
 
     <form id="auth-form">
         <div class="form-group">
@@ -76,11 +116,38 @@
 </div>
 
 <script>
+// 主题切换（与 base.html 保持一致）
+function getEffectiveTheme(){
+    var t = document.documentElement.getAttribute('data-theme');
+    if (t === 'light' || t === 'dark') return t;
+    return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+}
+function updateThemeButton(){
+    var label = document.getElementById('theme-label');
+    var icon  = document.getElementById('theme-icon');
+    if (!label || !icon) return;
+    var eff = getEffectiveTheme();
+    if (eff === 'dark') {
+        label.textContent = '深色';
+        icon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+    } else {
+        label.textContent = '浅色';
+        icon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>';
+    }
+}
+function toggleTheme(){
+    var next = getEffectiveTheme() === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem('openclaw-theme', next); } catch(e){}
+    updateThemeButton();
+}
+document.addEventListener('DOMContentLoaded', updateThemeButton);
+
 let isRegister = false;
 
 function toggleMode() {
     isRegister = !isRegister;
-    document.getElementById('page-title').textContent = isRegister ? '注册 OpenClaw' : '登录 OpenClaw';
+    document.getElementById('page-title').textContent = isRegister ? '注册 ClawTeam' : '登录 ClawTeam';
     document.getElementById('submit-btn').textContent = isRegister ? '注册' : '登录';
     document.getElementById('toggle-text').textContent = isRegister ? '已有账号？' : '还没有账号？';
     document.getElementById('toggle-link').textContent = isRegister ? '登录' : '注册';

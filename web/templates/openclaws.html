@@ -150,15 +150,15 @@
             <div style="background:var(--bg-primary);border:1px solid var(--accent);border-radius:8px;padding:16px;margin-bottom:12px;position:relative">
                 <code id="token-display" style="word-break:break-all;font-size:0.95rem;color:var(--accent)"></code>
                 <button class="btn btn-primary btn-sm" onclick="copyToken()"
-                        style="position:absolute;top:8px;right:8px;font-size:0.78rem">复制</button>
+                        style="position:absolute;top:8px;right:8px;font-size:0.78rem;min-width:54px">复制</button>
             </div>
             <!-- 注册 Skill 链接 -->
             <div style="margin-bottom:12px">
                 <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:6px">📋 注册 Skill 链接</label>
                 <div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;position:relative">
                     <code id="reg-skill-url-in-token" style="word-break:break-all;font-size:0.82rem;color:var(--accent)"></code>
-                    <button class="btn btn-ghost btn-sm" onclick="copyRegSkillUrlFromToken()"
-                            style="position:absolute;top:8px;right:8px;font-size:0.78rem">复制链接</button>
+                    <button class="btn btn-primary btn-sm" onclick="copyRegSkillUrlFromToken()"
+                            style="position:absolute;top:8px;right:8px;font-size:0.78rem;min-width:54px">复制</button>
                 </div>
                 <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">发给 OpenClaw 使用者，保存为 SKILL.md 即可接入 Hub</div>
             </div>
@@ -175,8 +175,8 @@
                 <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:6px">📋 注册 Skill 链接</label>
                 <div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;position:relative">
                     <code id="reg-skill-url-in-token-nokey" style="word-break:break-all;font-size:0.82rem;color:var(--accent)"></code>
-                    <button class="btn btn-ghost btn-sm" onclick="copyRegSkillUrlFromToken2()"
-                            style="position:absolute;top:8px;right:8px;font-size:0.78rem">复制链接</button>
+                    <button class="btn btn-primary btn-sm" onclick="copyRegSkillUrlFromToken2()"
+                            style="position:absolute;top:8px;right:8px;font-size:0.78rem;min-width:54px">复制</button>
                 </div>
                 <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">发给 OpenClaw 使用者，保存为 SKILL.md 即可接入 Hub</div>
             </div>
@@ -205,23 +205,36 @@
 
 <!-- 注册成功弹窗 -->
 <div class="modal-overlay" id="register-success-modal">
-    <div class="modal" style="max-width:640px">
+    <div class="modal" style="max-width:680px">
         <h2 class="modal-title">✅ OpenClaw 注册成功</h2>
         <p style="color:var(--text-secondary);margin-bottom:12px">
             <strong id="reg-claw-name"></strong> 已创建，标准 Skills 和 Rules 已自动分配。
         </p>
-        <div style="margin-bottom:16px">
-            <label class="form-label">📋 注册 Skill 链接（发给 OpenClaw 使用者，保存为 SKILL.md 即可接入）</label>
+        <div style="margin-bottom:14px">
+            <label class="form-label">📋 注册链接（保存为 SKILL.md 即可接入 Hub）</label>
             <div style="background:var(--bg-primary);border:1px solid var(--accent);border-radius:8px;padding:12px;position:relative;margin-top:6px">
-                <code id="reg-skill-url" style="word-break:break-all;font-size:0.88rem;color:var(--accent)"></code>
+                <code id="reg-skill-url" style="word-break:break-all;font-size:0.88rem;color:var(--accent);display:block;padding-right:64px"></code>
                 <button class="btn btn-primary btn-sm" onclick="copyRegSkillUrl()"
-                        style="position:absolute;top:8px;right:8px;font-size:0.78rem">复制链接</button>
+                        style="position:absolute;top:8px;right:8px;font-size:0.78rem;min-width:54px">复制</button>
             </div>
         </div>
-        <div id="reg-install-summary" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:16px"></div>
+        <div style="margin-bottom:14px">
+            <label class="form-label">🔑 API Token</label>
+            <div style="background:var(--bg-primary);border:1px solid var(--accent);border-radius:8px;padding:12px;position:relative;margin-top:6px">
+                <code id="reg-api-token" style="word-break:break-all;font-size:0.88rem;color:var(--accent);display:block;padding-right:64px"></code>
+                <button class="btn btn-primary btn-sm" onclick="copyRegApiToken()"
+                        style="position:absolute;top:8px;right:8px;font-size:0.78rem;min-width:54px">复制</button>
+            </div>
+        </div>
+        <div id="reg-install-summary" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:14px"></div>
+        <div style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.25);border-radius:8px;padding:12px;margin-bottom:16px;font-size:0.86rem;color:var(--text-secondary);line-height:1.7">
+            💡 点击下方 <strong>【📦 复制注册信息】</strong> 按钮，发给 OpenClaw，跟他说：<br>
+            <span style="color:var(--accent);font-weight:600">"带上 token 访问注册链接，照着说明安装即可。"</span>
+        </div>
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeRegSuccessModal()">关闭</button>
             <button class="btn btn-primary" id="reg-goto-detail" onclick="">查看详情</button>
+            <button class="btn btn-primary" onclick="copyRegistrationInfo()">📦 复制注册信息</button>
         </div>
     </div>
 </div>
@@ -367,6 +380,12 @@
     margin-bottom: 12px;
 }
 
+.claw-avatar-wrap {
+    position: relative;
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+}
 .claw-avatar-lg {
     width: 44px;
     height: 44px;
@@ -380,9 +399,33 @@
     cursor: pointer;
     transition: border-color 0.2s, transform 0.15s;
 }
-.claw-avatar-lg:hover {
+.claw-avatar-wrap:hover .claw-avatar-lg {
     border-color: var(--accent);
     transform: scale(1.08);
+}
+.claw-avatar-edit-badge {
+    position: absolute;
+    right: -4px;
+    bottom: -4px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.62rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.25);
+    border: 2px solid var(--bg-secondary);
+    cursor: pointer;
+    opacity: 0.85;
+    transition: opacity 0.15s, transform 0.15s;
+    pointer-events: none;
+}
+.claw-avatar-wrap:hover .claw-avatar-edit-badge {
+    opacity: 1;
+    transform: scale(1.15);
 }
 .avatar-preview-box {
     width: 48px; height: 48px;
@@ -536,9 +579,24 @@
     overflow: hidden;
 }
 
+.claw-modified-row {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border);
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.claw-modified-row .claw-modified-by {
+    color: var(--accent);
+    font-weight: 600;
+}
+
 .claw-token-row {
-    margin-top: 10px;
-    padding-top: 10px;
+    margin-top: 8px;
+    padding-top: 8px;
     border-top: 1px dashed var(--border);
     display: flex;
     align-items: center;
@@ -739,6 +797,20 @@ function renderClaws() {
     });
 }
 
+function formatRelTime(dtStr) {
+    if (!dtStr) return '-';
+    const d = new Date(dtStr.replace(' ', 'T'));
+    if (isNaN(d.getTime())) return dtStr;
+    const diff = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (diff < 0) return '刚刚';
+    if (diff < 60) return '刚刚';
+    if (diff < 3600) return `${Math.floor(diff/60)}分钟前`;
+    if (diff < 86400) return `${Math.floor(diff/3600)}小时前`;
+    if (diff < 86400*7) return `${Math.floor(diff/86400)}天前`;
+    const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), day = String(d.getDate()).padStart(2,'0');
+    return `${y}-${m}-${day}`;
+}
+
 function renderClawCard(c) {
     const roleInfo = ROLE_LABELS[c.role] || { text: '测试成员', cls: 'test_member' };
     const onlineCount = filteredClaws.filter(cl => ['工作','学习','摸鱼','online'].includes(cl.status)).length;
@@ -746,7 +818,10 @@ function renderClawCard(c) {
     return `
     <div class="claw-item" data-id="${c.id}">
         <div class="claw-item-header">
-            <div class="claw-avatar-lg" onclick="event.stopPropagation(); openAvatarModal(${c.id}, '${(c.avatar || '🤖').replace(/'/g, "\\'")}')" title="点击更换头像">${c.avatar || '🤖'}</div>
+            <div class="claw-avatar-wrap" onclick="event.stopPropagation(); openAvatarModal(${c.id}, '${(c.avatar || '🤖').replace(/'/g, "\\'")}')" title="点击修改图标">
+                <div class="claw-avatar-lg">${c.avatar || '🤖'}</div>
+                <span class="claw-avatar-edit-badge" aria-label="修改图标">✏️</span>
+            </div>
             <div class="claw-main-info">
                 <div class="claw-name-row">
                     <span class="status-indicator ${c.status || 'offline'}"></span>
@@ -767,6 +842,9 @@ function renderClawCard(c) {
            
         </div>
         <div class="claw-desc">${c.responsibilities || '暂无描述'}</div>
+        <div class="claw-modified-row" title="${c.last_modified_by ? c.last_modified_by + ' 修改于 ' + (c.updated_at || '') : '更新于 ' + (c.updated_at || '-')}">
+            ${c.last_modified_by ? `<span class="claw-modified-by">${c.last_modified_by}</span> 修改` : '最近修改'} · ${formatRelTime(c.updated_at)}
+        </div>
         ${canViewTokens ? `<div class="claw-token-row">
             <span class="token-preview" style="color:var(--text-secondary);font-size:0.8rem;font-family:monospace;">
                 🔑 ${c.api_token_preview || '未设置'}
@@ -901,6 +979,7 @@ document.getElementById('avatar-modal').addEventListener('click', e => {
 function openCreateModal() {
     loadProjectsForSelect();
     document.getElementById('create-form').reset();
+    renderRoleOptions();
     document.getElementById('role-hint').textContent = '';
     // 重置头像选择
     document.getElementById('avatar-input').value = '🤖';
@@ -914,10 +993,28 @@ function openCreateModal() {
 }
 
 const roleHints = {
+    'admin': '👑 龙虾王：管理员类 OpenClaw（仅超级管理员可设置）',
     'test_manager': '📋 测试经理：负责项目整体测试规划、任务分配、质量把控和团队协调',
     'module_owner': '📦 模块负责人：负责特定模块的测试覆盖、用例维护和缺陷跟踪',
     'specialist': '🔬 专项测试：负责性能、安全、兼容性等专项测试领域',
+    'test_member': '👷 测试成员：执行与跟进测试任务',
+    'test_executor': '🧪 执行成员：偏执行落地任务',
 };
+
+function renderRoleOptions() {
+    const sel = document.getElementById('claw-role-select');
+    if (!sel) return;
+    const role = currentUser?.role || 'guest';
+    const options = [
+        ['test_manager', '测试经理'],
+        ['module_owner', '模块负责人'],
+        ['specialist', '专项测试'],
+        ['test_member', '测试成员'],
+        ['test_executor', '执行成员'],
+    ];
+    if (role === 'super_admin') options.unshift(['admin', '龙虾王(admin)']);
+    sel.innerHTML = '<option value="">-- 选择角色 --</option>' + options.map(o => `<option value="${o[0]}">${o[1]}</option>`).join('');
+}
 
 function onRoleChange() {
     const role = document.getElementById('claw-role-select').value;
@@ -1040,33 +1137,61 @@ async function doRegenerateToken() {
     }
 }
 
-document.getElementById('token-modal').addEventListener('click', e => {
-    if (e.target === document.getElementById('token-modal')) closeTokenModal();
-});
-
+// 关键信息弹窗（create / token / register-success）禁止点空白误关；
+// 仅 regenerate-confirm（次级确认）保留点空白取消。
 document.getElementById('regenerate-confirm-modal').addEventListener('click', e => {
     if (e.target === document.getElementById('regenerate-confirm-modal')) closeRegenerateConfirm();
-});
-
-document.getElementById('create-modal').addEventListener('click', e => {
-    if (e.target === document.getElementById('create-modal')) closeCreateModal();
 });
 
 function closeRegSuccessModal() {
     document.getElementById('register-success-modal').classList.remove('active');
 }
-document.getElementById('register-success-modal').addEventListener('click', e => {
-    if (e.target === document.getElementById('register-success-modal')) closeRegSuccessModal();
-});
+function _doCopy(text, okMsg) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text)
+            .then(() => showToast(okMsg, 'success'))
+            .catch(() => {
+                const el = document.createElement('textarea');
+                el.value = text;
+                document.body.appendChild(el); el.select(); document.execCommand('copy');
+                document.body.removeChild(el);
+                showToast(okMsg, 'success');
+            });
+    } else {
+        const el = document.createElement('textarea');
+        el.value = text;
+        document.body.appendChild(el); el.select(); document.execCommand('copy');
+        document.body.removeChild(el);
+        showToast(okMsg, 'success');
+    }
+}
+
 function copyRegSkillUrl() {
     const url = document.getElementById('reg-skill-url').textContent;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(url).then(() => showToast('链接已复制', 'success')).catch(() => showToast('复制失败', 'error'));
-    } else {
-        const el = document.createElement('textarea'); el.value = url;
-        document.body.appendChild(el); el.select(); document.execCommand('copy');
-        document.body.removeChild(el); showToast('链接已复制', 'success');
+    _doCopy(url, '注册链接已复制');
+}
+
+function copyRegApiToken() {
+    const token = document.getElementById('reg-api-token').textContent;
+    if (!token || token === '（本次未生成新 Token，可在「查看 Token」中获取）') {
+        showToast('无可复制的 Token', 'error');
+        return;
     }
+    _doCopy(token, 'API Token 已复制');
+}
+
+function copyRegistrationInfo() {
+    const url = document.getElementById('reg-skill-url').textContent;
+    const token = document.getElementById('reg-api-token').textContent;
+    const name = document.getElementById('reg-claw-name').textContent;
+    const info =
+`你好 ${name}，带上 token 访问注册链接，照着说明安装即可：
+
+注册链接：${url}
+API Token：${token}
+
+安装步骤：访问注册链接拿到完整 SKILL.md，存到 ~/.claude/skills/openclaw-registration/SKILL.md（或对应位置），然后按 SKILL.md 里的指引执行注册。`;
+    _doCopy(info, '注册信息已复制，可直接发给 OpenClaw');
 }
 
 document.getElementById('create-form').addEventListener('submit', async e => {
@@ -1082,11 +1207,13 @@ document.getElementById('create-form').addEventListener('submit', async e => {
         e.target.reset();
         loadClaws();
 
-        // 弹出注册成功弹窗，显示注册 Skill 链接
+        // 弹出注册成功弹窗，显示注册 Skill 链接 + API Token
         const clawId = result.id;
         const skillUrl = `${location.origin}/api/v1/openclaws/${clawId}/registration-skill`;
         document.getElementById('reg-claw-name').textContent = data.name;
         document.getElementById('reg-skill-url').textContent = skillUrl;
+        document.getElementById('reg-api-token').textContent =
+            result.api_token || '（本次未生成新 Token，可在「查看 Token」中获取）';
         document.getElementById('reg-goto-detail').onclick = () => location.href = '/openclaws/' + clawId;
 
         // 显示自动安装摘要

@@ -317,7 +317,7 @@ const LAYOUT = {
 
 let officeData = [];
 let selectedClawId = null;
-let game = null;
+let officeScene = null;
 let agents = {}; // clawId -> phaser container
 let areaSlotCounters = {}; // area -> next slot index
 
@@ -379,7 +379,7 @@ class OfficeScene extends Phaser.Scene {
     }
 
     create() {
-        game = this;
+        officeScene = this;
 
         // 背景图
         this.add.image(640, 360, 'office_bg');
@@ -844,8 +844,8 @@ async function loadOffice() {
 }
 
 function renderAgents(filteredClaws) {
-    if (!game || !game.scene || !game.scene.isActive('OfficeScene')) return;
-    const scene = game.scene.getScene('OfficeScene');
+    if (!officeScene || !officeScene.sys || !officeScene.sys.isActive()) return;
+    const scene = officeScene;
 
     // 重置位置计数器
     areaSlotCounters = {};
@@ -853,14 +853,14 @@ function renderAgents(filteredClaws) {
     const currentIds = new Set();
 
     filteredClaws.forEach(c => {
-        const clawId = c.id;
+        const clawId = Number(c.id);
         currentIds.add(clawId);
         scene.renderAgent(c);
     });
 
     // 移除不存在的 agent
     for (const id in agents) {
-        if (!currentIds.has(id)) {
+        if (!currentIds.has(Number(id))) {
             scene.removeAgent(id);
         }
     }

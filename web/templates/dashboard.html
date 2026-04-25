@@ -71,7 +71,7 @@
     <!-- 任务动态（子页签） -->
     <div id="panel-activity" style="display:none">
         <div style="display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px">
-            <button id="subtab-todos" class="dashboard-subtab active" onclick="switchActivitySubTab('todos')">📌 今日待办</button>
+            <button id="subtab-todos" class="dashboard-subtab active" onclick="switchActivitySubTab('todos')">📌 今日待办 <span id="todos-count-badge" class="tag tag-blue" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
             <button id="subtab-submitted" class="dashboard-subtab" onclick="switchActivitySubTab('submitted')" style="display:none">📝 待审核 <span id="submitted-count-badge" class="tag tag-yellow" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
             <button id="subtab-done" class="dashboard-subtab" onclick="switchActivitySubTab('done')">✅ 近3天记录</button>
         </div>
@@ -340,6 +340,15 @@ function priorityBadge(pri) {
 function renderUpcomingTodos() {
     const el = $('#upcoming-todos-list');
     const todos = dashboardData.upcoming_todos || [];
+    const badge = document.getElementById('todos-count-badge');
+    if (badge) {
+        if (todos.length > 0) {
+            badge.style.display = '';
+            badge.textContent = todos.length;
+        } else {
+            badge.style.display = 'none';
+        }
+    }
     if (todos.length === 0) {
         el.innerHTML = '<div class="empty-state"><div class="empty-state-text">今日暂无待办</div></div>';
         return;
@@ -509,7 +518,7 @@ function _toList(val) {
 
 async function initDashReports() {
     window._dashReportsLoaded = true;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = window._localDateToday();
     $('#report-filter-date').value = today;
     try {
         const claws = await API.listClaws();
@@ -521,7 +530,7 @@ async function initDashReports() {
 }
 
 async function loadDashReports() {
-    const dateVal = $('#report-filter-date').value || new Date().toISOString().slice(0,10);
+    const dateVal = $('#report-filter-date').value || window._localDateToday();
     const clawId = $('#report-filter-claw').value;
     const projectFilter = document.getElementById('filter-project').value;
 

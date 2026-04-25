@@ -1452,7 +1452,7 @@ async function updateTodayStats() {
         const res = await fetch(`${HUB_API}/claw-messages?limit=100`);
         const data = await res.json();
         const messages = data.messages || [];
-        const today = new Date().toISOString().slice(0, 10);
+        const today = window._localDateToday();
 
         const todayMsgs = messages.filter(m => m.created_at && m.created_at.startsWith(today));
 
@@ -1466,7 +1466,7 @@ async function updateTodayStats() {
 
 async function loadRecentActivity() {
     try {
-        const today = new Date().toISOString().slice(0, 10);
+        const today = window._localDateToday();
         const res = await fetch(`${API_BASE}/reports/timeline?date=${today}`);
         const data = await res.json();
 

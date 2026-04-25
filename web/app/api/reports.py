@@ -3,10 +3,10 @@
 提供全局日报汇总视图、时间线、统计
 """
 from datetime import date, datetime, timedelta
-from flask import request, jsonify
+from flask import request, jsonify, session as flask_session
 from sqlalchemy import func, desc, or_
 from app import db
-from app.models import DailyReport, OpenClawInstance, Project
+from app.models import DailyReport, OpenClawInstance, Project, User
 from app.api import api_bp
 
 
@@ -20,10 +20,56 @@ def _project_filter(project_name):
     )
 
 
+def _collect_user_project_ids(user):
+    ids = set()
+    if not user:
+        return ids
+    for pid in (user.managed_projects or []):
+        try:
+            ids.add(int(pid))
+        except Exception:
+            continue
+    if user.bound_claw_id:
+        claw = OpenClawInstance.query.get(user.bound_claw_id)
+        if claw:
+            if claw.project_id:
+                ids.add(int(claw.project_id))
+            elif claw.project_name:
+                p = Project.query.filter_by(name=claw.project_name).first()
+                if p:
+                    ids.add(int(p.id))
+    return ids
+
+
+def _visible_claw_ids():
+    uid = flask_session.get('user_id')
+    user = User.query.get(uid) if uid else None
+    query = OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted')
+    if not user:
+        return []
+    if user.role != 'super_admin':
+        query = query.filter(OpenClawInstance.role != 'admin')
+        project_ids = list(_collect_user_project_ids(user))
+        if project_ids:
+            project_names = [p.name for p in Project.query.filter(Project.id.in_(project_ids)).all()]
+            query = query.filter(
+                or_(
+                    OpenClawInstance.project_id.in_(project_ids),
+                    OpenClawInstance.project_name.in_(project_names) if project_names else db.text('1=0')
+                )
+            )
+        elif user.bound_claw_id:
+            query = query.filter(OpenClawInstance.id == int(user.bound_claw_id))
+        else:
+            query = query.filter(OpenClawInstance.id == -1)
+    return [c.id for c in query.all()]
+
+
 @api_bp.route('/reports', methods=['GET'])
 def list_all_reports():
     """全局日报列表（支持多维筛选）"""
-    query = DailyReport.query
+    visible_ids = _visible_claw_ids()
+    query = DailyReport.query.filter(DailyReport.openclaw_id.in_(visible_ids or [0]))
 
     # 筛选: openclaw_id
     claw_id = request.args.get('openclaw_id', type=int)
@@ -79,8 +125,9 @@ def report_stats():
     # 项目过滤
     project = request.args.get('project')
 
+    visible_ids = _visible_claw_ids()
     # 基础查询
-    base_query = DailyReport.query
+    base_query = DailyReport.query.filter(DailyReport.openclaw_id.in_(visible_ids or [0]))
     if project:
         base_query = base_query.join(OpenClawInstance).filter(
             _project_filter(project)
@@ -102,7 +149,8 @@ def report_stats():
 
     # 全部 OpenClaw 数（排除已删除）
     claws_query = OpenClawInstance.query.filter(
-        OpenClawInstance.status != 'deleted'
+        OpenClawInstance.status != 'deleted',
+        OpenClawInstance.id.in_(visible_ids or [0])
     )
     if project:
         claws_query = claws_query.filter(_project_filter(project))
@@ -183,7 +231,10 @@ def report_timeline():
     target_date = date.fromisoformat(target_date)
     project = request.args.get('project')
 
-    query = DailyReport.query.filter_by(report_date=target_date)
+    visible_ids = _visible_claw_ids()
+    query = DailyReport.query.filter_by(report_date=target_date).filter(
+        DailyReport.openclaw_id.in_(visible_ids or [0])
+    )
     if project:
         query = query.join(OpenClawInstance).filter(
             _project_filter(project)

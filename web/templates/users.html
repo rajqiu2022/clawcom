@@ -21,7 +21,7 @@
 .role-user { background:rgba(34,197,94,0.12); color:#22c55e }
 .role-guest { background:rgba(156,163,175,0.15); color:#9ca3af }
 
-.btn-sm { padding:4px 10px; font-size:0.78rem; border-radius:6px; border:1px solid var(--border); background:var(--bg-card); cursor:pointer; transition:all .15s }
+.btn-sm { padding:4px 10px; font-size:0.78rem; border-radius:6px; border:1px solid var(--border); background:var(--bg-card); color:var(--text-primary); cursor:pointer; transition:all .15s }
 .btn-sm:hover { background:var(--bg-hover) }
 .btn-sm.btn-danger { color:#ef4444; border-color:rgba(239,68,68,0.3) }
 .btn-sm.btn-danger:hover { background:rgba(239,68,68,0.08) }
@@ -278,13 +278,16 @@ function renderUsers() {
 
     const isSA = currentUser && currentUser.role === 'super_admin';
     const isAdmin = currentUser && currentUser.role === 'admin';
-    // admin 和 super_admin 同等权限
-    const canEditAny = isSA || isAdmin;
-    const canDeleteAny = isSA || isAdmin;
+    const canCreateUser = isSA || isAdmin;
+    const addBtn = document.querySelector('button[onclick="showAddUserModal()"]');
+    if (addBtn) addBtn.style.display = canCreateUser ? '' : 'none';
 
     qs('#users-body').innerHTML = filtered.map(u => {
-        const canEdit = canEditAny;
-        const canDelete = canDeleteAny && u.id !== currentUser.id;
+        const canEdit = isSA
+            ? true
+            : (isAdmin && !['super_admin', 'admin'].includes(u.role) && u.id !== currentUser.id);
+        const canDelete = isSA && u.id !== currentUser.id;
+        const canResetPwd = isSA || canEdit || (u.id === currentUser.id);
         const initial = (u.display_name || u.username)[0].toUpperCase();
         return `<tr>
             <td style="display:flex;align-items:center">
@@ -300,7 +303,7 @@ function renderUsers() {
             <td style="font-size:0.82rem;color:var(--text-muted)">${u.created_at ? u.created_at.split(' ')[0] : '-'}</td>
             <td>
                 ${canEdit ? `<button class="btn-sm" onclick="editUser(${u.id})">编辑</button>` : ''}
-                ${canEdit ? `<button class="btn-sm" onclick="showResetPwd(${u.id},'${u.username}')">重置密码</button>` : ''}
+                ${canResetPwd ? `<button class="btn-sm" onclick="showResetPwd(${u.id},'${u.username}')">重置密码</button>` : ''}
                 ${canDelete ? `<button class="btn-sm btn-danger" onclick="deleteUser(${u.id},'${u.username}')">删除</button>` : ''}
             </td>
         </tr>`;
@@ -308,6 +311,10 @@ function renderUsers() {
 }
 
 function editUser(id) {
+    if (!(currentUser.role === 'super_admin' || (currentUser.role === 'admin' && !['super_admin', 'admin'].includes(u.role) && u.id !== currentUser.id))) {
+        showToast('无权编辑该用户', 'warning');
+        return;
+    }
     const u = allUsers.find(x => x.id === id);
     if (!u) return;
     qs('#edit-id').value = u.id;
@@ -337,6 +344,10 @@ async function saveUser() {
 }
 
 function showResetPwd(id, name) {
+    if (!(currentUser.role === 'super_admin' || id === currentUser.id || (currentUser.role === 'admin'))) {
+        showToast('无权重置该用户密码', 'warning');
+        return;
+    }
     qs('#reset-id').value = id;
     qs('#reset-username').textContent = name;
     qs('#reset-new-pwd').value = '';
@@ -370,6 +381,10 @@ function showChangePwdModal() {
 }
 
 function showAddUserModal() {
+    if (!(currentUser.role === 'super_admin' || currentUser.role === 'admin')) {
+        showToast('无权添加用户', 'warning');
+        return;
+    }
     qs('#add-username').value = '';
     qs('#add-display-name').value = '';
     qs('#add-role').value = 'user';

@@ -1,7 +1,7 @@
 """用户认证与管理 API"""
 from flask import request, jsonify, session
 from app import db
-from app.models import User
+from app.models import User, OpenClawInstance, Project
 from app.api import api_bp
 
 VALID_ROLES = ('super_admin', 'admin', 'user', 'guest')
@@ -101,10 +101,11 @@ def get_current_user():
 
     data['permissions'] = {
         # 菜单可见性
-        'nav_settings': is_sa or is_admin,
-        'nav_audit_logs': is_sa or is_admin,
-        'nav_hub': is_sa or is_admin,
-        'nav_users': is_sa or is_admin,
+        'nav_settings': is_sa,
+        'nav_audit_logs': is_sa,
+        'nav_hub': True,
+        'nav_review': True,
+        'nav_users': True,
         # 功能权限
         'can_create_openclaw': is_sa or is_admin,
         'can_delete_openclaw': is_sa or is_admin,
@@ -159,13 +160,13 @@ def _get_operator():
 
 
 def _require_super_admin():
-    """检查当前用户是否为管理员（super_admin 或 admin 同等权限）"""
+    """检查当前用户是否为 super_admin。"""
     uid = session.get('user_id')
     if not uid:
         return None, (jsonify({'error': '未登录'}), 401)
     user = User.query.get(uid)
-    if not user or user.role not in ('super_admin', 'admin'):
-        return None, (jsonify({'error': '需要管理员权限'}), 403)
+    if not user or user.role != 'super_admin':
+        return None, (jsonify({'error': '需要超级管理员权限'}), 403)
     return user, None
 
 
@@ -180,6 +181,28 @@ def _require_admin_or_above():
     return user, None
 
 
+def _collect_user_project_ids(user):
+    """收集用户关联的项目ID（统一 project_id 口径）。"""
+    if not user:
+        return set()
+    project_ids = set()
+    for pid in (user.managed_projects or []):
+        try:
+            project_ids.add(int(pid))
+        except Exception:
+            continue
+    if user.bound_claw_id:
+        claw = OpenClawInstance.query.get(user.bound_claw_id)
+        if claw:
+            if claw.project_id:
+                project_ids.add(int(claw.project_id))
+            elif claw.project_name:
+                p = Project.query.filter_by(name=claw.project_name).first()
+                if p:
+                    project_ids.add(int(p.id))
+    return project_ids
+
+
 # ============== 用户管理 ==============
 
 @api_bp.route('/users', methods=['GET'])
@@ -189,51 +212,26 @@ def list_users():
     - super_admin: 看所有用户
     - admin: 只看与自己同项目的用户
     """
-    operator, err = _require_admin_or_above()
-    if err:
-        return err
+    operator = _get_operator()
+    if not operator:
+        return jsonify({'error': '未登录'}), 401
 
     users = User.query.order_by(User.created_at).all()
 
-    if operator.role in ('super_admin', 'admin'):
+    if operator.role == 'super_admin':
         return jsonify([u.to_dict() for u in users])
 
-    # 普通用户：筛选同项目用户
-    # 收集操作者关联的项目 ID
-    from app.models import OpenClawInstance, Project
-    operator_project_ids = set()
-    if operator.managed_projects:
-        operator_project_ids.update(operator.managed_projects)
-    if operator.bound_claw_id:
-        claw = OpenClawInstance.query.get(operator.bound_claw_id)
-        if claw:
-            if claw.project_id:
-                operator_project_ids.add(claw.project_id)
-            elif claw.project_name:
-                p = Project.query.filter_by(name=claw.project_name).first()
-                if p:
-                    operator_project_ids.add(p.id)
+    # 非超管：只看同项目用户（admin/user/guest）
+    operator_project_ids = _collect_user_project_ids(operator)
 
-    # 过滤：用户的 managed_projects 或 bound_claw 项目与操作者有交集
     filtered = []
     for u in users:
-        # 自身始终可见（超管用户不显示给其他人）
+        # 自身始终可见
         if u.id == operator.id:
             filtered.append(u)
             continue
-        u_project_ids = set()
-        if u.managed_projects:
-            u_project_ids.update(u.managed_projects)
-        if u.bound_claw_id:
-            claw = OpenClawInstance.query.get(u.bound_claw_id)
-            if claw:
-                if claw.project_id:
-                    u_project_ids.add(claw.project_id)
-                elif claw.project_name:
-                    p = Project.query.filter_by(name=claw.project_name).first()
-                    if p:
-                        u_project_ids.add(p.id)
-        if operator_project_ids & u_project_ids:
+        u_project_ids = _collect_user_project_ids(u)
+        if operator_project_ids and (operator_project_ids & u_project_ids):
             filtered.append(u)
 
     return jsonify([u.to_dict() for u in filtered])
@@ -300,6 +298,10 @@ def update_user(user_id):
     if operator.role == 'admin':
         if target.role in ('super_admin', 'admin'):
             return jsonify({'error': '无权修改管理员'}), 403
+        op_projects = _collect_user_project_ids(operator)
+        target_projects = _collect_user_project_ids(target)
+        if target.id != operator.id and (not op_projects or not (op_projects & target_projects)):
+            return jsonify({'error': '仅可管理本项目成员'}), 403
         # admin 只能设置 user 或 guest
         if 'role' in data and data['role'] not in ('user', 'guest'):
             return jsonify({'error': 'admin 只能设置成员或访客角色'}), 403
@@ -320,9 +322,9 @@ def update_user(user_id):
 @api_bp.route('/users/<int:user_id>/reset-password', methods=['POST'])
 def reset_user_password(user_id):
     """管理员重置用户密码（临时功能）"""
-    operator, err = _require_admin_or_above()
-    if err:
-        return err
+    operator = _get_operator()
+    if not operator:
+        return jsonify({'error': '未登录'}), 401
 
     target = User.query.get_or_404(user_id)
     data = request.get_json()
@@ -331,7 +333,18 @@ def reset_user_password(user_id):
     if not new_pwd or len(new_pwd) < 4:
         return jsonify({'error': '新密码至少4位'}), 400
 
-    # admin 和 super_admin 同等权限，可重置任何用户密码
+    # 普通成员仅可重置自己的密码
+    if operator.role not in ('super_admin', 'admin') and target.id != operator.id:
+        return jsonify({'error': '仅可重置自己的密码'}), 403
+    # 项目管理员不能重置管理员密码（自身除外）
+    if operator.role == 'admin' and target.id != operator.id and target.role in ('super_admin', 'admin'):
+        return jsonify({'error': '无权重置管理员密码'}), 403
+    # 项目管理员仅可重置本项目成员（自身除外）
+    if operator.role == 'admin' and target.id != operator.id:
+        op_projects = _collect_user_project_ids(operator)
+        target_projects = _collect_user_project_ids(target)
+        if not op_projects or not (op_projects & target_projects):
+            return jsonify({'error': '仅可重置本项目成员密码'}), 403
 
     target.set_password(new_pwd)
     db.session.commit()

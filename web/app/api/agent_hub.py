@@ -6,9 +6,57 @@ from functools import wraps
 from flask import Blueprint, jsonify, request, current_app
 from datetime import datetime
 from app import db
-from app.models import Agent, Message, Conversation, OpenClawInstance, ClawMessage, hash_token, generate_agent_token
+from app.models import Agent, Message, Conversation, OpenClawInstance, ClawMessage, Project, hash_token, generate_agent_token
 
 agent_hub_bp = Blueprint('agent_hub', __name__)
+
+
+def _get_web_user():
+    from app.api.skills import _get_current_user
+    return _get_current_user()
+
+
+def _collect_user_project_ids(user):
+    project_ids = set()
+    if not user:
+        return project_ids
+    for pid in (getattr(user, 'managed_projects', None) or []):
+        try:
+            project_ids.add(int(pid))
+        except Exception:
+            continue
+    bound_claw_id = getattr(user, 'bound_claw_id', None)
+    if bound_claw_id:
+        claw = OpenClawInstance.query.get(bound_claw_id)
+        if claw:
+            if claw.project_id:
+                project_ids.add(int(claw.project_id))
+            elif claw.project_name:
+                p = Project.query.filter_by(name=claw.project_name).first()
+                if p:
+                    project_ids.add(int(p.id))
+    return project_ids
+
+
+def _visible_claw_query_for_user(user):
+    query = OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted')
+    if not user:
+        return query.filter(OpenClawInstance.id == -1)
+    if user.role == 'super_admin':
+        return query
+    query = query.filter(OpenClawInstance.role != 'admin')
+    project_ids = list(_collect_user_project_ids(user))
+    if project_ids:
+        project_names = [p.name for p in Project.query.filter(Project.id.in_(project_ids)).all()]
+        return query.filter(
+            db.or_(
+                OpenClawInstance.project_id.in_(project_ids),
+                OpenClawInstance.project_name.in_(project_names) if project_names else db.text('1=0')
+            )
+        )
+    if getattr(user, 'bound_claw_id', None):
+        return query.filter(OpenClawInstance.id == int(user.bound_claw_id))
+    return query.filter(OpenClawInstance.id == -1)
 
 # ============== 认证装饰器 ==============
 
@@ -37,7 +85,7 @@ def require_agent_token(f):
 @agent_hub_bp.route('/agents', methods=['POST'])
 def register_agent():
     """注册新 Agent（需要 admin 角色）"""
-    data = request.get_json()
+    data = request.get_json() or {}
 
     # 检查必填字段
     required = ['name', 'agent_key']
@@ -275,11 +323,8 @@ def get_stats(agent=None):
 @agent_hub_bp.route('/web/stats', methods=['GET'])
 def web_stats():
     """Web 管理端 - 通信中心统计概览（以 OpenClawInstance 为准）"""
-    from app.api.skills import _get_current_user
-    user = _get_current_user()
-    claw_query = OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted')
-    if not user or user.role not in ('super_admin', 'admin'):
-        claw_query = claw_query.filter(OpenClawInstance.role != 'admin')
+    user = _get_web_user()
+    claw_query = _visible_claw_query_for_user(user)
     claws = claw_query.all()
 
     online_count = sum(1 for c in claws if c.status in ('工作', '学习', '摸鱼', 'online'))
@@ -300,11 +345,8 @@ def web_stats():
 @agent_hub_bp.route('/web/agents', methods=['GET'])
 def web_list_agents():
     """Web 管理端 - Agent 列表（以 OpenClawInstance 为准）"""
-    from app.api.skills import _get_current_user
-    user = _get_current_user()
-    claw_query = OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted')
-    if not user or user.role not in ('super_admin', 'admin'):
-        claw_query = claw_query.filter(OpenClawInstance.role != 'admin')
+    user = _get_web_user()
+    claw_query = _visible_claw_query_for_user(user)
     claws = claw_query.order_by(OpenClawInstance.name).all()
 
     result = []
@@ -477,9 +519,13 @@ def web_list_claw_messages():
     msg_type = request.args.get('msg_type')
     limit = request.args.get('limit', 100, type=int)
 
-    query = ClawMessage.query
+    user = _get_web_user()
+    visible_claw_ids = [c.id for c in _visible_claw_query_for_user(user).all()]
+    query = ClawMessage.query.filter(ClawMessage.claw_id.in_(visible_claw_ids or [-1]))
 
     if claw_id:
+        if claw_id not in visible_claw_ids:
+            return jsonify({'error': '无权查看该 OpenClaw 消息'}), 403
         query = query.filter_by(claw_id=claw_id)
     if status:
         query = query.filter_by(status=status)
@@ -591,6 +637,9 @@ def web_broadcast():
     """
     data = request.get_json()
     content = data.get('content')
+    user = _get_web_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
 
     if not content:
         return jsonify({'error': '内容不能为空'}), 400
@@ -609,10 +658,14 @@ def web_broadcast():
     target_agent_ids = data.get('target_agent_ids', [])
     target_claw_ids = data.get('target_claw_ids', [])
     msg_type = data.get('msg_type', 'broadcast')
+    visible_claw_ids = [c.id for c in _visible_claw_query_for_user(user).all()]
 
     # 确保 target_claw_ids 是整数列表（JSON 反序列化后可能是字符串）
     if target_claw_ids:
         target_claw_ids = [int(x) for x in target_claw_ids]
+        denied = [cid for cid in target_claw_ids if cid not in visible_claw_ids]
+        if denied:
+            return jsonify({'error': '包含无权限目标 OpenClaw'}), 403
 
     sent_agents = 0
     sent_claws = 0
@@ -647,6 +700,7 @@ def web_broadcast():
     elif not target_agent_ids:
         # 全员通知（默认发送给所有在线 OpenClaw）
         online_claws = OpenClawInstance.query.filter(
+            OpenClawInstance.id.in_(visible_claw_ids or [-1]),
             OpenClawInstance.status.in_(['工作', '学习', '摸鱼', 'online'])
         ).all()
         for claw in online_claws:

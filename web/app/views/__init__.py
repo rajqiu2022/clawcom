@@ -82,8 +82,6 @@ def tapd():
 
 @views_bp.route('/hub')
 def hub():
-    r = _require_role('super_admin')
-    if r: return r
     return render_template('hub.html')
 
 
@@ -122,16 +120,12 @@ def audit_logs():
 
 @views_bp.route('/users')
 def users_management():
-    r = _require_role('super_admin', 'admin')
-    if r: return r
     return render_template('users.html')
 
 
 @views_bp.route('/office')
 def pixel_office():
     """像素办公室 — 可视化 OpenClaw 状态"""
-    r = _require_role('super_admin')
-    if r: return r
     return render_template('office.html')
 
 
@@ -139,3 +133,35 @@ def pixel_office():
 def testplans():
     """测试计划排期"""
     return render_template('testplans.html')
+
+
+@views_bp.route('/engineering')
+@views_bp.route('/engineering/baselines/<int:baseline_id>')
+@views_bp.route('/engineering/refresh/<int:batch_id>')
+@views_bp.route('/engineering/architecture/<int:snap_id>')
+def engineering(baseline_id=None, batch_id=None, snap_id=None):
+    """工程分析中心：基线管理 + 增量刷新批次 + 架构快照 + 影响项闭环。
+
+    Deep link 入口：
+      /engineering/baselines/{id}     基线详情
+      /engineering/refresh/{id}       刷新批次详情
+      /engineering/architecture/{id}  架构快照详情（用于跨 OpenClaw 引用）
+    """
+    return render_template(
+        'engineering.html',
+        initial_baseline_id=baseline_id,
+        initial_batch_id=batch_id,
+        initial_arch_snap_id=snap_id,
+    )
+
+
+@views_bp.route('/requirements')
+@views_bp.route('/requirements/iterations/<int:iteration_id>')
+@views_bp.route('/requirements/items/<int:item_id>')
+def requirements(iteration_id=None, item_id=None):
+    """需求分析中心：迭代需求快照 + 变更跟踪 + 用例/工程关联"""
+    return render_template(
+        'requirements.html',
+        initial_iteration_id=iteration_id,
+        initial_item_id=item_id,
+    )

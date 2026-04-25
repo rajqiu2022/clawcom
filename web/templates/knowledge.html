@@ -162,7 +162,6 @@
             <option value="">全部来源</option>
             <option value="openclaw">Agent 记录</option>
             <option value="openspace">OpenSpace 进化</option>
-            <option value="manual">手动录入</option>
         </select>
         <select class="form-select" id="filter-category" style="width:auto" onchange="loadKnowledge()">
             <option value="">全部标签</option>
@@ -296,7 +295,7 @@ const statusLabels = {
 const sourceLabels = {
     openclaw: ['tag-purple', '🤖 Agent'],
     openspace: ['tag-orange', '🧬 OpenSpace'],
-    manual: ['tag-blue', '✍️ 手动'],
+    // manual 来源不再展示标签（默认场景，绝大多数为 OpenClaw 提交，无需显式标识）
 };
 const categoryLabels = {
     'method': '测试方法', 'bug-standard': 'Bug 标准', 'bug-pattern': 'Bug 模式',
@@ -311,17 +310,26 @@ function escapeHtml(str) {
 
 function getSubmitterInfo(e) {
     if (e.source_type === 'openclaw') {
-        const name = e.source_openclaw_name || '未知 Agent';
+        let name;
+        if (e.source_openclaw_name) {
+            name = e.source_openclaw_name;
+        } else if (e.source_openclaw_id) {
+            // FK 失效（claw 已删除或 ID 错误）
+            name = `Agent #${e.source_openclaw_id} (已删除)`;
+        } else {
+            name = '未知 Agent (无 ID)';
+        }
         return { name, avatarClass: 'claw', initial: name.charAt(0) };
     }
     if (e.source_type === 'openspace') {
         return { name: 'OpenSpace', avatarClass: 'space', initial: 'OS' };
     }
-    return { name: '手动录入', avatarClass: 'manual', initial: '手' };
+    // manual 不再展示提交人徽标
+    return null;
 }
 
 function renderEntry(e) {
-    const src = sourceLabels[e.source_type] || ['tag-blue', '未知'];
+    const src = sourceLabels[e.source_type] || null;
     const submitter = getSubmitterInfo(e);
     const preview = (e.content || '').substring(0, 160).replace(/\n/g, ' ');
 
@@ -343,16 +351,18 @@ function renderEntry(e) {
             <div class="kn-card-title" title="${escapeHtml(e.title)}">${escapeHtml(e.title)}</div>
             <div class="kn-card-preview">${escapeHtml(preview)}${(e.content||'').length > 160 ? '...' : ''}</div>
             <div class="kn-card-tags">
-                <span class="tag ${src[0]}">${src[1]}</span>
+                ${src ? `<span class="tag ${src[0]}">${src[1]}</span>` : ''}
                 <span class="tag tag-accent">${categoryLabels[e.category] || e.category}</span>
                 <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
                 ${e.project_name ? `<span class="tag tag-blue">${escapeHtml(e.project_name)}</span>` : ''}
             </div>
             <div class="kn-card-footer">
+                ${submitter ? `
                 <div class="kn-card-submitter">
                     <span class="kn-card-submitter-avatar ${submitter.avatarClass}">${submitter.initial}</span>
                     <span>${escapeHtml(submitter.name)}</span>
                 </div>
+                ` : '<div></div>'}
                 <span class="kn-card-time">${timeAgo(e.created_at)}</span>
             </div>
             ${reviewBtns ? `<div style="display:flex;gap:6px;justify-content:flex-end" onclick="event.stopPropagation()">${reviewBtns}</div>` : ''}
@@ -440,22 +450,24 @@ async function reviewEntry(id, action) {
 async function showDetail(id) {
     const e = allEntries.find(x => x.id === id);
     if (!e) return;
-    const src = sourceLabels[e.source_type] || ['tag-blue', '未知'];
+    const src = sourceLabels[e.source_type] || null;
     const submitter = getSubmitterInfo(e);
     
     $('#detail-title').textContent = e.title;
     $('#detail-body').innerHTML = `
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px">
-            <span class="tag ${src[0]}">${src[1]}</span>
+            ${src ? `<span class="tag ${src[0]}">${src[1]}</span>` : ''}
             <span class="tag tag-accent">${categoryLabels[e.category] || e.category}</span>
             <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
             ${e.project_name ? `<span class="tag tag-blue">${escapeHtml(e.project_name)}</span>` : ''}
             ${e.scope ? `<span class="tag tag-blue">${e.scope}</span>` : ''}
         </div>
         <div style="display:flex;align-items:center;gap:8px;font-size:0.82rem;color:var(--text-muted);margin-bottom:12px">
+            ${submitter ? `
             <span class="kn-card-submitter-avatar ${submitter.avatarClass}">${submitter.initial}</span>
             <span>${escapeHtml(submitter.name)}</span>
             <span>·</span>
+            ` : ''}
             <span>创建: ${e.created_at || '未知'}</span>
             ${e.approved_by ? ` · 审核: ${e.approved_by}` : ''}
             ${e.reviewer_notes ? ` · 审核意见: ${e.reviewer_notes}` : ''}

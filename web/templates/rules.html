@@ -146,9 +146,27 @@ function _canEditRule(r) {
     if (currentUser.bound_claw_name && r.created_by === currentUser.bound_claw_name) return true;
     return false;
 }
+function _modifierTagRule(r) {
+    if (r.mirror_updated_by) {
+        const who = escapeHtml(r.mirror_updated_by);
+        return `<span style="color:var(--blue,#3b82f6)" title="${who} 提交了待审核修改">✏️ ${who} 待审核</span>`;
+    }
+    const who = r.last_modified_by || r.created_by || 'system';
+    const src = r.last_modified_source || 'web';
+    const icon = src === 'openclaw' ? '🤖' : (src === 'system' ? '⚙️' : '👤');
+    const tip = (src === 'openclaw' ? 'OpenClaw' : (src === 'system' ? '系统' : '人')) + ' 修改 · ' + (r.last_modified_at || r.updated_at || '');
+    return `<span title="${escapeHtml(tip)}">${icon} ${escapeHtml(who)}</span>`;
+}
 function _canDeleteRule(r) {
     if (!currentUser) return false;
-    if (currentUser.role === 'super_admin' || currentUser.role === 'admin') return true;
+    if (currentUser.role === 'super_admin') return true;
+    if (currentUser.role === 'admin') {
+        const mine = new Set((currentUser.managed_projects || []).map(Number));
+        const scoped = new Set((r.applicable_projects || []).map(Number));
+        if (mine.size && scoped.size) {
+            for (const pid of scoped) if (mine.has(pid)) return true;
+        }
+    }
     if (r.created_by === currentUser.username) return true;
     if (currentUser.bound_claw_name && r.created_by === currentUser.bound_claw_name) return true;
     return false;
@@ -308,7 +326,7 @@ function renderRules() {
             ${r.review_comment ? `<div style="margin-top:4px;font-size:0.78rem;color:var(--orange,#f97316);padding:4px 8px;background:rgba(249,115,22,0.08);border-radius:4px">📝 审核意见: ${escapeHtml(r.review_comment)}</div>` : ''}
             <div class="skill-desc">${r.description || ''}</div>
             <div style="margin-top:8px;font-size:0.78rem;color:var(--text-muted);display:flex;justify-content:space-between;align-items:center">
-                <span>${r.created_by || 'system'} · ${r.created_at ? timeAgo(r.created_at) : ''}</span>
+                <span>${_modifierTagRule(r)} · ${r.mirror_updated_at ? timeAgo(r.mirror_updated_at) : (r.last_modified_at ? timeAgo(r.last_modified_at) : (r.updated_at ? timeAgo(r.updated_at) : (r.created_at ? timeAgo(r.created_at) : '')))}</span>
                 <span>${r.install_count || 0} 个使用</span>
             </div>
             <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
@@ -316,8 +334,12 @@ function renderRules() {
                 <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end" onclick="event.stopPropagation()">
                     ${r.review_status === 'pending' && _isAdmin() ? `<button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#22c55e;color:#fff;border:none;border-radius:4px" onclick="reviewRule(${r.id},'approved')">通过</button><button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#f97316;color:#fff;border:none;border-radius:4px" onclick="reviewRule(${r.id},'revise')">打回</button><button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#6b7280;color:#fff;border:none;border-radius:4px" onclick="reviewRule(${r.id},'rejected')">废弃</button>` : ''}
                     ${r.review_status === 'revise' && _isAdmin() ? `<button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#22c55e;color:#fff;border:none;border-radius:4px" onclick="reviewRule(${r.id},'approved')">通过</button><button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#6b7280;color:#fff;border:none;border-radius:4px" onclick="reviewRule(${r.id},'rejected')">废弃</button>` : ''}
-                    ${_canEditRule(r) && r.review_status === 'approved' ? `<button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#e67e22;color:#fff;border:none;border-radius:4px" onclick="openAssignRuleModal(${r.id})">分配</button>` : ''}
-                    ${(r.review_status === 'approved' || r.review_status === 'revise') && _canEditRule(r) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="editRule(${r.id})">编辑</button>` : ''}
+                    ${_canEditRule(r) && r.review_status === 'approved' ? (
+                        (r.stale_count || 0) > 0
+                          ? `<button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#f59e0b;color:#fff;border:none;border-radius:4px" onclick="openAssignRuleModal(${r.id})" title="已有 ${r.stale_count} 个 OpenClaw 装的是旧版本">♻️ 重新分配 (${r.stale_count})</button>`
+                          : `<button class="btn" style="padding:4px 10px;font-size:0.82rem;background:#e67e22;color:#fff;border:none;border-radius:4px" onclick="openAssignRuleModal(${r.id})">分配</button>`
+                    ) : ''}
+                    ${r.review_status !== 'rejected' && _canEditRule(r) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem" onclick="editRule(${r.id})" title="${r.review_status==='pending'?'当前为待评审状态，修改将更新待审核镜像':''}">编辑</button>` : ''}
                     ${r.review_status !== 'pending' && _canDeleteRule(r) ? `<button class="btn btn-ghost" style="padding:4px 8px;font-size:0.82rem;color:var(--red)" onclick="deleteRule(${r.id})">删除</button>` : ''}
                 </div>
             </div>
@@ -560,17 +582,60 @@ async function openAssignRuleModal(ruleId) {
     $('#assign-rule-name').textContent = r ? r.display_name : 'Rule';
 
     const claws = await API.listClaws();
-    const installed = (r && r.used_by) || [];
+    const freshSet = new Set((r && r.used_by_fresh) || []);
+    const staleSet = new Set((r && r.used_by_stale) || []);
 
     $('#assign-claw-list').innerHTML = claws.map(c => {
-        const isInstalled = installed.includes(c.name);
-        return `<label style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:6px;cursor:pointer;border:1px solid ${isInstalled ? 'var(--green,#22c55e)' : 'var(--border)'};background:${isInstalled ? 'rgba(34,197,94,0.08)' : 'var(--bg-card,transparent)'};transition:all .15s">
-            <input type="checkbox" value="${c.id}" data-name="${c.name}" ${isInstalled ? 'checked disabled' : ''} style="width:16px;height:16px;accent-color:var(--accent)">
+        const isFresh = freshSet.has(c.name);
+        const isStale = staleSet.has(c.name);
+        let borderColor = 'var(--border)';
+        let bgColor = 'var(--bg-card,transparent)';
+        let cbAttrs = '';
+        let tagHtml = '';
+        let title = '';
+        if (isFresh) {
+            borderColor = 'var(--green,#22c55e)';
+            bgColor = 'rgba(34,197,94,0.06)';
+            cbAttrs = '';   // 已最新：默认不勾，但允许手工勾选触发强制重装
+            tagHtml = '<span class="tag tag-green" style="font-size:0.72rem;padding:2px 8px">已安装</span>'
+                    + '<span style="font-size:0.7rem;color:var(--text-muted);margin-left:6px">勾选可强制重装</span>';
+            title = '已安装最新版本。勾选可强制重新分配（用于安装失败恢复、文件被删、强制覆盖等场景）';
+        } else if (isStale) {
+            borderColor = '#f59e0b';
+            bgColor = 'rgba(245,158,11,0.10)';
+            cbAttrs = 'checked';
+            tagHtml = '<span class="tag" style="font-size:0.72rem;padding:2px 8px;background:#f59e0b;color:#fff">需要重新分配</span>';
+            title = 'Hub 端 Rule 已修改，本地为旧版本，建议重新分配';
+        } else {
+            title = '尚未安装';
+        }
+        return `<label title="${title}" style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:6px;cursor:pointer;border:1px solid ${borderColor};background:${bgColor};transition:all .15s">
+            <input type="checkbox" value="${c.id}" data-name="${c.name}" ${cbAttrs} style="width:16px;height:16px;accent-color:var(--accent)">
             <span style="width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:0.78rem;font-weight:600;flex-shrink:0">${(c.avatar || c.name[0])}</span>
             <span style="flex:1;font-size:0.88rem;font-weight:500">${c.name}<span style="font-size:0.78rem;color:var(--text-muted);margin-left:6px;font-weight:400">${c.role_title || c.role || ''}</span></span>
-            ${isInstalled ? '<span class="tag tag-green" style="font-size:0.72rem;padding:2px 8px">已安装</span>' : ''}
+            ${tagHtml}
         </label>`;
     }).join('');
+
+    const hintEl = document.getElementById('assign-stale-hint');
+    if (hintEl) {
+        const n = staleSet.size;
+        const fc = freshSet.size;
+        if (n > 0) {
+            hintEl.style.borderColor = '#f59e0b';
+            hintEl.style.background = 'rgba(245,158,11,0.08)';
+            hintEl.innerHTML = `⚠️ 该 Rule 内容已修改，<strong style="color:#f59e0b">${n} 个 OpenClaw</strong> 装的是旧版本（橙色标记），默认已勾选，点"确认分配"即可批量重装。`
+                + (fc > 0 ? `<br>另有 ${fc} 个已是最新，如需强制重装（安装失败恢复等）也可手动勾选。` : '');
+            hintEl.style.display = '';
+        } else if (fc > 0) {
+            hintEl.style.borderColor = 'var(--border)';
+            hintEl.style.background = 'rgba(34,197,94,0.05)';
+            hintEl.innerHTML = `💡 提示：勾选"已安装"的 OpenClaw 可<strong>强制重新分配</strong>（用于安装失败恢复、文件被误删、强制覆盖等场景）。`;
+            hintEl.style.display = '';
+        } else {
+            hintEl.style.display = 'none';
+        }
+    }
 
     $('#assign-modal').classList.add('active');
 }
@@ -607,7 +672,8 @@ async function submitAssignRule() {
             <h3>分配 Rule：<span id="assign-rule-name"></span></h3>
         </div>
         <div style="padding:16px;max-height:400px;overflow-y:auto">
-            <div style="margin-bottom:12px;font-size:0.88rem;color:var(--text-muted)">选择要安装此 Rule 的 OpenClaw（已安装的不可取消勾选）：</div>
+            <div id="assign-stale-hint" style="display:none;margin-bottom:10px;padding:8px 10px;border:1px solid #f59e0b;background:rgba(245,158,11,0.08);border-radius:6px;font-size:0.82rem;color:var(--text-primary);line-height:1.5"></div>
+            <div style="margin-bottom:12px;font-size:0.88rem;color:var(--text-muted)">选择要安装此 Rule 的 OpenClaw（绿色=已最新，橙色=需重新分配；已安装也可手动勾选 → 强制重装）：</div>
             <div id="assign-claw-list" style="display:flex;flex-direction:column;gap:6px"></div>
         </div>
         <div class="modal-actions" style="padding:12px 16px;border-top:1px solid var(--border)">

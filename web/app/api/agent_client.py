@@ -23,6 +23,15 @@ import json
 import time
 import hashlib
 import logging
+
+
+def _is_missing(v):
+    """统一的"必填"判定，避免 `if not x` 把合法的整数 0 当作缺失。"""
+    if v is None:
+        return True
+    if isinstance(v, str) and not v.strip():
+        return True
+    return False
 import threading
 
 logger = logging.getLogger(__name__)
@@ -211,11 +220,16 @@ def claw_sse_events(claw_id, claw=None):
 
         # === 连接建立时推送未读消息和当前待办（解决断线期间消息丢失问题）===
         try:
-            # 推送所有未读的 to_claw 消息（pending + delivered 但未 read 的）
+            # 只推送真正"未读"的消息：read_at IS NULL
+            # （以前推 status in [pending, delivered]，导致每次重连重推
+            #  几十条历史消息，逼客户端用 seen_msg_ids 永久去重，进而误伤新消息。
+            #  现在改成读取语义：客户端真正消费完一条 message 后，必须 POST
+            #  /api/openclaws/<id>/messages/<msg_id>/read，否则下次重连还会重推
+            #  这一条——这样客户端不再需要本地永久去重。）
             unread_msgs = ClawMessage.query.filter(
                 ClawMessage.claw_id == claw_id,
                 ClawMessage.direction == 'to_claw',
-                ClawMessage.status.in_(['pending', 'delivered'])
+                ClawMessage.read_at.is_(None),
             ).order_by(ClawMessage.created_at.asc()).limit(50).all()
             for msg in unread_msgs:
                 if msg.status == 'pending':
@@ -224,7 +238,9 @@ def claw_sse_events(claw_id, claw=None):
                 yield f"event: message\ndata: {json.dumps(msg.to_dict())}\n\n"
             if unread_msgs:
                 db.session.commit()
-                logger.info(f"SSE连接建立，推送 {len(unread_msgs)} 条未读消息给 OpenClaw {claw_id}")
+                logger.info(
+                    f"SSE连接建立，推送 {len(unread_msgs)} 条未读消息给 OpenClaw {claw_id}"
+                )
 
             # 推送当前待办列表
             today = date.today()
@@ -273,8 +289,15 @@ def claw_sse_events(claw_id, claw=None):
                 if loop_count % 30 == 1:  # 每60秒打一次
                     print(f"[SSE_LOOP] claw_id={claw_id} loop={loop_count}", flush=True)
 
-                # 强制刷新 session 缓存，确保查询到最新数据
-                # （SSE 长连接中 db.session 会缓存旧数据，导致 pending 消息不可见）
+                # 强制结束当前事务并刷新 session，确保后续 ORM 查询走新事务
+                # （SSE 长连接里 db.session 处于一个长事务，MySQL REPEATABLE READ
+                # 隔离级别下只能看到事务开始时的 snapshot，新插入的 pending 消息
+                # 在 ORM .query.filter().all() 里永远查不到 → messages 永远为空
+                # → 永远不会 PUSH。必须 rollback 结束事务再 expire_all。）
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
                 db.session.expire_all()
 
                 # 每10秒检查新任务和新消息
@@ -297,9 +320,14 @@ def claw_sse_events(claw_id, claw=None):
                 pending_msg_ids = []
                 try:
                     with _mc.cursor(_pymysql.cursors.DictCursor) as _mcur:
+                        # 主循环只推 status='pending' 的新消息（首屏未读消息已在
+                        # connected 阶段一次性推完）。这里如果用 read_at IS NULL
+                        # 会把所有"已推但未读"的也再次拉出来反复推，反而退化。
                         _mcur.execute(
-                            "SELECT id FROM claw_messages WHERE claw_id=%s AND status='pending' ORDER BY created_at ASC LIMIT 10",
-                            (claw_id,)
+                            "SELECT id FROM claw_messages WHERE claw_id=%s "
+                            "AND direction='to_claw' AND status='pending' "
+                            "ORDER BY created_at ASC LIMIT 10",
+                            (claw_id,),
                         )
                         pending_msg_ids = [row['id'] for row in _mcur.fetchall()]
                 finally:
@@ -316,13 +344,43 @@ def claw_sse_events(claw_id, claw=None):
                 
                 # === 每次循环都推送消息（不再等 10 秒间隔）===
                 # 消息查询已用独立 pymysql，结果可靠，直接推送
+                delivered_ids = []
                 for msg in messages:
                     msg.status = 'delivered'
                     msg.delivered_at = datetime.now()
                     yield f"event: message\ndata: {json.dumps(msg.to_dict())}\n\n"
-                
-                if messages:
-                    db.session.commit()
+                    delivered_ids.append(msg.id)
+
+                # 用独立 pymysql 把 status 写回 DB
+                # （和上面 status='工作' 同样的原因：db.session.commit() 在 gevent
+                # 长连接里可能不真正落库，会导致同一条消息被反复推送 / 状态卡 pending）
+                if delivered_ids:
+                    import pymysql as _pymysql
+                    _uc = _pymysql.connect(
+                        host=os.getenv('MYSQL_HOST', 'localhost'),
+                        port=int(os.getenv('MYSQL_PORT', '3306')),
+                        user=os.getenv('MYSQL_USER', 'your_mysql_user'),
+                        password=os.getenv('MYSQL_PASSWORD', 'your_mysql_user'),
+                        database=os.getenv('MYSQL_DATABASE', 'openclaw_manager'),
+                        charset='utf8mb4',
+                    )
+                    try:
+                        with _uc.cursor() as _ucur:
+                            _placeholders = ','.join(['%s'] * len(delivered_ids))
+                            _ucur.execute(
+                                f"UPDATE claw_messages SET status='delivered', "
+                                f"delivered_at=NOW() WHERE id IN ({_placeholders}) "
+                                f"AND status='pending'",
+                                tuple(delivered_ids),
+                            )
+                        _uc.commit()
+                        print(
+                            f"[SSE_PUSH] claw_id={claw_id} delivered "
+                            f"{len(delivered_ids)} msgs ids={delivered_ids}",
+                            flush=True,
+                        )
+                    finally:
+                        _uc.close()
 
                 if now - last_task_check > 10:
                     # 更新活跃时间和在线状态（使用独立 pymysql 连接，绕过 gevent session 问题）
@@ -468,7 +526,7 @@ def claw_task_report(claw_id, claw=None):
     }
     """
     data = request.get_json()
-    if not data or not data.get('task_id'):
+    if not data or _is_missing(data.get('task_id')):
         return jsonify({'error': 'task_id 为必填项'}), 400
 
     task = AgentTask.query.filter_by(task_id=data['task_id'], claw_id=claw_id).first()
@@ -542,12 +600,21 @@ def claw_send_to_claw(claw_id, claw=None):
     if not target_ids:
         return jsonify({'error': 'target_claw_ids 为必填项'}), 400
 
+    try:
+        normalized_target_ids = [int(x) for x in target_ids]
+    except (TypeError, ValueError):
+        return jsonify({'error': 'target_claw_ids 必须是整数数组'}), 400
+
+    # 防止 admin claw 把消息发给自己导致"自发自收"回路（direction=to_claw 且 sender=自己）
+    if claw_id in normalized_target_ids:
+        return jsonify({'error': '禁止给自己发送消息，请改用 /messages/<msg_id>/read 闭环回复'}), 400
+
     content = data['content']
     msg_type = data.get('msg_type', 'text')
     sent = 0
 
     targets = OpenClawInstance.query.filter(
-        OpenClawInstance.id.in_([int(x) for x in target_ids]),
+        OpenClawInstance.id.in_(normalized_target_ids),
         OpenClawInstance.status != 'deleted',
     ).all()
 
@@ -566,8 +633,8 @@ def claw_send_to_claw(claw_id, claw=None):
     db.session.commit()
 
     # 通知目标 claw 的 SSE 长连接立即推送
-    for target_id in target_ids:
-        notify_claw(int(target_id))
+    for target_id in normalized_target_ids:
+        notify_claw(target_id)
 
     return jsonify({'status': 'ok', 'sent_count': sent}), 201
 
@@ -763,7 +830,7 @@ def poll_task_result(claw_id, claw=None):
     }
     """
     data = request.get_json()
-    if not data or not data.get('task_id'):
+    if not data or _is_missing(data.get('task_id')):
         return jsonify({'error': 'task_id 为必填项'}), 400
 
     task = AgentTask.query.filter_by(task_id=data['task_id'], claw_id=claw_id).first()

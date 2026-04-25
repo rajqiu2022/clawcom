@@ -164,7 +164,8 @@
             <h3>分配 Skill：<span id="assign-skill-name"></span></h3>
         </div>
         <div style="padding:16px;max-height:400px;overflow-y:auto">
-            <div style="margin-bottom:12px;font-size:0.88rem;color:var(--text-muted)">选择要安装此 Skill 的 OpenClaw（已安装的不可取消勾选）：</div>
+            <div id="assign-stale-hint" style="display:none;margin-bottom:10px;padding:8px 10px;border:1px solid #f59e0b;background:rgba(245,158,11,0.08);border-radius:6px;font-size:0.82rem;color:var(--text-primary);line-height:1.5"></div>
+            <div style="margin-bottom:12px;font-size:0.88rem;color:var(--text-muted)">选择要安装此 Skill 的 OpenClaw（绿色=已最新，橙色=需重新分配；已安装也可手动勾选 → 强制重装）：</div>
             <div id="assign-claw-list" style="display:flex;flex-direction:column;gap:6px"></div>
         </div>
         <div class="modal-actions" style="padding:12px 16px;border-top:1px solid var(--border)">
@@ -188,9 +189,30 @@ function _canEditSkill(s) {
     if (currentUser.bound_claw_name && s.created_by === currentUser.bound_claw_name) return true;
     return false;
 }
+function _modifierTag(s) {
+    // 镜像存在 → 待审核状态优先显示提交人
+    if (s.mirror_updated_by) {
+        const who = escapeHtml(s.mirror_updated_by);
+        const t = s.mirror_updated_at || '';
+        return `<span style="color:var(--blue,#3b82f6)" title="${who} 提交了待审核修改 · ${t}">✏️ ${who} 待审核</span>`;
+    }
+    // 优先 last_modified_by（精确），否则回落 created_by
+    const who = s.last_modified_by || s.created_by || 'system';
+    const src = s.last_modified_source || 'web';
+    const icon = src === 'openclaw' ? '🤖' : (src === 'system' ? '⚙️' : '👤');
+    const tip = (src === 'openclaw' ? 'OpenClaw' : (src === 'system' ? '系统' : '人')) + ' 修改 · ' + (s.last_modified_at || s.updated_at || '');
+    return `<span title="${escapeHtml(tip)}">${icon} ${escapeHtml(who)}</span>`;
+}
 function _canDeleteSkill(s) {
     if (!currentUser) return false;
-    if (currentUser.role === 'super_admin' || currentUser.role === 'admin') return true;
+    if (currentUser.role === 'super_admin') return true;
+    if (currentUser.role === 'admin') {
+        const mine = new Set((currentUser.managed_projects || []).map(Number));
+        const scoped = new Set((s.applicable_projects || []).map(Number));
+        if (mine.size && scoped.size) {
+            for (const pid of scoped) if (mine.has(pid)) return true;
+        }
+    }
     if (s.created_by === currentUser.username) return true;
     if (currentUser.bound_claw_name && s.created_by === currentUser.bound_claw_name) return true;
     return false;
@@ -454,7 +476,8 @@ function renderSkills() {
             ? (s.used_by.slice(0, maxShow).map(u => `<span class="tag tag-blue">${u}</span>`).join('')
               + (s.used_by.length > maxShow ? `<span class="tag" style="background:var(--border);color:var(--text-muted)">+${s.used_by.length - maxShow}</span>` : ''))
             : '<span style="font-size:0.82rem;color:var(--text-muted)">暂无使用者</span>';
-        const timeStr = s.updated_at ? timeAgo(s.updated_at) : (s.created_at ? timeAgo(s.created_at) : '');
+        const lastModifiedAt = s.mirror_updated_at || s.updated_at || '';
+        const timeStr = lastModifiedAt ? timeAgo(lastModifiedAt) : '未记录';
         return `
         <div class="skill-card${s.category === 'evolved' ? ' skill-card-evolved' : ''}" style="cursor:pointer" onclick="previewSkill(${s.id})">
             <div class="skill-card-header">
@@ -475,13 +498,17 @@ function renderSkills() {
             </div>
             <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:6px">
-                    <span style="font-size:0.78rem;color:var(--text-muted);flex-shrink:0">${s.created_by || 'system'} · ${timeStr}</span>
+                    <span style="font-size:0.78rem;color:var(--text-muted);flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${_modifierTag(s)} · ${timeStr}</span>
                     <div style="display:flex;gap:4px;white-space:nowrap;flex-shrink:0" onclick="event.stopPropagation()">
                         ${s.review_status === 'pending' && _isAdmin() ? `<button class="btn" style="padding:3px 10px;font-size:0.78rem;background:#22c55e;color:#fff;border:none;border-radius:4px" onclick="reviewSkill(${s.id},'approved')">通过</button><button class="btn" style="padding:3px 10px;font-size:0.78rem;background:#f97316;color:#fff;border:none;border-radius:4px" onclick="reviewSkill(${s.id},'revise')">打回</button><button class="btn" style="padding:3px 10px;font-size:0.78rem;background:#6b7280;color:#fff;border:none;border-radius:4px" onclick="reviewSkill(${s.id},'rejected')">废弃</button>` : ''}
                         ${s.review_status === 'revise' && _isAdmin() ? `<button class="btn" style="padding:3px 10px;font-size:0.78rem;background:#22c55e;color:#fff;border:none;border-radius:4px" onclick="reviewSkill(${s.id},'approved')">通过</button><button class="btn" style="padding:3px 10px;font-size:0.78rem;background:#6b7280;color:#fff;border:none;border-radius:4px" onclick="reviewSkill(${s.id},'rejected')">废弃</button>` : ''}
                         ${s.review_status === 'rejected' && _isAdmin() ? `<button class="btn" style="padding:3px 10px;font-size:0.78rem;background:#22c55e;color:#fff;border:none;border-radius:4px" onclick="reviewSkill(${s.id},'approved')">恢复</button>` : ''}
-                        ${_canDeleteSkill(s) && s.review_status === 'approved' ? `<button class="btn" style="padding:3px 10px;font-size:0.78rem;background:#e67e22;color:#fff;border:none;border-radius:4px" onclick="openAssignModal(${s.id})">分配</button>` : ''}
-                        ${(s.review_status === 'approved' || s.review_status === 'revise') && _canEditSkill(s) ? `<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.78rem" onclick="editSkill(${s.id})">编辑</button>` : ''}
+                        ${_canDeleteSkill(s) && s.review_status === 'approved' ? (
+                            (s.stale_count || 0) > 0
+                              ? `<button class="btn" style="padding:3px 10px;font-size:0.78rem;background:#f59e0b;color:#fff;border:none;border-radius:4px" onclick="openAssignModal(${s.id})" title="已有 ${s.stale_count} 个 OpenClaw 装的是旧版本，点击重新分配">♻️ 重新分配 (${s.stale_count})</button>`
+                              : `<button class="btn" style="padding:3px 10px;font-size:0.78rem;background:#e67e22;color:#fff;border:none;border-radius:4px" onclick="openAssignModal(${s.id})">分配</button>`
+                        ) : ''}
+                        ${s.review_status !== 'rejected' && _canEditSkill(s) ? `<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.78rem" onclick="editSkill(${s.id})" title="${s.review_status==='pending'?'当前为待评审状态，修改将更新待审核镜像':''}">编辑</button>` : ''}
                         ${s.review_status !== 'pending' && _canDeleteSkill(s) ? `<button class="btn btn-ghost" style="padding:3px 8px;font-size:0.78rem;color:var(--red)" onclick="deleteSkill(${s.id})">删除</button>` : ''}
                     </div>
                 </div>
@@ -725,6 +752,38 @@ function previewSkill(id) {
     const contentHtml = s.template_content
         ? `<div style="background:var(--bg-secondary);padding:14px;border-radius:var(--radius-sm);font-family:monospace;font-size:0.85rem;white-space:pre-wrap;line-height:1.7;max-height:40vh;overflow-y:auto;cursor:pointer;position:relative" onclick="showFullContent('${escapeAttr(s.template_content)}')" title="点击查看完整内容">${escapeHtml(s.template_content)}<span style="position:absolute;top:4px;right:8px;background:rgba(255,255,255,0.15);color:#aaa;padding:1px 6px;border-radius:3px;font-size:0.72rem">点击全屏</span></div>`
         : '<div style="color:var(--text-muted)">暂无模板内容</div>';
+
+    // 镜像内容（待审核的修改）
+    let mirrorHtml = '';
+    if (s.mirror_content && _isAdmin()) {
+        try {
+            const mirror = JSON.parse(s.mirror_content);
+            const mirrorFields = Object.entries(mirror).filter(([k,v]) => v !== undefined && v !== null && v !== '');
+            if (mirrorFields.length > 0) {
+                mirrorHtml = `
+                    <div style="margin-top:16px;padding:12px;background:rgba(59,130,246,0.06);border:1px solid rgba(59,130,246,0.2);border-radius:var(--radius-sm)">
+                        <div style="font-size:0.85rem;font-weight:600;color:var(--blue,#3b82f6);margin-bottom:8px">📝 待审核修改 <span style="font-weight:400;font-size:0.78rem;color:var(--text-muted)">${s.mirror_updated_by ? '由 ' + escapeHtml(s.mirror_updated_by) + ' 提交' : ''} ${s.mirror_updated_at ? timeAgo(s.mirror_updated_at) : ''}</span></div>
+                        ${mirror.template_content ? `<div style="margin-bottom:8px"><strong style="font-size:0.82rem">修改后内容：</strong><div style="background:var(--bg-secondary);padding:10px;border-radius:4px;font-family:monospace;font-size:0.82rem;white-space:pre-wrap;line-height:1.6;max-height:25vh;overflow-y:auto;margin-top:4px">${escapeHtml(mirror.template_content)}</div></div>` : ''}
+                        ${mirror.display_name && mirror.display_name !== s.display_name ? `<div style="font-size:0.82rem;margin-bottom:4px"><strong>名称：</strong><span style="text-decoration:line-through;color:var(--text-muted)">${escapeHtml(s.display_name)}</span> → <span style="color:var(--blue,#3b82f6)">${escapeHtml(mirror.display_name)}</span></div>` : ''}
+                        ${mirror.description !== undefined && mirror.description !== s.description ? `<div style="font-size:0.82rem;margin-bottom:4px"><strong>描述：</strong>${escapeHtml(mirror.description)}</div>` : ''}
+                        ${mirror.category && mirror.category !== s.category ? `<div style="font-size:0.82rem;margin-bottom:4px"><strong>分类：</strong>${escapeHtml(mirror.category)}</div>` : ''}
+                    </div>
+                `;
+            }
+        } catch(e) {}
+    }
+
+    // 修改历史
+    let historyHtml = '';
+    if (s.content_history && s.content_history.length > 0) {
+        historyHtml = `<div style="margin-top:12px;font-size:0.82rem">
+            <strong>修改历史（${s.content_history.length} 条）</strong>
+            <div style="max-height:120px;overflow-y:auto;margin-top:4px">
+                ${s.content_history.map((h,i) => `<div style="padding:3px 0;border-bottom:1px solid var(--border);font-size:0.78rem;color:var(--text-muted)">${i+1}. ${escapeHtml(h.updated_by||'system')} · ${h.updated_at ? timeAgo(h.updated_at) : ''} — ${escapeHtml(h.summary||'')}</div>`).join('')}
+            </div>
+        </div>`;
+    }
+
     $('#preview-body').innerHTML = `
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px">
             ${categoryTag(s)}
@@ -738,8 +797,10 @@ function previewSkill(id) {
         ${s.trigger_phrase ? `<div style="margin-bottom:12px;font-size:0.85rem"><strong>触发短语：</strong>${escapeHtml(s.trigger_phrase)}</div>` : ''}
         <div style="margin-bottom:8px;font-size:0.85rem;font-weight:600">模板内容</div>
         ${contentHtml}
+        ${mirrorHtml}
+        ${historyHtml}
         <div style="margin-top:12px;font-size:0.78rem;color:var(--text-muted)">
-            创建者: ${s.created_by || 'system'} · ${s.created_at || ''}
+            最近修改: ${s.mirror_updated_at || s.updated_at || '-'}
             ${s.review_status === 'pending' ? '<br><span style="color:var(--yellow,#f59e0b)">⏳ 此 Skill 待管理员审核，审核通过后才能进入市场</span>' : ''}
             ${s.review_status === 'revise' ? '<br><span style="color:var(--orange,#f97316)">📝 此 Skill 需要修改后重新提交，修改后将自动重新进入待评审状态</span>' : ''}
             ${s.review_comment ? `<br><span style="color:var(--orange,#f97316)">审核意见: ${escapeHtml(s.review_comment)}</span>` : ''}
@@ -794,17 +855,62 @@ async function openAssignModal(skillId) {
 
     // 加载所有 OpenClaw
     const claws = await API.listClaws();
-    const installed = (s && s.used_by) || [];
+    const freshSet = new Set((s && s.used_by_fresh) || []);
+    const staleSet = new Set((s && s.used_by_stale) || []);
 
     $('#assign-claw-list').innerHTML = claws.map(c => {
-        const isInstalled = installed.includes(c.name);
-        return `<label style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:6px;cursor:pointer;border:1px solid ${isInstalled ? 'var(--green,#22c55e)' : 'var(--border)'};background:${isInstalled ? 'rgba(34,197,94,0.08)' : 'var(--bg-card,transparent)'};transition:all .15s">
-            <input type="checkbox" value="${c.id}" data-name="${c.name}" ${isInstalled ? 'checked disabled' : ''} style="width:16px;height:16px;accent-color:var(--accent)">
+        const isFresh = freshSet.has(c.name);
+        const isStale = staleSet.has(c.name);
+        let borderColor = 'var(--border)';
+        let bgColor = 'var(--bg-card,transparent)';
+        let cbAttrs = '';
+        let tagHtml = '';
+        let title = '';
+        if (isFresh) {
+            // 已最新：可勾选触发强制重装（用于安装失败恢复 / 文件被删 等）
+            borderColor = 'var(--green,#22c55e)';
+            bgColor = 'rgba(34,197,94,0.06)';
+            cbAttrs = '';   // 不默认勾选，但允许勾选
+            tagHtml = '<span class="tag tag-green" style="font-size:0.72rem;padding:2px 8px">已安装</span>'
+                    + '<span style="font-size:0.7rem;color:var(--text-muted);margin-left:6px">勾选可强制重装</span>';
+            title = '已安装最新版本。勾选可强制重新分配（用于安装失败恢复、文件被删、强制覆盖等场景）';
+        } else if (isStale) {
+            borderColor = '#f59e0b';
+            bgColor = 'rgba(245,158,11,0.10)';
+            cbAttrs = 'checked';
+            tagHtml = '<span class="tag" style="font-size:0.72rem;padding:2px 8px;background:#f59e0b;color:#fff">需要重新分配</span>';
+            title = 'Hub 端 Skill 已修改，本地为旧版本，建议重新分配';
+        } else {
+            title = '尚未安装';
+        }
+        return `<label title="${title}" style="display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:6px;cursor:pointer;border:1px solid ${borderColor};background:${bgColor};transition:all .15s">
+            <input type="checkbox" value="${c.id}" data-name="${c.name}" ${cbAttrs} style="width:16px;height:16px;accent-color:var(--accent)">
             <span style="width:28px;height:28px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:0.78rem;font-weight:600;flex-shrink:0">${(c.avatar || c.name[0])}</span>
             <span style="flex:1;font-size:0.88rem;font-weight:500">${c.name}<span style="font-size:0.78rem;color:var(--text-muted);margin-left:6px;font-weight:400">${c.role_title || c.role || ''}</span></span>
-            ${isInstalled ? '<span class="tag tag-green" style="font-size:0.72rem;padding:2px 8px">已安装</span>' : ''}
+            ${tagHtml}
         </label>`;
     }).join('');
+
+    // 顶部提示：stale 优先；否则只有已装时给一句"勾选可强制重装"提示
+    const staleCount = staleSet.size;
+    const freshCount = freshSet.size;
+    const hintEl = document.getElementById('assign-stale-hint');
+    if (hintEl) {
+        if (staleCount > 0) {
+            hintEl.style.borderColor = '#f59e0b';
+            hintEl.style.background = 'rgba(245,158,11,0.08)';
+            hintEl.innerHTML = `⚠️ 该 Skill 内容已修改，<strong style="color:#f59e0b">${staleCount} 个 OpenClaw</strong> 装的是旧版本（橙色标记），默认已勾选，点"确认分配"即可批量重装。`
+                + (freshCount > 0 ? `<br>另有 ${freshCount} 个已是最新，如需强制重装（安装失败恢复等）也可手动勾选。` : '');
+            hintEl.style.display = '';
+        } else if (freshCount > 0) {
+            hintEl.style.borderColor = 'var(--border)';
+            hintEl.style.background = 'rgba(34,197,94,0.05)';
+            hintEl.innerHTML = `💡 提示：勾选"已安装"的 OpenClaw 可<strong>强制重新分配</strong>（用于安装失败恢复、文件被误删、强制覆盖等场景）。`;
+            hintEl.style.display = '';
+        } else {
+            hintEl.style.display = 'none';
+        }
+    }
 
     $('#assign-modal').classList.add('active');
 }
