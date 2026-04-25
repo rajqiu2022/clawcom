@@ -1,2 +1,0 @@
-#!/bin/bash
-docker stop memos; docker rm memos; docker run -d --name memos -p 5231:5230 -v /data/memos:/var/opt/memos --restart unless-stopped ghcr.io/usememos/memos:latest; sleep 3; docker ps | grep memos; docker port memos
