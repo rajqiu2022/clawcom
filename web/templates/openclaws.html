@@ -89,7 +89,9 @@
                 </div>
                 <div class="form-group">
                     <label class="form-label">所属用户 *</label>
-                    <input class="form-input" name="owner" placeholder="如：张三">
+                    <select class="form-input" name="owner" id="owner-select" required>
+                        <option value="">-- 选择用户 --</option>
+                    </select>
                 </div>
             </div>
             <div class="form-group">
@@ -137,120 +139,73 @@
             <div class="form-group" style="border-top:1px dashed var(--border);padding-top:14px;margin-top:14px">
                 <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer">
                     <input type="checkbox" id="create-agent-toggle" onchange="onCreateAgentToggle()" style="width:16px;height:16px">
-                    <span>同时部署 Hermes Agent（Hub 通过 SSH 自动安装）</span>
+                    <span>同时部署 Hermes Agent（Hub 自动安装）</span>
                 </label>
                 <div style="font-size:0.78rem;color:var(--text-muted);margin-top:6px;padding-left:24px;line-height:1.6">
-                    勾选后 Hub 会先建 OpenClaw、生成 Token，再 SSH 到目标机部署一个 per-claw Hermes（目录 / 容器名 / unit 名按 claw id 隔离，不会和别的 claw 互相覆盖）。<br>
-                    SSH 凭据 / Venus API Key 仅用于本次部署，<strong>不会落库</strong>。该操作仅 <strong>超级管理员</strong> 可执行。
+                    勾选后 Hub 会先建 OpenClaw、生成 Token，再自动部署一个 per-claw Hermes（目录 / unit 名按 claw id 隔离，不会和别的 claw 互相覆盖）。<br>
+                    Venus API Key 仅用于本次部署，<strong>不会落库</strong>。该操作仅 <strong>超级管理员</strong> 可执行。
                 </div>
             </div>
             <div id="create-agent-fields" style="display:none;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">
-                <div class="form-group" style="margin-bottom:10px">
-                    <label class="form-label">部署方式 *</label>
-                    <select class="form-input" name="deploy_method" id="deploy-method" onchange="onDeployMethodChange()">
-                        <option value="docker">Docker（推荐 / 新机器，需 Docker 18+ 且能拉到镜像）</option>
-                        <option value="systemd">Systemd（兼容老机器 / 无 Docker，假设 Hermes 已装好 venv）</option>
-                    </select>
-                    <div id="deploy-method-hint" style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5"></div>
-                </div>
-                <div class="two-col">
-                    <div class="form-group" style="margin-bottom:10px">
-                        <label class="form-label">目标机 host *</label>
-                        <input class="form-input" name="deploy_host" placeholder="如 9.134.51.249（Hermes 所在机，非 Hub）" title="SSH 落点：与《Hermes 部署指南》§一 一致时常为 249；Hub 仍在 9.134.11.169:8088">
-                    </div>
-                    <div class="form-group" style="margin-bottom:10px">
-                        <label class="form-label">SSH 端口</label>
-                        <input class="form-input" name="deploy_ssh_port" placeholder="22" value="22">
-                    </div>
-                </div>
-                <div class="two-col">
-                    <div class="form-group" style="margin-bottom:10px">
-                        <label class="form-label">SSH 用户 *</label>
-                        <input class="form-input" name="deploy_ssh_user" placeholder="root" value="root">
-                    </div>
-                    <div class="form-group" style="margin-bottom:10px">
-                        <label class="form-label">认证方式</label>
-                        <select class="form-input" name="deploy_auth_type" id="deploy-auth-type" onchange="onDeployAuthChange()">
-                            <option value="password">密码</option>
-                            <option value="key">SSH 私钥（PEM 文本）</option>
-                        </select>
-                    </div>
-                </div>
-                <div class="form-group" id="deploy-password-group" style="margin-bottom:10px">
-                    <label class="form-label">SSH 密码 *</label>
-                    <input class="form-input" type="password" name="deploy_ssh_password" placeholder="仅本次部署使用，不会保存到 Hub">
-                </div>
-                <div class="form-group" id="deploy-key-group" style="margin-bottom:10px;display:none">
-                    <label class="form-label">SSH 私钥（PEM 文本） *</label>
-                    <textarea class="form-textarea" name="deploy_ssh_private_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----" style="min-height:90px;font-family:monospace;font-size:0.78rem"></textarea>
-                    <input class="form-input" type="password" name="deploy_ssh_key_passphrase" placeholder="密钥 passphrase（无则留空）" style="margin-top:6px">
-                </div>
+                <input type="hidden" name="deploy_method" value="systemd">
                 <div class="form-group" style="margin-bottom:10px">
                     <label class="form-label">Venus API Key *</label>
                     <input class="form-input" type="password" name="deploy_venus_api_key" placeholder="如 SELWHFXdTCIc8abHcfjvXpFC@4991（仅本次部署使用）">
                 </div>
-                <!-- Docker 模式专用 -->
-                <div class="form-group" id="deploy-docker-fields" style="margin-bottom:0">
-                    <label class="form-label">Hermes 镜像</label>
-                    <input class="form-input" name="deploy_image" placeholder="ccr.ccs.tencentyun.com/hermes/hermes-agent:latest" value="ccr.ccs.tencentyun.com/hermes/hermes-agent:latest">
+                <div class="form-group" style="margin-bottom:10px">
+                    <label class="form-label">目录布局 *</label>
+                    <select class="form-input" name="hermes_layout" id="hermes-layout" onchange="onHermesLayoutChange()">
+                        <option value="split" selected>标准拆分（推荐）：安装目录 + 数据目录（HERMES_HOME）</option>
+                        <option value="legacy">单目录兼容（旧机）：install 与 data 同一根路径</option>
+                    </select>
                 </div>
-                <!-- Systemd 模式专用（对齐 Hermes 部署指南 v2：/opt + /root/.hermes-*） -->
-                <div id="deploy-systemd-fields" style="display:none">
-                    <div class="form-group" style="margin-bottom:10px">
-                        <label class="form-label">目录布局 *</label>
-                        <select class="form-input" name="hermes_layout" id="hermes-layout" onchange="onHermesLayoutChange()">
-                            <option value="split" selected>标准拆分（推荐）：安装目录 + 数据目录（HERMES_HOME）</option>
-                            <option value="legacy">单目录兼容（旧机）：install 与 data 同一根路径</option>
-                        </select>
-                    </div>
-                    <div id="hermes-split-fields">
-                        <div class="two-col">
-                            <div class="form-group" style="margin-bottom:10px">
-                                <label class="form-label">安装目录（venv + 源码）*</label>
-                                <input class="form-input" name="deploy_hermes_install_dir" placeholder="/opt/hermes-xiaohe">
-                            </div>
-                            <div class="form-group" style="margin-bottom:10px">
-                                <label class="form-label">数据目录（HERMES_HOME）*</label>
-                                <input class="form-input" name="deploy_hermes_data_dir" placeholder="/root/.hermes-xiaohe">
-                            </div>
-                        </div>
-                        <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:10px;line-height:1.55">
-                            与《Hermes Agent 标准化部署指南》一致：<code>config.yaml</code> 写在数据目录<strong>根</strong>下；
-                            systemd 服务名为 <code>hermes-gateway-claw-&lt;id&gt;.service</code>，
-                            启动命令为 <code>python -m hermes_cli.main gateway run --replace</code>。
-                        </div>
-                    </div>
-                    <div id="hermes-legacy-fields" style="display:none">
-                        <div class="form-group" style="margin-bottom:10px">
-                            <label class="form-label">Hermes 根目录（单目录）*</label>
-                            <input class="form-input" name="deploy_hermes_home" placeholder="如 /opt/hermes-xiaohe（含 venv/ 与 config/）">
-                            <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
-                                兼容旧布局：配置写在 <code>{根}/config/config.yaml</code>，默认启动方式为 <strong>Module</strong>（<code>python -m hermes_agent</code>），可在下方改为 Gateway。
-                            </div>
-                        </div>
-                    </div>
-                    <div class="form-group" style="margin-bottom:10px">
-                        <label class="form-label">启动方式</label>
-                        <select class="form-input" name="deploy_hermes_start_mode" id="deploy-hermes-start-mode">
-                            <option value="gateway">Gateway（hermes_cli.main gateway run --replace）</option>
-                            <option value="module">Module（python -m hermes_agent 等）</option>
-                        </select>
-                    </div>
+                <div id="hermes-split-fields">
                     <div class="two-col">
                         <div class="form-group" style="margin-bottom:10px">
-                            <label class="form-label">Python 可执行文件（可选）</label>
-                            <input class="form-input" name="deploy_hermes_python" placeholder="缺省 {安装目录}/venv/bin/python">
+                            <label class="form-label">安装目录（venv + 源码）*</label>
+                            <input class="form-input" name="deploy_hermes_install_dir" placeholder="/opt/hermes-xiaohe">
                         </div>
                         <div class="form-group" style="margin-bottom:10px">
-                            <label class="form-label">Systemd User（可选）</label>
-                            <input class="form-input" name="deploy_systemd_user" placeholder="root" value="root">
+                            <label class="form-label">数据目录（HERMES_HOME）*</label>
+                            <input class="form-input" name="deploy_hermes_data_dir" placeholder="/root/.hermes-xiaohe">
                         </div>
                     </div>
-                    <div class="form-group" style="margin-bottom:0">
-                        <label class="form-label">Module 模式下的包名（可选）</label>
-                        <input class="form-input" name="deploy_hermes_module" placeholder="hermes_agent" value="hermes_agent">
-                        <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px">仅当启动方式为 Module 时使用。</div>
+                    <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:10px;line-height:1.55">
+                        与《Hermes Agent 标准化部署指南》一致：<code>config.yaml</code> 写在数据目录<strong>根</strong>下；
+                        systemd 服务名为 <code>hermes-gateway-claw-&lt;id&gt;.service</code>，
+                        启动命令为 <code>python -m hermes_cli.main gateway run --replace</code>。
                     </div>
+                </div>
+                <div id="hermes-legacy-fields" style="display:none">
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="form-label">Hermes 根目录（单目录）*</label>
+                        <input class="form-input" name="deploy_hermes_home" placeholder="如 /opt/hermes-xiaohe（含 venv/ 与 config/）">
+                        <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
+                            兼容旧布局：配置写在 <code>{根}/config/config.yaml</code>，默认启动方式为 <strong>Module</strong>（<code>python -m hermes_agent</code>），可在下方改为 Gateway。
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-bottom:10px">
+                    <label class="form-label">启动方式</label>
+                    <select class="form-input" name="deploy_hermes_start_mode" id="deploy-hermes-start-mode">
+                        <option value="gateway">Gateway（hermes_cli.main gateway run --replace）</option>
+                        <option value="module">Module（python -m hermes_agent 等）</option>
+                    </select>
+                </div>
+                <div class="two-col">
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="form-label">Python 可执行文件（可选）</label>
+                        <input class="form-input" name="deploy_hermes_python" placeholder="缺省 {安装目录}/venv/bin/python">
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="form-label">Systemd User（可选）</label>
+                        <input class="form-input" name="deploy_systemd_user" placeholder="root" value="root">
+                    </div>
+                </div>
+                <div class="form-group" style="margin-bottom:0">
+                    <label class="form-label">Module 模式下的包名（可选）</label>
+                    <input class="form-input" name="deploy_hermes_module" placeholder="hermes_agent" value="hermes_agent">
+                    <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px">仅当启动方式为 Module 时使用。</div>
                 </div>
             </div>
             </div><!-- /create-agent-block -->
@@ -861,8 +816,6 @@ function _applyCreateAgentVisibility() {
         if (toggle) toggle.checked = false;
         const fields = document.getElementById('create-agent-fields');
         if (fields) fields.style.display = 'none';
-    } else {
-        try { onDeployMethodChange(); } catch (e) { /* DOM 还没就绪就忽略 */ }
     }
 }
 
@@ -1154,6 +1107,7 @@ document.getElementById('avatar-modal').addEventListener('click', e => {
 
 function openCreateModal() {
     loadProjectsForSelect();
+    loadUsersForSelect();
     document.getElementById('create-form').reset();
     renderRoleOptions();
     document.getElementById('role-hint').textContent = '';
@@ -1161,11 +1115,27 @@ function openCreateModal() {
     document.getElementById('avatar-input').value = '🤖';
     document.getElementById('avatar-preview').textContent = '🤖';
     initAvatarPicker();
-    // 所属用户默认为当前登录用户
-    if (currentUser) {
-        document.querySelector('#create-form input[name="owner"]').value = currentUser.display_name || currentUser.username || '';
-    }
     document.getElementById('create-modal').classList.add('active');
+}
+
+// 加载用户列表填充到"所属用户"下拉框
+async function loadUsersForSelect() {
+    const sel = document.getElementById('owner-select');
+    if (!sel) return;
+    try {
+        const users = await API.request('GET', '/api/v1/users');
+        let html = '<option value="">-- 选择用户 --</option>';
+        users.forEach(u => {
+            const display = u.display_name || u.username || u.email || '未知';
+            const selected = currentUser && (u.id === currentUser.id || u.username === currentUser.username) ? ' selected' : '';
+            // owner 字段必须存 username，不能存 display_name
+            html += `<option value="${u.username}"${selected}>${display}</option>`;
+        });
+        sel.innerHTML = html;
+    } catch (err) {
+        console.error('加载用户列表失败:', err);
+        sel.innerHTML = '<option value="">-- 加载失败 --</option>';
+    }
 }
 
 const roleHints = {
@@ -1403,40 +1373,7 @@ function onCreateAgentToggle() {
     const on = document.getElementById('create-agent-toggle').checked;
     document.getElementById('create-agent-fields').style.display = on ? '' : 'none';
     if (on) {
-        onDeployMethodChange();
         try { onHermesLayoutChange(); } catch (e) { /* */ }
-    }
-}
-
-function onDeployAuthChange() {
-    const v = document.getElementById('deploy-auth-type').value;
-    document.getElementById('deploy-password-group').style.display = v === 'password' ? '' : 'none';
-    document.getElementById('deploy-key-group').style.display = v === 'key' ? '' : 'none';
-}
-
-// 切换部署方式时显示对应的字段，并给一段提示文案
-function onDeployMethodChange() {
-    const method = document.getElementById('deploy-method').value;
-    const dockerFields = document.getElementById('deploy-docker-fields');
-    const systemdFields = document.getElementById('deploy-systemd-fields');
-    const hint = document.getElementById('deploy-method-hint');
-    if (method === 'systemd') {
-        dockerFields.style.display = 'none';
-        systemdFields.style.display = '';
-        onHermesLayoutChange();
-        hint.innerHTML =
-            '⚠️ Systemd 与《Hermes 部署指南》v2 对齐：<strong>不会</strong>远程 git/pip 安装，' +
-            '只写配置 + systemd unit。标准拆分为 <code>/opt/hermes-*</code>（venv）+ ' +
-            '<code>/root/.hermes-*</code>（HERMES_HOME）；服务名 ' +
-            '<code>hermes-gateway-claw-&lt;id&gt;.service</code>，默认 Gateway 启动。';
-    } else {
-        dockerFields.style.display = '';
-        systemdFields.style.display = 'none';
-        hint.innerHTML =
-            'Docker 模式：Hub 会 <code>docker pull</code> 镜像并起一个 ' +
-            '<code>hermes-agent-claw-&lt;id&gt;</code> 容器，目录走 ' +
-            '<code>/opt/openclaw-agents/claw-&lt;id&gt;-&lt;name&gt;/</code>。' +
-            '<br>需要目标机有可用的 Docker 18+，且能拉到镜像。';
     }
 }
 
@@ -1527,76 +1464,46 @@ document.getElementById('create-form').addEventListener('submit', async e => {
     const createAgent = isSuperAdmin && document.getElementById('create-agent-toggle').checked;
     let deployOpts = null;
     if (createAgent) {
-        const authType = data.deploy_auth_type || 'password';
-        const deployMethod = (data.deploy_method || 'docker').toLowerCase();
-        if (!data.deploy_host) {
-            showToast('请填写目标机 host', 'error');
-            return;
-        }
         if (!data.deploy_venus_api_key) {
             showToast('请填写 Venus API Key', 'error');
             return;
         }
-        if (authType === 'password' && !data.deploy_ssh_password) {
-            showToast('请填写 SSH 密码（或切换为私钥认证）', 'error');
-            return;
-        }
-        if (authType === 'key' && !data.deploy_ssh_private_key) {
-            showToast('请粘贴 SSH 私钥（PEM 文本）', 'error');
-            return;
-        }
-        if (deployMethod === 'systemd') {
-            const layout = data.hermes_layout || 'split';
-            if (layout === 'split') {
-                if (!data.deploy_hermes_install_dir || !data.deploy_hermes_data_dir) {
-                    showToast('请填写安装目录与数据目录（或切换为单目录兼容）', 'error');
-                    return;
-                }
-                if (!data.deploy_hermes_install_dir.startsWith('/') ||
-                    !data.deploy_hermes_data_dir.startsWith('/')) {
-                    showToast('安装目录与数据目录须为绝对路径', 'error');
-                    return;
-                }
-            } else {
-                if (!data.deploy_hermes_home) {
-                    showToast('单目录模式请填写 Hermes 根目录', 'error');
-                    return;
-                }
-                if (!data.deploy_hermes_home.startsWith('/')) {
-                    showToast('根目录须为绝对路径', 'error');
-                    return;
-                }
+        const layout = data.hermes_layout || 'split';
+        if (layout === 'split') {
+            if (!data.deploy_hermes_install_dir || !data.deploy_hermes_data_dir) {
+                showToast('请填写安装目录与数据目录（或切换为单目录兼容）', 'error');
+                return;
+            }
+            if (!data.deploy_hermes_install_dir.startsWith('/') ||
+                !data.deploy_hermes_data_dir.startsWith('/')) {
+                showToast('安装目录与数据目录须为绝对路径', 'error');
+                return;
+            }
+        } else {
+            if (!data.deploy_hermes_home) {
+                showToast('单目录模式请填写 Hermes 根目录', 'error');
+                return;
+            }
+            if (!data.deploy_hermes_home.startsWith('/')) {
+                showToast('根目录须为绝对路径', 'error');
+                return;
             }
         }
         deployOpts = {
-            deploy_method: deployMethod,
-            host: data.deploy_host,
-            ssh_port: data.deploy_ssh_port ? parseInt(data.deploy_ssh_port, 10) : 22,
-            ssh_user: data.deploy_ssh_user || 'root',
+            deploy_method: 'systemd',
             venus_api_key: data.deploy_venus_api_key,
         };
-        if (deployMethod === 'docker') {
-            deployOpts.image = data.deploy_image || 'ccr.ccs.tencentyun.com/hermes/hermes-agent:latest';
+        if (layout === 'split') {
+            deployOpts.hermes_install_dir = data.deploy_hermes_install_dir.replace(/\/+$/, '');
+            deployOpts.hermes_data_dir = data.deploy_hermes_data_dir.replace(/\/+$/, '');
         } else {
-            const layout = data.hermes_layout || 'split';
-            if (layout === 'split') {
-                deployOpts.hermes_install_dir = data.deploy_hermes_install_dir.replace(/\/+$/, '');
-                deployOpts.hermes_data_dir = data.deploy_hermes_data_dir.replace(/\/+$/, '');
-            } else {
-                deployOpts.hermes_home = data.deploy_hermes_home.replace(/\/+$/, '');
-            }
-            if (data.deploy_hermes_python) deployOpts.hermes_python = data.deploy_hermes_python;
-            if (data.deploy_hermes_module) deployOpts.hermes_module = data.deploy_hermes_module;
-            if (data.deploy_systemd_user) deployOpts.systemd_user = data.deploy_systemd_user;
-            if (data.deploy_hermes_start_mode) {
-                deployOpts.hermes_start_mode = data.deploy_hermes_start_mode;
-            }
+            deployOpts.hermes_home = data.deploy_hermes_home.replace(/\/+$/, '');
         }
-        if (authType === 'password') {
-            deployOpts.ssh_password = data.deploy_ssh_password;
-        } else {
-            deployOpts.ssh_private_key = data.deploy_ssh_private_key;
-            if (data.deploy_ssh_key_passphrase) deployOpts.ssh_key_passphrase = data.deploy_ssh_key_passphrase;
+        if (data.deploy_hermes_python) deployOpts.hermes_python = data.deploy_hermes_python;
+        if (data.deploy_hermes_module) deployOpts.hermes_module = data.deploy_hermes_module;
+        if (data.deploy_systemd_user) deployOpts.systemd_user = data.deploy_systemd_user;
+        if (data.deploy_hermes_start_mode) {
+            deployOpts.hermes_start_mode = data.deploy_hermes_start_mode;
         }
         data.create_agent = true;
         data.deploy = deployOpts;
