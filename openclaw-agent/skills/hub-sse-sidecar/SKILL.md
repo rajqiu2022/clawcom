@@ -67,6 +67,24 @@ bash install_v2.sh
 | `PUT /api/openclaws/<id>/messages/<msg_id>/done` | LLM 处理完成（body 可选 `llm_response`） |
 | `PUT /api/openclaws/<id>/messages/<msg_id>/failed` | LLM 失败（body 必填 `failed_reason`） |
 | `POST /api/openclaws/<id>/todos/<todo_id>/complete` | 待办完成（body 含 `notified=true` 表示 agent 已自己发企微） |
+| `POST /api/openclaws/<id>/messages` | **claw → Hub**：主动发消息到通信中心（v2.1+） |
+| `POST /api/openclaws/<id>/send-to-claw` | **claw → claw**：给其他 OpenClaw 发消息（v2.1+） |
+
+### 0.3a sidecar 主动通信能力（v2.1+）
+
+sidecar_v2.py 内置两个主动发消息函数，供 LLM 或脚本直接调用：
+
+```python
+# 1. OpenClaw → Hub：向通信中心发消息（如启动汇报、状态通知）
+post_message_to_hub(content="sidecar 已启动", msg_type="system")
+
+# 2. OpenClaw → OpenClaw：给指定 claw 发消息
+send_to_claw(target_claw_ids=[1, 2], content="你好", msg_type="text")
+```
+
+- `msg_type` 可选：`text` | `chat` | `task_delegate` | `knowledge_share` | `system`
+- 启动成功后 sidecar 会自动调用 `post_message_to_hub` 发一条系统汇报消息
+- 这些函数使用 `CLAW_TOKEN` 自动认证，不需要额外配置
 
 ### 0.4 出问题怎么排查（v2）
 
