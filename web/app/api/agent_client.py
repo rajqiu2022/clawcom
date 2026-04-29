@@ -567,6 +567,7 @@ def claw_send_message(claw_id, claw=None):
 
     msg = ClawMessage(
         claw_id=claw_id,
+        from_claw_id=claw_id,
         sender_name=claw.name,
         content=data['content'],
         msg_type=data.get('msg_type', 'text'),
@@ -584,7 +585,7 @@ def claw_send_message(claw_id, claw=None):
 @agent_bp.route('/<int:claw_id>/send-to-claw', methods=['POST'])
 @require_claw_token
 def claw_send_to_claw(claw_id, claw=None):
-    """OpenClaw 给其他 OpenClaw 发消息（admin claw 可发给任意 claw）
+    """OpenClaw 给其他 OpenClaw 发消息（任意 claw 可互发，不能发给自己）
 
     请求体：
     {
@@ -593,9 +594,6 @@ def claw_send_to_claw(claw_id, claw=None):
         "msg_type": "text|chat|task_delegate|knowledge_share"
     }
     """
-    if claw.role != 'admin':
-        return jsonify({'error': '只有管理员 claw 可以给其他 claw 发消息'}), 403
-
     data = request.get_json()
     if not data or not data.get('content'):
         return jsonify({'error': 'content 为必填项'}), 400
@@ -609,7 +607,7 @@ def claw_send_to_claw(claw_id, claw=None):
     except (TypeError, ValueError):
         return jsonify({'error': 'target_claw_ids 必须是整数数组'}), 400
 
-    # 防止 admin claw 把消息发给自己导致"自发自收"回路（direction=to_claw 且 sender=自己）
+    # 禁止自发自收回路
     if claw_id in normalized_target_ids:
         return jsonify({'error': '禁止给自己发送消息，请改用 /messages/<msg_id>/read 闭环回复'}), 400
 
@@ -625,6 +623,7 @@ def claw_send_to_claw(claw_id, claw=None):
     for target in targets:
         msg = ClawMessage(
             claw_id=target.id,
+            from_claw_id=claw_id,
             sender_name=claw.name,
             content=content,
             msg_type=msg_type,

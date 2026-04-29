@@ -312,6 +312,43 @@ def _post_complete(todo_id, result_summary=''):
         return False
 
 
+def post_message_to_hub(content, msg_type='text'):
+    """OpenClaw → Hub：主动给 Hub 发消息（如部署汇报、状态通知）。"""
+    url = f"{HUB_URL}/api/openclaws/{CLAW_ID}/messages"
+    data = json.dumps({
+        'content': content,
+        'msg_type': msg_type,
+    }).encode('utf-8')
+    req = urllib.request.Request(url, data=data, method='POST')
+    req.add_header('Authorization', f'Bearer {CLAW_TOKEN}')
+    req.add_header('Content-Type', 'application/json')
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status == 200 or r.status == 201
+    except Exception as e:
+        log(f'[hub] 主动发消息失败 err={e}')
+        return False
+
+
+def send_to_claw(target_claw_ids, content, msg_type='text'):
+    """OpenClaw → OpenClaw：给其他 claw 发消息。"""
+    url = f"{HUB_URL}/api/openclaws/{CLAW_ID}/send-to-claw"
+    data = json.dumps({
+        'target_claw_ids': target_claw_ids,
+        'content': content,
+        'msg_type': msg_type,
+    }).encode('utf-8')
+    req = urllib.request.Request(url, data=data, method='POST')
+    req.add_header('Authorization', f'Bearer {CLAW_TOKEN}')
+    req.add_header('Content-Type', 'application/json')
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status == 200 or r.status == 201
+    except Exception as e:
+        log(f'[claw] 给 claw 发消息失败 err={e}')
+        return False
+
+
 def handle_todo(todo):
     """处理一条 ClawTodo：LLM 跑业务逻辑，sidecar 负责 complete 回调。"""
     todo_id = todo.get('id')
@@ -463,6 +500,14 @@ def main():
     if not get_cfg('enabled', True):
         log('[config] enabled=false，sidecar 直接退出')
         sys.exit(0)
+
+    # 启动成功后向 Hub 汇报（openclaw → hub）
+    claw_name = get_cfg('claw_name', '')
+    post_message_to_hub(
+        f"【{claw_name or 'OpenClaw'}】sidecar v{SIDECAR_VERSION} 已启动，"
+        f"SSE 连接就绪，todo worker 运行中。",
+        msg_type='system'
+    )
 
     # 信号处理
     def stop(signum, frame):

@@ -1008,7 +1008,9 @@ class ClawMessage(db.Model):
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
-                       nullable=False, comment='关联的 OpenClaw ID')
+                       nullable=False, comment='关联的 OpenClaw ID（接收方）')
+    from_claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
+                            nullable=True, comment='发送方 OpenClaw ID（claw→claw / claw→hub 时填写）')
     sender_name = db.Column(db.String(50), default='Web Admin',
                           comment='发送者名称')
     content = db.Column(db.Text, nullable=False, comment='消息内容')
@@ -1027,8 +1029,10 @@ class ClawMessage(db.Model):
     llm_response = db.Column(db.Text, comment='LLM 处理后的回复内容（可选）')
     created_at = db.Column(db.DateTime, default=_now)
 
-    # 关联到 OpenClaw
-    claw = db.relationship('OpenClawInstance', backref='messages')
+    # 关联到 OpenClaw（接收方）
+    claw = db.relationship('OpenClawInstance', foreign_keys=[claw_id], backref='messages')
+    # 关联到发送方 OpenClaw
+    from_claw = db.relationship('OpenClawInstance', foreign_keys=[from_claw_id], backref='sent_messages')
 
     def _infer_urgency(self):
         """根据 msg_type 推断 urgency（DB 没存就推断）
@@ -1054,6 +1058,7 @@ class ClawMessage(db.Model):
         return {
             'id': self.id,
             'claw_id': self.claw_id,
+            'from_claw_id': self.from_claw_id,
             'sender_name': self.sender_name,
             'content': self.content,
             'msg_type': self.msg_type,
@@ -1408,7 +1413,7 @@ class AgentDeployment(db.Model):
     remote_base_dir = db.Column(db.String(500), default='',
                                 comment='per-claw 远端工作目录：docker=/opt/openclaw-agents/claw-12-xiaoma/，systemd=hermes_home（如 /opt/hermes-xiaohe）')
     container_name = db.Column(db.String(100), default='',
-                               comment='docker=容器名 hermes-agent-claw-12；systemd=unit 名 hermes-agent-claw-12.service')
+                               comment='docker=容器名 hermes-agent-claw-12；systemd=unit hermes-gateway-claw-12.service')
     image = db.Column(db.String(255), default='',
                       comment='docker 模式使用的 Hermes 镜像；systemd 模式留空')
     status = db.Column(db.String(20), default='pending',
