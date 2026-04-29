@@ -36,7 +36,14 @@ import urllib.error
 import urllib.request
 
 # ── 配置加载 ──────────────────────────────────────
-BASE_DIR = os.path.expanduser("~/.openclaw-sidecar")
+# BASE_DIR 不再硬编码：优先从 OPENCLAW_SIDECAR_CONFIG 所在目录推导，
+# 这样同一台机器跑多个 sidecar 实例（小天 / 小赫 / 小马…）时
+# 日志、队列、worker.lock 全部物理隔离，不会互相覆盖。
+CONFIG_FILE = os.environ.get(
+    "OPENCLAW_SIDECAR_CONFIG",
+    os.path.expanduser("~/.openclaw-sidecar/config.env"),
+)
+BASE_DIR = os.path.dirname(os.path.abspath(CONFIG_FILE))
 BOOTSTRAP_LOG_DIR = os.path.join(BASE_DIR, "logs")
 BOOTSTRAP_LOG_FILE = os.path.join(BOOTSTRAP_LOG_DIR, "sse_client.bootstrap.log")
 
@@ -59,12 +66,6 @@ def _bootstrap_log(msg: str) -> None:
 def _fatal_exit(msg: str, code: int = 2) -> None:
     _bootstrap_log("[fatal] " + msg)
     sys.exit(code)
-
-
-CONFIG_FILE = os.environ.get(
-    "OPENCLAW_SIDECAR_CONFIG",
-    os.path.expanduser("~/.openclaw-sidecar/config.env"),
-)
 
 
 def load_config(path: str) -> dict:
@@ -168,6 +169,10 @@ def spawn_worker() -> None:
     except Exception as e:
         log(f"⚠️ 打不开 {bootstrap_log}: {e}，worker 输出会丢")
         log_fd = subprocess.DEVNULL
+    # 把 OPENCLAW_SIDECAR_CONFIG 显式传给子进程，
+    # 保证多实例场景下 worker 也读对应实例的 config.env / queue / lock。
+    child_env = os.environ.copy()
+    child_env["OPENCLAW_SIDECAR_CONFIG"] = CONFIG_FILE
     proc = subprocess.Popen(
         # -u: 不缓冲 stdout/stderr，确保崩溃时最后几行能落盘
         ["python3", "-u", WORKER_SCRIPT],
@@ -175,6 +180,7 @@ def spawn_worker() -> None:
         stdin=subprocess.DEVNULL,
         stdout=log_fd,
         stderr=subprocess.STDOUT,
+        env=child_env,
     )
     try:
         with open(WORKER_LOCK, "w") as f:

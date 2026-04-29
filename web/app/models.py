@@ -129,6 +129,8 @@ class OpenClawInstance(db.Model):
                            onupdate=_now)
     last_modified_by = db.Column(db.String(100),
                                  comment='最近一次修改人（用户名/OpenClaw 名）')
+    owner_wecom_userid = db.Column(db.String(64),
+                                   comment='owner 的企微 userid/RTX 名（如 rajqiu），Hub 集中代发企微消息时使用')
 
     project = db.relationship('Project', backref='openclaws')
 
@@ -418,7 +420,7 @@ class KnowledgeEntry(db.Model):
         default='manual',
         comment='来源类型：openclaw=Agent记录，openspace=自动进化，manual=手动录入')
     status = db.Column(
-        db.Enum('draft', 'pending_review', 'approved', 'rejected'),
+        db.Enum('draft', 'pending_review', 'approved', 'revise', 'rejected'),
         default='draft')
     reviewer_notes = db.Column(db.Text, comment='审核意见')
     approved_at = db.Column(db.DateTime)
@@ -1016,9 +1018,13 @@ class ClawMessage(db.Model):
                          comment='方向：to_claw=Web发给OpenClaw, from_claw=OpenClaw发给Web')
     reply_to = db.Column(db.Integer, comment='回复的消息ID')
     status = db.Column(db.String(20), default='pending',
-                      comment='状态：pending/delivered/read')
+                      comment='状态：pending/delivered/processing/done/failed/read')
     delivered_at = db.Column(db.DateTime, comment='送达时间')
     read_at = db.Column(db.DateTime, comment='读取时间')
+    processing_at = db.Column(db.DateTime, comment='LLM 开始处理时间（B+ 状态机）')
+    done_at = db.Column(db.DateTime, comment='LLM 处理完成时间（B+ 状态机）')
+    failed_reason = db.Column(db.Text, comment='处理失败原因（B+ 状态机）')
+    llm_response = db.Column(db.Text, comment='LLM 处理后的回复内容（可选）')
     created_at = db.Column(db.DateTime, default=_now)
 
     # 关联到 OpenClaw
@@ -1057,6 +1063,9 @@ class ClawMessage(db.Model):
             'urgency': self._infer_urgency(),
             'delivered_at': str(self.delivered_at) if self.delivered_at else None,
             'read_at': str(self.read_at) if self.read_at else None,
+            'processing_at': str(self.processing_at) if self.processing_at else None,
+            'done_at': str(self.done_at) if self.done_at else None,
+            'failed_reason': self.failed_reason,
             'created_at': str(self.created_at) if self.created_at else None,
         }
 
@@ -1293,6 +1302,10 @@ class ClawTodoLog(db.Model):
                        comment='submitted(已提交)/approved(已审核)/completed(旧-兼容)/skipped/overdue/retry_failed')
     retry_count = db.Column(db.Integer, default=0,
                             comment='实际重试次数')
+    notified_at = db.Column(db.DateTime,
+                            comment='企微通知时间：agent 自发或 Hub 兜底，NULL 表示尚未通知 owner')
+    notified_strategy = db.Column(db.String(30), default='',
+                                  comment='通知策略：agent_self(agent自己用 message 工具发) / timeout_fallback(Hub 5分钟兜底应用通知)')
     created_at = db.Column(db.DateTime, default=_now)
 
     openclaw = db.relationship('OpenClawInstance', backref='todo_logs')
@@ -1311,6 +1324,167 @@ class ClawTodoLog(db.Model):
             'result_summary': self.result_summary,
             'status': self.status,
             'retry_count': self.retry_count or 0,
+            'notified_at': str(self.notified_at) if self.notified_at else None,
+            'notified_strategy': self.notified_strategy or '',
+        }
+
+
+class ClawSidecarConfig(db.Model):
+    """Sidecar 配置中心（B+ 方案）
+
+    每个 OpenClaw 一条记录，存放运行时配置；Web 后台改动后 sidecar 通过
+    心跳/拉配置接口感知并热加载。把 install.sh / 本地 env 的脏配置
+    集中到 Hub，是"简单稳定"的关键。
+    """
+    __tablename__ = 'claw_sidecar_configs'
+
+    claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
+                        primary_key=True, comment='关联 OpenClaw ID')
+    agent_type = db.Column(db.String(20), default='openclaw',
+                           comment='agent 类型：openclaw/hermes/custom')
+    openclaw_bin = db.Column(db.String(500), default='',
+                             comment='openclaw CLI 绝对路径（自动探测后回填）')
+    hermes_home = db.Column(db.String(500), default='',
+                            comment='hermes 代码目录（仅 hermes 类型需要）')
+    agent_name = db.Column(db.String(50), default='main',
+                           comment='openclaw agent 子命令名，默认 main')
+    agent_timeout = db.Column(db.Integer, default=300,
+                              comment='单次 LLM 调用超时（秒），默认 300')
+    wecom_enabled = db.Column(db.Boolean, default=False,
+                              comment='本 claw 是否启用企微通知（owner_wecom_userid 必须有值）')
+    enabled = db.Column(db.Boolean, default=True,
+                        comment='是否启用 sidecar；关闭后 sidecar 自停')
+    config_version = db.Column(db.Integer, default=1,
+                               comment='每次配置变更 +1，sidecar 拿到比本地大就 reload')
+    sidecar_version = db.Column(db.String(30), default='',
+                                comment='sidecar 上报的自身版本号')
+    last_heartbeat_at = db.Column(db.DateTime,
+                                  comment='sidecar 最近一次心跳/拉配置时间')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+    updated_by = db.Column(db.String(100), default='',
+                           comment='最近一次修改人')
+
+    claw = db.relationship('OpenClawInstance', backref=db.backref('sidecar_config', uselist=False))
+
+    def to_dict(self):
+        return {
+            'claw_id': self.claw_id,
+            'agent_type': self.agent_type,
+            'openclaw_bin': self.openclaw_bin,
+            'hermes_home': self.hermes_home,
+            'agent_name': self.agent_name,
+            'agent_timeout': self.agent_timeout,
+            'wecom_enabled': bool(self.wecom_enabled),
+            'enabled': bool(self.enabled),
+            'config_version': self.config_version,
+            'sidecar_version': self.sidecar_version,
+            'last_heartbeat_at': str(self.last_heartbeat_at) if self.last_heartbeat_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+            'updated_by': self.updated_by,
+        }
+
+
+class AgentDeployment(db.Model):
+    """Hub 代建 Agent 的远端部署记录
+
+    每次 Hub 通过 SSH 在远端机器部署 / 重新部署一个 OpenClaw 对应的 agent（首期：Hermes Docker），
+    都会落一条记录。OpenClaw 创建本身不会因为部署失败回滚——部署状态独立追踪，
+    支持后续重试和详情查看。
+
+    敏感凭据（SSH 密码 / 私钥 / Venus API Key）只在请求生命周期内使用，绝不落库。
+    """
+    __tablename__ = 'agent_deployments'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    openclaw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
+                            nullable=False, comment='关联 OpenClaw ID')
+    agent_type = db.Column(db.String(20), default='hermes',
+                           comment='agent 类型：首期固定 hermes')
+    deploy_method = db.Column(db.String(20), default='docker',
+                              comment='部署方式：docker / systemd')
+    host = db.Column(db.String(255), default='', comment='远端目标机 host:port 或纯 host')
+    ssh_user = db.Column(db.String(64), default='', comment='SSH 登录用户')
+    remote_base_dir = db.Column(db.String(500), default='',
+                                comment='per-claw 远端工作目录：docker=/opt/openclaw-agents/claw-12-xiaoma/，systemd=hermes_home（如 /opt/hermes-xiaohe）')
+    container_name = db.Column(db.String(100), default='',
+                               comment='docker=容器名 hermes-agent-claw-12；systemd=unit 名 hermes-agent-claw-12.service')
+    image = db.Column(db.String(255), default='',
+                      comment='docker 模式使用的 Hermes 镜像；systemd 模式留空')
+    status = db.Column(db.String(20), default='pending',
+                       comment='pending/in_progress/success/failed/cancelled')
+    log_tail = db.Column(db.Text, comment='最近一次 stdout/stderr 截尾，用于前端展示')
+    error_message = db.Column(db.Text, comment='失败原因摘要')
+    started_at = db.Column(db.DateTime, comment='开始执行时间')
+    finished_at = db.Column(db.DateTime, comment='完成时间')
+    triggered_by = db.Column(db.String(100), default='',
+                             comment='触发人：用户名 / OpenClaw 名 / "system"')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    claw = db.relationship('OpenClawInstance', backref='agent_deployments')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'openclaw_id': self.openclaw_id,
+            'agent_type': self.agent_type,
+            'deploy_method': self.deploy_method,
+            'host': self.host,
+            'ssh_user': self.ssh_user,
+            'remote_base_dir': self.remote_base_dir,
+            'container_name': self.container_name,
+            'image': self.image,
+            'status': self.status,
+            'log_tail': self.log_tail,
+            'error_message': self.error_message,
+            'started_at': str(self.started_at) if self.started_at else None,
+            'finished_at': str(self.finished_at) if self.finished_at else None,
+            'triggered_by': self.triggered_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class WecomSendLog(db.Model):
+    """企微发送日志（B+ 方案）
+
+    所有 Hub 集中代发的企微消息都先落库，再异步/同步发出，方便排障和重试。
+    """
+    __tablename__ = 'wecom_send_logs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
+                        comment='来源 claw（可空，表示系统级通知）')
+    related_type = db.Column(db.String(30), default='',
+                             comment='关联资源类型：todo_complete/message_failed/skill_review 等')
+    related_id = db.Column(db.Integer, comment='关联资源 ID')
+    target_userid = db.Column(db.String(64), default='',
+                              comment='目标企微 userid（rajqiu 等）；空表示走群机器人')
+    content = db.Column(db.Text, comment='发送内容（已渲染 markdown）')
+    strategy = db.Column(db.String(30), default='',
+                         comment='实际使用的发送策略：direct_api/group_robot/relay_lobster')
+    status = db.Column(db.String(20), default='pending',
+                       comment='pending/sent/failed')
+    error = db.Column(db.Text, comment='失败错误信息')
+    created_at = db.Column(db.DateTime, default=_now)
+    sent_at = db.Column(db.DateTime, comment='实际发送时间')
+
+    claw = db.relationship('OpenClawInstance', backref='wecom_send_logs')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'claw_id': self.claw_id,
+            'related_type': self.related_type,
+            'related_id': self.related_id,
+            'target_userid': self.target_userid,
+            'content': self.content,
+            'strategy': self.strategy,
+            'status': self.status,
+            'error': self.error,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'sent_at': str(self.sent_at) if self.sent_at else None,
         }
 
 
@@ -3002,5 +3176,73 @@ class TapdRefreshRequest(db.Model):
             'picked_at': str(self.picked_at) if self.picked_at else None,
             'finished_at': str(self.finished_at) if self.finished_at else None,
             'error_message': self.error_message,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+# ============================================================
+# 评审中心 - 多轮评审记录（多态表，覆盖 Skill/Rule/Knowledge/TCL）
+# ============================================================
+
+class ReviewComment(db.Model):
+    """统一评审记录表（每一次"提交/通过/整改/废弃/纯评论"都写一条，全程留痕）。
+
+    多态：resource_type + resource_id 指向具体资源。不加真 FK，避免删除资源时级联。
+    parent_review_id：仅 TCL 场景使用，关联 test_case_library_reviews.id。
+    """
+
+    __tablename__ = 'review_comments'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    resource_type = db.Column(
+        db.Enum('skill', 'rule', 'knowledge', 'testcase_library'),
+        nullable=False, index=True,
+        comment='资源类型')
+    resource_id = db.Column(db.Integer, nullable=False, index=True,
+                            comment='目标资源 id（不加 FK 约束，应用层校验）')
+    parent_review_id = db.Column(
+        db.Integer, nullable=True,
+        comment='TCL 时关联 test_case_library_reviews.id，其它为 NULL')
+
+    action = db.Column(
+        db.Enum('submit', 'approve', 'revise', 'reject',
+                'withdraw', 'comment'),
+        nullable=False, index=True,
+        comment='动作类型：submit=提交/重新提交, approve=通过, '
+                'revise=打回整改, reject=废弃, withdraw=撤回, comment=纯评论')
+    from_status = db.Column(db.String(30), default='',
+                            comment='状态机起点（如 pending）')
+    to_status = db.Column(db.String(30), default='',
+                          comment='状态机终点（如 revise）')
+    content = db.Column(db.Text, default='',
+                        comment='评审意见 / 整改要求 / 提交说明')
+
+    author = db.Column(db.String(100), default='', index=True,
+                       comment='username / claw_name')
+    author_type = db.Column(
+        db.Enum('user', 'openclaw', 'system'),
+        default='user',
+        comment='发起方类型')
+
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    __table_args__ = (
+        db.Index('ix_rc_resource', 'resource_type', 'resource_id'),
+        db.Index('ix_rc_resource_created',
+                 'resource_type', 'resource_id', 'created_at'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'resource_type': self.resource_type,
+            'resource_id': self.resource_id,
+            'parent_review_id': self.parent_review_id,
+            'action': self.action,
+            'from_status': self.from_status or '',
+            'to_status': self.to_status or '',
+            'content': self.content or '',
+            'author': self.author or '',
+            'author_type': self.author_type or 'user',
             'created_at': str(self.created_at) if self.created_at else None,
         }

@@ -250,7 +250,9 @@ def claw_sse_events(claw_id, claw=None):
             pending_todos = []
             for t in all_todos:
                 log = today_logs.get(t.id)
-                is_done = log and log.status in ('completed', 'approved')
+                # submitted 表示 agent 已经执行并回写结果，等待人工审核。
+                # 对 SSE 推送而言它不能再算 pending，否则会反复触发 agent 重做。
+                is_done = log and log.status in ('submitted', 'completed', 'approved')
                 need_today = False
                 if t.schedule_type == 'once':
                     need_today = not is_done
@@ -423,7 +425,9 @@ def claw_sse_events(claw_id, claw=None):
                         pending_todos = []
                         for t in all_todos:
                             log = today_logs.get(t.id)
-                            is_done = log and log.status in ('completed', 'approved')
+                            # submitted 表示 agent 已经执行并回写结果，等待人工审核。
+                            # 对 SSE 推送而言它不能再算 pending，否则会反复触发 agent 重做。
+                            is_done = log and log.status in ('submitted', 'completed', 'approved')
 
                             # 判断今天是否需要执行
                             need_today = False
@@ -706,6 +710,258 @@ def claw_mark_read(claw_id, msg_id, claw=None):
     if reply_msg:
         result['reply'] = reply_msg.to_dict()
     return jsonify(result)
+
+
+# ==================== B+ 状态机：sidecar v2 显式上报 ====================
+# 这三个接口取代老 sidecar 的"1.5 秒自动 mark read 兜底"——
+# 让 sidecar 在 LLM 执行前/后/失败时显式调用，Hub 才能区分"agent 真的在干"和"agent 卡死"。
+
+@agent_bp.route('/<int:claw_id>/messages/<int:msg_id>/processing', methods=['PUT'])
+@require_claw_token
+def claw_mark_processing(claw_id, msg_id, claw=None):
+    """sidecar v2：开始调用 LLM 处理这条消息。
+
+    幂等：重复调用只更新时间戳。从 pending/delivered → processing。
+    """
+    msg = ClawMessage.query.filter_by(id=msg_id, claw_id=claw_id).first()
+    if not msg:
+        return jsonify({'error': '消息不存在'}), 404
+    msg.status = 'processing'
+    msg.processing_at = datetime.now()
+    if not msg.delivered_at:
+        msg.delivered_at = msg.processing_at
+    db.session.commit()
+    return jsonify({'status': 'ok', 'msg_id': msg_id, 'state': 'processing'})
+
+
+@agent_bp.route('/<int:claw_id>/messages/<int:msg_id>/done', methods=['PUT'])
+@require_claw_token
+def claw_mark_done(claw_id, msg_id, claw=None):
+    """sidecar v2：LLM 处理完成，可附带 llm_response（Hub 仅留痕，不二次转发）。
+
+    Body (可选): { "llm_response": "..." }
+    自动同时更新 read_at（兼容老链路把 done 视作"已读"）。
+    """
+    msg = ClawMessage.query.filter_by(id=msg_id, claw_id=claw_id).first()
+    if not msg:
+        return jsonify({'error': '消息不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    msg.status = 'done'
+    msg.done_at = datetime.now()
+    if not msg.read_at:
+        msg.read_at = msg.done_at
+    resp = (data.get('llm_response') or '').strip()
+    if resp:
+        msg.llm_response = resp[:5000]
+    db.session.commit()
+    return jsonify({'status': 'ok', 'msg_id': msg_id, 'state': 'done'})
+
+
+@agent_bp.route('/<int:claw_id>/messages/<int:msg_id>/failed', methods=['PUT'])
+@require_claw_token
+def claw_mark_failed(claw_id, msg_id, claw=None):
+    """sidecar v2：LLM 处理失败，必须带 failed_reason。
+
+    Body: { "failed_reason": "..." }
+    """
+    msg = ClawMessage.query.filter_by(id=msg_id, claw_id=claw_id).first()
+    if not msg:
+        return jsonify({'error': '消息不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    reason = (data.get('failed_reason') or '').strip()
+    if not reason:
+        return jsonify({'error': 'failed_reason 必填'}), 400
+    msg.status = 'failed'
+    msg.failed_reason = reason[:2000]
+    if not msg.read_at:
+        # 标记 read_at 让 SSE 不再重推这条 failed 消息
+        msg.read_at = datetime.now()
+    db.session.commit()
+    return jsonify({'status': 'ok', 'msg_id': msg_id, 'state': 'failed'})
+
+
+# ==================== sidecar 配置中心：sidecar v2 拉配置 + 心跳 ====================
+
+@agent_bp.route('/<int:claw_id>/sidecar-config', methods=['GET'])
+@require_claw_token
+def claw_sidecar_config(claw_id, claw=None):
+    """sidecar v2 启动 / 每 60s 拉配置，顺便上报心跳。
+
+    Query 参数（可选）:
+        sidecar_version=2.0.0  - sidecar 自身版本
+        agent_type=openclaw    - 自动探测到的 agent 类型（首次启动用于初始化配置）
+        openclaw_bin=/path/...  - 自动探测到的 bin 路径
+
+    返回:
+        {
+          agent_type, openclaw_bin, hermes_home, agent_name, agent_timeout,
+          wecom_enabled, enabled, config_version,
+          owner_wecom_userid,    # 让 sidecar 拼 prompt 时能带上
+          server_time
+        }
+    """
+    from app.models import ClawSidecarConfig
+
+    cfg = ClawSidecarConfig.query.get(claw_id)
+    if cfg is None:
+        # 首次启动：用 sidecar 上报的 agent_type / bin 初始化（保守默认）
+        cfg = ClawSidecarConfig(
+            claw_id=claw_id,
+            agent_type=request.args.get('agent_type', 'openclaw') or 'openclaw',
+            openclaw_bin=request.args.get('openclaw_bin', '') or '',
+            hermes_home=request.args.get('hermes_home', '') or '',
+            agent_name=request.args.get('agent_name', 'main') or 'main',
+            agent_timeout=int(request.args.get('agent_timeout', 300) or 300),
+            wecom_enabled=False,
+            enabled=True,
+            config_version=1,
+            sidecar_version=request.args.get('sidecar_version', '') or '',
+            last_heartbeat_at=datetime.now(),
+            updated_by=f'sidecar_first_start',
+        )
+        db.session.add(cfg)
+    else:
+        cfg.last_heartbeat_at = datetime.now()
+        sver = request.args.get('sidecar_version', '')
+        if sver and cfg.sidecar_version != sver:
+            cfg.sidecar_version = sver
+
+    db.session.commit()
+
+    # 把 owner_wecom_userid 一并返回给 sidecar
+    owner_wecom_userid = claw.owner_wecom_userid or ''
+
+    payload = cfg.to_dict()
+    payload['owner_wecom_userid'] = owner_wecom_userid
+    payload['claw_name'] = claw.name
+    payload['server_time'] = datetime.now().isoformat()
+    return jsonify(payload)
+
+
+@agent_bp.route('/<int:claw_id>/sidecar-deployment-verify', methods=['GET'])
+@require_claw_token
+def sidecar_deployment_verify(claw_id, claw=None):
+    """供 install_v2.sh / claw 单命令部署后自检：Hub 汇总 DB 状态，不对就列出原因。
+
+    Query:
+        expected_sidecar_version   默认读环境变量 EXPECTED_SIDECAR_VERSION，缺省 2.0.1
+        heartbeat_max_age_sec     默认 180，超过则认为 sidecar 未正常心跳
+        notify=1                  若校验未通过，向该 claw 发一条 system 消息（便于 agent 看到）
+
+    返回 JSON（HTTP 200，body 里 ok=false 表示未通过）：
+        ok, errors[], warnings[], hints{}
+    """
+    from app.models import OpenClawSkill, ClawSidecarConfig as _Cfg
+
+    expected = (
+        request.args.get('expected_sidecar_version')
+        or os.getenv('EXPECTED_SIDECAR_VERSION', '2.0.1')
+    ).strip()
+    try:
+        hb_max = int(request.args.get('heartbeat_max_age_sec', '180'))
+    except ValueError:
+        hb_max = 180
+    do_notify = request.args.get('notify', '').lower() in ('1', 'true', 'yes')
+
+    errors = []
+    warnings = []
+    hints = {}
+
+    inst = OpenClawInstance.query.get(claw_id)
+    if not inst:
+        errors.append({'code': 'no_instance', 'message': f'claw_id={claw_id} 不存在'})
+    else:
+        mode = (inst.connection_mode or '').strip().lower()
+        if mode != 'sse':
+            errors.append({
+                'code': 'connection_mode',
+                'message': f'当前 connection_mode={mode!r}，#143 v2 需要 sse',
+                'fix': f"UPDATE openclaw_instances SET connection_mode='sse' WHERE id={claw_id};",
+            })
+        hints['connection_mode'] = mode
+
+        o143 = OpenClawSkill.query.filter_by(
+            openclaw_id=claw_id, skill_id=143, enabled=True).first()
+        if not o143:
+            errors.append({
+                'code': 'skill_143',
+                'message': '未在 Hub 启用 skill #143（hub-sse-sidecar-v2）',
+                'fix': 'Hub Web → 给小 claw 安装 #143 并启用',
+            })
+
+        o135 = OpenClawSkill.query.filter_by(
+            openclaw_id=claw_id, skill_id=135, enabled=True).first()
+        if o135:
+            warnings.append({
+                'code': 'skill_135_enabled',
+                'message': '仍启用旧 #135，可能与 v2 冲突',
+                'fix': 'Hub Web → 禁用 #135',
+            })
+
+        cfg = _Cfg.query.get(claw_id)
+        if not cfg:
+            errors.append({
+                'code': 'no_sidecar_config',
+                'message': 'Hub 尚无 claw_sidecar_configs 记录（sidecar 未成功拉过 /sidecar-config）',
+                'fix': '确认本机 sidecar 已启动且 CLAW_TOKEN 正确',
+            })
+        else:
+            hints['sidecar_version'] = cfg.sidecar_version or ''
+            hints['last_heartbeat_at'] = (
+                str(cfg.last_heartbeat_at) if cfg.last_heartbeat_at else None)
+            if cfg.sidecar_version and expected and cfg.sidecar_version != expected:
+                warnings.append({
+                    'code': 'sidecar_version_mismatch',
+                    'message': f'sidecar 上报 {cfg.sidecar_version!r}，期望 {expected!r}',
+                    'fix': f'curl 拉取静态脚本后重启 sidecar: {inst.name}',
+                })
+            if cfg.last_heartbeat_at:
+                age = (datetime.now() - cfg.last_heartbeat_at).total_seconds()
+                if age > hb_max:
+                    errors.append({
+                        'code': 'heartbeat_stale',
+                        'message': f'心跳过旧 {int(age)}s > {hb_max}s',
+                        'fix': '本机 systemctl restart hub-sse-sidecar-v2 或检查 sidecar 日志',
+                    })
+            else:
+                errors.append({
+                    'code': 'no_heartbeat',
+                    'message': 'sidecar 从未写入 last_heartbeat_at',
+                    'fix': '检查 sidecar 进程与网络',
+                })
+
+    ok = len(errors) == 0
+    body = {
+        'ok': ok,
+        'claw_id': claw_id,
+        'expected_sidecar_version': expected,
+        'errors': errors,
+        'warnings': warnings,
+        'hints': hints,
+    }
+
+    if do_notify and not ok:
+        lines = ['[Hub 部署校验未通过]']
+        for e in errors:
+            lines.append(f"- {e.get('code')}: {e.get('message')}")
+            if e.get('fix'):
+                lines.append(f"  建议: {e['fix']}")
+        for w in warnings:
+            lines.append(f"- (警告) {w.get('code')}: {w.get('message')}")
+        msg = ClawMessage(
+            claw_id=claw_id,
+            sender_name='Hub',
+            content='\n'.join(lines),
+            msg_type='system',
+            direction='to_claw',
+            status='pending',
+        )
+        db.session.add(msg)
+        db.session.commit()
+        notify_claw(claw_id)
+        body['notified_message_id'] = msg.id
+
+    return jsonify(body)
 
 
 @agent_bp.route('/<int:claw_id>/dispatch', methods=['POST'])

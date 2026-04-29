@@ -89,6 +89,29 @@ def _can_manage_claw(user, claw):
     return getattr(user, 'bound_claw_id', None) == claw.id
 
 
+def _can_own_claw(user, claw):
+    """高危操作（删除 / 查看 Token / 重置 Token）的权限。
+    仅以下身份允许，项目管理员对非自己的 claw 一律拒绝：
+      1) super_admin（含全平台 admin claw 如龙虾王）
+      2) 绑定者：user.bound_claw_id == claw.id
+      3) Owner：claw.owner 等于 user.username 或 user.display_name
+         （历史数据 owner 字段两种值都存在，比如 'condihuang' 或 '文敏'）
+    """
+    if not user:
+        return False
+    if _is_global_actor(user):
+        return True
+    if getattr(user, 'bound_claw_id', None) == claw.id:
+        return True
+    owner = (getattr(claw, 'owner', None) or '').strip()
+    if owner:
+        username = (getattr(user, 'username', None) or '').strip()
+        display = (getattr(user, 'display_name', None) or '').strip()
+        if (username and owner == username) or (display and owner == display):
+            return True
+    return False
+
+
 def _parse_project_id(raw):
     """解析项目 id：'__global__' / 'global' / 'all' / 空 / 0 / None → None（"全平台"或未关联），其它正整数 → int。"""
     if raw is None or raw == '':
@@ -175,6 +198,8 @@ def list_openclaws():
         d['total_todos'] = total_todos
         d['today_submitted'] = today_submitted
         d['today_approved'] = today_approved
+        # 高危操作（删除 / 看 Token / 重置 Token）的权限：仅 owner（super_admin / 绑定者 / 创建者）
+        d['can_own'] = _can_own_claw(user, c)
         result.append(d)
     return jsonify(result)
 
@@ -361,6 +386,50 @@ def create_openclaw():
         init_task_count = 0
         db.session.rollback()
 
+    # === 可选：Hub 代建 Hermes Agent（仅 super_admin） ===
+    # 注意：部署失败不会回滚 OpenClaw 注册；状态写入 agent_deployments 表，
+    # 前端通过 /openclaws/<id>/agent-deployments/latest 轮询。
+    # 高危操作（远端 SSH + Docker 起容器）只允许超级管理员触发，
+    # 项目管理员即使能创建 OpenClaw 也不能代建 agent。
+    deployment_payload = None
+    create_agent = bool(data.get('create_agent'))
+    deploy_opts_raw = data.get('deploy') if isinstance(data.get('deploy'), dict) else None
+    if create_agent and deploy_opts_raw and user and user.role != 'super_admin':
+        deployment_payload = {
+            'status': 'failed',
+            'error_message': '仅超级管理员可代建 Hermes Agent，已忽略部署请求。',
+        }
+        logger.warning('agent deploy denied for claw %d: user=%s role=%s 非 super_admin',
+                       claw.id, getattr(user, 'username', '?'), getattr(user, 'role', '?'))
+    elif create_agent and deploy_opts_raw:
+        try:
+            from app.api.agent_deployments import (
+                _parse_deploy_options,
+                trigger_async_deployment,
+            )
+            hub_url = (data.get('hub_url') or request.host_url.rstrip('/')).rstrip('/')
+            deploy_req = _parse_deploy_options(
+                deploy_opts_raw,
+                claw=claw,
+                claw_token=raw_token,
+                hub_url=hub_url,
+                actor_name=_actor_display_name(user),
+            )
+            dep = trigger_async_deployment(claw, deploy_req)
+            deployment_payload = dep.to_dict()
+        except ValueError as ve:
+            deployment_payload = {
+                'status': 'failed',
+                'error_message': f'部署参数无效：{ve}',
+            }
+            logger.warning('agent deploy validation failed for claw %d: %s', claw.id, ve)
+        except Exception as e:
+            deployment_payload = {
+                'status': 'failed',
+                'error_message': f'部署任务下发失败：{e}',
+            }
+            logger.exception('agent deploy spawn failed for claw %d', claw.id)
+
     # 返回完整 Token（注册时必须返回，否则 OpenClaw 无法连接 SSE）
     result = claw.to_dict()
     result['api_token'] = raw_token
@@ -376,6 +445,8 @@ def create_openclaw():
         'packs': [p.name for p in active_packs],
     }
     result['init_tasks'] = init_task_count
+    if deployment_payload is not None:
+        result['agent_deployment'] = deployment_payload
     return jsonify(result), 201
 
 
@@ -386,7 +457,9 @@ def get_openclaw(claw_id):
     user = _get_user()
     if not _can_read_claw(user, claw):
         return jsonify({'error': '无权访问该 OpenClaw'}), 403
-    return jsonify(claw.to_dict())
+    payload = claw.to_dict()
+    payload['can_own'] = _can_own_claw(user, claw)
+    return jsonify(payload)
 
 
 @api_bp.route('/openclaws/<int:claw_id>', methods=['PUT'])
@@ -425,8 +498,8 @@ def regenerate_token(claw_id):
     """重新生成 API Token（旧 Token 立即失效）"""
     claw = OpenClawInstance.query.get_or_404(claw_id)
     user = _get_user()
-    if not _can_manage_claw(user, claw):
-        return jsonify({'error': '无权操作该 OpenClaw'}), 403
+    if not _can_own_claw(user, claw):
+        return jsonify({'error': '仅本 OpenClaw 的绑定者 / 创建者 / 超级管理员可重置 Token'}), 403
 
     raw_token = generate_api_token()
     claw.api_token_hash = hash_token(raw_token)
@@ -452,8 +525,8 @@ def get_claw_token(claw_id):
     """
     claw = OpenClawInstance.query.get_or_404(claw_id)
     user = _get_user()
-    if not _can_read_claw(user, claw):
-        return jsonify({'error': '无权查看该 Token'}), 403
+    if not _can_own_claw(user, claw):
+        return jsonify({'error': '仅本 OpenClaw 的绑定者 / 创建者 / 超级管理员可查看完整 Token'}), 403
 
     return jsonify({
         'id': claw.id,
@@ -465,14 +538,16 @@ def get_claw_token(claw_id):
 
 @api_bp.route('/openclaws/<int:claw_id>', methods=['DELETE'])
 def delete_openclaw(claw_id):
-    """软删除 OpenClaw（保留所有配置、记忆和关联数据，支持后续恢复）"""
+    """软删除 OpenClaw（保留所有配置、记忆和关联数据，支持后续恢复）。
+
+    权限：仅本 claw 的绑定者 / 创建者 / 超级管理员可删除；
+    项目管理员对项目内非自己的 claw 没有删除权限。
+    """
     claw = OpenClawInstance.query.get_or_404(claw_id)
     user = _get_user()
-    if not user or user.role not in ('super_admin', 'admin'):
-        return jsonify({'error': '需要管理员权限'}), 403
-    if not _can_manage_claw(user, claw):
-        return jsonify({'error': '无权删除该 OpenClaw'}), 403
-    if claw.role == 'admin' and user.role != 'super_admin':
+    if not _can_own_claw(user, claw):
+        return jsonify({'error': '仅本 OpenClaw 的绑定者 / 创建者 / 超级管理员可删除'}), 403
+    if claw.role == 'admin' and not _is_global_actor(user):
         return jsonify({'error': '仅超级管理员可删除 admin OpenClaw'}), 403
 
     claw.status = 'deleted'

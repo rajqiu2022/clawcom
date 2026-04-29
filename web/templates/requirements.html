@@ -5,6 +5,9 @@
 
 {% block top_actions %}
 <div style="display:flex;gap:10px;align-items:center">
+    <select class="form-select" id="filter-project" onchange="onProjectChange()" style="min-width:140px">
+        <option value="">全部项目</option>
+    </select>
     <select class="form-select" id="filter-iteration" onchange="onIterationChange()" style="min-width:220px">
         <option value="">请选择迭代...</option>
     </select>
@@ -198,6 +201,8 @@
 
 <script>
 const State = {
+    projects: [],
+    currentProjectId: null,
     iterations: [],
     currentIterationId: {% if initial_iteration_id %}{{ initial_iteration_id }}{% else %}null{% endif %},
     items: [],
@@ -232,22 +237,66 @@ function pillPriority(p){ if(!p) return ''; const k = String(p).split(' ')[0]; r
 
 // =================== 入口 ===================
 async function init(){
+    await loadProjects();
     await loadIterations();
     if (State.currentIterationId) {
+        // 若 URL 带了 iteration_id，先把对应迭代的 project 选中（让筛选条件保持一致）
+        const cur = State.iterations.find(it => Number(it.id) === Number(State.currentIterationId));
+        if (cur && cur.project_id) {
+            State.currentProjectId = Number(cur.project_id);
+            document.getElementById('filter-project').value = String(cur.project_id);
+            // 重载迭代列表（按所属项目过滤），但保留当前选中
+            await loadIterations();
+        }
         document.getElementById('filter-iteration').value = State.currentIterationId;
         await onIterationChange();
     }
 }
 
+async function loadProjects(){
+    try {
+        const data = await API.get('/projects');
+        const list = Array.isArray(data) ? data : (data.projects || []);
+        State.projects = list;
+        const sel = document.getElementById('filter-project');
+        sel.innerHTML = '<option value="">全部项目</option>' + list.map(p =>
+            `<option value="${p.id}">${esc(p.name)}</option>`
+        ).join('');
+        if (State.currentProjectId) sel.value = String(State.currentProjectId);
+    } catch(e) {
+        console.error(e);
+    }
+}
+
+async function onProjectChange(){
+    const v = document.getElementById('filter-project').value;
+    State.currentProjectId = v ? parseInt(v) : null;
+    // 切换项目后重置迭代选择 + 清空详情
+    State.currentIterationId = null;
+    State.currentItem = null;
+    document.getElementById('filter-iteration').value = '';
+    document.getElementById('detail-body').innerHTML = '<div class="req-empty">请从中栏选择需求</div>';
+    document.getElementById('items-list').innerHTML = '<div class="req-empty">请先选择迭代</div>';
+    document.getElementById('changes-list').innerHTML = '<div class="req-empty">请先选择迭代</div>';
+    document.getElementById('req-stats').style.display = 'none';
+    await loadIterations();
+}
+
 async function loadIterations(){
     try {
-        const data = await API.get('/test-iterations');
+        const params = [];
+        if (State.currentProjectId) params.push(`project_id=${State.currentProjectId}`);
+        const url = '/test-iterations' + (params.length ? `?${params.join('&')}` : '');
+        const data = await API.get(url);
         const list = data.iterations || data || [];
         State.iterations = list;
         const sel = document.getElementById('filter-iteration');
+        const cur = sel.value;
         sel.innerHTML = '<option value="">请选择迭代...</option>' + list.map(it =>
             `<option value="${it.id}">${esc(it.name)} ${it.version_name ? '· '+esc(it.version_name) : ''}</option>`
         ).join('');
+        // 如果当前选中的迭代仍在新列表里，恢复选中；否则保持空
+        if (cur && list.some(it => String(it.id) === cur)) sel.value = cur;
     } catch(e) {
         console.error(e);
     }

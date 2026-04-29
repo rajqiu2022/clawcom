@@ -131,6 +131,97 @@
                 <textarea class="form-textarea" name="responsibilities" placeholder="描述这个 OpenClaw 负责什么..."></textarea>
             </div>
             <input type="hidden" name="connection_mode" value="polling">
+
+            <!-- 代建 Hermes Agent（仅 super_admin 可见）-->
+            <div id="create-agent-block" style="display:none">
+            <div class="form-group" style="border-top:1px dashed var(--border);padding-top:14px;margin-top:14px">
+                <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer">
+                    <input type="checkbox" id="create-agent-toggle" onchange="onCreateAgentToggle()" style="width:16px;height:16px">
+                    <span>同时部署 Hermes Agent（Hub 通过 SSH 自动安装）</span>
+                </label>
+                <div style="font-size:0.78rem;color:var(--text-muted);margin-top:6px;padding-left:24px;line-height:1.6">
+                    勾选后 Hub 会先建 OpenClaw、生成 Token，再 SSH 到目标机部署一个 per-claw Hermes（目录 / 容器名 / unit 名按 claw id 隔离，不会和别的 claw 互相覆盖）。<br>
+                    SSH 凭据 / Venus API Key 仅用于本次部署，<strong>不会落库</strong>。该操作仅 <strong>超级管理员</strong> 可执行。
+                </div>
+            </div>
+            <div id="create-agent-fields" style="display:none;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">
+                <div class="form-group" style="margin-bottom:10px">
+                    <label class="form-label">部署方式 *</label>
+                    <select class="form-input" name="deploy_method" id="deploy-method" onchange="onDeployMethodChange()">
+                        <option value="docker">Docker（推荐 / 新机器，需 Docker 18+ 且能拉到镜像）</option>
+                        <option value="systemd">Systemd（兼容老机器 / 无 Docker，假设 Hermes 已装好 venv）</option>
+                    </select>
+                    <div id="deploy-method-hint" style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5"></div>
+                </div>
+                <div class="two-col">
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="form-label">目标机 host *</label>
+                        <input class="form-input" name="deploy_host" placeholder="如 your-hub-host">
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="form-label">SSH 端口</label>
+                        <input class="form-input" name="deploy_ssh_port" placeholder="22" value="22">
+                    </div>
+                </div>
+                <div class="two-col">
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="form-label">SSH 用户 *</label>
+                        <input class="form-input" name="deploy_ssh_user" placeholder="root" value="root">
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="form-label">认证方式</label>
+                        <select class="form-input" name="deploy_auth_type" id="deploy-auth-type" onchange="onDeployAuthChange()">
+                            <option value="password">密码</option>
+                            <option value="key">SSH 私钥（PEM 文本）</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group" id="deploy-password-group" style="margin-bottom:10px">
+                    <label class="form-label">SSH 密码 *</label>
+                    <input class="form-input" type="password" name="deploy_ssh_password" placeholder="仅本次部署使用，不会保存到 Hub">
+                </div>
+                <div class="form-group" id="deploy-key-group" style="margin-bottom:10px;display:none">
+                    <label class="form-label">SSH 私钥（PEM 文本） *</label>
+                    <textarea class="form-textarea" name="deploy_ssh_private_key" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----" style="min-height:90px;font-family:monospace;font-size:0.78rem"></textarea>
+                    <input class="form-input" type="password" name="deploy_ssh_key_passphrase" placeholder="密钥 passphrase（无则留空）" style="margin-top:6px">
+                </div>
+                <div class="form-group" style="margin-bottom:10px">
+                    <label class="form-label">Venus API Key *</label>
+                    <input class="form-input" type="password" name="deploy_venus_api_key" placeholder="如 your-venus-api-key（仅本次部署使用）">
+                </div>
+                <!-- Docker 模式专用 -->
+                <div class="form-group" id="deploy-docker-fields" style="margin-bottom:0">
+                    <label class="form-label">Hermes 镜像</label>
+                    <input class="form-input" name="deploy_image" placeholder="ccr.ccs.tencentyun.com/hermes/hermes-agent:latest" value="ccr.ccs.tencentyun.com/hermes/hermes-agent:latest">
+                </div>
+                <!-- Systemd 模式专用 -->
+                <div id="deploy-systemd-fields" style="display:none">
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="form-label">HERMES_HOME *</label>
+                        <input class="form-input" name="deploy_hermes_home" placeholder="如 /opt/hermes-xiaohe（目标机已装好 Hermes 的根目录，下面要有 venv/ 和 hermes_agent 源码）">
+                        <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
+                            Hub 不会替你装 Hermes，只会在这个目录下刷 <code>config/.env</code> 并生成 per-claw systemd unit。<br>
+                            前置条件：<code>$HERMES_HOME/venv/bin/python -m hermes_agent</code> 必须能跑起来。
+                        </div>
+                    </div>
+                    <div class="two-col">
+                        <div class="form-group" style="margin-bottom:10px">
+                            <label class="form-label">Python 路径（可选）</label>
+                            <input class="form-input" name="deploy_hermes_python" placeholder="缺省 $HERMES_HOME/venv/bin/python">
+                        </div>
+                        <div class="form-group" style="margin-bottom:10px">
+                            <label class="form-label">Systemd User（可选）</label>
+                            <input class="form-input" name="deploy_systemd_user" placeholder="root" value="root">
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:0">
+                        <label class="form-label">Python 模块名（可选）</label>
+                        <input class="form-input" name="deploy_hermes_module" placeholder="hermes_agent" value="hermes_agent">
+                    </div>
+                </div>
+            </div>
+            </div><!-- /create-agent-block -->
+
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
                 <button type="submit" class="btn btn-primary">创建</button>
@@ -227,6 +318,20 @@
             </div>
         </div>
         <div id="reg-install-summary" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:14px"></div>
+
+        <!-- Hermes Agent 部署状态（仅在勾选了"代建 Agent"时出现） -->
+        <div id="reg-deploy-section" style="display:none;margin-bottom:14px;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg-secondary)">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+                <strong style="font-size:0.92rem">🛠️ Hermes Agent 部署</strong>
+                <span id="reg-deploy-status-pill" style="font-size:0.78rem;padding:2px 10px;border-radius:999px;background:rgba(234,179,8,0.15);color:#eab308">⏳ 部署中...</span>
+            </div>
+            <div id="reg-deploy-meta" style="font-size:0.78rem;color:var(--text-muted);line-height:1.7"></div>
+            <details id="reg-deploy-details" style="margin-top:8px;font-size:0.78rem">
+                <summary style="cursor:pointer;color:var(--text-secondary)">展开部署日志</summary>
+                <pre id="reg-deploy-log" style="white-space:pre-wrap;word-break:break-all;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;padding:10px;margin-top:6px;max-height:240px;overflow:auto;font-size:0.74rem"></pre>
+            </details>
+        </div>
+
         <div style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.25);border-radius:8px;padding:12px;margin-bottom:16px;font-size:0.86rem;color:var(--text-secondary);line-height:1.7">
             💡 点击下方 <strong>【📦 复制注册信息】</strong> 按钮，发给 OpenClaw，跟他说：<br>
             <span style="color:var(--accent);font-weight:600">"带上 token 访问注册链接，照着说明安装即可。"</span>
@@ -650,6 +755,7 @@ let allClaws = [];
 let allProjects = [];
 let filteredClaws = [];
 let canViewTokens = false;  // 是否有权限查看 Token
+let isSuperAdmin = false;   // 是否超级管理员（控制"代建 Hermes Agent"开关可见性）
 
 const ROLE_LABELS = {
     'admin': { text: '管理员', cls: 'admin' },
@@ -678,15 +784,34 @@ async function loadClaws() {
     }
 }
 
-// 加载当前用户权限，判断是否可查看 Token
+// 加载当前用户权限，判断是否可查看 Token / 是否能代建 Agent
 async function loadTokenPermission() {
     try {
         const me = await API.request('GET', '/auth/me');
         const role = me.role || 'guest';
         // super_admin / admin 可查看所有 token；user 只能查看绑定 claw 的 token
         canViewTokens = (role === 'super_admin' || role === 'admin');
+        // 代建 Hermes Agent 是高危运维操作（远端 SSH + Docker），仅 super_admin
+        isSuperAdmin = (role === 'super_admin');
     } catch(e) {
         canViewTokens = false;
+        isSuperAdmin = false;
+    }
+    _applyCreateAgentVisibility();
+}
+
+// 根据 isSuperAdmin 决定"同时部署 Hermes Agent"区域的可见性
+function _applyCreateAgentVisibility() {
+    const block = document.getElementById('create-agent-block');
+    if (!block) return;
+    block.style.display = isSuperAdmin ? '' : 'none';
+    if (!isSuperAdmin) {
+        const toggle = document.getElementById('create-agent-toggle');
+        if (toggle) toggle.checked = false;
+        const fields = document.getElementById('create-agent-fields');
+        if (fields) fields.style.display = 'none';
+    } else {
+        try { onDeployMethodChange(); } catch (e) { /* DOM 还没就绪就忽略 */ }
     }
 }
 
@@ -845,7 +970,7 @@ function renderClawCard(c) {
         <div class="claw-modified-row" title="${c.last_modified_by ? c.last_modified_by + ' 修改于 ' + (c.updated_at || '') : '更新于 ' + (c.updated_at || '-')}">
             ${c.last_modified_by ? `<span class="claw-modified-by">${c.last_modified_by}</span> 修改` : '最近修改'} · ${formatRelTime(c.updated_at)}
         </div>
-        ${canViewTokens ? `<div class="claw-token-row">
+        ${c.can_own ? `<div class="claw-token-row">
             <span class="token-preview" style="color:var(--text-secondary);font-size:0.8rem;font-family:monospace;">
                 🔑 ${c.api_token_preview || '未设置'}
             </span>
@@ -1145,6 +1270,10 @@ document.getElementById('regenerate-confirm-modal').addEventListener('click', e 
 
 function closeRegSuccessModal() {
     document.getElementById('register-success-modal').classList.remove('active');
+    if (typeof _deployPollTimer !== 'undefined' && _deployPollTimer) {
+        clearInterval(_deployPollTimer);
+        _deployPollTimer = null;
+    }
 }
 function _doCopy(text, okMsg) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -1194,6 +1323,105 @@ API Token：${token}
     _doCopy(info, '注册信息已复制，可直接发给 OpenClaw');
 }
 
+function onCreateAgentToggle() {
+    const on = document.getElementById('create-agent-toggle').checked;
+    document.getElementById('create-agent-fields').style.display = on ? '' : 'none';
+    if (on) onDeployMethodChange();
+}
+
+function onDeployAuthChange() {
+    const v = document.getElementById('deploy-auth-type').value;
+    document.getElementById('deploy-password-group').style.display = v === 'password' ? '' : 'none';
+    document.getElementById('deploy-key-group').style.display = v === 'key' ? '' : 'none';
+}
+
+// 切换部署方式时显示对应的字段，并给一段提示文案
+function onDeployMethodChange() {
+    const method = document.getElementById('deploy-method').value;
+    const dockerFields = document.getElementById('deploy-docker-fields');
+    const systemdFields = document.getElementById('deploy-systemd-fields');
+    const hint = document.getElementById('deploy-method-hint');
+    if (method === 'systemd') {
+        dockerFields.style.display = 'none';
+        systemdFields.style.display = '';
+        hint.innerHTML =
+            '⚠️ Systemd 模式 <strong>不会</strong> 替你装 Hermes 源码 / venv，' +
+            '只会刷 <code>$HERMES_HOME/config/.env</code> 并生成 ' +
+            '<code>/etc/systemd/system/hermes-agent-claw-&lt;id&gt;.service</code>。' +
+            '<br>请先确认目标机 <code>$HERMES_HOME/venv/bin/python -m hermes_agent</code> 能跑通。';
+    } else {
+        dockerFields.style.display = '';
+        systemdFields.style.display = 'none';
+        hint.innerHTML =
+            'Docker 模式：Hub 会 <code>docker pull</code> 镜像并起一个 ' +
+            '<code>hermes-agent-claw-&lt;id&gt;</code> 容器，目录走 ' +
+            '<code>/opt/openclaw-agents/claw-&lt;id&gt;-&lt;name&gt;/</code>。' +
+            '<br>需要目标机有可用的 Docker 18+，且能拉到镜像。';
+    }
+}
+
+function _renderDeployStatus(dep) {
+    if (!dep) return;
+    const pill = document.getElementById('reg-deploy-status-pill');
+    const meta = document.getElementById('reg-deploy-meta');
+    const log = document.getElementById('reg-deploy-log');
+    const map = {
+        pending:     { txt: '⏳ 等待执行', color: '#eab308', bg: 'rgba(234,179,8,0.15)' },
+        in_progress: { txt: '🚀 部署中...', color: '#3b82f6', bg: 'rgba(59,130,246,0.15)' },
+        success:     { txt: '✅ 部署成功', color: '#22c55e', bg: 'rgba(34,197,94,0.15)' },
+        failed:      { txt: '❌ 部署失败', color: '#ef4444', bg: 'rgba(239,68,68,0.15)' },
+        cancelled:   { txt: '⚪ 已取消',   color: '#9ca3af', bg: 'rgba(156,163,175,0.15)' },
+    };
+    const info = map[dep.status] || { txt: dep.status, color: '#9ca3af', bg: 'rgba(156,163,175,0.15)' };
+    pill.textContent = info.txt;
+    pill.style.color = info.color;
+    pill.style.background = info.bg;
+
+    const lines = [];
+    const method = dep.deploy_method || 'docker';
+    lines.push(`方式：<code>${method}</code>`);
+    if (dep.host) lines.push(`目标机：${dep.ssh_user || ''}@${dep.host}`);
+    if (dep.remote_base_dir) {
+        const dirLabel = method === 'systemd' ? 'HERMES_HOME' : '目录';
+        lines.push(`${dirLabel}：<code>${dep.remote_base_dir}</code>`);
+    }
+    if (dep.container_name) {
+        const cLabel = method === 'systemd' ? 'Systemd unit' : '容器';
+        lines.push(`${cLabel}：<code>${dep.container_name}</code>`);
+    }
+    if (dep.image) lines.push(`镜像：<code>${dep.image}</code>`);
+    if (dep.error_message) lines.push(`<span style="color:#ef4444">错误：${dep.error_message}</span>`);
+    meta.innerHTML = lines.join('<br>');
+    log.textContent = dep.log_tail || '';
+}
+
+let _deployPollTimer = null;
+function _startDeployPolling(clawId) {
+    if (_deployPollTimer) clearInterval(_deployPollTimer);
+    let elapsed = 0;
+    const tick = async () => {
+        try {
+            const resp = await fetch(`/api/v1/openclaws/${clawId}/agent-deployments/latest`);
+            if (!resp.ok) return;
+            const json = await resp.json();
+            const dep = json.deployment;
+            if (!dep) return;
+            _renderDeployStatus(dep);
+            if (dep.status === 'success' || dep.status === 'failed' || dep.status === 'cancelled') {
+                clearInterval(_deployPollTimer);
+                _deployPollTimer = null;
+            }
+        } catch (e) { /* 静默重试 */ }
+        elapsed += 4;
+        if (elapsed > 600) {  // 10 分钟兜底停止
+            clearInterval(_deployPollTimer);
+            _deployPollTimer = null;
+        }
+    };
+    tick();
+    _deployPollTimer = setInterval(tick, 4000);
+}
+
 document.getElementById('create-form').addEventListener('submit', async e => {
     e.preventDefault();
     const form = new FormData(e.target);
@@ -1201,13 +1429,72 @@ document.getElementById('create-form').addEventListener('submit', async e => {
 
     if (!data.project_id) delete data.project_id;
 
+    // 收集代建 Agent 的部署参数（仅 super_admin 可触发，前端再兜底过滤一次）
+    const createAgent = isSuperAdmin && document.getElementById('create-agent-toggle').checked;
+    let deployOpts = null;
+    if (createAgent) {
+        const authType = data.deploy_auth_type || 'password';
+        const deployMethod = (data.deploy_method || 'docker').toLowerCase();
+        if (!data.deploy_host) {
+            showToast('请填写目标机 host', 'error');
+            return;
+        }
+        if (!data.deploy_venus_api_key) {
+            showToast('请填写 Venus API Key', 'error');
+            return;
+        }
+        if (authType === 'password' && !data.deploy_ssh_password) {
+            showToast('请填写 SSH 密码（或切换为私钥认证）', 'error');
+            return;
+        }
+        if (authType === 'key' && !data.deploy_ssh_private_key) {
+            showToast('请粘贴 SSH 私钥（PEM 文本）', 'error');
+            return;
+        }
+        if (deployMethod === 'systemd' && !data.deploy_hermes_home) {
+            showToast('Systemd 模式需要填写 HERMES_HOME（如 /opt/hermes-xiaohe）', 'error');
+            return;
+        }
+        if (deployMethod === 'systemd' && data.deploy_hermes_home && !data.deploy_hermes_home.startsWith('/')) {
+            showToast('HERMES_HOME 必须是绝对路径', 'error');
+            return;
+        }
+        deployOpts = {
+            deploy_method: deployMethod,
+            host: data.deploy_host,
+            ssh_port: data.deploy_ssh_port ? parseInt(data.deploy_ssh_port, 10) : 22,
+            ssh_user: data.deploy_ssh_user || 'root',
+            venus_api_key: data.deploy_venus_api_key,
+        };
+        if (deployMethod === 'docker') {
+            deployOpts.image = data.deploy_image || 'ccr.ccs.tencentyun.com/hermes/hermes-agent:latest';
+        } else {
+            deployOpts.hermes_home = data.deploy_hermes_home.replace(/\/+$/, '');
+            if (data.deploy_hermes_python) deployOpts.hermes_python = data.deploy_hermes_python;
+            if (data.deploy_hermes_module) deployOpts.hermes_module = data.deploy_hermes_module;
+            if (data.deploy_systemd_user) deployOpts.systemd_user = data.deploy_systemd_user;
+        }
+        if (authType === 'password') {
+            deployOpts.ssh_password = data.deploy_ssh_password;
+        } else {
+            deployOpts.ssh_private_key = data.deploy_ssh_private_key;
+            if (data.deploy_ssh_key_passphrase) deployOpts.ssh_key_passphrase = data.deploy_ssh_key_passphrase;
+        }
+        data.create_agent = true;
+        data.deploy = deployOpts;
+        data.hub_url = location.origin;
+    }
+    // 清掉前端单独收集的 deploy_* 字段，避免后端把它们当作 OpenClaw 字段
+    Object.keys(data).forEach(k => { if (k.startsWith('deploy_')) delete data[k]; });
+
     try {
         const result = await API.createClaw(data);
         closeCreateModal();
         e.target.reset();
+        document.getElementById('create-agent-toggle').checked = false;
+        document.getElementById('create-agent-fields').style.display = 'none';
         loadClaws();
 
-        // 弹出注册成功弹窗，显示注册 Skill 链接 + API Token
         const clawId = result.id;
         const skillUrl = `${location.origin}/api/v1/openclaws/${clawId}/registration-skill`;
         document.getElementById('reg-claw-name').textContent = data.name;
@@ -1216,7 +1503,6 @@ document.getElementById('create-form').addEventListener('submit', async e => {
             result.api_token || '（本次未生成新 Token，可在「查看 Token」中获取）';
         document.getElementById('reg-goto-detail').onclick = () => location.href = '/openclaws/' + clawId;
 
-        // 显示自动安装摘要
         const ai = result.auto_installed || {};
         const parts = [];
         if (ai.skills && ai.skills.length) parts.push(`${ai.skills.length} 个 Skills`);
@@ -1224,6 +1510,18 @@ document.getElementById('create-form').addEventListener('submit', async e => {
         if (result.init_tasks) parts.push(`${result.init_tasks} 个初始化任务`);
         document.getElementById('reg-install-summary').textContent =
             parts.length ? `已自动安装：${parts.join('、')}` : '';
+
+        // 部署状态（仅当请求带了 create_agent 时）
+        const deploySection = document.getElementById('reg-deploy-section');
+        if (result.agent_deployment) {
+            deploySection.style.display = '';
+            _renderDeployStatus(result.agent_deployment);
+            if (['pending', 'in_progress'].includes(result.agent_deployment.status)) {
+                _startDeployPolling(clawId);
+            }
+        } else {
+            deploySection.style.display = 'none';
+        }
 
         document.getElementById('register-success-modal').classList.add('active');
     } catch (err) {

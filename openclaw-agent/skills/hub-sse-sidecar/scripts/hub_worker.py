@@ -33,6 +33,8 @@ import urllib.error
 import urllib.request
 
 # ── 配置加载 ──────────────────────────────────────
+# BASE_DIR 不再硬编码，与 sse_client 一样从 CONFIG_FILE 所在目录推导，
+# 保证 worker 与 sse_client 在同一目录下读写同一份 task_queue.jsonl。
 CONFIG_FILE = os.environ.get(
     "OPENCLAW_SIDECAR_CONFIG",
     os.path.expanduser("~/.openclaw-sidecar/config.env"),
@@ -66,7 +68,7 @@ AGENT_TIMEOUT = int(CFG.get("AGENT_TIMEOUT", "120"))
 TODOS_VERIFY_DELAY = int(CFG.get("TODOS_VERIFY_DELAY", "3"))
 TODOS_FORCE_COMPLETE_FALLBACK = CFG.get("TODOS_FORCE_COMPLETE_FALLBACK", "1").strip() not in ("0", "false", "False", "no", "NO")
 
-BASE_DIR = os.path.expanduser("~/.openclaw-sidecar")
+BASE_DIR = os.path.dirname(os.path.abspath(CONFIG_FILE))
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "hub_worker.log")
 QUEUE_FILE = os.path.join(LOG_DIR, "task_queue.jsonl")

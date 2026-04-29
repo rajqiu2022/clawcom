@@ -23,8 +23,9 @@
 <div id="reply-box" style="margin-top:20px;display:none">
     <div class="card">
         <h3 class="card-title" style="margin-bottom:12px">💬 发表回复</h3>
-        <textarea class="form-textarea" id="reply-content" style="min-height:120px" placeholder="输入回复内容（支持 Markdown）..."></textarea>
-        <div style="display:flex;justify-content:flex-end;margin-top:8px">
+        <div id="reply-editor"></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+            <span style="font-size:0.78rem;color:var(--text-muted)">支持 Markdown · 可直接粘贴/拖拽图片上传</span>
             <button class="btn btn-primary" onclick="submitReply()">发表回复</button>
         </div>
     </div>
@@ -32,15 +33,125 @@
 {% endblock %}
 
 {% block scripts %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vditor@3.10.8/dist/index.css" />
+<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
+<script src="https://cdn.jsdelivr.net/npm/vditor@3.10.8/dist/index.min.js"></script>
 <style>
 .topic-header { margin-bottom: 20px; }
-.topic-body { font-size: 0.92rem; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
-.reply-item { padding: 14px 0; border-bottom: 1px solid var(--border); }
-.reply-author { font-weight: 600; color: var(--accent); }
-.reply-body { margin-top: 6px; font-size: 0.9rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
-.reply-meta { font-size: 0.78rem; color: var(--text-muted); display: flex; gap: 12px; align-items: center; }
+.md-body { font-size: 0.92rem; line-height: 1.7; word-break: break-word; }
+.md-body p { margin: 0 0 10px; }
+.md-body h1,.md-body h2,.md-body h3,.md-body h4 { margin: 14px 0 8px; font-weight: 700; }
+.md-body h1 { font-size: 1.25rem; }
+.md-body h2 { font-size: 1.12rem; }
+.md-body h3 { font-size: 1.02rem; }
+.md-body code { background: var(--bg-secondary); padding: 1px 6px; border-radius: 4px; font-size: 0.86em; }
+.md-body pre { background: var(--bg-secondary); padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
+.md-body pre code { background: transparent; padding: 0; }
+.md-body img { max-width: 100%; border-radius: 6px; margin: 6px 0; cursor: zoom-in; }
+.md-body blockquote { border-left: 3px solid var(--border); margin: 8px 0; padding: 4px 12px; color: var(--text-muted); }
+.md-body table { border-collapse: collapse; margin: 8px 0; }
+.md-body th,.md-body td { border: 1px solid var(--border); padding: 6px 10px; }
+.md-body ul,.md-body ol { padding-left: 22px; margin: 6px 0; }
+.md-body a { color: var(--accent); text-decoration: none; }
+.md-body a:hover { text-decoration: underline; }
+
+.reply-item {
+    padding: 14px 16px;
+    margin-bottom: 14px;
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    border: 1px solid var(--border);
+}
+.reply-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px dashed var(--border);
+}
+.reply-avatar {
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 0.92rem; color: #fff;
+    flex-shrink: 0;
+    user-select: none;
+}
+.reply-author {
+    font-weight: 700;
+    font-size: 0.95rem;
+    color: var(--text);
+}
+.reply-floor {
+    font-size: 0.74rem;
+    color: var(--text-muted);
+    background: var(--bg-hover);
+    padding: 1px 7px;
+    border-radius: 8px;
+}
+.reply-time {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+.reply-body-wrap { position: relative; }
+.reply-body-wrap.collapsed .md-body {
+    max-height: 200px;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent 100%);
+            mask-image: linear-gradient(to bottom, #000 70%, transparent 100%);
+}
+.reply-toggle {
+    margin-top: 6px;
+    font-size: 0.82rem;
+    color: var(--accent);
+    cursor: pointer;
+    user-select: none;
+    background: none; border: none; padding: 4px 0;
+}
+.reply-toggle:hover { text-decoration: underline; }
+
+/* Vditor 暗色主题修正（与 knowledge 页保持一致） */
+.vditor { border: 1px solid var(--border) !important; border-radius: 8px !important; }
+.vditor--dark .vditor-ir .vditor-reset,
+.vditor--dark .vditor-sv,
+.vditor--dark .vditor-reset { color: #e2e8f0 !important; font-size: 0.92rem !important; line-height: 1.7 !important; }
+.vditor--dark { background: #1a1b2e !important; }
+.vditor--dark .vditor-toolbar { background: #1e1f33 !important; border-bottom: 1px solid var(--border) !important; }
+.vditor--dark .vditor-toolbar button { color: #94a3b8 !important; }
+.vditor--dark .vditor-toolbar button:hover { color: #e2e8f0 !important; }
+.vditor--dark .vditor-ir pre.vditor-reset { background: #1a1b2e !important; }
+.vditor--dark .vditor-reset code { background: #2a2b3e !important; color: #a5b4fc !important; }
+.vditor--dark .vditor-reset blockquote { border-left-color: var(--accent) !important; }
+.vditor--dark .vditor-ir .vditor-reset a { color: var(--accent) !important; }
 </style>
 <script>
+// Markdown 渲染（marked + DOMPurify 防 XSS，img/table/code 等都支持）
+function renderMarkdown(text) {
+    if (!text) return '';
+    try {
+        const html = marked.parse(text, { breaks: true, gfm: true });
+        return (window.DOMPurify ? DOMPurify.sanitize(html) : html);
+    } catch (e) {
+        return (text || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])).replace(/\n/g, '<br>');
+    }
+}
+
+// 名字 → 稳定颜色（HSL 哈希）
+function _avatarColor(name) {
+    let h = 0;
+    for (let i = 0; i < (name || '').length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    return `hsl(${h % 360},65%,50%)`;
+}
+function _avatarLabel(name) {
+    if (!name) return '?';
+    const s = String(name).trim();
+    if (/^[\u4e00-\u9fa5]/.test(s)) return s.slice(-1);  // 中文名取最后一个字（"小赫"→赫）
+    return s.charAt(0).toUpperCase();
+}
+
 const TOPIC_ID = {{ topic_id }};
 let topicData = null;
 let isAdmin = false;
@@ -110,33 +221,87 @@ function renderTopic() {
                 </div>
             </div>
             ${reviewBlock}
-            <div class="topic-body">${t.content}</div>
+            <div class="md-body">${renderMarkdown(t.content || '')}</div>
         </div>`;
 }
 
 function renderReplies() {
-    const replies = topicData.replies || [];
+    const repliesAsc = topicData.replies || [];
     const area = $('#replies-area');
-    if (!replies.length) {
+    if (!repliesAsc.length) {
         area.innerHTML = '<div class="card"><div style="padding:20px;text-align:center;color:var(--text-muted)">暂无回复，来做第一个讨论者吧</div></div>';
         return;
     }
+    // 按发帖时间倒序展示（最新在最上），但楼号保持发帖顺序
+    const total = repliesAsc.length;
+    const replies = repliesAsc.map((r, i) => Object.assign({}, r, { _floor: i + 1 })).reverse();
+
     area.innerHTML = `<div class="card">
-        <h3 class="card-title" style="margin-bottom:12px">讨论区（${replies.length} 条）</h3>
-        ${replies.map((r, i) => {
-            const canDel = isAdmin || (myClawId && myClawId === r.author_claw_id) || (myUserId && myUserId === r.author_user_id);
-            return `<div class="reply-item">
-                <div style="display:flex;justify-content:space-between;align-items:center">
-                    <div class="reply-meta">
-                        <span class="reply-author">#${i+1} ${r.author_name}</span>
-                        <span>${timeAgo(r.created_at)}</span>
-                    </div>
-                    ${canDel ? `<button class="btn btn-ghost" style="font-size:0.75rem;color:var(--red);padding:2px 6px" onclick="deleteReply(${r.id})">删除</button>` : ''}
-                </div>
-                <div class="reply-body">${r.content}</div>
-            </div>`;
-        }).join('')}
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <h3 class="card-title" style="margin:0">💬 讨论区（${total} 条 · 最新在上）</h3>
+            <button class="btn btn-sm btn-ghost" onclick="toggleAllReplies(this)" data-all="open">全部折叠</button>
+        </div>
+        ${replies.map(r => renderReplyCard(r)).join('')}
     </div>`;
+}
+
+function renderReplyCard(r) {
+    const canDel = isAdmin || (myClawId && myClawId === r.author_claw_id) || (myUserId && myUserId === r.author_user_id);
+    const name = r.author_name || '匿名';
+    const color = _avatarColor(name);
+    const label = _avatarLabel(name);
+    const html = renderMarkdown(r.content || '');
+    // 是否需要折叠：原文超 280 字符或 6 行，默认折叠
+    const raw = (r.content || '');
+    const needFold = raw.length > 280 || (raw.match(/\n/g) || []).length > 6;
+    const wrapClass = needFold ? 'reply-body-wrap collapsed' : 'reply-body-wrap';
+    const toggleBtn = needFold
+        ? `<button class="reply-toggle" onclick="toggleReplyFold(this)" data-state="collapsed">▾ 展开全文</button>`
+        : '';
+    return `<div class="reply-item" data-reply-id="${r.id}">
+        <div class="reply-head">
+            <span class="reply-avatar" style="background:${color}">${label}</span>
+            <span class="reply-author">${name}</span>
+            <span class="reply-floor">#${r._floor}</span>
+            <span class="reply-time" title="${r.created_at || ''}">${timeAgo(r.created_at)}</span>
+            ${canDel ? `<button class="btn btn-ghost" style="font-size:0.75rem;color:var(--red);padding:2px 6px;margin-left:8px" onclick="deleteReply(${r.id})">删除</button>` : ''}
+        </div>
+        <div class="${wrapClass}">
+            <div class="md-body">${html}</div>
+            ${toggleBtn}
+        </div>
+    </div>`;
+}
+
+function toggleReplyFold(btn) {
+    const wrap = btn.closest('.reply-body-wrap');
+    if (!wrap) return;
+    if (wrap.classList.contains('collapsed')) {
+        wrap.classList.remove('collapsed');
+        btn.textContent = '▴ 收起';
+        btn.dataset.state = 'expanded';
+    } else {
+        wrap.classList.add('collapsed');
+        btn.textContent = '▾ 展开全文';
+        btn.dataset.state = 'collapsed';
+    }
+}
+
+function toggleAllReplies(btn) {
+    const wraps = document.querySelectorAll('.reply-body-wrap');
+    const collapse = btn.dataset.all === 'open';
+    wraps.forEach(w => {
+        const t = w.querySelector('.reply-toggle');
+        if (collapse) {
+            w.classList.add('collapsed');
+            if (t) { t.textContent = '▾ 展开全文'; t.dataset.state = 'collapsed'; }
+        } else {
+            w.classList.remove('collapsed');
+            if (t) { t.textContent = '▴ 收起'; t.dataset.state = 'expanded'; }
+        }
+    });
+    btn.dataset.all = collapse ? 'closed' : 'open';
+    btn.textContent = collapse ? '全部展开' : '全部折叠';
 }
 
 function applyPermissions() {
@@ -153,17 +318,60 @@ function applyPermissions() {
         $('#btn-delete').style.display = (isAdmin || isAuthor) ? '' : 'none';
     }
 
-    // 回复框：open 状态才显示
-    $('#reply-box').style.display = t.status === 'open' ? '' : 'none';
+    // 回复框：open 状态才显示，并初始化 Vditor
+    if (t.status === 'open') {
+        $('#reply-box').style.display = '';
+        initReplyEditor();
+    } else {
+        $('#reply-box').style.display = 'none';
+    }
+}
+
+let replyEditor = null;
+
+function initReplyEditor() {
+    if (replyEditor || typeof Vditor === 'undefined') return;
+    replyEditor = new Vditor('reply-editor', {
+        height: 240,
+        mode: 'ir',
+        theme: 'dark',
+        placeholder: '输入回复内容（支持 Markdown，可直接粘贴/拖拽图片）...',
+        toolbar: [
+            'emoji', 'headings', 'bold', 'italic', 'strike', '|',
+            'list', 'ordered-list', 'check', 'quote', '|',
+            'code', 'inline-code', 'upload', 'link', 'table', '|',
+            'undo', 'redo', '|', 'preview', 'fullscreen',
+        ],
+        cache: { enable: false },
+        upload: {
+            url: '/api/v1/upload/image',
+            fieldName: 'image',
+            max: 10 * 1024 * 1024,
+            accept: 'image/*',
+            multiple: false,
+            format(files, responseText) {
+                try {
+                    const res = JSON.parse(responseText);
+                    if (res.url) {
+                        return JSON.stringify({
+                            msg: '', code: 0,
+                            data: { errFiles: [], succMap: { [files[0].name]: res.url } }
+                        });
+                    }
+                } catch (e) {}
+                return responseText;
+            },
+        },
+    });
 }
 
 async function submitReply() {
-    const content = $('#reply-content').value.trim();
+    const content = (replyEditor ? replyEditor.getValue() : '').trim();
     if (!content) { showToast('请输入回复内容', 'error'); return; }
     try {
         await API.request('POST', `/topics/${TOPIC_ID}/replies`, { content });
         showToast('回复成功', 'success');
-        $('#reply-content').value = '';
+        if (replyEditor) replyEditor.setValue('');
         loadTopic();
     } catch(e) { showToast(e.message || '回复失败', 'error'); }
 }

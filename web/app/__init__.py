@@ -898,7 +898,146 @@ def create_app(config_name=None):
                 except Exception as e:
                     logger.info(f'tapd_refresh_requests 表创建跳过: {e}')
 
+                # ===== B+ 方案：OpenClaw ↔ Hub 通信稳定化 =====
+                # 1) openclaw_instances 加 owner_wecom_userid（owner 的企微 ID）
+                try:
+                    conn.execute(text(
+                        "ALTER TABLE openclaw_instances "
+                        "ADD COLUMN owner_wecom_userid VARCHAR(64) DEFAULT NULL "
+                        "COMMENT 'owner 在企微的 userid/RTX 名（如 rajqiu），用于 Hub 集中代发企微消息'"
+                    ))
+                    logger.info('已添加 openclaw_instances.owner_wecom_userid 列')
+                except Exception:
+                    pass
+
+                # 2) claw_messages 状态机扩展：pending/delivered/processing/done/failed/read
+                try:
+                    conn.execute(text(
+                        "ALTER TABLE claw_messages "
+                        "MODIFY COLUMN status VARCHAR(20) DEFAULT 'pending' "
+                        "COMMENT '状态：pending/delivered/processing/done/failed/read'"
+                    ))
+                    logger.info('claw_messages.status 列已扩展')
+                except Exception as e:
+                    logger.info(f'claw_messages.status 扩展跳过: {e}')
+
+                # 3) claw_messages 加上失败原因和处理时间戳
+                for col, coltype in [
+                    ('processing_at', 'DATETIME DEFAULT NULL'),
+                    ('done_at', 'DATETIME DEFAULT NULL'),
+                    ('failed_reason', 'TEXT DEFAULT NULL'),
+                    ('llm_response', 'LONGTEXT DEFAULT NULL'),
+                ]:
+                    try:
+                        conn.execute(text(
+                            f'ALTER TABLE claw_messages ADD COLUMN {col} {coltype}'))
+                        logger.info(f'已添加 claw_messages.{col} 列')
+                    except Exception:
+                        pass
+
+                # 4) sidecar 配置中心表（Web 后台改完自动下发到 sidecar）
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS claw_sidecar_configs (
+                            claw_id INTEGER PRIMARY KEY,
+                            agent_type VARCHAR(20) DEFAULT 'openclaw',
+                            openclaw_bin VARCHAR(500) DEFAULT '',
+                            hermes_home VARCHAR(500) DEFAULT '',
+                            agent_name VARCHAR(50) DEFAULT 'main',
+                            agent_timeout INTEGER DEFAULT 300,
+                            wecom_enabled BOOLEAN DEFAULT 0,
+                            enabled BOOLEAN DEFAULT 1,
+                            config_version INTEGER DEFAULT 1,
+                            sidecar_version VARCHAR(30) DEFAULT '',
+                            last_heartbeat_at DATETIME DEFAULT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            updated_by VARCHAR(100) DEFAULT '',
+                            FOREIGN KEY (claw_id) REFERENCES openclaw_instances(id),
+                            INDEX ix_sidecar_cfg_heartbeat (last_heartbeat_at)
+                        )
+                    """))
+                    logger.info('claw_sidecar_configs 表已创建')
+                except Exception as e:
+                    logger.info(f'claw_sidecar_configs 表创建跳过: {e}')
+
+                # 5a) claw_todo_logs 加 notified_at / notified_strategy（B+ 5分钟兜底用）
+                for col, coltype in [
+                    ('notified_at', 'DATETIME DEFAULT NULL'),
+                    ('notified_strategy', "VARCHAR(30) DEFAULT ''"),
+                ]:
+                    try:
+                        conn.execute(text(
+                            f'ALTER TABLE claw_todo_logs ADD COLUMN {col} {coltype}'))
+                        logger.info(f'已添加 claw_todo_logs.{col} 列')
+                    except Exception:
+                        pass
+
+                # 5c) Hub 代建 Hermes Agent 部署记录表
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS agent_deployments (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            openclaw_id INTEGER NOT NULL,
+                            agent_type VARCHAR(20) DEFAULT 'hermes',
+                            deploy_method VARCHAR(20) DEFAULT 'docker',
+                            host VARCHAR(255) DEFAULT '',
+                            ssh_user VARCHAR(64) DEFAULT '',
+                            remote_base_dir VARCHAR(500) DEFAULT '',
+                            container_name VARCHAR(100) DEFAULT '',
+                            image VARCHAR(255) DEFAULT '',
+                            status VARCHAR(20) DEFAULT 'pending',
+                            log_tail TEXT,
+                            error_message TEXT,
+                            started_at DATETIME,
+                            finished_at DATETIME,
+                            triggered_by VARCHAR(100) DEFAULT '',
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (openclaw_id) REFERENCES openclaw_instances(id),
+                            INDEX ix_agent_deploy_claw (openclaw_id),
+                            INDEX ix_agent_deploy_status (status),
+                            INDEX ix_agent_deploy_created (created_at)
+                        )
+                    """))
+                    logger.info('agent_deployments 表已创建')
+                except Exception as e:
+                    logger.info(f'agent_deployments 表创建跳过: {e}')
+
+                # 5b) 企微发送日志表（所有 wecom send 尝试都留痕，方便排障）
+                try:
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS wecom_send_logs (
+                            id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                            claw_id INTEGER,
+                            related_type VARCHAR(30) DEFAULT '',
+                            related_id INTEGER DEFAULT NULL,
+                            target_userid VARCHAR(64) DEFAULT '',
+                            content TEXT,
+                            strategy VARCHAR(30) DEFAULT '',
+                            status VARCHAR(20) DEFAULT 'pending',
+                            error TEXT,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            sent_at DATETIME DEFAULT NULL,
+                            FOREIGN KEY (claw_id) REFERENCES openclaw_instances(id),
+                            INDEX ix_wecom_log_claw (claw_id),
+                            INDEX ix_wecom_log_status (status),
+                            INDEX ix_wecom_log_created (created_at)
+                        )
+                    """))
+                    logger.info('wecom_send_logs 表已创建')
+                except Exception as e:
+                    logger.info(f'wecom_send_logs 表创建跳过: {e}')
+
         except Exception as e:
             logger.warning(f'自动迁移检查异常: {e}')
+
+    # 启动 5 分钟兜底守护进程（B+ 通信稳定化）
+    # 内部用 system_config 表做主进程选举，gunicorn -w 4 安全
+    try:
+        from app.services.timeout_watcher import start_timeout_watcher
+        start_timeout_watcher(app)
+    except Exception as e:
+        logger.warning(f'timeout_watcher 启动失败（不影响主服务）: {e}')
 
     return app
