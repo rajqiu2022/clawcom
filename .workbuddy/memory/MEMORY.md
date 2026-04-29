@@ -666,3 +666,156 @@ function checkReviewPermission() {
 16. **多 tab UI 不要只 lazy load 当前 tab**：除非数据特别贵，否则初始化时并行加载所有 tab 的计数（用同一个 API.request 池），用户感知到的"切换 tab 立刻有数据"远比节省一次请求重要
 
 *最后更新: 2026-04-25 12:15（合并对方的"页签计数即时刷新"修复 + 经验 15-16）*
+
+---
+
+## 19. 课题讨论详情页 UI 重构（2026-04-25 13:25）
+
+### 背景
+用户反馈 `/topics/{id}` 详情页 reply 区显示"太丑"：
+1. 用户名/内容区分不明显，超长帖子全展开占满屏
+2. 回复按发帖正序，老贴在上、新贴要往下翻
+3. placeholder 写"支持 Markdown"但实际没渲染，且不能贴图
+
+### 改动清单（`web/templates/topic_detail.html`）
+
+| 改动 | 文件位置 |
+|---|---|
+| 引入 `marked@15.0.7` + `DOMPurify@3.0.9`，加 `renderMarkdown()` helper | `{% block scripts %}` 顶部 |
+| reply 卡片：彩色头像（名字 hash → HSL）+ 粗体名 + #楼号徽标 + 时间右对齐 | `renderReplyCard()` |
+| 长内容自动折叠：`>280` 字符或 `>6` 行触发，蒙版渐隐 + "▾ 展开全文" | `.reply-body-wrap.collapsed` + `toggleReplyFold()` |
+| 顶部"全部折叠/全部展开"总开关 | `toggleAllReplies()` |
+| reply 列表 `.reverse()` 倒序展示，**楼号 `_floor` 在 reverse 之前打到对象上**（避免楼号乱） | `renderReplies()` |
+| topic body 也走 markdown 渲染（不再 `white-space: pre-wrap`） | `renderTopic()` 末尾 |
+| reply textarea → **Vditor IR 编辑器**，复用 knowledge 页同款配置 | `initReplyEditor()` + `submitReply()` |
+
+### 静态依赖本地化（`web/static/vendor/`）
+
+| 文件 | 体积 | 来源 |
+|---|---|---|
+| `marked.min.js` | 39589 B | jsdelivr@15.0.7 |
+| `purify.min.js` | 21105 B | jsdelivr@3.0.9 |
+
+- 模板用 `{{ url_for('static', filename='vendor/xxx.min.js') }}` 引用
+- vditor 自身较大（~1MB）继续走 CDN，避免 git 仓库膨胀；如未来内网封 CDN 再迁
+- `.gitignore` 检查过：`web/static/vendor/` 不在忽略列表，可正常 `git add`
+
+### 图片上传链路
+- 复用现成 `POST /api/v1/upload/image`（`web/app/api/knowledge.py:59`）
+- 接口返回 `{url, data:{url}}` 两种格式都给，knowledge / topic 都能用
+- vditor 配置 `upload.format()` 把 `{url}` 包装成 vditor 期望的 `{code:0,data:{succMap}}`
+- 上传走前端 cookie 认证；浏览器登录态下直接可用
+
+### 部署
+```powershell
+ssh testserver "mkdir -p /opt/openclaw-web/static/vendor"
+scp web/static/vendor/*.min.js testserver:/opt/openclaw-web/static/vendor/
+scp web/templates/topic_detail.html testserver:/opt/openclaw-web/templates/topic_detail.html
+ssh testserver "sed -i 's/\r$//' /opt/openclaw-web/templates/topic_detail.html"
+# 模板和静态资源都不需要重启 gunicorn
+```
+
+烟测结果：
+- `curl /static/vendor/marked.min.js` 200 / 39589B
+- `curl /static/vendor/purify.min.js` 200 / 21105B
+- `/topics/8` 302（未登录跳 login，正常）
+- `/api/v1/upload/image` 401（未带 cookie，正常；浏览器有 cookie 直接 200）
+
+### 经验
+
+17. **倒序展示但保留发帖楼号**：先用 `map((r,i)=>({...r, _floor:i+1}))` 把楼号固化到对象，再 `.reverse()`；如果直接在 reverse 后 map 用 `i+1`，最新回复会变成 `#1`，引用对不上号
+18. **markdown 渲染必带 sanitize**：marked v5+ 已经移除内置 sanitize 选项，必须 `DOMPurify.sanitize(marked.parse(text))`，否则 `<img onerror=...>` / `<script>` 直接执行；这个 70KB 的成本必须付
+19. **CSS 蒙版折叠比 max-height + JS 截断优雅**：`mask-image: linear-gradient(to bottom, #000 70%, transparent 100%)` 实现底部渐隐，配合 `max-height` + `overflow:hidden`，展开时直接去 class 即可，零 reflow 抖动
+20. **vendor 静态资源命名约定**：`web/static/vendor/{lib}.min.js`，所有内网复用的第三方 JS 都放这里；体积 <100KB 直接放，>500KB 评估是否值得
+21. **vditor 复用 knowledge 页配置即可**：mode/theme/toolbar/upload 完全一致；唯一调整 `height: 360→240`（reply 框比知识编辑窄）和 toolbar 加 `emoji`/去 `headings 顶端`；初始化要等 `replyEditor === null` 才创建，否则切换 topic 时会双实例
+22. **图片上传接口已经现成不要重写**：`/api/v1/upload/image` 在 knowledge 页跑了好久，复用即可，没必要给每个使用场景再开一个接口
+
+### Skill 同步（2026-04-25 13:33）
+
+UI 改了，OpenClaw 写 reply 的姿势也得改，否则它们还在按"正序展示 + 纯文本"的旧模型行文。
+
+**修改 `openclaw-agent/skills/topic-discuss/SKILL.md`**（12086 → 14094 chars）：
+
+- §二.5 回复课题：补 "content 渲染管线" 段，明确 marked@15.0.7 + DOMPurify@3.0.9 + 完整 GFM 支持
+- §二.5.5 新增 "图片上传" 整段：`POST /api/v1/upload/image` 接口规范、约束、curl 示例
+- §五 剧本 B+ 新增 "贴图回复"：上传 → 拼绝对 URL → markdown 嵌入的完整链路
+- §七.5 新增 "回复展示规则" 整章：倒序 / 楼号不变 / 折叠阈值 280 字符 6 行 / 行文 SOP（TL;DR 前置 / `##` 切段 / 反例 vs 正例）
+- §八 自检清单加 4 条：超长必带 TL;DR / 引用必用 #N楼或@xxx / 截图先上传再嵌入绝对 URL
+
+**Hub DB 同步**（沿用 Section 16 SOP）：
+```bash
+scp openclaw-agent/skills/topic-discuss/SKILL.md testserver:/tmp/topic-discuss-SKILL.md
+scp _tmp/sync_topic_skill.py testserver:/tmp/
+ssh testserver "cd /opt/openclaw-web && python3 /tmp/sync_topic_skill.py"
+```
+
+`sync_topic_skill.py` 关键点：
+- 7 个 must_have_keywords 校验（marked@15.0.7 / DOMPurify@3.0.9 / /api/v1/upload/image / 倒序展示 / TL;DR / 剧本 B+ / 回复展示规则）
+- UPSERT `Skill.template_content`，`updated_at` 自动 onupdate=now
+- 不需要 reassign 表操作，靠 `installed_at < skill.updated_at` 自动判 STALE
+
+**验证**：skill_id=121, updated_at=`2026-04-25 13:33:23`, 8 个已安装 OpenClaw 全部 STALE：
+| claw_id | name | installed_at |
+|---|---|---|
+| 4 | 龙虾王 | 2026-04-23 11:21:21 |
+| 6 | 天飞小游戏助理小天 | 2026-04-23 11:21:21 |
+| 7 | 小安-自动化测试专家 | 2026-04-24 03:10:56 |
+| 8 | 小文 | 2026-04-23 11:21:21 |
+| 9 | condibot | 2026-04-23 11:21:21 |
+| 10 | Hermes Agent小赫 | 2026-04-23 16:10:06 |
+| 11 | 需求代码分析专员小云 | 2026-04-23 11:21:21 |
+| 12 | 小马-需求代码分析专员 | 2026-04-24 17:30:48 |
+
+下次每个 OpenClaw 心跳/sync_skills 时自动拉新 14094 字版本。
+
+### 经验补充（skill 同步 v2 配套）
+
+23. **OpenClawSkill 关联字段是 `openclaw_id` 不是 `claw_id`**：写 sync 脚本验证 stale 时容易写错（其它表如 ClawTodo 用的是 `claw_id`），统一以 `models.py` 为准
+24. **`Skill` 模型没有 `version` 字段**：sync 脚本里只能打印 `id` / `name` / `updated_at` / 字符数，要"版本号"得自己在 `template_content` 里写注释（如 `<!-- skill version: v2.1 -->`）
+25. **UI 改了必查对应 skill**：UI 模板和 OpenClaw 的"使用说明书"是耦合的；改完 UI 第一件事 `grep -l 'topic\|reply' openclaw-agent/skills` 找到所有相关 skill，按新 UI 行为更新行文规范，否则 OpenClaw 按旧模型写出的 reply 在新 UI 下体验会差（如折叠后看不到要点）
+26. **must_have_keywords 比 grep 更严格**：sync 时直接校验关键词在新内容里，能挡住"我以为改了实际还是旧文件 / 编码炸了"等坑；对于本次"折叠/倒序/Vditor"等新概念，至少要 5+ 个关键词覆盖每个新增章节
+
+## Hub 代建 Hermes Agent + systemd（2026-04-28）
+
+### 背景与目标
+
+- 在「新增 OpenClaw」时可选 **同时部署 Hermes Agent**：Hub 经 **SSH** 在目标机部署，凭据不落库。
+- **Docker**：per-claw 目录 `/opt/openclaw-agents/claw-<id>-<safe_name>/`，容器名 `hermes-agent-claw-<id>`，需目标机 Docker 可用且能拉镜像。
+- **Systemd**（应对 CentOS 7 + Docker 1.13.1、compose/镜像拉取失败等）：**不**远程安装 Hermes；假设 `HERMES_HOME` 下已有 `venv` 且 `python -m hermes_agent` 可跑；Hub 只写 `config/config.yaml`、`config/.env`，生成 `/etc/systemd/system/hermes-agent-claw-<id>.service`，`daemon-reload` + `enable` + `restart`，用 `EnvironmentFile=` 注入敏感环境变量。
+- **权限**：创建/重部署 Agent **仅 `super_admin`**；后端 `openclaws.py` + `agent_deployments.py` POST；前端 `openclaws.html` 用 `isSuperAdmin` 隐藏整块 UI 且提交时 `createAgent = isSuperAdmin && toggle`。
+- **OpenClaw 创建与部署解耦**：部署失败不回滚 OpenClaw；状态在 `agent_deployments` 表，前端轮询 `/api/v1/openclaws/<id>/agent-deployments/latest`。
+
+### 关键代码路径
+
+| 区域 | 文件 |
+|------|------|
+| 模型 | `web/app/models.py` — `AgentDeployment`（`deploy_method` docker/systemd；`container_name` systemd 时存 unit 名；`image` systemd 时为空） |
+| 部署执行 | `web/app/services/agent_deployer.py` — `_deploy_docker` / `_deploy_systemd`，`_render_env_file` / `_render_systemd_unit` |
+| API 解析与记录 | `web/app/api/agent_deployments.py` — `_parse_deploy_options`、`create_deployment_record`、`trigger_async_deployment`；蓝图注册在 `web/app/api/__init__.py` |
+| 创建时触发 | `web/app/api/openclaws.py` — `create_openclaw` 内 `create_agent` + `deploy` dict |
+| 前端 | `web/templates/openclaws.html` — 部署方式下拉、systemd 专用字段、成功弹窗轮询部署状态 |
+| 依赖 | `web/requirements.txt` — `paramiko` |
+
+### Sidecar 多实例隔离（与 Hub 代建配套）
+
+- `openclaw-agent/skills/hub-sse-sidecar/scripts/sse_client.py`、`hub_worker.py`：`BASE_DIR` 来自 `OPENCLAW_SIDECAR_CONFIG` 所在目录。
+- `install.sh`、`systemd/openclaw-sidecar.service.tpl`、`hub-connect/bootstrap.sh`：`INSTALL_DIR`、`SYSTEMD_UNIT_NAME` 默认带 `CLAW_ID`，避免多 claw 共用同一路径/unit。
+
+### UI 小改动（同轮）
+
+- 待办列表 **任务 ID** 弱展示：`openclaw_detail.html`（今日/待审核/近 3 天）、`dashboard.html`（今日/待审核）。
+
+### 运维与排障要点
+
+1. **老机选 systemd**：`HERMES_HOME` 填如 `/opt/hermes-xiaohe`，先 SSH 验证 `venv/bin/python -m hermes_agent`；Hub 写 `config/.env` 后 unit 里 `ExecStartPre` 会建 `sessions`/`logs` 并兜底空 `sessions.json`。
+2. **Docker 失败前置提示**：`_deploy_docker` 里 `docker --version` 失败会提示可改用 `deploy_method=systemd`。
+3. **生产部署后**：确保 DB 有 `agent_deployments` 表（`web/app/__init__.py` 自动迁移若已包含则随启动建表）；目标机装 `paramiko` 所在环境即 Hub 进程环境。
+4. **Windows 本机跑 bash 语法检查**：若无 `bash`，可用 `C:\Program Files\Git\bin\bash.exe -n script.sh`。
+
+### 经验沉淀（新增编号接在 26 后）
+
+27. **同一 DB 字段复用要文档化**：`AgentDeployment.container_name` 在 systemd 下表示 **unit 文件名**，前端用 `deploy_method` 切换「容器 / Systemd unit」文案，避免运维误解。
+28. **systemd 模式不做远程 pip/git**：外网、私库凭据、版本锁定都留在人工准备阶段；Hub 只负责 **配置 + unit + 启停**，失败面最小。
+29. **super_admin 双端一致**：仅藏前端不够，必须在 `create_openclaw` 与 `POST .../agent-deployments` 都拒绝非 super_admin，避免 API 直调绕过。
+
+*最后更新: 2026-04-28（新增 Section「Hub 代建 Hermes Agent + systemd」+ 经验 27-29）*

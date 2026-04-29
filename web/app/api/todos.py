@@ -340,6 +340,18 @@ def complete_todo(claw_id, todo_id):
         )
         db.session.add(log)
 
+    # B+ 通知机制说明：
+    #   - 主路径：agent 自己用 message(channel='wecom', to=owner) 工具发企微私聊（真会话）
+    #   - Hub 不重复发；agent 发完后回调 complete 接口时传 notified=true 回写 notified_at
+    #   - 兜底：5 分钟后 timeout_watcher 扫到 notified_at 仍为空的 submitted 记录
+    #          走 sendRTXInfo 应用通知兜底（sendRTXInfo 不是真私聊，是小红点）
+    #   - 默认 notified=false（保守：不传就当 agent 没发，由 Hub 兜底）
+    if status == 'submitted':
+        notified_flag = bool(data.get('notified'))
+        if notified_flag:
+            log.notified_at = datetime.now()
+            log.notified_strategy = 'agent_self'
+
     # once 类型提交后自动关闭
     if todo.schedule_type == 'once' and status == 'submitted':
         todo.enabled = False

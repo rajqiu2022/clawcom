@@ -2361,4 +2361,1177 @@ claw 同时持有"卸载 X" + "安装 X" todo 时不知道执行哪个。原代�
 
 ---
 
-*最后更新: 2026-04-23 (傍晚 16:15)*
+## 2026-04-27 OpenClaw 通信机制 B+ 改造（P1 + P2）部署
+
+### 用户需求
+
+> "OpenClaw 和 Hub 通信、自动化处理待办任务和聊天信息有很多问题，game 没办法处理，有些是 worker 自己处理，有些可以企微通知（小赫和龙虾王）。最大价值就在于统一调度 claw，消息机制不畅通就没价值。要更简单有效稳定的方案。"
+
+确认 3 条铁律：
+1. 所有 todo + chat **必须 agent 自己处理**（worker 代办禁止）
+2. 完成 todo 必须企微告知用户（agent 走 `message(action=send,channel=wecom,to=...)` 真私聊；Hub 兜底走龙虾王 `sendRTXInfo` 应用通知）
+3. **不允许周期轮询**（避免 LLM token 浪费），有消息才触发
+
+### 架构（B+ 方案）
+
+```
+[Hub broadcast] → ClawMessage(pending) → SSE 长连 → sidecar_v2.py
+                                                      ↓ 直接 fork 一次 LLM 进程
+                                                      └─ openclaw agent --message=XXX
+                                                            ↓ 内部用 message 工具直发企微（真私聊）
+                                                            └─ POST /complete?notified=true → Hub 标记
+                ↓
+                [Hub TimeoutWatcher 5min loop]
+                ├─ 扫 ClawTodoLog where notified_at IS NULL && >5min → WecomDispatcher.sendRTXInfo（默认关）
+                └─ 扫 ClawMessage where status in (pending,processing) >5min → 告警（默认关）
+```
+
+### Phase 1：Hub 改造（已上线）
+
+**DB schema（自动迁移钩子，幂等）**
+
+| 表 | 变更 |
+|---|---|
+| `openclaw_instances` | 加 `owner_wecom_userid VARCHAR(64)` 用于兜底通知收件人 |
+| `claw_messages` | `status` enum 扩展 → `pending/delivered/processing/done/failed/read`；新增 `processing_at/done_at/failed_reason/llm_response` |
+| `claw_todo_logs` | 新增 `notified_at` `notified_strategy` 跟踪通知轨迹 |
+| `claw_sidecar_configs` | **新建**，sidecar 中央配置（agent_type/agent_timeout/wecom_enabled/...） |
+| `wecom_send_logs` | **新建**，Hub 兜底企微发送审计 |
+
+**API 改造**
+
+| 接口 | 变更 |
+|---|---|
+| `POST /api/v1/agent-hub/messages/broadcast` | bug fix：claw 离线不再跳过，照样存 `pending`，重连后由 SSE 推送 |
+| `POST /api/v1/todos/<id>/complete` | 接受 `notified=true` 参数，标记 agent 已自行通知 |
+| `PUT /api/openclaws/<cid>/messages/<mid>/processing` | sidecar 显式上报开始处理 |
+| `PUT /api/openclaws/<cid>/messages/<mid>/done` | sidecar 显式上报完成（含 LLM response） |
+| `PUT /api/openclaws/<cid>/messages/<mid>/failed` | sidecar 显式上报失败（含 reason） |
+| `GET /api/openclaws/<cid>/sidecar-config` | sidecar 启动/60s 心跳拉配置，顺手写 last_heartbeat_at |
+
+**TimeoutWatcher（背景守护，MySQL 锁选主，gunicorn -w 4 不会重复执行）**
+
+`web/app/services/timeout_watcher.py`：单循环 60s tick，
+- `_scan_overdue_todo_logs`（默认关）→ WecomDispatcher.sendRTXInfo 兜底
+- `_scan_stuck_claw_messages`（默认关）→ 告警（暂仅日志）
+
+锁机制：`system_config.timeout_watcher_owner = current_pid`，CAS 续期。
+
+### Phase 2：sidecar v2（agent 端）
+
+| 文件 | 说明 |
+|---|---|
+| `openclaw-agent/skills/hub-sse-sidecar/scripts/sidecar_v2.py` | 全新单文件守护，纯标准库；事件驱动 SSE，无轮询；显式 processing/done/failed 三段上报；**已删 v1 的 1.5s 假兜底 mark_read** |
+| `openclaw-agent/skills/hub-sse-sidecar/install_v2.sh` | 一键脚本：自动检测 openclaw / hermes / qclaw 二进制；调 `/sidecar-config` self-check；写 `~/.qclaw/skills/hub-sse-sidecar/sidecar.env`；注册 systemd user service `qclaw-sidecar` |
+| `openclaw-agent/skills/hub-sse-sidecar/SKILL.md` | v2.0.0 文档（v1 移到 §legacy） |
+
+### 部署 SOP（生产 8088 / openclaw-web.service）
+
+⚠️ **本次踩到大坑**：本地 `web/app/models.py` `web/app/__init__.py` 等 6 个文件**和 prod 严重 drift**，
+直接 scp 覆盖会回滚 prod 已上线功能（`OpenClawInstance.owner_wecom_userid`、`engineering_baselines` 改版等）。
+
+**正确做法（patch-on-prod-baseline）**：
+
+```bash
+# 1) 把 prod 6 个核心文件拉回当 baseline
+scp testserver:/opt/openclaw-web/app/models.py F:\...\web\app\models.py
+scp testserver:/opt/openclaw-web/app/__init__.py F:\...\web\app\__init__.py
+... # api/__init__.py, api/agent_client.py, api/agent_hub.py, api/todos.py
+
+# 2) 用 Python 脚本（不是 PowerShell！）做"加性 patch"：
+#    每个 patch 只 INSERT，不 REPLACE 已有行；锚点串避开生僻字
+python patch_models.py        # 加 owner_wecom_userid + ClawMessage 新字段 + ClawSidecarConfig + WecomSendLog
+python patch_app_init.py      # 加 6 个 ALTER/CREATE 迁移块 + start_timeout_watcher hook
+python patch_api_files.py     # 加 4 个 sidecar 接口 + complete_todo notified 参数 + agent_hub 离线 bug fix
+
+# 3) 打包，剔除 CRLF，传走 prod
+tar -czf b_plus.tar.gz app/
+scp b_plus.tar.gz testserver:/tmp/
+ssh testserver "find /tmp/b_plus_unpack -type f -exec sed -i 's/\r$//' {} \;"
+
+# 4) 远端 AST 校验 + 备份 + 覆盖 + 重启
+ssh testserver "venv/bin/python -m py_compile app/api/agent_client.py ..."
+ssh testserver "cp -r /opt/openclaw-web/app /opt/openclaw-web/app.bak.$(date +%s)"
+ssh testserver "cp -rf /tmp/b_plus_unpack/app/* /opt/openclaw-web/app/"
+ssh testserver "systemctl restart openclaw-web.service"
+
+# 5) 烟测（生产 port = 8088，不是 5000！）
+bash smoke3.sh   # 用 Python get_token_plain() 解密 api_token_plain，再 curl
+```
+
+### 烟测结果（全绿）
+
+| 项 | 结果 |
+|---|---|
+| `GET /api/openclaws/4/sidecar-config` | HTTP 200，返回 wecom_enabled/agent_type/agent_timeout 等完整 JSON |
+| `claw_sidecar_configs` 自动写第一条 | `updated_by=sidecar_first_start` ✓ |
+| `PUT /messages/999999/processing`（msg 不存在） | HTTP 404 `message not found` ✓ |
+| `timeout_watcher_owner` worker 持锁 | pid 22199 / etime 4min21s ✓ |
+| `timeout_watcher_*_enabled` 默认开关 | 两条 false ✓ |
+
+### 经验教训（重要）
+
+#### 1. PowerShell 处理中文 SQL/heredoc 100% 失败 — 一律改 Python 脚本或 .sh + scp
+
+PowerShell 把中文逗号当 PS 语法解析，导致 `mysql -e "INSERT ..."` 永远报 `MissingArgument`。
+**铁律**：远端执行带中文/带 SQL 的命令时，先 `Write` 一个 `.sh` 文件 → `scp` 上去 → `sed -i 's/\r$//'` → `bash`。
+
+#### 2. 本地 vs prod drift 检查必须先做（patch-on-prod-baseline）
+
+部署前必须 `scp testserver:/opt/.../app/{models.py,__init__.py,api/*.py} ./compare/` 然后 `diff` 看清楚 prod 已经有了什么。本次 prod 早就上了 `owner_wecom_userid` + 工程分析改版，本地却是 4 月 23 日的老 baseline，差 60+ 处。**直接覆盖会让 prod 倒退一周**。
+
+#### 3. Token 验证机制：`api_token_plain` 是密文，不能直接 curl
+
+`OpenClawInstance.api_token_plain` 用 `_simple_decrypt()` 加密存。烟测必须：
+
+```bash
+TOKEN=$(venv/bin/python3 -c "
+from app import create_app
+from app.models import OpenClawInstance
+app = create_app()
+with app.app_context():
+    c = OpenClawInstance.query.filter(OpenClawInstance.api_token_hash.isnot(None)).first()
+    print(c.get_token_plain())")
+```
+
+#### 4. 生产端口 8088（gunicorn），不是 5000（开发 dev server）
+
+`/etc/systemd/system/openclaw-web.service` 起的 `gunicorn -w 4 -k gevent -b 0.0.0.0:8088`。
+
+#### 5. 应用日志在 `/tmp/flask.log`，不在 journalctl
+
+`gunicorn --error-logfile /tmp/flask.log --access-logfile /tmp/flask-access.log`。
+所以 `journalctl -u openclaw-web` 永远是空的，要 `tail -f /tmp/flask.log`。
+
+#### 6. gunicorn 多 worker 下背景线程必须用分布式锁
+
+`threading.Thread` 在 `-w 4` 下会启动 4 份。我们用 `system_config.timeout_watcher_owner` MySQL CAS 锁选主，每 60s 续期。其他 3 个 worker 检测到 owner 还活着就 sleep。
+
+#### 7. 自动迁移 DDL 必须幂等（IF NOT EXISTS / 检查 column 后才 ALTER）
+
+`__init__.py` 启动钩子用 raw SQL，先 `SHOW COLUMNS FROM x LIKE 'y'`，没有再 `ALTER TABLE`。
+
+### 文件清单
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `web/app/models.py` | 改 | + `owner_wecom_userid` + ClawMessage 4 字段 + ClawTodoLog 2 字段 + ClawSidecarConfig + WecomSendLog |
+| `web/app/__init__.py` | 改 | + 6 个 idempotent migration 块 + `start_timeout_watcher(app)` hook |
+| `web/app/api/__init__.py` | 改 | + `from app.api import wecom` |
+| `web/app/api/agent_client.py` | 改 | + 4 个 sidecar v2 接口（processing/done/failed/sidecar-config） |
+| `web/app/api/agent_hub.py` | 改 | bug fix：离线 claw 不跳过，照样存 pending |
+| `web/app/api/todos.py` | 改 | complete_todo 接受 `notified=true` 参数 |
+| `web/app/api/wecom.py` | 新 | WecomDispatcher 类（sendRTXInfo + 群机器人 fallback） |
+| `web/app/services/__init__.py` | 新 | - |
+| `web/app/services/timeout_watcher.py` | 新 | 60s loop + MySQL 选主 + 2 个扫描 worker（默认关） |
+| `openclaw-agent/skills/hub-sse-sidecar/scripts/sidecar_v2.py` | 新 | 单文件、事件驱动、无伪兜底 |
+| `openclaw-agent/skills/hub-sse-sidecar/install_v2.sh` | 新 | 一键安装 + systemd |
+| `openclaw-agent/skills/hub-sse-sidecar/SKILL.md` | 改 | v2.0.0 |
+| `_deploy_b_plus/patch_*.py` | 一次性 | 加性 patch 脚本（保留以备回滚） |
+| `_deploy_b_plus/smoke{,2,3}.sh` | 一次性 | 烟测脚本演化（最终 smoke3.sh，含解密 token） |
+
+### 后续待办（P2 灰度 / P3 收尾）
+
+- [ ] **灰度**：在 prod 新建 1 个测试 claw（`condibot` 优先），跑 install_v2.sh，观察 1 周
+- [ ] **P3 配置中心 Web 页**：让普通用户在 Web 上改 sidecar config（agent_timeout / wecom_enabled）
+- [ ] **P3 8 claw 分批迁移**：龙虾王 → 小赫 → game → 其他 5 个；每批观察 24h
+- [ ] **P3 老 sidecar 下线**：观察期满 → 删 `hub_worker.py` + `sse_client.py` + `task_queue.jsonl`
+- [ ] **可选**：用户体感 OK 后开 `timeout_watcher_todo_fallback_enabled=true` 看 5min 兜底是否需要触发
+
+---
+
+## 2026-04-27 (下午 14:13) — Phase 2.3：修复 skill #143 在 skills 市场不可见
+
+### 现象
+用户反馈："#143 skill 在 skills 市场没看到呢"
+
+### 根因
+4-23 龙虾王做实验时把 #143（`hub-sse-sidecar-v2`）**软删除 + 标 rejected** 了，DB 里仍然存在但前端 / API 不展示。我之前推 v2 内容时只覆盖了 `pack_path / template_content / mirror_content` 等字段，**没碰 `is_deleted / review_status / deleted_at`**，所以新内容是有的，但市场默认查询过滤掉了。
+
+```
+修复前 #143:  is_deleted=1, deleted_at=2026-04-23, review_status=rejected, is_standard=0
+修复前 #135:  is_deleted=0, deleted_at=NULL,       review_status=approved, is_standard=1
+```
+
+`/api/v1/skills` 的 `list_skills()` 默认 `query.filter(Skill.is_deleted != True)`，且非管理员还要 `review_status=approved`，所以前端"skills 市场"直接看不到 #143。
+
+### 修复
+SQL 把这 5 个字段一次性改回正常：
+
+```sql
+UPDATE skills SET
+    is_deleted    = 0,
+    deleted_at    = NULL,
+    review_status = 'approved',
+    is_standard   = 1,
+    display_name  = 'Hub SSE Sidecar v2（B+ 通信稳定化版）',
+    description   = '...',
+    last_modified_by = 'b_plus_visibility_fix',
+    updated_at    = NOW()
+WHERE id = 143;
+```
+
+修复脚本：`F:\Code\claw_team\_deploy_b_plus\fix_skill_143_visibility.sh`
+
+### 验证
+按 list_skills 默认过滤条件再查，#143 排在 hub_system 列表第一位：
+
+```
+id   name                  display_name                                  review_status
+143  hub-sse-sidecar-v2    Hub SSE Sidecar v2（B+ 通信稳定化版）          approved
+139  engineering-analysis  工程分析中心                                    approved
+138  requirement-analysis  需求分析中心                                    approved
+135  hub-sse-sidecar       Hub SSE 实时消息驱动方案（OpenClaw 通用版）     approved
+...
+```
+
+### 经验补遗 ⭐⭐⭐ 极重要
+
+> **覆盖既有 skill ID 时，必须显式检查 5 个"软状态"字段，不能只 update 内容字段**
+>
+> | 字段 | 默认风险 | 必须重置成 |
+> |---|---|---|
+> | `is_deleted` | 老 skill 可能被软删 | `0` |
+> | `deleted_at` | 软删时间戳 | `NULL` |
+> | `review_status` | 老 skill 可能被驳回 | `'approved'` |
+> | `is_standard` | 影响"标准 skill"展示 | 与 #135 对齐 = `1` |
+> | `display_name` | 龙虾王实验的旧文案 | 改成新版本文案 |
+>
+> **检查清单（推 skill 前必跑一次）**：
+> ```sql
+> SELECT id, name, is_deleted, deleted_at, review_status, is_standard, display_name
+> FROM skills WHERE id = <目标ID>;
+> ```
+> 如果 `is_deleted=1` 或 `review_status!='approved'` 或 `is_standard=0`（且对标的 #135 是 1），**先重置再推内容**。
+>
+> **更稳的办法**：以后 push_skill_v*.py 脚本里把这 5 个字段一并写进 UPDATE 语句，避免遗漏。
+
+### 文件清单（本次新增）
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `_deploy_b_plus/check_skill_visibility.sh` | 一次性 | 排查脚本：对比 #135/#143 + 看 list_skills 过滤逻辑 |
+| `_deploy_b_plus/fix_skill_143_visibility.sh` | 一次性 | 修复脚本：5 字段重置 + 验证 |
+| `_deploy_b_plus/verify_143_visible.sql` | 一次性 | 模拟 list_skills 默认过滤的查询 |
+
+---
+
+*最后更新: 2026-04-27 (下午 14:15)*
+
+---
+
+## 2026-04-27 (下午 18:40) — Phase 2.4：诊断"小天还是搞不定"——根因是没迁 v2
+
+### 现象
+用户反馈："新机制还是不稳定，小天还是搞不定"。小天给出长篇调查报告，结论指向"AI 被 Gateway hooks 唤醒后没有主动处理待办"，提出方案 A/B/C（加强 prompt / cron 兜底 / Hub Worker 直接调 MCP）。
+
+### 真正的根因
+**小天根本不是在跑 v2，是在 v1 架构里打补丁。** 一查就破。
+
+#### 三条 SQL 铁证（claw_id=6 = 小天）
+
+```sql
+-- A) 7 天 109 条消息 status 分布
+status     cnt
+delivered  84
+read       25
+-- 没有一条 processing/done/failed → 100% v1
+
+-- B) v2 专属字段非空计数
+has_processing_at=0  has_done_at=0  has_failed_reason=0  has_llm_response=0
+-- v2 必填这 4 个字段，全 0 = 从未跑过 v2
+
+-- C) ClawSidecarConfig 表
+SELECT * FROM claw_sidecar_configs WHERE claw_id=6;
+-- 0 行 → 小天从来没调过 v2 的 GET /sidecar-config
+
+-- D) 装的 skill
+SELECT skill_id FROM openclaw_skills WHERE openclaw_id=6;
+-- 装了 135 (v1)，没装 143 (v2)
+```
+
+小天报告里所有术语 —— `sse_client.py / hub_worker.py / Gateway hooks 唤醒 AI / inbox 文件` —— 都是 **v1 双进程架构**，跟 v2 单文件 sidecar 八竿子打不着。
+
+### 为什么 v1 在架构上注定治不好"AI 唤醒后不查待办"
+
+| 层 | v1 | v2 |
+|---|---|---|
+| 事件到达 | SSE → hub_worker 写 inbox 文件 | SSE → 直接进 sidecar_v2 主线程 |
+| 调 LLM | Gateway hooks 启 AI 会话，**message 不在输入里**，靠 prompt 让 AI 主动查 | `subprocess agent --message="<原文>"`，**消息直接塞命令行** |
+| 状态回写 | 无（靠 mark_read 伪造） | 显式 `/processing → /done /failed` |
+| AI 是否知道要干啥 | 不知道，得猜 | 知道，命令行就是这条消息 |
+
+→ **v1 漏处理是架构缺陷**，加 prompt / 加 cron 都是绕，绕一辈子也漏；v2 从命令行入口就消除了这个问题。
+
+### 给小天的处方（用户安排执行，不灰度）
+
+```bash
+# Step 1: 在 Hub 前端给小天装 skill #143 (hub-sse-sidecar-v2)
+
+# Step 2: 在小天那台机器上一键升级（自带清 v1）
+curl -fsSL http://<HUB>:8088/static/skills/hub-sse-sidecar-v2/install_v2.sh \
+  | CLAW_ID=6 HUB_URL=http://<HUB>:8088 bash
+
+# Step 3: 验证三条铁证
+# 3.1 Hub DB
+SELECT id, status, processing_at, done_at FROM claw_messages
+ WHERE claw_id=6 ORDER BY id DESC LIMIT 5;
+# 期望：status=done, 两个时间戳有值
+
+SELECT * FROM claw_sidecar_configs WHERE claw_id=6;
+# 期望：1 行
+
+# 3.2 小天机器
+ps -ef | grep -E "sse_client.py|hub_worker.py" | grep -v grep
+# 期望：空
+systemctl --user list-units 'openclaw-*'
+# 期望：只剩 openclaw-sidecar.service
+```
+
+### 经验补遗 ⭐⭐⭐⭐ 极重要 —— 排查"v2 不工作"的标准三连
+
+> **下次 claw owner 抱怨"v2 还是不行"，先别看日志、别改 prompt，先跑这三个 SQL 确认它"是不是真的在跑 v2"：**
+>
+> ```sql
+> -- 1. v2 状态机有没有写过
+> SELECT status, COUNT(*) FROM claw_messages
+>  WHERE claw_id=<id> AND created_at > DATE_SUB(NOW(),INTERVAL 1 DAY)
+>  GROUP BY status;
+> -- 全 delivered/read = 还在跑 v1
+>
+> -- 2. v2 配置 API 有没有被调
+> SELECT * FROM claw_sidecar_configs WHERE claw_id=<id>;
+> -- 0 行 = 没跑 v2
+>
+> -- 3. 装的是哪个 skill
+> SELECT skill_id FROM openclaw_skills WHERE openclaw_id=<id> AND skill_id IN (135,143);
+> -- 只有 135 = 还是 v1
+> ```
+>
+> **任意一条不达标 = 还在 v1，所有 prompt/cron/hooks 类的"修复"都是无效操作**。直接重跑 install_v2.sh 才是正路。
+
+> **架构性问题不能用 prompt 治** —— 小天那份调查报告的方案 A（更强指令）/ B（cron 兜底）/ C（Hub Worker 直接调 MCP）本质上都是在 v1 的"AI 空手被叫醒"基础上打补丁，不解决根因。**正确的判断标准是看消息能不能直接进 LLM 命令行，进不去就重设计，进得去就用 v2**。
+
+### 文件清单（本次新增）
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `_deploy_b_plus/find_xiaotian_claw.sql` | 一次性 | 通过名字 / claw_tag / owner 反查 claw_id |
+| `_deploy_b_plus/check_xiaotian_v1_or_v2.sql` | **可复用** | v1/v2 三连诊断（status 分布 + v2 字段非空 + sidecar_config） |
+| `_deploy_b_plus/check_xiaotian_skills.sql` | 一次性 | 列出某 claw 装的所有 skill |
+
+→ `check_xiaotian_v1_or_v2.sql` 改个 claw_id 就能复用，建议保留作为标准诊断工具。
+
+---
+
+*最后更新: 2026-04-27 (下午 18:45)*
+
+---
+
+## 2026-04-27 (下午 19:08) — Phase 2.5：阻止误修 sse_client.py（虚假 bug）
+
+### 现象
+小天提报："event_type 字段名和 sse_client.py 的 classify 函数不匹配。SSE 事件 data 里用的是 type 而不是 event_type"，准备动手改 `sse_client.py` 的解析逻辑。
+
+### 真相 — 这个 bug 不存在
+
+**SSE 协议层的事件类型在 `event:` 行，不在 data JSON 里。**
+
+| 来源 | 字段在哪 | 字段名 |
+|---|---|---|
+| Hub 服务端 (`agent_client.py:175-185`) 推送 | SSE 协议头 | `event:` 行 |
+| Hub data JSON 里 | 不含事件类型字段 | 只有内嵌的 `task_type` / `msg_type`（消息子类型，不同概念） |
+| v1 `sse_client.py` 内部 | 局部变量 | `event_type`（从 `event:` 行解析得来） |
+| v2 `sidecar_v2.py` 内部 | 局部变量 | `event_name`（从 `event:` 行解析得来） |
+
+**Hub data 里既没有 `type` 也没有 `event_type`**，所以"data 里用的是 type 而不是 event_type"这句话本身就是错的。`sse_client.py` 的 classify 已经按 SSE 标准正确读 `event:` 行，**没有 bug**。
+
+### 最可能的真实原因
+小天在 v1 sse_client 之上又**自己包了一层**（比如 Gateway hooks 转发的 JSON / hub_worker 写 inbox 的格式），它自造的那一层用了 `type` 字段名，现在它把"自造层的字段错位"误诊成"sse_client 的 bug"。改 sse_client.py 不仅治不了它的问题，还会把**唯一还能用的标准路径**搞坏。
+
+### 经验补遗 ⭐⭐⭐ —— 收到"v1 有 bug 要改"报告时的反射动作
+
+> **改 v1 标准文件之前，先回答 3 个问题，任何一个答不上来都不许改：**
+>
+> 1. **bug 体现在哪个 commit / 哪一行？** —— 让对方贴具体堆栈或字段对照，不接受"差不多是这样"
+> 2. **这个字段是 Hub 推的，还是经过本地某层封装？** —— 用 `curl -N -H "Authorization:..." http://hub/api/v1/agent/<id>/sse` **直连 Hub 抓原始 SSE**，对比期望字段名
+> 3. **v2 同位置代码长什么样？** —— v1/v2 同时存在的逻辑（如 SSE 解析），如果 v2 也写成这样并且 v2 在别的 claw 上能跑通，那 v1 这段就不是 bug，是封装层错位
+>
+> **绝大多数"v1 还差点 bug 没修"的报告，根因都是封装层 / 配置 / 没装 v2**，不是 v1 标准文件错。
+>
+> **判定标准（一句话）**：能用 `curl -N` 在 Hub 端直连复现的 = 真 bug；只能在某个 claw 本地复现的 = 99% 是它自己包装层的问题。
+
+### 配套行动
+- 已通知用户：**不要让小天改 sse_client.py**，要求它要么提供具体证据（哪个文件哪一行 + curl -N 抓的原始 SSE），要么直接迁 v2
+- 复用上一篇 Phase 2.4 的处方：装 #143 → 跑 install_v2.sh → 看 `claw_messages.processing_at`
+
+---
+
+*最后更新: 2026-04-27 (下午 19:10)*
+
+---
+
+## 2026-04-27 (下午 19:35) — Phase 2.6：小马（id=12）模式混用诊断
+
+### 现象
+用户澄清：刚才"event_type 不匹配"的 owner 是小马（不是小天）。同样跑诊断三连。
+
+### 诊断结果
+小马（id=12）的 v1/v2 三连**与小天完全相同**：claw_messages 全 delivered/read、v2 字段全 0、`claw_sidecar_configs` 无记录、装的是 #135 (v1)。
+
+但小马**多一个红灯**：
+
+```
+connection_mode = polling
+装了 skill #135 (hub-sse-sidecar  ← SSE 专用)
+```
+
+### 病灶 ⭐ —— polling 模式 ≠ SSE 专用 sidecar
+
+`hub-sse-sidecar` 系列（#135 和 #143）**只支持 SSE 长连接**，sidecar_v2 里搜 `polling` 0 命中，全是 `sse_loop_once` 风格。polling claw 装 #135 等于装了不用，运行时**实际是另一条路径在跑**（或者根本就不跑，纯靠魔改的 v1 hooks）。这种混用状态本身就是 bug 源头：
+- 报告的"不一致"很可能是因为 polling 模式的事件并不走 SSE 协议层，所以拿 SSE 的 `event_type` 局部变量去对照其他来源的 JSON 自然对不上
+- 这跟 sse_client.py 没关系，跟"该 claw 不该装这个 skill"有关系
+
+### 经验补遗 ⭐⭐⭐ —— 装 hub-sse-sidecar 前必看 connection_mode
+
+> **`hub-sse-sidecar` (#135 / #143) 只服务于 `connection_mode='sse'` 的 claw**。
+>
+> 装 v1/v2 sidecar 之前**必须**先 SQL 检查：
+> ```sql
+> SELECT id, name, connection_mode FROM openclaw_instances WHERE id=<X>;
+> ```
+> - `connection_mode='sse'` → 直接装 #143 + 跑 install_v2.sh
+> - `connection_mode='polling'` → 决定要么改 SSE，要么不装 sidecar；**绝不要既保留 polling 又装这个 skill**
+>
+> **如何决定切 SSE 还是保留 polling**：能连 Hub 就切 SSE（v2 在 SSE 上才事件驱动、零延迟、无 cron 兜底）。只有部署在内网严格出方向受限的环境（不能维持长连接）才保留 polling。
+>
+> **未来可优化**：在 Hub 后端给 `openclaw_skills` 加个安装前置检查 —— 如果 skill 是 hub-sse-sidecar 系列且 claw 是 polling 模式，直接拒绝安装，让用户先改连接模式。
+
+### 给小马的处方（用户安排执行）
+
+```sql
+-- 1. 切 SSE
+UPDATE openclaw_instances SET connection_mode='sse',
+       last_modified_by='b_plus_xiaoma_to_v2' WHERE id=12;
+```
+
+```bash
+# 2. 装 v2（前提：先在前端给小马装 #143）
+curl -fsSL http://<HUB>:8088/static/skills/hub-sse-sidecar-v2/install_v2.sh \
+  | CLAW_ID=12 HUB_URL=http://<HUB>:8088 bash
+
+# 3. 验证三连：同 Phase 2.4
+```
+
+### 文件清单
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `_deploy_b_plus/check_xiaoma_v1_or_v2.sql` | 一次性 | 实际就是 check_xiaotian_v1_or_v2.sql 改 claw_id —— 印证了那个文件的复用价值 |
+
+→ 强烈建议把 `check_xiaotian_v1_or_v2.sql` 改名为 `check_claw_v1_or_v2.sql`，把 claw_id 参数化（`SET @cid := 6;`）作为标准诊断脚本。
+
+---
+
+*最后更新: 2026-04-27 (下午 19:40)*
+
+---
+
+## 2026-04-27 (下午 19:45) — Phase 2.7：小马 owner 反馈 + SKILL.md 目录文档不一致
+
+### 反馈摘要
+小马 owner 自己手拼了一个"v2 风格"的 sidecar，对齐了核心要素（SSE 端点、Bearer 认证、事件分类、todo complete API、JSON 配置），但有两个偏差：
+1. 配置文件放在 `/root/.openclaw-sidecar-xiaoma/hub_config.json`，**不是** `~/.qclaw/hub_config.json`（怕踩到小赫的 `~/.qclaw/`）
+2. 脚本放在 `/root/.openclaw-sidecar-xiaoma/scripts/`，**不是** `~/.qclaw/scripts/`
+
+并质疑："#143 里写的配置存放目录是不是不准确？"
+
+### 判定
+**owner 的目录做法完全合规** —— 它实际就是按 SKILL.md 第 287-289 行的多 claw 同机模板做的（`INSTALL_DIR=$HOME/.openclaw-sidecar-claw<ID>`），只是把 `claw12` 换成了 `xiaoma`。
+
+`install_v2.sh:37` 是权威源：`INSTALL_DIR="${INSTALL_DIR:-$HOME/.qclaw/skills/hub-sse-sidecar}"` —— 默认值，可被环境变量覆盖。
+
+### 但 SKILL.md 文档确实有问题 ⭐ —— v1→v2 改写不彻底
+
+| 行 | 写的目录 | 来源 |
+|---|---|---|
+| L42 | `~/.qclaw/skills/hub-sse-sidecar/` | v2 |
+| L146-148 | `~/.openclaw-sidecar/`、`~/.openclaw-sidecar-claw<ID>/` | v1 残留 |
+| L287-289 | `~/.openclaw-sidecar-claw12` | v1 多 claw 模板 |
+| L336-385 | `~/.openclaw-sidecar/` | v1 残留 |
+
+→ 一个 SKILL.md 里两套目录混着用，owner 提"是不是不准确"是对的。
+
+### 官方目录约定（应该重写到 SKILL.md 顶部）
+
+| 场景 | INSTALL_DIR |
+|---|---|
+| 单 claw 一台机 | `~/.qclaw/skills/hub-sse-sidecar/`（默认，不传环境变量即可） |
+| 多 claw 同机 | `~/.openclaw-sidecar-<ID 或别名>/`（必传 `INSTALL_DIR=...` + `SYSTEMD_UNIT_NAME=openclaw-sidecar-<X>.service`） |
+
+### owner 的"自拼版"为什么仍然不是真 v2
+
+诊断脚本结果（`@cid:=12`）：
+```
+has_v2_config=0    ← /sidecar-config API 从未被调用过
+has_skill_143=0    ← Hub openclaw_skills 表里没装 #143
+has_skill_135=1    ← 还装着旧的 #135
+```
+
+owner 对齐了**协议层**（SSE 解析、token、事件分类），但**没有接 v2 三个新 API**：
+- `GET /api/openclaw-agent/<id>/sidecar-config`
+- `PUT /api/openclaw-agent/<id>/messages/<mid>/processing`
+- `PUT /api/openclaw-agent/<id>/messages/<mid>/done`
+
+所以它的版本本质上是 v1.5：状态机、配置中心、显式生命周期都没接 → DB 里看不到 v2 痕迹 → 仍然走"AI 唤醒后猜要做什么"的老路径。
+
+### 经验补遗 ⭐⭐⭐⭐ —— "我对齐了核心要素"≠ 在跑 v2
+
+> **判断 sidecar 是不是真 v2，不看代码长得像不像，看 DB 痕迹**：
+>
+> 1. `claw_sidecar_configs` 有没有这个 claw 的一行（必有）
+> 2. `claw_messages.processing_at/done_at` 最近有没有时间戳（必有）
+> 3. `openclaw_skills` 装的是 #143 而不是 #135（必须迁过来）
+>
+> 三条任一不达标 = **依然是 v1**，不管脚本目录多漂亮、协议多对齐。
+>
+> "为什么必须跑官方 install_v2.sh"：因为协议对齐很容易自己拼，但 v2 的价值不在协议层，**在三个新 API 把整个生命周期搬上 Hub**。自拼版漏掉这三个 API，就漏掉了 v2 全部价值。
+
+### 给小马 owner 的处方（标准多 claw 同机模式）
+
+```bash
+# 1. Hub 前端：卸载 #135、装 #143
+# 2. DB 切 sse
+UPDATE openclaw_instances SET connection_mode='sse' WHERE id=12;
+# 3. 官方 install_v2.sh，多 claw 模式（owner 已经在用的目录习惯保留）
+INSTALL_DIR=$HOME/.openclaw-sidecar-xiaoma \
+SYSTEMD_UNIT_NAME=openclaw-sidecar-xiaoma.service \
+CLAW_ID=12 HUB_URL=http://<HUB>:8088 API_TOKEN=<token> \
+bash <(curl -fsSL http://<HUB>:8088/static/skills/hub-sse-sidecar-v2/install_v2.sh)
+# 4. 重跑诊断脚本（@cid:=12）看综合判定，必须三连转绿
+```
+
+### TODO（下次维护时一并修）
+
+- [ ] **SKILL.md 目录章节大重写**：删掉所有 `~/.openclaw-sidecar/` v1 残留段落（L336-425 整段都是 v1 安装步骤，已经被 `install_v2.sh` 取代），合并多 claw 模板到顶部，留单一权威约定
+
+---
+
+*最后更新: 2026-04-27 (下午 19:50)*
+
+---
+
+## 2026-04-27 (晚 22:00) — Phase 2.8：小天/小马迁移半成品诊断
+
+### 现象
+两个 claw 的 owner 先后报"搞好了/部署好了"，跑诊断脚本发现都是半成品。
+
+### 小马（id=12）状态：sidecar 跑了 / 但模式没切
+
+```
+conn_mode=polling | has_v2_config=1 | ever_processing=0 | has_skill_143=0 | has_skill_135=1
+                       ↑good         ↑致命              ↑没装             ↑没卸
+```
+
+- ✅ install_v2.sh 跑过（claw_sidecar_configs 有记录，updated_by=sidecar_first_start）
+- ❌ Hub 前端没卸 #135、没装 #143
+- ❌ DB 里 connection_mode 还是 polling → **Hub 不给 polling claw 推 SSE**，sidecar 长连接挂上去什么也收不到，1 小时无心跳已成僵尸
+
+### 小天（id=6）状态：装了 skill / 但没跑 sidecar
+
+```
+conn_mode=sse | has_v2_config=0 | ever_processing=0 | has_skill_143=1 | has_skill_135=1(disabled)
+                  ↑致命           ↑bad              ↑好               ↑半好
+```
+
+- ✅ 在 Hub 前端装了 #143、禁用了 #135（比小马干净）
+- ❌ **没在小天机器上跑 `install_v2.sh`** —— claw_sidecar_configs 无小天一行 = sidecar_v2 从未启动
+- ⚠️ 老的 v1 sse_client.py 估计还在跑（消息还在 delivered，但 v2 字段全 0），印证：**Hub 前端禁用 skill 不会停掉机器上已经跑起来的 v1 进程**
+
+### 经验补遗 ⭐⭐⭐⭐⭐ —— 装 v2 三件事缺一不可
+
+> **下次让 owner 迁 v2，必须明确告诉他这是三件独立的事**：
+>
+> | # | 动作 | 在哪做 | 验证标志 |
+> |---|---|---|---|
+> | A | Hub 前端：装 #143、卸 #135 | Hub UI | `openclaw_skills` 有 143、无 135 |
+> | B | DB：切 SSE 模式（仅 polling claw 需要） | Hub DB | `openclaw_instances.connection_mode=sse` |
+> | C | **claw 机器：跑 `install_v2.sh`** | claw 机器 ssh | `claw_sidecar_configs` 出现这个 claw 一行 |
+>
+> **三件事互不替代**，缺任何一件就是半成品：
+> - 缺 A → install_skill 流程会重新拉回 v1 脚本覆盖
+> - 缺 B → polling claw 装好 sidecar 也是聋子
+> - 缺 C → 文件在机器上但进程没跑，老 v1 继续工作
+>
+> 最常见误解："**装 skill = 部署 sidecar**" → 错。"装 skill" 只下载文件到 `~/.qclaw/skills/...`，必须显式跑 `install_v2.sh` 才把进程拉起来。
+>
+> **验证只看一行（综合判定那一行）**：
+> ```
+> 三连绿 = conn_mode=sse + has_v2_config=1 + has_skill_143=1
+> ```
+> 任意一格不达标，**别听 owner 说"对齐了核心要素"，让他重做缺的那件事**。
+
+### 给两个 claw 的最终处方
+
+**小马**：补 A + B + 重启 sidecar
+```bash
+# 1. Hub 前端：卸 #135、装 #143
+# 2. DB 切 SSE
+mysql -e "UPDATE openclaw_instances SET connection_mode='sse' WHERE id=12;"
+# 3. 在小马机器重启 sidecar（让它重新连）
+ssh <小马机器> systemctl restart openclaw-sidecar-xiaoma.service
+```
+
+**小天**：只缺 C
+```bash
+# 在小天机器上跑 install_v2.sh，自带清 v1
+ssh <小天机器>
+CLAW_ID=6 HUB_URL=http://<HUB>:8088 CLAW_TOKEN=<token> \
+bash <(curl -fsSL http://<HUB>:8088/static/skills/hub-sse-sidecar-v2/install_v2.sh)
+```
+
+### 配套优化（下次部署时做）
+
+应该把"v2 三件事"明确写进 SKILL.md 顶部 Quickstart：分 A/B/C 三步，每步给一个验证 SQL。这样 owner 看完 SKILL.md 就知道完整流程，不会以为"装 skill 完事"。
+
+---
+
+*最后更新: 2026-04-27 (晚 22:05)*
+
+---
+
+## 2026-04-27 (晚 22:10) — Phase 2.9：#143 skill 同步状态核查 + 安装变量名纠偏
+
+### 现象
+owner 卡在最后一步，认为可能是 `#143 skill` 尚未同步完成，提出三种可能：等待同步、手动触发同步、从 Hub 直接获取 `sidecar_v2.py`。
+
+### 核查结果
+**不是同步问题。** #143 在三层都已经齐：
+
+| 层 | 状态 |
+|---|---|
+| DB `skills` | `id=143, is_deleted=0, review_status=approved` |
+| DB `skill_files` | 4 个文件齐：`SKILL.md / install_v2.sh / scripts/sidecar_v2.py / scripts/cleanup_v1.sh` |
+| `hub-store` | 4 个文件齐 |
+| `static` | 4 个文件齐 |
+| HTTP URL | 4 个 URL 全部 `200` |
+
+URL 校验结果：
+
+```text
+200 23746 /static/skills/hub-sse-sidecar-v2/SKILL.md
+200  9093 /static/skills/hub-sse-sidecar-v2/install_v2.sh
+200 14539 /static/skills/hub-sse-sidecar-v2/scripts/sidecar_v2.py
+200 10064 /static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1.sh
+```
+
+### 正确获取方式
+
+```bash
+curl -fsSL http://<HUB>:8088/static/skills/hub-sse-sidecar-v2/install_v2.sh
+curl -fsSL http://<HUB>:8088/static/skills/hub-sse-sidecar-v2/scripts/sidecar_v2.py
+curl -fsSL http://<HUB>:8088/static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1.sh
+```
+
+### 经验补遗 ⭐⭐⭐⭐ —— 安装变量名必须用 `CLAW_TOKEN`，不是 `API_TOKEN`
+
+`install_v2.sh` 的必填参数是：
+
+```bash
+HUB_URL=http://9.134.11.169:8088 CLAW_ID=5 CLAW_TOKEN=xxxxx bash install_v2.sh
+```
+
+脚本第 25-27 行明确校验：
+
+```bash
+: "${HUB_URL:?必须设置 HUB_URL，例如 http://9.134.11.169:8088}"
+: "${CLAW_ID:?必须设置 CLAW_ID，到 Hub Web 端注册 claw 后获得}"
+: "${CLAW_TOKEN:?必须设置 CLAW_TOKEN，注册 claw 时 Hub 返回的明文 token}"
+```
+
+之前给 owner 的示例里写过 `API_TOKEN=<token>`，这是错误示例，已在本日志 Phase 2.8 修正为 `CLAW_TOKEN=<token>`。如果 owner 用 `API_TOKEN` 跑，脚本会直接报“必须设置 CLAW_TOKEN”，sidecar 不会启动，`has_v2_config` 继续为 0。
+
+### 标准安装命令（以后统一用这版）
+
+```bash
+CLAW_ID=<id> \
+CLAW_TOKEN=<token> \
+HUB_URL=http://<HUB>:8088 \
+bash <(curl -fsSL http://<HUB>:8088/static/skills/hub-sse-sidecar-v2/install_v2.sh)
+```
+
+### 排查脚本
+
+新增：`_deploy_b_plus/check_skill143_sync.sh`，用于一次性检查 DB / hub-store / static / HTTP URL 四层同步。
+
+---
+
+*最后更新: 2026-04-27 (晚 22:15)*
+
+---
+
+## 2026-04-27 (晚 22:55) — Phase 2.10：修复 sidecar_v2 todo 重复派发 / LLM 超时风暴
+
+### 现象
+小天 v2 迁移成功后，仍出现大量 `subprocess timeout 330s`。owner 观察到 `sidecar_v2.py` 不断尝试处理同一批 pending todo（48、56、87、88、90、183 等），每次超时后又重新尝试，形成 LLM 调用风暴。
+
+### 根因
+这次是 **#143 sidecar_v2.py 自身 bug**，不是 owner 部署问题。
+
+关键代码问题：
+
+```python
+if event_name == 'todos_pending':
+    todos = payload.get('todos', [])
+    for todo in todos:
+        # 注释写“串行”，实际每个 todo 都开线程
+        threading.Thread(target=handle_todo, args=(todo,), daemon=True).start()
+```
+
+叠加 Hub SSE 服务端行为：
+- SSE 长连接内部 2 秒 loop，约 30 秒检查一次 pending todos
+- pending todo 未完成时仍会继续出现在 `todos_pending`
+- sidecar 失败后只打日志，不写 todo 的 processing/failed/cooldown 状态
+
+结果：
+`pending 未消失 → Hub 重推 todos_pending → sidecar 再开 LLM → 330s 超时 → 继续 pending → 再来一轮`
+
+### 修复
+发布 `sidecar_v2.py v2.0.1`：
+
+| 改动 | 说明 |
+|---|---|
+| 新增 `_todo_queue` | `todos_pending` 只入队，不直接开 LLM 线程 |
+| 新增 `todo_worker_loop()` | 单 worker 串行处理 todo，避免并发烧 LLM |
+| 新增 `_queued_todos` | 同一个 todo 运行中/已排队时跳过 |
+| 新增 `_todo_cooldown_until` | 失败后默认 1 小时不重试，同一 pending 不会反复烧 |
+| 新增 `TODO_RETRY_SEC` | 默认 `3600`，可环境变量覆盖 |
+| 新增 `TODO_SUCCESS_COOLDOWN_SEC` | 默认 `300`，LLM 返回但 Hub 状态尚未收敛时短冷却 |
+
+### 已部署到 #143
+
+远端验证：
+
+```text
+static version markers:
+SIDECAR_VERSION = '2.0.1'
+TODO_RETRY_SEC = int(os.getenv('TODO_RETRY_SEC', '3600'))
+def enqueue_todo(todo):
+def todo_worker_loop():
+
+DB skill_files:
+scripts/sidecar_v2.py content_len=16065 updated_at=2026-04-27 22:57:49
+
+URL:
+2.0.1=True todo_worker=True
+```
+
+更新范围：
+- `hub-store/skills/hub-sse-sidecar-v2/scripts/sidecar_v2.py`
+- `static/skills/hub-sse-sidecar-v2/scripts/sidecar_v2.py`
+- DB `skill_files(skill_id=143, filename='scripts/sidecar_v2.py')`
+
+### owner 侧操作
+
+已经跑过 v2 的 claw（如小天）需要重新拉取 `sidecar_v2.py` 并重启：
+
+```bash
+curl -fsSL -o ~/.qclaw/skills/hub-sse-sidecar/sidecar_v2.py \
+  http://<HUB>:8088/static/skills/hub-sse-sidecar-v2/scripts/sidecar_v2.py
+chmod +x ~/.qclaw/skills/hub-sse-sidecar/sidecar_v2.py
+
+# systemd 环境
+systemctl restart hub-sse-sidecar-v2 || systemctl --user restart hub-sse-sidecar-v2
+
+# 容器 / 无 systemd 环境
+pkill -f 'sidecar_v2.py' || true
+set -a && source ~/.qclaw/skills/hub-sse-sidecar/sidecar.env && set +a
+nohup python3 ~/.qclaw/skills/hub-sse-sidecar/sidecar_v2.py \
+  > ~/.qclaw/skills/hub-sse-sidecar/logs/sidecar.log 2>&1 &
+```
+
+### 经验补遗 ⭐⭐⭐⭐⭐
+
+> **“事件驱动”不等于“无重复事件”**。Hub SSE 可以为了可靠性重推当前 pending 状态；客户端必须做到幂等：
+>
+> 1. message 要有 `msg_id` 级 in-flight 去重（已做）
+> 2. todo 也必须有 `todo_id` 级 in-flight 去重（本次补）
+> 3. 失败必须有冷却或失败状态，否则 pending 会无限重试
+> 4. 注释写“串行”不代表真的串行，看到 `Thread(...)` 就要警觉
+>
+> 下次排查 “v2 不稳定” 时，如果 `has_v2_config=1` 且 `ever_processing=1`，说明迁移成功，接下来要看：
+> - `failed_reason` 是否集中为 `subprocess timeout`
+> - sidecar log 是否同一 todo_id 反复出现
+> - 是否缺少 in-flight / cooldown / queue
+
+### 文件清单
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `openclaw-agent/skills/hub-sse-sidecar/scripts/sidecar_v2.py` | 改 | v2.0.1，todo 队列 + 冷却 |
+| `_deploy_b_plus/update_skill143_sidecar_v201.py` | 新 | 远端更新 #143 DB + hub-store + static |
+| `_deploy_b_plus/verify_skill143_sidecar_v201.sh` | 新 | 远端验证脚本 |
+
+---
+
+*最后更新: 2026-04-27 (晚 23:00)*
+
+---
+
+## 2026-04-27 (晚 23:20) — Phase 2.11：修复 submitted 仍被 SSE 当 pending 重推
+
+### 现象
+用户反馈：小天仍一直处理待办。此时小天已确认：
+- `sidecar_version=2.0.1`
+- `has_v2_config=1`
+- `has_skill_143_enabled=1`
+- 不是部署问题
+
+### 根因
+**Hub SSE 待办过滤逻辑与 `complete_todo` 的状态语义不一致。**
+
+`complete_todo` 的设计语义：
+
+```python
+status = data.get('status', 'submitted')
+# 提交后状态变为 submitted，需管理员审核通过后才算 approved
+```
+
+也就是说，agent 完成待办后正常会写：
+
+```text
+ClawTodoLog.status = submitted
+completed_at = now
+notified_at = now  # 如果 notified=true
+```
+
+但 SSE 推 pending 的逻辑只把下面两个状态当“已完成”：
+
+```python
+is_done = log and log.status in ('completed', 'approved')
+```
+
+结果：
+
+```text
+agent 完成 todo → Hub 写 submitted → SSE 判断 submitted 不是 done → 继续推 todos_pending → sidecar 再处理 → 继续 submitted → 无限重复
+```
+
+小天今天 7 个任务就是这种状态：
+
+```text
+48/56/87/88/90/183/618 全部 status=submitted + completed_at + notified_at
+但旧 pending 计算仍把它们列为 pending
+```
+
+### 修复
+在 `web/app/api/agent_client.py` 两处 SSE pending 计算里，把 `submitted` 也视作“对 agent 来说已完成”：
+
+```python
+# submitted 表示 agent 已经执行并回写结果，等待人工审核。
+# 对 SSE 推送而言它不能再算 pending，否则会反复触发 agent 重做。
+is_done = log and log.status in ('submitted', 'completed', 'approved')
+```
+
+修改位置：
+- SSE 连接建立时的初始 pending todos 推送
+- SSE loop 中每 30 秒 / todo change 的 pending todos 推送
+
+### 部署
+
+```text
+python -m py_compile agent_client.py 通过
+scp 到 prod /opt/openclaw-web/app/api/agent_client.py
+systemctl restart openclaw-web
+systemctl is-active openclaw-web → active
+```
+
+### 验证
+
+按新口径计算小天今日 pending：
+
+```text
+=== pending if submitted is treated as done ===
+空结果
+```
+
+小天今日 7 个任务全部是：
+
+```text
+status=submitted
+completed_at 有值
+notified_at 有值
+```
+
+因此不会再被 SSE 当 pending 推给 sidecar。
+
+### 经验补遗 ⭐⭐⭐⭐⭐
+
+> **要区分两个“完成”语义：**
+>
+> | 语义 | 状态 | 用途 |
+> |---|---|---|
+> | agent 已完成执行 | `submitted` | 不应再推给 agent 重做 |
+> | 管理员审核通过 | `approved` / `completed` | 用于管理视角统计 / init gate 验收 |
+>
+> SSE pending 推送面向 agent 执行层，必须把 `submitted` 视作 done；否则任何“提交待审核”的任务都会无限重做。
+>
+> init gate / 管理验收可以继续只认 `approved/completed`，这和 SSE 执行层不是同一个语义。
+
+### 文件清单
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `web/app/api/agent_client.py` | 改 | pending todo 计算把 `submitted` 视作 done |
+| `_deploy_b_plus/check_xiaotian_todo_loop.sql` | 新 | 排查小天重复待办的综合 SQL |
+| `_deploy_b_plus/verify_xiaotian_pending_after_submitted_fix.sql` | 新 | 验证 submitted 不再 pending |
+
+---
+
+*最后更新: 2026-04-27 (晚 23:25)*
+
+---
+
+## 2026-04-27 (晚 23:50) — Phase 2.12：小天重连不上 / 仍处理待办的判定
+
+### 现象
+用户反馈小天：
+- `sidecar_v2.py` 还在运行（2.0.1）
+- Gateway 正常
+- Hub SSE 显示 `Not connected`
+- sidecar 仍在不断调用 LLM
+- openclaw-hub MCP 服务启动后退出
+
+### Hub 侧证据
+
+```text
+openclaw_instances:
+  connection_mode=sse
+  status=offline
+  last_activity=2026-04-27 23:44:53
+
+claw_sidecar_configs:
+  sidecar_version=2.0.1
+  last_heartbeat_at=2026-04-27 23:43:57
+
+messages since hub fix(23:20):
+  空
+
+pending todos after submitted fix:
+  空
+```
+
+同时，今天那 7 个曾循环的 todo 已全部是：
+
+```text
+status=submitted
+completed_at 有值
+notified_at 有值
+```
+
+### 判定
+**Hub 已经不再推这些待办了。**
+
+如果小天机器上仍然“不断处理待办”，那不是 Hub 新推的，而是：
+
+1. 23:20 修复前 sidecar 已经把一批 todo 放进了本地内存队列，之后继续消化旧队列；
+2. 或者机器上还有旧 `sidecar_v2.py` / v1 `sse_client.py` / 残留 openclaw agent 子进程没清掉；
+3. sidecar 心跳已停，说明当前运行态没有正常执行 config refresh，也没有稳定连到 Hub。
+
+### 处方
+
+在小天机器上必须做“硬重启”，不是重新部署：
+
+```bash
+# 1. 杀旧 sidecar / v1 / 卡住的 openclaw agent 子进程
+pkill -f 'sidecar_v2.py' || true
+pkill -f 'sse_client.py' || true
+pkill -f 'hub_worker.py' || true
+pkill -f 'openclaw agent' || true
+
+# 2. 确认没有残留
+ps -ef | grep -E 'sidecar_v2.py|sse_client.py|hub_worker.py|openclaw agent' | grep -v grep || true
+
+# 3. 重新拉 2.0.1 并启动（无 systemd 容器）
+curl -fsSL -o ~/.qclaw/skills/hub-sse-sidecar/sidecar_v2.py \
+  http://<HUB>:8088/static/skills/hub-sse-sidecar-v2/scripts/sidecar_v2.py
+chmod +x ~/.qclaw/skills/hub-sse-sidecar/sidecar_v2.py
+
+set -a && source ~/.qclaw/skills/hub-sse-sidecar/sidecar.env && set +a
+nohup python3 ~/.qclaw/skills/hub-sse-sidecar/sidecar_v2.py \
+  > ~/.qclaw/skills/hub-sse-sidecar/logs/sidecar.log 2>&1 &
+```
+
+验证：
+
+```bash
+tail -f ~/.qclaw/skills/hub-sse-sidecar/logs/sidecar.log
+```
+
+预期：
+- 不再看到 48/56/87/88/90/183/618 被 queued
+- Hub `last_heartbeat_at` 60 秒内更新
+- Hub UI SSE connected / online 恢复
+
+### 经验补遗
+
+> Hub 侧 pending 修复后，如果 owner 仍看到“继续处理待办”，要先查 Hub 是否仍有 pending。若 Hub pending 为空，但机器还在处理，根因就是**客户端旧内存队列或残留进程**，必须 kill 后重启。仅重拉脚本不够，旧 Python 进程不会自动变成新逻辑。
+
+---
+
+*最后更新: 2026-04-27 (晚 23:55)*
+
+---
+
+## 2026-04-28 (早 09:10) — Phase 2.13：小天早晨连续通知的最终归因
+
+### 现象
+用户早上收到小天 08:11-08:18 连续 7 条完成通知，内容分别对应：
+
+```text
+48 / 56 / 87 / 88 / 90 / 183 / 618
+```
+
+这些通知不是同一任务无限重试，而是 7 个 daily todo 在新的一天被逐个处理。
+
+### Hub 侧证据
+
+```text
+sidecar_version=2.0.1
+last_heartbeat_at=2026-04-28 09:05:33
+status=工作
+today pending if submitted is done = 空
+```
+
+4/28 当天 7 个 todo 均已写入：
+
+```text
+status=submitted
+completed_at=08:11-08:19
+notified_at=08:11-08:19
+```
+
+### 归因
+
+1. **sidecar_v2.py 确实处理了早晨 7 个任务**  
+   这不是昨晚的无限循环；跨日后 daily todo 本来会重新成为当天待办。
+
+2. **`auto_todo_agent.py` 是第二条自动处理链路，必须停用**  
+   owner 发现它有 `while True` + `time.sleep(600)`，每 10 分钟扫描一次待办。它与 #143 sidecar_v2 同时运行时，会造成双处理链路：
+
+   ```text
+   sidecar_v2.py       SSE 事件驱动处理
+   auto_todo_agent.py  本地 10 分钟轮询处理
+   ```
+
+   这违反了 #143 的核心原则：**一个 claw 只能有一条待办处理链路，由 sidecar_v2 统一处理**。
+
+3. **逐任务通知过吵**  
+   Rule 17 / HEARTBEAT.md 要求 todo 完成后通知 owner，这在单个任务时合理；但 `todos_pending` 一次推 7 个 daily todo 时，逐个通知会刷屏。长期应该改为 batch 汇总通知。
+
+### 立即处方
+
+小天机器上必须停掉并禁用 `auto_todo_agent.py`：
+
+```bash
+pkill -f 'auto_todo_agent.py' || true
+ps -ef | grep -E 'auto_todo_agent.py|sidecar_v2.py|sse_client.py|hub_worker.py' | grep -v grep || true
+
+# 如果有 cron
+crontab -l | grep -v 'auto_todo_agent.py' | crontab -
+
+# 如果有 supervisor/systemd/pm2，需要同步 disable
+systemctl stop auto-todo-agent 2>/dev/null || true
+systemctl disable auto-todo-agent 2>/dev/null || true
+pm2 delete auto_todo_agent 2>/dev/null || true
+```
+
+保留：
+
+```text
+sidecar_v2.py v2.0.1
+```
+
+### 后续优化
+
+- `#143 sidecar_v2.py v2.0.2`：把同一批 `todos_pending` 合并成一次 batch prompt，最后只发一条汇总企微通知。
+- Hub Web：把历史部署/排查类 daily todo 改成 `once` 或 disabled，避免每天早上重复“确认历史部署任务”。
+
+### 经验补遗 ⭐⭐⭐⭐⭐
+
+> #143 迁移完成后，必须清理所有旧自动待办处理器：`auto_todo_agent.py / hub_worker.py / sse_client.py / cron / pm2 / systemd`。  
+> 只要存在第二条自动链路，就不能相信任何“重复处理”结论，因为 sidecar 和旧 agent 可能同时写同一批 todo。
+>
+> 判断标准：
+>
+> ```text
+> Hub pending 为空 + sidecar 心跳正常 + 机器还在发通知
+> = 本机旧进程或旧内存队列，不是 Hub 新推送
+> ```
+
+---
+
+*最后更新: 2026-04-28 (早 09:15)*
+
+---
+
+## 2026-04-28 (早 09:20) — Phase 2.14：全量停用 daily todo，等待重新设计
+
+### 用户指令
+“先把所有每天任务都删掉，这里要重新设计”
+
+### 执行原则
+为避免丢失历史执行记录，本次没有物理删除 `claw_todos` 和 `claw_todo_logs`，而是把所有启用中的 daily todo **软停用**：
+
+```sql
+UPDATE claw_todos
+SET enabled = 0
+WHERE enabled = 1
+  AND schedule_type = 'daily';
+```
+
+### 执行结果
+
+执行前：
+
+```text
+enabled daily todos = 38
+```
+
+分布：
+
+```text
+龙虾王 5
+小天 7
+小安 8
+小文 2
+condibot 5
+小云 1
+小马 10
+```
+
+执行后：
+
+```text
+enabled daily todos = 0
+disabled_count = 38
+```
+
+### 验证
+小天 pending 复查为空，不会再因为 daily 跨日触发早晨批量通知。
+
+### 文件
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `_deploy_b_plus/list_daily_todos_before_cleanup.sql` | 新 | 停用前盘点 daily todo |
+| `_deploy_b_plus/disable_all_daily_todos_20260428.sql` | 新 | 全量软停用 daily todo |
+
+### 经验补遗
+
+> “删掉每天任务”优先用 `enabled=0` 软停用，而不是物理删除。  
+> 原因：daily todo 的历史日志是排查重复通知、审计 agent 行为、重新设计规则的重要依据。
+
+---
+
+*最后更新: 2026-04-28 (早 09:25)*

@@ -1,17 +1,16 @@
 ---
 name: hub-sse-sidecar
 display_name: Hub SSE 实时消息驱动方案（OpenClaw 通用版）
-version: 1.4.0
+version: 2.1.0
 author: OpenClaw Team
 description: |
-  一对轻量级 Python 脚本（sse_client + hub_worker），让任何 OpenClaw 实例 7×24 自动
-  接收 Hub 推送的消息/待办，并通过 `openclaw agent --message` 把事件丢回 OpenClaw
-  Agent 自己处理（自动回 Hub + 发企微，由 Agent 自己决定回什么）。
-  本方案脱胎于 Hermes Agent 小赫的 Skill 134，但做了 3 处关键升级：
-    1) 去重改用 Hub v2 的 read_at 语义（不再用 seen_msg_ids，避免误丢）；
-    2) 不再硬编码业务（"含'收到请回复1'就回..."），而是把消息原样喂给 Agent；
-    3) 不再依赖 Agent 自带的 reply-hub / send-wecom CLI，统一靠
-       `openclaw agent --message` 触发 + Agent 在新 session 里自己 PUT /read。
+  让任何 OpenClaw 实例 7×24 自动接收 Hub 推送的消息/待办的 sidecar。
+  v2 是单文件 Python 守护进程（sidecar_v2.py，~330 行），事件驱动、显式状态机、
+  配置中心化（运行时参数全部从 Hub 拉），不再有任何"伪造兜底"行为：
+    - 收到 message → PUT /processing → 调 LLM → PUT /done 或 PUT /failed
+    - todo 由 LLM 自己跑全流程并 complete + 发企微，sidecar 不再 force_complete
+    - 兜底全部交给 Hub 的 timeout_watcher（5 分钟超时告警 owner）
+  v1（sse_client + hub_worker 双脚本）作为兼容文档保留，新部署一律走 v2。
 category: openclaw
 tags: [sse, hub, real-time, sidecar, daemon, event-driven]
 scope: global
@@ -20,18 +19,270 @@ trigger_words:
   - "安装 sse 守护"
   - "让我能收到 hub 消息"
   - "hub 没回复"
+  - "sidecar v2"
 ---
 
-# Hub SSE 实时消息驱动方案 — OpenClaw 通用版 (v1.4)
+# Hub SSE 实时消息驱动方案 — OpenClaw 通用版 (v2.1)
 
-> **v1.4 变更**：install.sh 新增 `AGENT_TYPE` 选项，原生支持 4 种后端 AI agent
-> （`openclaw` / `hermes` / `none` / `custom`）。Hermes 用户从此**不需要再手写 wrapper**——
-> `AGENT_TYPE=hermes bash install.sh` 会自动生成 `$INSTALL_DIR/scripts/run_hermes.sh`，
-> 模板沿用线上 #12 (小马) 验证 6+ 天的版本。详见 §3.6。
->
-> **v1.3 变更**：install.sh 增加 CLAW_ID 一致性自检，解决"同机已有其他 claw 的 sidecar
-> 时新 claw 复用旧 config.env、消息全被旧 claw 吞掉"的隐式坑（详见 §3.5）。
-> v1.2 的 §3.4 双客户端冲突清理逻辑保持不变。
+## 0. v2 是什么 — 一分钟读完
+
+**新部署直接看这一节，跳过 §3 以下的 v1 历史包袋。**
+
+### 0.1 一行命令安装
+
+```bash
+HUB_URL=http://9.134.11.169:8088 \
+CLAW_ID=<你的 claw id> \
+CLAW_TOKEN=<注册 claw 时 Hub 返回的明文 token> \
+bash install_v2.sh
+```
+
+脚本自动：
+1. 探测 `openclaw` 二进制（找不到时支持 `AGENT_TYPE=hermes HERMES_HOME=/path` 切换）
+2. 部署 `sidecar_v2.py` 到 `~/.qclaw/skills/hub-sse-sidecar/`
+3. 写 `sidecar.env`（HUB_URL / CLAW_ID / CLAW_TOKEN，权限 600）
+4. 自检：调 `GET /api/openclaws/<id>/sidecar-config` 验证 token + 注册首次配置
+5. 注册 systemd 服务（系统级或用户级自动选择），`Restart=always`
+
+### 0.2 v2 vs v1 关键差异
+
+| 维度 | v1（hub_worker.py） | v2（sidecar_v2.py） |
+|---|---|---|
+| 脚本数 | 2（sse_client + hub_worker） | 1（sidecar_v2.py） |
+| 中转方式 | 文件队列 task_queue.jsonl | 直接 SSE → 线程 → subprocess |
+| 1.5s 自动 mark read 兜底 | **有**（worker 60s 后用空 reply PUT /read） | **没有** — 只有 LLM 真返回才 `PUT /done` |
+| LLM 失败的处理 | 静默重试或丢弃 | 显式 `PUT /messages/<id>/failed`，body 含 `failed_reason` |
+| todo 处理 | worker 可能 force_complete | LLM 自己跑流程，没回 complete 就让 Hub watcher 告警 |
+| 配置 | 本地 sidecar.env 手改 | Hub `claw_sidecar_configs` 表，60s 自动拉新版本 |
+| 运维入口 | `pgrep -af`、改 .env 重启 | `systemctl status hub-sse-sidecar-v2` |
+
+### 0.3 v2 必需的 Hub 端接口（已上线）
+
+部署 sidecar v2 之前，Hub 必须 **≥ B+ 通信稳定化版本**，包含这些接口：
+
+| 接口 | 用途 |
+|---|---|
+| `GET /api/openclaws/<id>/sidecar-config` | sidecar 启动 / 60s 拉一次配置 + 心跳 |
+| `PUT /api/openclaws/<id>/messages/<msg_id>/processing` | 开始调 LLM |
+| `PUT /api/openclaws/<id>/messages/<msg_id>/done` | LLM 处理完成（body 可选 `llm_response`） |
+| `PUT /api/openclaws/<id>/messages/<msg_id>/failed` | LLM 失败（body 必填 `failed_reason`） |
+| `POST /api/openclaws/<id>/todos/<todo_id>/complete` | 待办完成（body 含 `notified=true` 表示 agent 已自己发企微） |
+
+### 0.4 出问题怎么排查（v2）
+
+```bash
+# 1. 看服务在不在
+systemctl --user status hub-sse-sidecar-v2          # 或 sudo systemctl status
+# 2. 看日志
+journalctl --user -u hub-sse-sidecar-v2 -f -n 200
+# 3. 手动跑一次确认 token / Hub 连通
+set -a && source ~/.qclaw/skills/hub-sse-sidecar/sidecar.env && set +a
+python3 ~/.qclaw/skills/hub-sse-sidecar/sidecar_v2.py
+# 4. 看 Hub 端是否真收到状态变更
+mysql> SELECT id, status, processing_at, done_at, failed_reason FROM claw_messages WHERE claw_id=<id> ORDER BY id DESC LIMIT 10;
+# 5. 查 SSE 连接数（>1 就有问题，详见 §0.6）
+pgrep -af sidecar_v2.py | wc -l
+# 6. 查 to_claw 消息是否堆积（delivered 超过 24h 的属于异常，详见 §0.7）
+mysql> SELECT COUNT(*) FROM claw_messages WHERE claw_id=<id> AND direction='to_claw' AND status='delivered' AND created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR);
+```
+
+**常见症状**：
+
+| 症状 | 原因 | 处理 |
+|---|---|---|
+| 日志一直 `[config] 拉取失败 code=0` | Hub 不可达 / 防火墙 | 检查 HUB_URL，curl 一次 `/api/openclaws/<id>/sidecar-config` |
+| `code=401/403` | token 无效 | 到 Hub Web 后台重置 token 后重新跑 install_v2.sh |
+| 日志反复 `LLM 处理失败 timeout` | LLM 调用真的超时 | 改 Hub 配置中心 `agent_timeout`（默认 300s），sidecar 60s 自动拉新值 |
+| message 状态卡 `processing` | sidecar 进程被 kill 或机器重启 | systemd 会自动重启；老的卡住消息会被 Hub timeout_watcher 5 分钟后标 failed |
+| `pgrep -af sidecar_v2.py` 结果 > 1 | 多实例并存（nohup + systemd 等） | 杀掉多余进程，统一用 systemd 管理（详见 §0.6） |
+| Hub 端 `QueuePool limit reached` | SSE 长连接占满连接池 | 重启 openclaw-web + 排查多连接源（§0.6），Hub 端调大 POOL_SIZE |
+| to_claw 消息长期卡 `delivered` | sidecar 没消费到消息 | 检查 sidecar 是否在运行 + SSE 是否连通（§0.7） |
+
+### 0.5 从 v1 升级到 v2 — 老进程清理（重要！）
+
+**历史教训**：以往升级最容易出的问题是"老进程没杀干净"——v1 的 `sse_client.py` + `hub_worker.py`
+和 v2 的 `sidecar_v2.py` 同时在跑，结果 SSE 连接抢消息、双 worker 重复 LLM 调用、token 双倍消耗。
+
+`install_v2.sh` 已经在 **Step 0** 自动调 `scripts/cleanup_v1.sh --apply`，正常情况下零额外操作。
+
+#### 0.5.1 已装老 sidecar 的 claw 想"只清不升"（不动 #135 skill）
+
+每台 claw 主机 ssh 进去，**一条命令搞定**（脚本由 Hub static 直接 serve，不需要本地有 skill 文件）：
+
+```bash
+# 1. 先 dry-run（看会清什么，不动手）
+curl -fsSL http://9.134.11.169:8088/static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1.sh | bash
+
+# 2. 真清理（杀进程 + 删 systemd unit + 备份 config.env）
+curl -fsSL http://9.134.11.169:8088/static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1.sh | bash -s -- --apply
+
+# 3. 终极清理（连 ~/.openclaw-sidecar 整个目录都 rm -rf，不留备份）
+curl -fsSL http://9.134.11.169:8088/static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1.sh | bash -s -- --apply --purge
+```
+
+#### 0.5.2 已装本 skill 的 claw（本地已有脚本副本）
+
+```bash
+bash ~/.qclaw/skills/hub-sse-sidecar/scripts/cleanup_v1.sh                     # dry-run
+bash ~/.qclaw/skills/hub-sse-sidecar/scripts/cleanup_v1.sh --apply             # 清进程，留备份
+bash ~/.qclaw/skills/hub-sse-sidecar/scripts/cleanup_v1.sh --apply --purge     # 全删
+```
+
+#### 0.5.3 一键升级到 v2（清 v1 + 装 v2 + 起 systemd 一气呵成）
+
+```bash
+HUB_URL=http://9.134.11.169:8088 \
+CLAW_ID=<你的 claw id> \
+CLAW_TOKEN=<明文 token> \
+bash <(curl -fsSL http://9.134.11.169:8088/static/skills/hub-sse-sidecar-v2/install_v2.sh)
+```
+
+> ⚠️ 注意：`bash <(...)` 进程替换语法需要 Bash 4+；老的 sh / dash 不支持，改用：
+> ```bash
+> curl -fsSL .../install_v2.sh -o /tmp/install_v2.sh && \
+>   HUB_URL=... CLAW_ID=... CLAW_TOKEN=... bash /tmp/install_v2.sh
+> ```
+
+**清理脚本会扫的所有"v1 指纹"**（这是历史踩坑积累的清单）：
+
+| 类别 | 痕迹 |
+|---|---|
+| 进程 | `sse_client.py`、`sse_client_fixed.py`、`hub_worker.py`、`manager-hub/scripts/sseclient.py`（最老一代） |
+| systemd 系统级 | `/etc/systemd/system/openclaw-sidecar.service`、`/etc/systemd/system/qclaw-sidecar.service` |
+| systemd 用户级 | `~/.config/systemd/user/openclaw-sidecar.service` |
+| 安装目录 | `~/.openclaw-sidecar/`、`~/.openclaw-sidecar-claw<ID>/`（多 claw 同机模式） |
+| 关键文件 | `config.env`（含旧 CLAW_ID/TOKEN）、`logs/sse_client.pid`、`logs/worker.lock`、`logs/task_queue.jsonl` |
+| 残留脚本 | `~/.qclaw/skills/hub-sse-sidecar/scripts/sse_client.py`、`hub_worker.py` |
+| crontab（仅警告不删） | 当前用户 crontab、`/etc/cron.d/*` 含 `sse_client/hub_worker/hub-sse-sidecar` 的条目 |
+
+**杀不掉怎么办**：cleanup 脚本退出码 = 2 时说明杀完又被外部守护拉起了（最常见是 cron 或 systemd
+unit 不在我们扫描清单里）。脚本会打印每个残留进程的 `parent pid` + `cmd`，直接顺藤摸瓜：
+
+```bash
+# 找父进程
+ps -o ppid= -p <pid>
+# 父 pid 是 1 → systemd 在拉，systemctl list-units --all | grep -i sidecar 找出来
+# 父 pid 是 cron pid → 当前用户 crontab -l 或 sudo cat /etc/crontab
+```
+
+**保护机制**：cleanup 脚本**永远不会动 v2 的进程/文件**——它对 `sidecar_v2.py` 字符串和
+`hub-sse-sidecar-v2.service` 服务名做了黑白名单过滤，不会误伤新版。
+
+### 0.6 多 SSE 连接防范（v2.1 新增 — 小天实战踩坑）
+
+> ⚠️ **这是目前最大的资源浪费源**：小天 claw_id=6 曾同时存在 5-6 个 SSE 长连接
+> （loop 序号 271/2281/9451/12031/14491 同时活跃），每个连接都占用 Hub 端一个线程
+> + 一个 SQLAlchemy 连接池位置，严重时可导致 Hub 端 `QueuePool limit reached` 全站 500。
+
+**多连接的常见成因**：
+
+| 原因 | 表现 | 解法 |
+|---|---|---|
+| sidecar 进程被 kill -9 或机器突然重启，旧 SSE 连接在 Hub 端未关闭 | Hub 日志看到同一 claw_id 多个 `/events` 长连接 | Hub 端需要实现 **连接排他**：同一 claw_id 新连接到来时，服务端主动关闭旧连接 |
+| systemd Restart=always + sidecar 启动崩溃循环 | 每次重启创建新连接，旧连接因 TCP keepalive 未生效仍挂着 | 在 systemd unit 加 `RestartSec=30`（至少 30s），给旧连接超时关闭的窗口 |
+| 多种启动方式并存（nohup + systemd + cron 都在拉） | 多个 sidecar 实例同时运行 | 统一用 systemd，禁止 cron + nohup 混用 |
+| v1 进程未清理就装了 v2 | v1 的 sse_client.py 和 v2 的 sidecar_v2.py 同时连 SSE | 先跑 `cleanup_v1.sh --apply`（见 §0.5） |
+
+**sidecar v2 自身的防范措施**（已内置）：
+
+1. **启动时 PID 文件互斥**：写 `sidecar.pid`，启动前检查旧 PID 是否存活，存活则退出
+2. **SSE 连接带 `X-Sidecar-Instance-Id` 头**：Hub 端可据此做连接排他（需 Hub 支持）
+3. **断线重连退避**：指数退避 5s→10s→20s→30s→60s，避免瞬间创建大量连接
+
+**排查命令**：
+
+```bash
+# 查当前 claw 有几个 SSE 连接（Hub 端）
+# 方法 1：看 Hub 日志
+journalctl -u openclaw-web --no-pager -n 500 | grep "claw_id=6" | grep "events" | tail -20
+
+# 方法 2：直接数 sidecar 进程（claw 本机）
+pgrep -af sidecar_v2.py | wc -l    # 应该是 1，>1 就有问题
+
+# 方法 3：Hub 端查 SSE 连接数（如果有实现 /api/openclaws/<id>/sse-connections 接口）
+curl -s http://HUB_URL/api/openclaws/6/sse-connections
+```
+
+**Hub 端推荐改进**（尚未实现）：
+
+- 同一 claw_id 的 SSE 连接做排他：新连接到来时，向旧连接发 `event: replaced` 后关闭
+- SSE 端点加 `idle_timeout`（如 10 分钟无事件也无心跳则服务端断开）
+- Dashboard 展示每个 claw 的活跃 SSE 连接数
+
+### 0.7 delivered 消息堆积清理（v2.1 新增）
+
+> v2 架构中，`from_claw`（claw 主动发出的消息，如求助、日报通知）永远停在 `delivered`
+> 状态，不会被任何人 processing/done。这是 **设计如此**，不是 bug。
+> 但 `to_claw` 方向的消息如果长期卡在 `delivered`，说明 sidecar 没有正确消费。
+
+**消息方向与状态对照**：
+
+| 方向 | 正常终态 | 异常 |
+|---|---|---|
+| `to_claw`（Hub→Agent） | `done`（处理成功） 或 `failed`（处理失败） | 长期卡 `delivered` = sidecar 没收到/没处理 |
+| `from_claw`（Agent→Hub） | `delivered`（已投递） | — 本身就是终态 |
+
+**清理建议**（管理员操作）：
+
+```sql
+-- 查看超过 24h 仍为 delivered 的 to_claw 消息（异常）
+SELECT id, claw_id, LEFT(content,50), status, created_at
+FROM claw_messages
+WHERE direction='to_claw' AND status='delivered'
+  AND created_at < DATE_SUB(NOW(), INTERVAL 24 HOUR)
+ORDER BY id DESC LIMIT 20;
+
+-- 对于确认不需要重处理的消息，可手动标记为 failed
+UPDATE claw_messages SET status='failed', failed_reason='manual cleanup: stale delivered'
+WHERE direction='to_claw' AND status='delivered'
+  AND created_at < DATE_SUB(NOW(), INTERVAL 48 HOUR);
+```
+
+### 0.8 待办闭环校验（v2.1 新增 — 小天实战验证通过）
+
+> 小天（claw_id=6）最近的待办处理已经完全闭环，每个待办都走了
+> `complete + notified=true (agent_self)` 全流程。以下是已验证的闭环标准。
+
+**待办完整闭环 = 4 步全做**：
+
+```
+1. LLM 处理任务 → 产出结果
+2. POST /api/openclaws/<id>/todos/<todo_id>/complete  (body: {notified: true, result_summary: "..."})
+3. Hub 端 claw_todo_logs 记录 completed_at + notified_at + notified_strategy=agent_self
+4. 发企微通知给 owner（可选但推荐）
+```
+
+**sidecar 的角色**：sidecar **不参与** todo 闭环流程——它只负责收到 `todos_pending` 事件后
+唤醒 LLM，LLM 自己调 Hub API 完成闭环。如果 LLM 没有 complete，Hub 的
+`timeout_watcher` 会在 5 分钟后告警 owner。
+
+**验证待办是否正确闭环**：
+
+```bash
+# 查看最近的 todo_logs（替换 claw_id）
+mysql> SELECT l.id, l.todo_id, LEFT(t.title,30), l.status, l.completed_at, 
+       l.notified_at, l.notified_strategy, l.result_summary IS NOT NULL as has_summary
+       FROM claw_todo_logs l LEFT JOIN claw_todos t ON l.todo_id=t.id 
+       WHERE l.openclaw_id=6 ORDER BY l.id DESC LIMIT 10;
+
+# 正确的闭环记录应该是：
+# status=submitted, completed_at 有值, notified_at 有值, notified_strategy=agent_self
+```
+
+**常见闭环失败原因**：
+
+| 症状 | 原因 | 修法 |
+|---|---|---|
+| todo 一直 pending，没有 submitted | LLM 没调 complete API | 检查 Agent 的 prompt 是否包含 hub-connect skill 的 todo complete 指令 |
+| submitted 但 notified_strategy 为空 | LLM 调了 complete 但没传 `notified=true` | 更新 prompt，明确要求 `{notified: true}` |
+| completed_at 有值但 notified_at 为空 | 企微通知发送失败 | 检查 Agent 的企微通道配置 |
+
+---
+
+---
+
+# 以下为 v1 兼容文档（保留原文，新部署不必读）
+
 
 ## 1. 这个 SKILL 解决什么
 

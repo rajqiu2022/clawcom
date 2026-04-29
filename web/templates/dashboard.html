@@ -371,6 +371,7 @@ function renderUpcomingTodos() {
             <div style="flex:1;min-width:0">
                 <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
                     <strong style="font-size:0.84rem">${todo.title}</strong>
+                    <span style="font-size:0.68rem;color:var(--text-muted);font-family:monospace;opacity:0.7" title="任务ID">#${todo.id}</span>
                     ${priorityBadge(todo.priority)}
                     ${urgencyLabel(todo.urgency_level)}
                 </div>
@@ -378,7 +379,7 @@ function renderUpcomingTodos() {
                     🤖 ${todo.openclaw_name}
                     ${todo.schedule_time ? `· ⏰ ${todo.schedule_time}` : ''}
                     ${todo.schedule_type !== 'daily' ? `· 周期:${todo.schedule_type}` : ''}
-                    ${todo.created_at ? `· 创建于 ${fmtTime(todo.created_at)}` : ''}
+                    ${(todo.template_created_at || todo.created_at) ? `· 创建于 ${fmtTime(todo.template_created_at || todo.created_at)}` : ''}
                 </div>
             </div>
             <span class="tag tag-yellow" style="font-size:0.7rem;white-space:nowrap">待完成</span>
@@ -412,6 +413,7 @@ function renderSubmittedTodos() {
             <div style="flex:1;min-width:0">
                 <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
                     <strong style="font-size:0.84rem">${todo.title}</strong>
+                    <span style="font-size:0.68rem;color:var(--text-muted);font-family:monospace;opacity:0.7" title="任务ID">#${todo.id}</span>
                     ${priorityBadge(todo.priority)}
                     <span class="tag tag-yellow" style="font-size:0.68rem">📝 已提交</span>
                 </div>

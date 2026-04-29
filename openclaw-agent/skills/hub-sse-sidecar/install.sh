@@ -83,8 +83,9 @@ TODOS_FORCE_COMPLETE_FALLBACK="${TODOS_FORCE_COMPLETE_FALLBACK:-1}"
 SKILL_DIR="${SKILL_DIR:-$HOME/.qclaw/skills/hub-sse-sidecar}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.openclaw-sidecar}"
 SKILL_REMOTE_BASE="${HUB_URL}/static/skills/hub-sse-sidecar"
-# systemd unit 名字默认带 CLAW_ID 后缀，避免同机多 claw 互覆盖
-SYSTEMD_UNIT_NAME="${SYSTEMD_UNIT_NAME:-openclaw-sidecar.service}"
+# systemd unit 名字默认带 CLAW_ID 后缀，避免同机多 claw 互覆盖；
+# 调用方（如 Hub 代建流程）可显式传 SYSTEMD_UNIT_NAME 进一步定制。
+SYSTEMD_UNIT_NAME="${SYSTEMD_UNIT_NAME:-openclaw-sidecar-claw-${CLAW_ID}.service}"
 SYSTEMD_UNIT_PATH="/etc/systemd/system/$SYSTEMD_UNIT_NAME"
 
 case "$AGENT_TYPE" in
@@ -430,11 +431,14 @@ if [ "$USE_SYSTEMD" = "1" ]; then
   CURRENT_USER="$(id -un)"
   CURRENT_HOME="$HOME"
   CURRENT_PATH="$PATH"
+  # __INSTALL_DIR__ 让模板真正跟随本次 install.sh 的 INSTALL_DIR；
+  # __HOME__ 仍保留兼容旧模板，但优先级低于 __INSTALL_DIR__。
   sed \
     -e "s#__CLAW_ID__#$CLAW_ID#g" \
     -e "s#__USER__#$CURRENT_USER#g" \
     -e "s#__HOME__#$CURRENT_HOME#g" \
     -e "s#__PATH__#$CURRENT_PATH#g" \
+    -e "s#__INSTALL_DIR__#$INSTALL_DIR#g" \
     "$TPL" > "$RENDERED"
 
   echo "==> 安装 systemd unit → $SYSTEMD_UNIT_PATH"
@@ -464,7 +468,10 @@ if [ "$USE_SYSTEMD" = "1" ]; then
     exit 1
   fi
 else
-  echo "==> nohup 启动 sse_client.py"
+  echo "==> nohup 启动 sse_client.py（INSTALL_DIR=$INSTALL_DIR）"
+  # 显式传 OPENCLAW_SIDECAR_CONFIG，让多实例（每个 claw 一个 INSTALL_DIR）
+  # 都能正确加载到自己的 config.env，BASE_DIR/日志/队列也会指向同一目录。
+  OPENCLAW_SIDECAR_CONFIG="$INSTALL_DIR/config.env" \
   nohup python3 -u "$INSTALL_DIR/scripts/sse_client.py" \
     > "$INSTALL_DIR/logs/sse_client.log" 2>&1 &
   NEW_PID=$!

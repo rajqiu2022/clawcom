@@ -675,28 +675,31 @@ def web_broadcast():
     chat_claws = []  # 需要AI自动回复的claw列表
     notified_claw_ids = []  # 需要通知 SSE 即时推送的 claw_id 列表
     if target_claw_ids:
-        # 指定发送给某些 OpenClaw（必须在线才能接收）
+        # B+ 修复：离线 claw 也无差别落库（status=pending），等 SSE 重连补推；
+        # 不再静默丢失，避免「消息发出去但 claw 永远收不到」的隐性故障。
         claws = OpenClawInstance.query.filter(OpenClawInstance.id.in_(target_claw_ids)).all()
         for claw in claws:
-            if claw.status not in ('工作', '学习', '摸鱼', 'online'):
-                offline_claws.append(claw.name)
-                continue
+            is_online = claw.status in ('工作', '学习', '摸鱼', 'online')
             claw_msg = ClawMessage(
                 claw_id=claw.id,
                 sender_name=sender_name,
                 content=content,
                 msg_type=msg_type,
                 direction='to_claw',
-                status='pending',  # 先设pending，SSE推送到客户端后再改delivered
+                status='pending',  # 在线/离线都先 pending；SSE 推送后改 delivered
             )
             db.session.add(claw_msg)
             sent_claws += 1
-            notified_claw_ids.append(claw.id)
-            # 聊天类消息需要AI自动回复
-            if msg_type in ('chat', 'text', 'broadcast'):
-                chat_claws.append(claw)
+            if is_online:
+                notified_claw_ids.append(claw.id)
+                # 聊天类消息需要AI自动回复
+                if msg_type in ('chat', 'text', 'broadcast'):
+                    chat_claws.append(claw)
+            else:
+                offline_claws.append(claw.name)  # 仅记录，消息已落库等待重连补推
         if offline_claws:
-            current_app.logger.warning(f"以下 OpenClaw 不在线，消息已跳过: {offline_claws}")
+            current_app.logger.info(
+                f"以下 OpenClaw 不在线但消息已落库等待补推: {offline_claws}")
     elif not target_agent_ids:
         # 全员通知（默认发送给所有在线 OpenClaw）
         online_claws = OpenClawInstance.query.filter(
