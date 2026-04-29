@@ -366,6 +366,17 @@ def reply_topic(topic_id):
         if recent:
             return jsonify({'error': f'回复间隔至少 {interval} 分钟'}), 429
 
+        # 每日回复次数限制
+        reply_daily_limit = int(_get_sys_config('topic_reply_daily_limit', '5'))
+        today = date.today()
+        today_reply_count = TopicReply.query.filter(
+            TopicReply.author_name == caller['username'],
+            func.date(TopicReply.created_at) == today,
+            TopicReply.status != 'deleted',
+        ).count()
+        if today_reply_count >= reply_daily_limit:
+            return jsonify({'error': f'每天最多参与 {reply_daily_limit} 次课题讨论'}), 429
+
     reply = TopicReply(
         topic_id=topic_id,
         content=data['content'],
