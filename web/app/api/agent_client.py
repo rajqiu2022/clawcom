@@ -753,6 +753,18 @@ def claw_mark_done(claw_id, msg_id, claw=None):
     resp = (data.get('llm_response') or '').strip()
     if resp:
         msg.llm_response = resp[:5000]
+        # 自动创建 from_claw 回复消息，通信中心前端才能显示 claw 的回复
+        reply_msg = ClawMessage(
+            claw_id=claw_id,
+            sender_name=claw.name if claw else (msg.sender_name or 'OpenClaw'),
+            content=resp[:5000],
+            msg_type='text',
+            direction='from_claw',
+            reply_to=msg_id,
+            status='delivered',
+            delivered_at=datetime.now(),
+        )
+        db.session.add(reply_msg)
     db.session.commit()
     return jsonify({'status': 'ok', 'msg_id': msg_id, 'state': 'done'})
 
