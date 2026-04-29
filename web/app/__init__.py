@@ -935,6 +935,15 @@ def create_app(config_name=None):
                     except Exception:
                         pass
 
+                # 3a) claw_messages 增加 from_claw_id（支持 claw→claw / claw→hub 追踪发送方）
+                try:
+                    conn.execute(text(
+                        'ALTER TABLE claw_messages ADD COLUMN from_claw_id INT DEFAULT NULL'
+                    ))
+                    logger.info('已添加 claw_messages.from_claw_id 列')
+                except Exception:
+                    pass
+
                 # 4) sidecar 配置中心表（Web 后台改完自动下发到 sidecar）
                 try:
                     conn.execute(text("""

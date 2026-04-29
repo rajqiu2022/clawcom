@@ -353,7 +353,13 @@ async function viewConversation(item) {
         const chatBox = document.getElementById('chatMessages');
         chatBox.innerHTML = msgs.map(m => {
             const isSent = m.direction === 'to_claw';
-            const sender = isSent ? (m.sender_name || '我') : (m.claw_name || m.sender_name || 'OpenClaw');
+            // 发送方名称：claw→claw 用 from_claw_name；hub→claw 用 sender_name；claw→hub 用 claw_name
+            let sender;
+            if (isSent) {
+                sender = m.from_claw_name || m.sender_name || '我';
+            } else {
+                sender = m.claw_name || m.sender_name || 'OpenClaw';
+            }
             return `<div class="chat-msg ${isSent ? 'chat-msg-sent' : 'chat-msg-recv'}"><div class="chat-msg-sender">${sender}</div><div class="chat-msg-content">${m.content}</div><div class="chat-msg-time">${timeAgo(m.created_at)}</div></div>`;
         }).join('');
         if (msgs.length === 0) chatBox.innerHTML = '<div class="empty-state" style="padding:20px">暂无消息，发送一条吧</div>';

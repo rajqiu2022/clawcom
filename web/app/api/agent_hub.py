@@ -534,13 +534,16 @@ def web_list_claw_messages():
 
     messages = query.order_by(ClawMessage.created_at.desc()).limit(limit).all()
 
-    # 附加 OpenClaw 名称
+    # 附加 OpenClaw 名称（接收方 + 发送方）
     result = []
     for m in messages:
         d = m.to_dict()
         claw = OpenClawInstance.query.get(m.claw_id)
         d['claw_name'] = claw.name if claw else '未知'
         d['claw_status'] = claw.status if claw else 'unknown'
+        if m.from_claw_id:
+            from_claw = OpenClawInstance.query.get(m.from_claw_id)
+            d['from_claw_name'] = from_claw.name if from_claw else '未知'
         result.append(d)
 
     return jsonify({
@@ -644,8 +647,9 @@ def web_broadcast():
     if not content:
         return jsonify({'error': '内容不能为空'}), 400
 
-    # 识别发送者：Web session 或 Bearer Token
+    # 识别发送者：Web session 或 Bearer Token（admin claw）
     sender_name = 'Web Admin'
+    from_claw_id = None
     auth_header = request.headers.get('Authorization', '')
     if auth_header.startswith('Bearer '):
         token = auth_header[7:]
@@ -653,6 +657,7 @@ def web_broadcast():
         for _claw in _OCI.query.filter(_OCI.status != 'deleted').all():
             if _claw.verify_token(token):
                 sender_name = _claw.name
+                from_claw_id = _claw.id
                 break
 
     target_agent_ids = data.get('target_agent_ids', [])
@@ -682,6 +687,7 @@ def web_broadcast():
             is_online = claw.status in ('工作', '学习', '摸鱼', 'online')
             claw_msg = ClawMessage(
                 claw_id=claw.id,
+                from_claw_id=from_claw_id,
                 sender_name=sender_name,
                 content=content,
                 msg_type=msg_type,
