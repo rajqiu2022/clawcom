@@ -54,6 +54,12 @@ def require_auth():
         if path.startswith(pub):
             return None
 
+    # OpenClaw 注册 bootstrap 链接需要在 Agent 尚未接入前可访问；
+    # bootstrap.sh 内部仍会校验 query token，registration-skill 只用于发给目标 Agent。
+    if path.startswith('/api/v1/openclaws/') and (
+            path.endswith('/registration-skill') or path.endswith('/bootstrap.sh')):
+        return None
+
     # Web session 登录
     uid = session.get('user_id')
     if uid:

@@ -156,7 +156,7 @@
                 <div class="two-col">
                     <div class="form-group" style="margin-bottom:10px">
                         <label class="form-label">目标机 host *</label>
-                        <input class="form-input" name="deploy_host" placeholder="如 your-hub-host">
+                        <input class="form-input" name="deploy_host" placeholder="如 your-hermes-host（Hermes 所在机，非 Hub）" title="SSH 落点：与《Hermes 部署指南》§一 一致时常为 249；Hub 仍在 your-hub-host:8088">
                     </div>
                     <div class="form-group" style="margin-bottom:10px">
                         <label class="form-label">SSH 端口</label>
@@ -194,20 +194,52 @@
                     <label class="form-label">Hermes 镜像</label>
                     <input class="form-input" name="deploy_image" placeholder="ccr.ccs.tencentyun.com/hermes/hermes-agent:latest" value="ccr.ccs.tencentyun.com/hermes/hermes-agent:latest">
                 </div>
-                <!-- Systemd 模式专用 -->
+                <!-- Systemd 模式专用（对齐 Hermes 部署指南 v2：/opt + /root/.hermes-*） -->
                 <div id="deploy-systemd-fields" style="display:none">
                     <div class="form-group" style="margin-bottom:10px">
-                        <label class="form-label">HERMES_HOME *</label>
-                        <input class="form-input" name="deploy_hermes_home" placeholder="如 /opt/hermes-xiaohe（目标机已装好 Hermes 的根目录，下面要有 venv/ 和 hermes_agent 源码）">
-                        <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
-                            Hub 不会替你装 Hermes，只会在这个目录下刷 <code>config/.env</code> 并生成 per-claw systemd unit。<br>
-                            前置条件：<code>$HERMES_HOME/venv/bin/python -m hermes_agent</code> 必须能跑起来。
+                        <label class="form-label">目录布局 *</label>
+                        <select class="form-input" name="hermes_layout" id="hermes-layout" onchange="onHermesLayoutChange()">
+                            <option value="split" selected>标准拆分（推荐）：安装目录 + 数据目录（HERMES_HOME）</option>
+                            <option value="legacy">单目录兼容（旧机）：install 与 data 同一根路径</option>
+                        </select>
+                    </div>
+                    <div id="hermes-split-fields">
+                        <div class="two-col">
+                            <div class="form-group" style="margin-bottom:10px">
+                                <label class="form-label">安装目录（venv + 源码）*</label>
+                                <input class="form-input" name="deploy_hermes_install_dir" placeholder="/opt/hermes-xiaohe">
+                            </div>
+                            <div class="form-group" style="margin-bottom:10px">
+                                <label class="form-label">数据目录（HERMES_HOME）*</label>
+                                <input class="form-input" name="deploy_hermes_data_dir" placeholder="/root/.hermes-xiaohe">
+                            </div>
                         </div>
+                        <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:10px;line-height:1.55">
+                            与《Hermes Agent 标准化部署指南》一致：<code>config.yaml</code> 写在数据目录<strong>根</strong>下；
+                            systemd 服务名为 <code>hermes-gateway-claw-&lt;id&gt;.service</code>，
+                            启动命令为 <code>python -m hermes_cli.main gateway run --replace</code>。
+                        </div>
+                    </div>
+                    <div id="hermes-legacy-fields" style="display:none">
+                        <div class="form-group" style="margin-bottom:10px">
+                            <label class="form-label">Hermes 根目录（单目录）*</label>
+                            <input class="form-input" name="deploy_hermes_home" placeholder="如 /opt/hermes-xiaohe（含 venv/ 与 config/）">
+                            <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
+                                兼容旧布局：配置写在 <code>{根}/config/config.yaml</code>，默认启动方式为 <strong>Module</strong>（<code>python -m hermes_agent</code>），可在下方改为 Gateway。
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="form-label">启动方式</label>
+                        <select class="form-input" name="deploy_hermes_start_mode" id="deploy-hermes-start-mode">
+                            <option value="gateway">Gateway（hermes_cli.main gateway run --replace）</option>
+                            <option value="module">Module（python -m hermes_agent 等）</option>
+                        </select>
                     </div>
                     <div class="two-col">
                         <div class="form-group" style="margin-bottom:10px">
-                            <label class="form-label">Python 路径（可选）</label>
-                            <input class="form-input" name="deploy_hermes_python" placeholder="缺省 $HERMES_HOME/venv/bin/python">
+                            <label class="form-label">Python 可执行文件（可选）</label>
+                            <input class="form-input" name="deploy_hermes_python" placeholder="缺省 {安装目录}/venv/bin/python">
                         </div>
                         <div class="form-group" style="margin-bottom:10px">
                             <label class="form-label">Systemd User（可选）</label>
@@ -215,8 +247,9 @@
                         </div>
                     </div>
                     <div class="form-group" style="margin-bottom:0">
-                        <label class="form-label">Python 模块名（可选）</label>
+                        <label class="form-label">Module 模式下的包名（可选）</label>
                         <input class="form-input" name="deploy_hermes_module" placeholder="hermes_agent" value="hermes_agent">
+                        <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px">仅当启动方式为 Module 时使用。</div>
                     </div>
                 </div>
             </div>
@@ -252,6 +285,15 @@
                             style="position:absolute;top:8px;right:8px;font-size:0.78rem;min-width:54px">复制</button>
                 </div>
                 <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">发给 OpenClaw 使用者，保存为 SKILL.md 即可接入 Hub</div>
+            </div>
+            <div style="margin-bottom:12px">
+                <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:6px">🚀 一键部署命令（推荐直接丢给 Agent）</label>
+                <div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;position:relative">
+                    <code id="bootstrap-command-in-token" style="word-break:break-all;font-size:0.82rem;color:var(--accent);display:block;padding-right:64px"></code>
+                    <button class="btn btn-primary btn-sm" onclick="copyBootstrapCommandFromToken()"
+                            style="position:absolute;top:8px;right:8px;font-size:0.78rem;min-width:54px">复制</button>
+                </div>
+                <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">Agent 执行后会自动安装 #143、启动 SSE、回传验证结果</div>
             </div>
             <div id="token-warning" style="background:rgba(234,179,8,0.1);border:1px solid rgba(234,179,8,0.3);border-radius:8px;padding:12px;margin-bottom:12px;display:none">
                 <p style="font-size:0.85rem;color:#eab308;margin:0">
@@ -310,6 +352,15 @@
             </div>
         </div>
         <div style="margin-bottom:14px">
+            <label class="form-label">🚀 一键部署命令（推荐直接丢给 Agent）</label>
+            <div style="background:var(--bg-primary);border:1px solid var(--accent);border-radius:8px;padding:12px;position:relative;margin-top:6px">
+                <code id="reg-bootstrap-command" style="word-break:break-all;font-size:0.88rem;color:var(--accent);display:block;padding-right:64px"></code>
+                <button class="btn btn-primary btn-sm" onclick="copyRegBootstrapCommand()"
+                        style="position:absolute;top:8px;right:8px;font-size:0.78rem;min-width:54px">复制</button>
+            </div>
+            <div style="font-size:0.76rem;color:var(--text-muted);margin-top:6px">Agent 执行后自动安装 #143、启动 SSE，并回传部署验证。</div>
+        </div>
+        <div style="margin-bottom:14px">
             <label class="form-label">🔑 API Token</label>
             <div style="background:var(--bg-primary);border:1px solid var(--accent);border-radius:8px;padding:12px;position:relative;margin-top:6px">
                 <code id="reg-api-token" style="word-break:break-all;font-size:0.88rem;color:var(--accent);display:block;padding-right:64px"></code>
@@ -334,7 +385,7 @@
 
         <div style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.25);border-radius:8px;padding:12px;margin-bottom:16px;font-size:0.86rem;color:var(--text-secondary);line-height:1.7">
             💡 点击下方 <strong>【📦 复制注册信息】</strong> 按钮，发给 OpenClaw，跟他说：<br>
-            <span style="color:var(--accent);font-weight:600">"带上 token 访问注册链接，照着说明安装即可。"</span>
+            <span style="color:var(--accent);font-weight:600">"执行这条一键部署命令，完成后 Hub 就能实时给你发消息。"</span>
         </div>
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeRegSuccessModal()">关闭</button>
@@ -1154,6 +1205,17 @@ function closeTokenModal() {
     document.getElementById('token-modal').classList.remove('active');
 }
 
+function buildBootstrapCommand(clawId, token) {
+    if (!clawId || !token) return '';
+    const url = `${location.origin}/api/v1/openclaws/${clawId}/bootstrap.sh?token=${encodeURIComponent(token)}`;
+    return `bash <(curl -fsSL "${url}")`;
+}
+
+function copyBootstrapCommandFromToken() {
+    const cmd = document.getElementById('bootstrap-command-in-token').textContent;
+    _doCopy(cmd, '一键部署命令已复制');
+}
+
 function copyToken() {
     const token = document.getElementById('token-display').textContent;
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -1216,6 +1278,7 @@ async function viewToken(clawId, clawName) {
         document.getElementById('btn-regenerate-token').style.display = 'inline-block';
         document.getElementById('token-display').textContent = result.api_token;
         document.getElementById('reg-skill-url-in-token').textContent = skillUrl;
+        document.getElementById('bootstrap-command-in-token').textContent = buildBootstrapCommand(clawId, result.api_token);
         document.getElementById('token-warning').style.display = 'none';
         document.getElementById('token-modal').classList.add('active');
     } catch (err) {
@@ -1253,6 +1316,7 @@ async function doRegenerateToken() {
         document.getElementById('token-content').style.display = 'block';
         document.getElementById('no-token-content').style.display = 'none';
         document.getElementById('token-display').textContent = result.api_token;
+        document.getElementById('bootstrap-command-in-token').textContent = buildBootstrapCommand(currentClawId, result.api_token);
         document.getElementById('token-warning').style.display = 'none';
         // 同时更新卡片上的预览
         loadClaws();
@@ -1309,24 +1373,39 @@ function copyRegApiToken() {
     _doCopy(token, 'API Token 已复制');
 }
 
+function copyRegBootstrapCommand() {
+    const cmd = document.getElementById('reg-bootstrap-command').textContent;
+    if (!cmd) {
+        showToast('无可复制的部署命令', 'error');
+        return;
+    }
+    _doCopy(cmd, '一键部署命令已复制');
+}
+
 function copyRegistrationInfo() {
     const url = document.getElementById('reg-skill-url').textContent;
     const token = document.getElementById('reg-api-token').textContent;
+    const command = document.getElementById('reg-bootstrap-command').textContent;
     const name = document.getElementById('reg-claw-name').textContent;
     const info =
-`你好 ${name}，带上 token 访问注册链接，照着说明安装即可：
+`你好 ${name}，请在你的机器上执行下面这条一键部署命令。执行完成后，Hub 就能通过 SSE 实时给你发聊天消息和待办：
 
-注册链接：${url}
+${command}
+
+备查注册链接：${url}
 API Token：${token}
 
-安装步骤：访问注册链接拿到完整 SKILL.md，存到 ~/.claude/skills/openclaw-registration/SKILL.md（或对应位置），然后按 SKILL.md 里的指引执行注册。`;
+如果 shell 不支持 <(...)，请打开注册链接，复制里面的兼容写法执行。`;
     _doCopy(info, '注册信息已复制，可直接发给 OpenClaw');
 }
 
 function onCreateAgentToggle() {
     const on = document.getElementById('create-agent-toggle').checked;
     document.getElementById('create-agent-fields').style.display = on ? '' : 'none';
-    if (on) onDeployMethodChange();
+    if (on) {
+        onDeployMethodChange();
+        try { onHermesLayoutChange(); } catch (e) { /* */ }
+    }
 }
 
 function onDeployAuthChange() {
@@ -1344,11 +1423,12 @@ function onDeployMethodChange() {
     if (method === 'systemd') {
         dockerFields.style.display = 'none';
         systemdFields.style.display = '';
+        onHermesLayoutChange();
         hint.innerHTML =
-            '⚠️ Systemd 模式 <strong>不会</strong> 替你装 Hermes 源码 / venv，' +
-            '只会刷 <code>$HERMES_HOME/config/.env</code> 并生成 ' +
-            '<code>/etc/systemd/system/hermes-agent-claw-&lt;id&gt;.service</code>。' +
-            '<br>请先确认目标机 <code>$HERMES_HOME/venv/bin/python -m hermes_agent</code> 能跑通。';
+            '⚠️ Systemd 与《Hermes 部署指南》v2 对齐：<strong>不会</strong>远程 git/pip 安装，' +
+            '只写配置 + systemd unit。标准拆分为 <code>/opt/hermes-*</code>（venv）+ ' +
+            '<code>/root/.hermes-*</code>（HERMES_HOME）；服务名 ' +
+            '<code>hermes-gateway-claw-&lt;id&gt;.service</code>，默认 Gateway 启动。';
     } else {
         dockerFields.style.display = '';
         systemdFields.style.display = 'none';
@@ -1357,6 +1437,20 @@ function onDeployMethodChange() {
             '<code>hermes-agent-claw-&lt;id&gt;</code> 容器，目录走 ' +
             '<code>/opt/openclaw-agents/claw-&lt;id&gt;-&lt;name&gt;/</code>。' +
             '<br>需要目标机有可用的 Docker 18+，且能拉到镜像。';
+    }
+}
+
+function onHermesLayoutChange() {
+    const layout = document.getElementById('hermes-layout');
+    if (!layout) return;
+    const v = layout.value;
+    const splitEl = document.getElementById('hermes-split-fields');
+    const legEl = document.getElementById('hermes-legacy-fields');
+    const start = document.getElementById('deploy-hermes-start-mode');
+    if (splitEl) splitEl.style.display = v === 'split' ? '' : 'none';
+    if (legEl) legEl.style.display = v === 'legacy' ? '' : 'none';
+    if (start) {
+        start.value = v === 'legacy' ? 'module' : 'gateway';
     }
 }
 
@@ -1382,7 +1476,7 @@ function _renderDeployStatus(dep) {
     lines.push(`方式：<code>${method}</code>`);
     if (dep.host) lines.push(`目标机：${dep.ssh_user || ''}@${dep.host}`);
     if (dep.remote_base_dir) {
-        const dirLabel = method === 'systemd' ? 'HERMES_HOME' : '目录';
+        const dirLabel = method === 'systemd' ? '数据 / 安装' : '目录';
         lines.push(`${dirLabel}：<code>${dep.remote_base_dir}</code>`);
     }
     if (dep.container_name) {
@@ -1451,13 +1545,28 @@ document.getElementById('create-form').addEventListener('submit', async e => {
             showToast('请粘贴 SSH 私钥（PEM 文本）', 'error');
             return;
         }
-        if (deployMethod === 'systemd' && !data.deploy_hermes_home) {
-            showToast('Systemd 模式需要填写 HERMES_HOME（如 /opt/hermes-xiaohe）', 'error');
-            return;
-        }
-        if (deployMethod === 'systemd' && data.deploy_hermes_home && !data.deploy_hermes_home.startsWith('/')) {
-            showToast('HERMES_HOME 必须是绝对路径', 'error');
-            return;
+        if (deployMethod === 'systemd') {
+            const layout = data.hermes_layout || 'split';
+            if (layout === 'split') {
+                if (!data.deploy_hermes_install_dir || !data.deploy_hermes_data_dir) {
+                    showToast('请填写安装目录与数据目录（或切换为单目录兼容）', 'error');
+                    return;
+                }
+                if (!data.deploy_hermes_install_dir.startsWith('/') ||
+                    !data.deploy_hermes_data_dir.startsWith('/')) {
+                    showToast('安装目录与数据目录须为绝对路径', 'error');
+                    return;
+                }
+            } else {
+                if (!data.deploy_hermes_home) {
+                    showToast('单目录模式请填写 Hermes 根目录', 'error');
+                    return;
+                }
+                if (!data.deploy_hermes_home.startsWith('/')) {
+                    showToast('根目录须为绝对路径', 'error');
+                    return;
+                }
+            }
         }
         deployOpts = {
             deploy_method: deployMethod,
@@ -1469,10 +1578,19 @@ document.getElementById('create-form').addEventListener('submit', async e => {
         if (deployMethod === 'docker') {
             deployOpts.image = data.deploy_image || 'ccr.ccs.tencentyun.com/hermes/hermes-agent:latest';
         } else {
-            deployOpts.hermes_home = data.deploy_hermes_home.replace(/\/+$/, '');
+            const layout = data.hermes_layout || 'split';
+            if (layout === 'split') {
+                deployOpts.hermes_install_dir = data.deploy_hermes_install_dir.replace(/\/+$/, '');
+                deployOpts.hermes_data_dir = data.deploy_hermes_data_dir.replace(/\/+$/, '');
+            } else {
+                deployOpts.hermes_home = data.deploy_hermes_home.replace(/\/+$/, '');
+            }
             if (data.deploy_hermes_python) deployOpts.hermes_python = data.deploy_hermes_python;
             if (data.deploy_hermes_module) deployOpts.hermes_module = data.deploy_hermes_module;
             if (data.deploy_systemd_user) deployOpts.systemd_user = data.deploy_systemd_user;
+            if (data.deploy_hermes_start_mode) {
+                deployOpts.hermes_start_mode = data.deploy_hermes_start_mode;
+            }
         }
         if (authType === 'password') {
             deployOpts.ssh_password = data.deploy_ssh_password;
@@ -1484,7 +1602,8 @@ document.getElementById('create-form').addEventListener('submit', async e => {
         data.deploy = deployOpts;
         data.hub_url = location.origin;
     }
-    // 清掉前端单独收集的 deploy_* 字段，避免后端把它们当作 OpenClaw 字段
+    // 清掉前端单独收集的 deploy_* / hermes_layout，避免后端误收未知字段
+    delete data.hermes_layout;
     Object.keys(data).forEach(k => { if (k.startsWith('deploy_')) delete data[k]; });
 
     try {
@@ -1501,6 +1620,8 @@ document.getElementById('create-form').addEventListener('submit', async e => {
         document.getElementById('reg-skill-url').textContent = skillUrl;
         document.getElementById('reg-api-token').textContent =
             result.api_token || '（本次未生成新 Token，可在「查看 Token」中获取）';
+        document.getElementById('reg-bootstrap-command').textContent =
+            result.api_token ? buildBootstrapCommand(clawId, result.api_token) : '';
         document.getElementById('reg-goto-detail').onclick = () => location.href = '/openclaws/' + clawId;
 
         const ai = result.auto_installed || {};

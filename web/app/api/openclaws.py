@@ -112,6 +112,31 @@ def _can_own_claw(user, claw):
     return False
 
 
+def _ensure_sidecar_v2_enabled(claw):
+    """确保注册链接/一键脚本走 #143 sidecar v2，并把连接模式切到 SSE。"""
+    changed = False
+    if (claw.connection_mode or '').lower() != 'sse':
+        claw.connection_mode = 'sse'
+        changed = True
+
+    skill = Skill.query.get(143) or Skill.query.filter_by(
+        name='hub-sse-sidecar-v2').first()
+    if skill:
+        rel = OpenClawSkill.query.filter_by(
+            openclaw_id=claw.id, skill_id=skill.id).first()
+        if rel:
+            if not rel.enabled:
+                rel.enabled = True
+                changed = True
+        else:
+            db.session.add(OpenClawSkill(
+                openclaw_id=claw.id, skill_id=skill.id, enabled=True))
+            changed = True
+    if changed:
+        db.session.commit()
+    return skill
+
+
 def _parse_project_id(raw):
     """解析项目 id：'__global__' / 'global' / 'all' / 空 / 0 / None → None（"全平台"或未关联），其它正整数 → int。"""
     if raw is None or raw == '':
@@ -231,6 +256,7 @@ def create_openclaw():
                     claw.project_id = _parse_project_id(data.get('project_id'))
                 claw.last_modified_by = _actor_display_name(user)
                 db.session.commit()
+                _ensure_sidecar_v2_enabled(claw)
 
                 result = claw.to_dict()
                 result['restored'] = True
@@ -277,6 +303,7 @@ def create_openclaw():
             existing.api_token_plain = _simple_encrypt(raw_token)
             existing.last_modified_by = _actor_display_name(user)
             db.session.commit()
+            _ensure_sidecar_v2_enabled(existing)
 
             result = existing.to_dict()
             result['restored'] = True
@@ -385,6 +412,8 @@ def create_openclaw():
             'Init tasks failed for claw %d: %s', claw.id, e)
         init_task_count = 0
         db.session.rollback()
+
+    _ensure_sidecar_v2_enabled(claw)
 
     # === 可选：Hub 代建 Hermes Agent（仅 super_admin） ===
     # 注意：部署失败不会回滚 OpenClaw 注册；状态写入 agent_deployments 表，
@@ -578,11 +607,14 @@ def get_registration_skill_for_claw(claw_id):
     """
     from flask import Response
     from app.api.registration_bootstrap import (
+        build_bootstrap_command,
         build_bootstrap_markdown,
         build_mcp_config_snippets,
+        _bootstrap_sh_url,
     )
 
     claw = OpenClawInstance.query.get_or_404(claw_id)
+    _ensure_sidecar_v2_enabled(claw)
     token = claw.get_token_plain() or ''
     hub_url = 'http://your-hub-host:8088'
     project_name = claw.project.name if claw.project else (claw.project_name or '未指定')
@@ -617,13 +649,15 @@ def get_registration_skill_for_claw(claw_id):
             'claw_name': claw.name,
             'hub_url': hub_url,
             'api_token': token,
+            'bootstrap_sh_url': _bootstrap_sh_url(hub_url, claw.id, token),
+            'bootstrap_command': build_bootstrap_command(hub_url, claw.id, token),
             'skill_content': md,
             'skill_links': skill_links,
             'rule_links': rule_links,
             'mcp_config_snippets': build_mcp_config_snippets(
                 hub_url, claw.id, token,
             ),
-            'mode': 'bootstrap',
+            'mode': 'bootstrap-v2',
         })
 
     return Response(
@@ -631,6 +665,62 @@ def get_registration_skill_for_claw(claw_id):
         mimetype='text/markdown; charset=utf-8',
         headers={
             'Content-Disposition': f'inline; filename="registration-claw-{claw.id}.md"',
+            'Cache-Control': 'no-store',
+        },
+    )
+
+
+@api_bp.route('/openclaws/<int:claw_id>/bootstrap.sh', methods=['GET'])
+def get_bootstrap_script_for_claw(claw_id):
+    """返回该 OpenClaw 的一键自部署 shell 脚本。
+
+    访问方式：
+      bash <(curl -fsSL '.../bootstrap.sh?token=oc_tk_xxx')
+
+    token 参数必须匹配该 claw；Web owner/super_admin 登录态也可访问。
+    """
+    from flask import Response
+    from app.api.registration_bootstrap import build_bootstrap_script
+
+    claw = OpenClawInstance.query.get_or_404(claw_id)
+    token = (request.args.get('token') or request.args.get('claw_token')
+             or request.args.get('api_token') or '').strip()
+    user = _get_user()
+    token_ok = bool(token and claw.verify_token(token))
+    if not token_ok and not _can_own_claw(user, claw):
+        return Response(
+            '#!/usr/bin/env bash\necho "bootstrap token 无效或无权限" >&2\nexit 1\n',
+            status=403,
+            mimetype='text/x-shellscript; charset=utf-8',
+            headers={'Cache-Control': 'no-store'},
+        )
+
+    _ensure_sidecar_v2_enabled(claw)
+    raw_token = token if token_ok else (claw.get_token_plain() or '')
+    if not raw_token:
+        return Response(
+            '#!/usr/bin/env bash\necho "该 OpenClaw 尚未生成 API Token" >&2\nexit 1\n',
+            status=404,
+            mimetype='text/x-shellscript; charset=utf-8',
+            headers={'Cache-Control': 'no-store'},
+        )
+
+    hub_url = 'http://your-hub-host:8088'
+    project_name = claw.project.name if claw.project else (claw.project_name or '未指定')
+    script = build_bootstrap_script(
+        hub_url=hub_url,
+        claw_id=claw.id,
+        claw_name=claw.name or '',
+        role=claw.role or 'test_member',
+        project_name=project_name,
+        api_token=raw_token,
+    )
+    return Response(
+        script,
+        mimetype='text/x-shellscript; charset=utf-8',
+        headers={
+            'Content-Disposition': f'inline; filename="openclaw-bootstrap-{claw.id}.sh"',
+            'Cache-Control': 'no-store',
         },
     )
 
