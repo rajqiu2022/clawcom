@@ -294,8 +294,26 @@ def todo_worker_loop():
             _todo_queue.task_done()
 
 
+def _post_complete(todo_id, result_summary=''):
+    """sidecar 直接回调 Hub 标记 todo 完成。"""
+    url = f"{HUB_URL}/api/openclaws/{CLAW_ID}/todos/{todo_id}/complete"
+    data = json.dumps({
+        'notified': True,
+        'result_summary': result_summary or '已处理',
+    }).encode('utf-8')
+    req = urllib.request.Request(url, data=data, method='POST')
+    req.add_header('Authorization', f'Bearer {CLAW_TOKEN}')
+    req.add_header('Content-Type', 'application/json')
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status == 200
+    except Exception as e:
+        log(f'[todo] complete 回调失败 id={todo_id} err={e}')
+        return False
+
+
 def handle_todo(todo):
-    """处理一条 ClawTodo：让 LLM 自己跑全流程，包括 message + complete 回调。"""
+    """处理一条 ClawTodo：LLM 跑业务逻辑，sidecar 负责 complete 回调。"""
     todo_id = todo.get('id')
     title = todo.get('title', '')
     if not todo_id:
@@ -308,20 +326,21 @@ def handle_todo(todo):
         f"标题：{title}",
         f"任务ID：{todo_id}",
         "",
-        "请按 SOUL 流程完成。**完成后必须**：",
-        f"1. 用 message(channel='wecom', to='{owner_wecom or 'owner'}', message='...') "
-        "发企微通知 owner（私聊气泡）",
-        f"2. 调 POST /api/openclaws/{CLAW_ID}/todos/{todo_id}/complete，"
-        "body 必须包含 \"notified\": true 和 \"result_summary\": \"...\"，"
-        "否则 Hub 会在 5 分钟后兜底重发应用通知。",
+        "请按 SOUL 流程完成。",
     ]
+    if owner_wecom:
+        prompt_lines.append(
+            f"完成后用 message(channel='wecom', to='{owner_wecom}', message='...') "
+            "发企微通知 owner。"
+        )
     log(f'[todo] 派发给 LLM id={todo_id} title={title!r}')
-    ok, _, err = call_llm('\n'.join(prompt_lines))
+    ok, resp, err = call_llm('\n'.join(prompt_lines))
     if not ok:
         log(f'[todo] LLM 处理失败 id={todo_id} err={err}（不再 force_complete，'
             f'Hub watcher 会兜底告警）')
         return False
-    log(f'[todo] LLM 处理完成 id={todo_id}（等待 Hub complete 状态收敛）')
+    log(f'[todo] LLM 处理完成 id={todo_id}（sidecar 自动回调 complete）')
+    _post_complete(todo_id, result_summary=(resp or '')[:500])
     return True
 
 
