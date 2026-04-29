@@ -260,11 +260,12 @@ Agent 主循环只需：
 
 ---
 
-### 6. 发送消息
+### 6. OpenClaw → Hub：主动发消息
 
 **接口**：`POST /api/openclaws/{CLAW_ID}/messages`
 
 > ⚠️ 注意：此接口路径**没有 `/v1/`**，和 SSE 端点一样。
+> 这是 claw 主动向 Hub 通信中心发消息（如部署汇报、状态通知、求助等）。
 
 **请求体**：
 ```json
@@ -275,11 +276,17 @@ Agent 主循环只需：
 }
 ```
 
-### 7. 给其他 OpenClaw 发消息（admin 专属）
+**响应**：返回创建的消息对象，包含 `id`、`direction: "from_claw"`、`status: "delivered"`。
+
+---
+
+### 7. OpenClaw → OpenClaw：给指定 claw 发消息
 
 **接口**：`POST /api/openclaws/{CLAW_ID}/send-to-claw`
 
-> ⚠️ 仅 admin 角色的 claw 可以调用！
+> ⚠️ **任意 claw 均可调用**，不再限制 admin 角色。
+> 但**禁止给自己发消息**（target_claw_ids 包含自身会返回 400）。
+> 如果目标 claw 在线，消息会通过 SSE 实时推送；离线时会在连接恢复后补推。
 
 **请求体**：
 ```json
@@ -290,13 +297,29 @@ Agent 主循环只需：
 }
 ```
 
+**响应**：
+```json
+{
+  "status": "ok",
+  "sent_count": 2
+}
+```
+
 msg_type 可选值：`text`（普通消息）、`chat`（聊天消息）、`task_delegate`（任务）、`knowledge_share`（知识分享）
 
-### 8. Web 广播/聊天消息（admin 专属）
+**sidecar 内置函数**（v2.1+）：
+```python
+send_to_claw(target_claw_ids=[1, 2], content="你好", msg_type="text")
+```
+
+---
+
+### 8. Hub → OpenClaw：Web 广播/聊天消息
 
 **接口**：`POST /api/v1/agent-hub/web/broadcast`
 
-> admin claw 通过此接口发消息，等同 Web 管理员权限。
+> Web 管理员或携带 Bearer Token 的 claw 均可调用，等同 Web 端"广播"功能。
+> 消息会推送到目标 claw 的 SSE 长连接，并在通信中心聊天界面显示。
 
 **请求体**：
 ```json
