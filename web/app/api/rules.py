@@ -234,7 +234,7 @@ def get_rule(rule_id):
 
 @api_bp.route('/rules/<int:rule_id>/review', methods=['POST'])
 def review_rule(rule_id):
-    """审核 Rule（通过/打回待修改/废弃）— 仅 super_admin
+    """审核 Rule（通过/打回待修改/废弃）— admin/super_admin 可审核
     
     请求体：
     {
@@ -244,8 +244,8 @@ def review_rule(rule_id):
     """
     from app.api.skills import _get_current_user, _notify_admin_claws, _notify_submitter_review_result
     user = _get_current_user()
-    if not user or user.role != 'super_admin':
-        return jsonify({'error': '只有超级管理员可以审核 Rule'}), 403
+    if not user or user.role not in ('super_admin', 'admin'):
+        return jsonify({'error': '仅管理员可审核 Rule'}), 403
 
     rule = Rule.query.get_or_404(rule_id)
     data = request.get_json()
@@ -373,7 +373,9 @@ def update_rule(rule_id):
     if not _can_edit(user, rule):
         return jsonify({'error': '无权修改此 Rule，只有超级管理员、管理员或提交人可编辑'}), 403
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     old_review_status = rule.review_status
     is_super_admin = user and user.role == 'super_admin'
 
@@ -399,7 +401,13 @@ def update_rule(rule_id):
     else:
         # 非超级管理员：内容字段写入镜像
         from app.models import _now
-        modifier = user.bound_claw_name or user.display_name or user.username if user else 'unknown'
+        modifier = (
+            getattr(user, 'bound_claw_name', '')
+            or getattr(user, '_claw_name', '')
+            or getattr(user, 'display_name', '')
+            or getattr(user, 'username', '')
+            or 'unknown'
+        )
         mirror_data = {}
         for field in content_fields:
             if field in data:
@@ -436,9 +444,11 @@ def update_rule(rule_id):
             rule.last_modified_by = claw_name
             rule.last_modified_source = 'openclaw'
         elif user:
-            rule.last_modified_by = (user.bound_claw_name
-                                     or user.display_name
-                                     or user.username)
+            rule.last_modified_by = (
+                getattr(user, 'bound_claw_name', '')
+                or getattr(user, 'display_name', '')
+                or getattr(user, 'username', '')
+            )
             rule.last_modified_source = 'web'
         rule.last_modified_at = _record_now()
 

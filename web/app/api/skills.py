@@ -4,7 +4,9 @@ from app import db
 from app.models import Skill, OpenClawSkill, OpenClawInstance, Rule, User, _now
 
 OFF_SHELF_SKILL_NAMES = {'hub-connect'}
-OFF_SHELF_SKILL_IDS = {118}
+# 按 skill id 下架（不进市场、不可再分配）。#135 是旧 hub-sse-sidecar，
+# 已被 #143 hub-sse-sidecar-v2 取代；#118 manager-hub 已上架为「通信中心模块」。
+OFF_SHELF_SKILL_IDS = frozenset({135})
 
 
 def _is_off_shelf_skill(skill):
@@ -206,7 +208,6 @@ def _semantic_search_skills(keyword, user=None, review_filter=None, show_deleted
     query = Skill.query.filter(
         Skill.is_deleted != True,
         Skill.name.notin_(list(OFF_SHELF_SKILL_NAMES)),
-        Skill.id.notin_(list(OFF_SHELF_SKILL_IDS)),
     )
     if not user or user.role != 'super_admin':
         query = query.filter(Skill.scope != 'admin')
@@ -442,7 +443,7 @@ def batch_import_evolved():
 
 @api_bp.route('/skills/<int:skill_id>/review', methods=['POST'])
 def review_skill(skill_id):
-    """审核 Skill（通过/打回待修改/废弃）— 仅 super_admin（龙虾王 Token 认证映射为 super_admin）
+    """审核 Skill（通过/打回待修改/废弃）— admin/super_admin 可审核
     
     请求体：
     {
@@ -458,8 +459,8 @@ def review_skill(skill_id):
     - revise → rejected（废弃）
     """
     user = _get_current_user()
-    if not user or user.role != 'super_admin':
-        return jsonify({'error': '只有超级管理员可以审核 Skill'}), 403
+    if not user or user.role not in ('super_admin', 'admin'):
+        return jsonify({'error': '仅管理员可审核 Skill'}), 403
 
     skill = Skill.query.get_or_404(skill_id)
     data = request.get_json()
@@ -676,7 +677,9 @@ def update_skill(skill_id):
         logging.warning(f'[SKILL AUTH] 403 denied: user={user}, user.role={getattr(user,"role",None)}, user.username={getattr(user,"username",None)}, skill={skill_id}, created_by={skill.created_by}')
         return jsonify({'error': '无权修改此 Skill，只有超级管理员、管理员或提交人可编辑'}), 403
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     old_review_status = skill.review_status
     is_super_admin = user and user.role == 'super_admin'
 
@@ -699,7 +702,13 @@ def update_skill(skill_id):
                             f'更新字段: {", ".join(data.keys())}')
     else:
         # 非超级管理员：内容字段写入镜像，元数据字段直接改
-        modifier = user.bound_claw_name or user.display_name or user.username if user else 'unknown'
+        modifier = (
+            getattr(user, 'bound_claw_name', '')
+            or getattr(user, '_claw_name', '')
+            or getattr(user, 'display_name', '')
+            or getattr(user, 'username', '')
+            or 'unknown'
+        )
         mirror_data = {}
         for field in content_fields:
             if field in data:
@@ -737,9 +746,11 @@ def update_skill(skill_id):
             skill.last_modified_by = claw_name
             skill.last_modified_source = 'openclaw'
         elif user:
-            skill.last_modified_by = (user.bound_claw_name
-                                      or user.display_name
-                                      or user.username)
+            skill.last_modified_by = (
+                getattr(user, 'bound_claw_name', '')
+                or getattr(user, 'display_name', '')
+                or getattr(user, 'username', '')
+            )
             skill.last_modified_source = 'web'
         skill.last_modified_at = _now()
 
@@ -921,9 +932,18 @@ def install_skill(claw_id):
 
     skill = Skill.query.get_or_404(skill_id)
 
-    # 已软删除的 Skill 不能安装
-    if _is_off_shelf_skill(skill):
-        return jsonify({'error': '此 Skill 已下架，无法安装'}), 403
+    if skill.is_deleted:
+        return jsonify({'error': '此 Skill 已删除，无法安装'}), 403
+
+    # ID 级下架用于废弃旧方案：不进公开列表，也不可再分配。
+    if int(skill.id) in OFF_SHELF_SKILL_IDS:
+        return jsonify({'error': '此 Skill 已下架，无法安装；请使用新版替代 Skill'}), 403
+
+    # 名称级下架：不进公开列表，仅管理员可分配。
+    if skill.name in OFF_SHELF_SKILL_NAMES:
+        user = _get_current_user()
+        if not (user and user.role in ('super_admin', 'admin')):
+            return jsonify({'error': '此 Skill 已下架，仅管理员可安装'}), 403
 
     # 只有已审核通过的 skill 才能安装（管理员跳过此限制）
     user = _get_current_user()
@@ -1079,8 +1099,8 @@ def install_skill(claw_id):
     except Exception:
         pass
 
-    from app.api.agent_client import notify_claw
-    notify_claw(claw_id)
+    from app.api.agent_client import notify_claw_todo
+    notify_claw_todo(claw_id)
     return jsonify({
         'message': f'已为 {claw.name} {"重新分配" if is_reinstall else "分配"} {skill.display_name}',
         'is_reinstall': is_reinstall,
@@ -1152,7 +1172,6 @@ def list_standard_skills():
                   Skill.is_standard == True,
                   Skill.is_deleted != True,
                   Skill.name.notin_(list(OFF_SHELF_SKILL_NAMES)),
-                  Skill.id.notin_(list(OFF_SHELF_SKILL_IDS)),
               )
               .order_by(Skill.name)
               .all())
@@ -1222,7 +1241,6 @@ def get_registration_skill():
         Skill.name != 'registration-skill',
         Skill.is_deleted != True,
         Skill.name.notin_(list(OFF_SHELF_SKILL_NAMES)),
-        Skill.id.notin_(list(OFF_SHELF_SKILL_IDS)),
     ).all()
 
     result = skill.to_dict()
