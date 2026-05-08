@@ -9,7 +9,7 @@
 - **快照同步**：按 Hub 测试迭代（TestIteration）维度拉取 TAPD Story 全量字段，POST 到 Hub `/requirements/iterations/<id>/snapshots` 落库
 - **下拉缓存**：维护 `tapd_iterations_cache` / `tapd_versions` / `tapd_baselines` / `tapd_field_map_cache`，让前端 TestIteration 创建/编辑表单的"TAPD 迭代下拉"零延迟
 - **字段级变更日志**：Hub 端在 upsert 时自动 diff 并写入 `requirement_change_logs`，Agent 不必关心 diff 算法
-- **工程关联**：基于 `tapd_story_id` 自动把工程变更（EngineeringChangeItem）和需求挂钩
+- **工程关联**：基于 `tapd_story_id` 自动建立**函数/方法级**关联（`requirement_function_links`，包含 `file_path + symbol_name + start_line + end_line`）
 - **响应实时刷新**：反向轮询 `/requirements/agent/tapd-refresh-queue`，当用户在 Hub 点击"实时刷新"按钮，agent 在 ≤15s 内拉取最新 TAPD 数据并推送
 - **每日全量**：定时任务（cron 或 APScheduler）每日凌晨同步所有活跃迭代，作为 baseline
 
@@ -60,7 +60,7 @@ Content-Type: application/json
 ┌──────────────────────────────────────┐
 │ requirement_items（upsert）          │
 │ requirement_change_logs（diff 写）   │
-│ requirement_engineering_links（自动）│
+│ requirement_function_links（自动）   │
 └──────────────────────────────────────┘
 ```
 
@@ -94,6 +94,7 @@ OpenClaw 推送 `stories[]` 时 **直接使用 TAPD 原字段名**（蛇形命�
 | `iteration_id` | `tapd_iteration_id` | string(≤64) | TAPD 迭代 ID（≠ Hub iteration_id） |
 | `custom_field_eight` 或 `acceptance_criteria` | `acceptance_criteria` | text | **测试验收标准**（关键） |
 | `custom_field_three` 或 `test_focus` | `test_focus` | text | 测试关注点 |
+| `test_suggestions` | `test_suggestions` | JSON string（LONGTEXT） | 测试点建议（建议传 JSON 数组/对象） |
 | `custom_field_six` 或 `test_result` | `test_result` | text | 测试结果 |
 | `custom_field_18` 或 `need_test` | `need_test` | string(≤40) | 是否需要测试 |
 | `custom_field_19` 或 `review_progress` | `review_progress` | string(≤40) | 评审进度 |
@@ -101,6 +102,8 @@ OpenClaw 推送 `stories[]` 时 **直接使用 TAPD 原字段名**（蛇形命�
 | `progress` / `effort` / `effort_completed` / `remain` | 同名 | int/float | 进度工时 |
 | `created` / `modified` / `completed` | `tapd_created_at` / `tapd_modified_at` / `tapd_completed_at` | datetime | TAPD 时间，格式 `YYYY-MM-DD HH:MM:SS` |
 | `begin` / `due` | `tapd_begin` / `tapd_due` | date | TAPD 排期，格式 `YYYY-MM-DD` |
+| `impl_status` | `impl_status` | string(≤20) | **Agent 填写**，实现状态：`not_impl`/`in_progress`/`implemented`/`unknown` |
+| `impl_remark` | `impl_remark` | string(≤500) | **Agent 填写**，实现状态备注（如"服务端已完成，客户端未开始"） |
 
 > **额外**：完整原始 JSON 会落库到 `raw_payload`（LONGTEXT），便于以后扩展字段不用 ALTER。
 
@@ -157,13 +160,19 @@ racinggo workspace 常见状态（详见 `Documents/TAPD_API/05_story_status_map
       "description": "<p>原描述 HTML...</p>",
       "custom_field_eight": "1. 短信发送 ≤3s\n2. 错误验证码 5 次锁定...",
       "custom_field_three": "重点验证错峰场景",
+      "test_suggestions": [
+        {"title": "验证码风控", "points": ["5 次错误锁定", "锁定后解锁策略"]},
+        {"title": "短信通道", "points": ["发送时延 <= 3s", "失败重试与兜底"]}
+      ],
       "progress": 60,
       "effort": 8,
       "effort_completed": 5,
       "created": "2026-04-15 10:00:00",
       "modified": "2026-04-20 14:23:00",
       "begin": "2026-04-15",
-      "due": "2026-04-30"
+      "due": "2026-04-30",
+      "impl_status": "in_progress",
+      "impl_remark": "服务端已完成，客户端联调中"
     }
   ],
   "removed_story_ids": ["1170202650000999000"]
@@ -422,12 +431,305 @@ def handle_one(req):
 
 ---
 
+## 需求分析图谱（Requirement Analysis Graph）
+
+> **新增功能（2026-05-08）**：Agent 在完成需求快照推送后，应对所有需求进行**关联分析**，将功能域聚类和一致性问题推送到 Hub，供前端"需求图谱"按钮展示。
+
+### 一、数据模型
+
+#### 1.1 功能域聚类（`requirement_domain_clusters`）
+
+按功能域（如"关卡系统"、"3C_手势_镜头"）对需求聚类，统计该域的需求数、平均质量分、TOP 问题。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `iteration_id` | int FK | 所属迭代 |
+| `domain_name` | varchar(50) | 功能域名 |
+| `requirement_count` | int | 该域需求数 |
+| `avg_score` | decimal(5,1) | 该域平均质量分（0-10） |
+| `top_issues` | text(JSON数组) | 该域 TOP 问题列表 |
+| `created_at` | datetime | 创建时间 |
+
+**幂等键**：`(iteration_id, domain_name)` — 重复推送会覆盖更新。
+
+#### 1.2 一致性问题（`requirement_consistency_issues`）
+
+记录跨需求的一致性问题（复制粘贴、覆盖遗漏、差异化缺失、模板化严重、关联提醒）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `iteration_id` | int FK | 所属迭代 |
+| `issue_type` | varchar(30) | 问题类型 |
+| `severity` | varchar(10) | 严重度：高/中/低 |
+| `domain` | varchar(50) | 所属功能域 |
+| `requirement_ids` | text(JSON数组) | 涉及的需求 ID 列表 |
+| `detail` | text | 问题描述 |
+| `status` | varchar(20) | open/closed（可标记已修复） |
+| `resolved_at` | datetime | 修复时间 |
+| `resolved_by` | varchar(100) | 修复人 |
+
+---
+
+### 二、API 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/requirements/iterations/<id>/domain-clusters` | 获取功能域聚类列表 |
+| `POST` | `/requirements/domain-clusters` | 推送单条功能域聚类（幂等 upsert） |
+| `GET` | `/requirements/iterations/<id>/consistency-issues` | 获取一致性问题列表 |
+| `POST` | `/requirements/consistency-issues` | 推送单条一致性问题 |
+| `PUT` | `/requirements/consistency-issues/<id>` | 更新问题状态（标记已修复） |
+| `DELETE` | `/requirements/consistency-issues/<id>` | 删除问题 |
+| `DELETE` | `/requirements/domain-clusters/<id>` | 删除功能域聚类 |
+
+> **认证**：所有接口需要 `Authorization: Bearer {HUB_API_TOKEN}` 头。
+
+---
+
+### 三、推送范式
+
+#### 3.1 推送功能域聚类
+
+```json
+POST /api/v1/requirements/domain-clusters
+{
+  "iteration_id": 42,
+  "domain_name": "关卡系统",
+  "requirement_count": 8,
+  "avg_score": 6.5,
+  "top_issues": ["验收标准缺失", "描述歧义"]
+}
+```
+
+**响应示例：**
+```json
+{
+  "id": 1,
+  "iteration_id": 42,
+  "domain_name": "关卡系统",
+  "requirement_count": 8,
+  "avg_score": 6.5,
+  "top_issues": "[\"验收标准缺失\", \"描述歧义\"]",
+  "created_at": "2026-05-08 14:30:00"
+}
+```
+
+#### 3.2 推送一致性问题
+
+```json
+POST /api/v1/requirements/consistency-issues
+{
+  "iteration_id": 42,
+  "issue_type": "复制粘贴",
+  "severity": "高",
+  "domain": "关卡系统",
+  "requirement_ids": [101, 102, 103],
+  "detail": "需求 101/102/103 的验收标准完全复制粘贴，未体现差异化"
+}
+```
+
+**响应示例：**
+```json
+{
+  "id": 1,
+  "iteration_id": 42,
+  "issue_type": "复制粘贴",
+  "severity": "高",
+  "domain": "关卡系统",
+  "requirement_ids": "[101, 102, 103]",
+  "detail": "需求 101/102/103 的验收标准完全复制粘贴，未体现差异化",
+  "status": "open",
+  "resolved_at": null,
+  "resolved_by": "",
+  "created_at": "2026-05-08 14:35:00"
+}
+```
+
+#### 3.3 标记问题已修复
+
+```json
+PUT /api/v1/requirements/consistency-issues/1
+{
+  "status": "closed"
+}
+```
+
+---
+
+### 四、Agent 分析流程
+
+推荐在**每日全量同步完成后**触发需求图谱分析。
+
+```
+每日 02:00 全量同步完成后：
+  1. 获取本迭代所有需求列表（GET /requirements/iterations/{id}/items）
+  2. 调用 LLM 分析：
+     a. 按功能域聚类（提取需求标题/描述中的功能域关键词）
+     b. 评估每个需求的质量分（0-10，基于描述完整性、验收标准清晰度等）
+     c. 检测跨需求的一致性问题：
+        - 复制粘贴：验收标准/描述高度相似
+        - 覆盖遗漏：关联工程变更但需求描述未更新
+        - 差异化缺失：同类需求但验收标准完全一致
+        - 模板化严重：描述过于抽象，缺乏具体细节
+        - 关联提醒：需求 A 引用需求 B 但未明确依赖关系
+  3. 删除本迭代旧的图谱数据（可选：前端按 created_at 区分版本）
+  4. 推送功能域聚类（POST /requirements/domain-clusters）
+  5. 推送一致性问题（POST /requirements/consistency-issues）
+```
+
+#### 4.1 LLM 提示词模板（参考）
+
+```
+你是一个需求质量分析专家。给定以下需求列表（JSON 数组），请完成：
+
+1. 功能域聚类：将需求按功能域分组（如"关卡系统"、"3C_手势_镜头"、"UI_交互"等）
+2. 质量评分：为每个需求打分（0-10），考虑：
+   - 描述完整性（是否有背景、目标、验收标准）
+   - 验收标准清晰度（是否可测试、无歧义）
+   - 依赖关系是否明确
+3. 一致性问题检测：找出跨需求的问题（复制粘贴、覆盖遗漏、差异化缺失、模板化严重、关联提醒）
+
+输出 JSON：
+{
+  "domain_clusters": [
+    {
+      "domain_name": "关卡系统",
+      "requirement_ids": [1, 2, 3],
+      "avg_score": 6.5,
+      "top_issues": ["验收标准缺失", "描述歧义"]
+    }
+  ],
+  "consistency_issues": [
+    {
+      "issue_type": "复制粘贴",
+      "severity": "高",
+      "domain": "关卡系统",
+      "requirement_ids": [1, 2],
+      "detail": "需求 1 和 2 的验收标准完全复制粘贴"
+    }
+  ]
+}
+
+需求列表：
+{requirements_json}
+```
+
+---
+
+### 五、Agent 侧代码示例
+
+```python
+import os, requests, json as pyjson
+HUB = os.environ['HUB_BASE_URL']
+TOKEN = os.environ['HUB_API_TOKEN']
+HEADERS = {
+    'Authorization': f'Bearer {TOKEN}',
+    'Content-Type': 'application/json',
+}
+
+def push_domain_cluster(iteration_id, domain_name, req_ids, scores):
+    """推送单条功能域聚类"""
+    avg = sum(scores) / len(scores) if scores else 0
+    r = requests.post(
+        f'{HUB}/api/v1/requirements/domain-clusters',
+        headers=HEADERS, timeout=30,
+        json={
+            'iteration_id': iteration_id,
+            'domain_name': domain_name,
+            'requirement_count': len(req_ids),
+            'avg_score': round(avg, 1),
+            'top_issues': pyjson.dumps(['问题1', '问题2']),  # JSON 字符串
+        },
+    )
+    r.raise_for_status()
+    return r.json()
+
+def push_consistency_issue(iteration_id, issue_type, severity, domain, req_ids, detail):
+    """推送单条一致性问题"""
+    r = requests.post(
+        f'{HUB}/api/v1/requirements/consistency-issues',
+        headers=HEADERS, timeout=30,
+        json={
+            'iteration_id': iteration_id,
+            'issue_type': issue_type,
+            'severity': severity,
+            'domain': domain,
+            'requirement_ids': pyjson.dumps(req_ids),  # JSON 字符串
+            'detail': detail,
+        },
+    )
+    r.raise_for_status()
+    return r.json()
+
+def run_graph_analysis(iteration_id, workspace_id):
+    """执行需求图谱分析（在每日全量同步后调用）"""
+    # 1. 获取本迭代所有需求
+    items_resp = requests.get(
+        f'{HUB}/api/v1/requirements/iterations/{iteration_id}/items',
+        headers=HEADERS, params={'page_size': 500}, timeout=30,
+    ).json()
+    items = items_resp.get('items', [])
+
+    # 2. 调用 LLM 分析（伪代码）
+    analysis_result = call_llm_for_graph_analysis(items)
+
+    # 3. 推送功能域聚类
+    for cluster in analysis_result.get('domain_clusters', []):
+        req_ids = cluster['requirement_ids']
+        scores = [next(i['completeness_score'] for i in items if i['id'] in req_ids)]  # 假设有 completeness_score
+        push_domain_cluster(iteration_id, cluster['domain_name'], req_ids, scores)
+        # 推送 TOP issues
+        # ...
+
+    # 4. 推送一致性问题
+    for issue in analysis_result.get('consistency_issues', []):
+        push_consistency_issue(
+            iteration_id,
+            issue['issue_type'],
+            issue['severity'],
+            issue['domain'],
+            issue['requirement_ids'],
+            issue['detail'],
+        )
+
+    return {'clusters': len(analysis_result.get('domain_clusters', [])),
+            'issues': len(analysis_result.get('consistency_issues', []))}
+```
+
+---
+
+### 六、注意事项
+
+1. **`top_issues` 和 `requirement_ids` 字段存储格式是 JSON 字符串**（LONGTEXT），不是原生 JSON 类型。推送时先用 `json.dumps()` 序列化。
+2. **功能域聚类是幂等的**：相同 `(iteration_id, domain_name)` 的 POST 会覆盖更新，无需先 DELETE 再 POST。
+3. **一致性问题不支持幂等**：每次分析直接 INSERT，建议在分析前先清空本迭代的旧问题（可选，前端按 `created_at` 区分版本更简单）。
+4. **LLM 调用成本**：需求图谱分析需要把所有需求传给 LLM，注意 token 限制。建议分批（每批 20-30 条需求）。
+5. **触发时机**：推荐在每日全量同步（策略 B）完成后触发，或者作为独立的定时任务（每日 03:00）。
+
+---
+
 ## 与其它模块的协作
 
 ### 与 engineering-analysis
 
-- 推送工程刷新批次（POST `/engineering/refresh`）时若 `change_item.tapd_story_ids` 含 story_id，**Hub 自动**建立 `requirement_engineering_links`，Agent 不必额外操作
-- 反向：本 Skill 推送 snapshot 时，Hub 也会扫描存量 EngineeringChangeItem 自动补建链接
+- 推送工程刷新批次（POST `/engineering/refresh`）时若 `change_item.tapd_story_ids` 含 story_id，**Hub 自动**建立 `requirement_function_links`（函数/方法级，含文件信息）
+- 反向：本 Skill 推送 snapshot 时，Hub 也会扫描存量 EngineeringChangeItem 自动补建函数级链接（优先读取 `symbol_names`，若含 AST 行号会写入 `start_line/end_line`）
+
+**联调前置检查（非常重要）**
+
+1. `engineering_change_items.tapd_story_ids` 不能是空数组 `[]`
+   - 若全是 `[]`，Hub 无法把工程变更挂到需求，函数关联会是 0 条
+2. `engineering_change_items.symbol_names` 需要包含函数/方法信息
+   - 推荐对象数组：
+     ```json
+     [
+       {"name":"CreateOrder","start_line":128,"end_line":196},
+       {"name":"ValidateCoupon","start_line":210,"end_line":248}
+     ]
+     ```
+3. `tapd_story_ids` 与需求快照中的 `stories[].id` 必须同源同值（字符串化后一致）
+
+> 排查建议：先抽样 10 条 `engineering_change_items`，确认 `tapd_story_ids` 非空且 `symbol_names` 有效，再看 `/requirements/items/{id}/engineering-changes` 返回。
 
 ### 与 testcase-manager
 
@@ -437,6 +739,185 @@ def handle_one(req):
 ### 与 testplan-manager
 
 - TestIteration 创建/编辑表单的 "TAPD 迭代" 多选下拉直接读 `/test-plans/tapd-iterations?project_id=` → 走 `tapd_iterations_cache` 本地查询，0 延迟
+
+---
+
+## 数据管理 API
+
+### 删除整个迭代数据（`DELETE /requirements/iterations/<id>/data`）
+
+删除某个迭代下的所有需求分析数据（需求条目 + 变更日志 + 用例关联 + 工程关联 + 函数级关联），允许用户清空后重新上传快照。
+
+**响应示例：**
+```json
+{
+  "iteration_id": 42,
+  "deleted_items": 79,
+  "deleted_logs": 156,
+  "deleted_links": 12,
+  "deleted_eng_links": 8,
+  "deleted_function_links": 32
+}
+```
+
+### 删除单条需求记录（`DELETE /requirements/items/<id>`）
+
+删除单条需求记录及其关联的变更日志、用例关联、工程关联。删除后可通过重新推送快照恢复。
+
+**响应示例：**
+```json
+{
+  "id": 123,
+  "deleted_logs": 5,
+  "deleted_links": 2,
+  "deleted_eng_links": 1,
+  "deleted_function_links": 6
+}
+```
+
+> **注意**：删除操作不可撤销。删除后如需恢复，需要 Agent 重新推送 snapshot。
+
+### 更新需求实现状态（`PATCH /requirements/items/<id>/impl-status`）
+
+Agent 基于工程代码分析结果，判断某条需求的功能是否已实现，更新实现状态和备注。
+
+**请求示例：**
+```json
+{
+  "impl_status": "in_progress",
+  "impl_remark": "服务端已完成，客户端还没完成"
+}
+```
+
+**`impl_status` 允许值：**
+| 值 | 含义 |
+|---|---|
+| `not_impl` | 未实现 |
+| `in_progress` | 实现中（部分完成） |
+| `implemented` | 已实现 |
+| `unknown` | 未评估（默认） |
+
+**`impl_remark`**：备注说明，最大 500 字符，前端鼠标悬浮时 tooltip 显示。
+
+**响应**：返回更新后的完整需求 `to_dict()` JSON。
+
+### 批量更新实现状态（`PATCH /requirements/iterations/<id>/impl-status-batch`）
+
+Agent 一次性更新某迭代下多条需求的实现状态。
+
+**请求示例：**
+```json
+{
+  "items": [
+    {"tapd_story_id": "1012345", "impl_status": "implemented", "impl_remark": "全部完成"},
+    {"tapd_story_id": "1012346", "impl_status": "in_progress", "impl_remark": "服务端完成，客户端未开始"},
+    {"tapd_story_id": "1012347", "impl_status": "not_impl", "impl_remark": ""}
+  ]
+}
+```
+
+**响应示例：**
+```json
+{
+  "updated_count": 3,
+  "updated_stories": ["1012345", "1012346", "1012347"],
+  "errors": []
+}
+```
+
+> **使用场景**：Agent 完成工程代码分析后，对比需求列表和代码实现，批量标记每条需求的实现进度。结合 `engineering-analysis` skill 的代码分析结果使用效果最佳。
+
+---
+
+## 实现状态分析流程
+
+Agent 基于工程代码分析结果来判断需求的实现进度，推荐流程：
+
+### 触发时机
+
+1. **工程分析完成后**：`engineering-analysis` skill 完成代码变更分析后，自动触发实现状态评估
+2. **每日全量同步后**：策略 B 全量同步完成后，对比代码仓库状态更新实现进度
+3. **手动触发**：用户在 Hub 页面请求评估某迭代的实现状态
+
+### 判断逻辑
+
+```
+对于每条需求 story：
+1. 获取该需求关联的工程变更（函数/方法级，含文件与符号）
+2. 分析关联代码变更的覆盖情况：
+   - 服务端代码是否有对应实现？
+   - 客户端代码是否有对应实现？
+   - 配置/数据表是否已变更？
+3. 综合判断：
+   - 所有相关模块均有代码变更且已合入 → implemented
+   - 部分模块有变更但不完整 → in_progress + 备注说明缺少哪部分
+   - 无关联代码变更 → not_impl
+   - 无法确定（如无法匹配到代码）→ unknown
+```
+
+### 代码示例
+
+```python
+def evaluate_impl_status(iteration_id, workspace_id):
+    """评估某迭代下所有需求的实现状态"""
+    # 1. 获取迭代下的需求列表
+    items = requests.get(
+        f'{HUB}/api/v1/requirements/iterations/{iteration_id}/items?page_size=200',
+        headers=HEADERS
+    ).json()['items']
+
+    # 2. 对每条需求分析工程关联
+    batch_updates = []
+    for item in items:
+        eng_resp = requests.get(
+            f'{HUB}/api/v1/requirements/items/{item["id"]}/engineering-changes',
+            headers=HEADERS
+        ).json()
+        changes = eng_resp.get('changes', [])
+
+        status, remark = analyze_changes(item, changes)
+        batch_updates.append({
+            'tapd_story_id': item['tapd_story_id'],
+            'impl_status': status,
+            'impl_remark': remark,
+        })
+
+    # 3. 批量更新
+    requests.patch(
+        f'{HUB}/api/v1/requirements/iterations/{iteration_id}/impl-status-batch',
+        headers=HEADERS,
+        json={'items': batch_updates}
+    ).raise_for_status()
+
+
+def analyze_changes(item, eng_changes):
+    """根据工程变更分析单条需求的实现状态"""
+    if not eng_changes:
+        return 'not_impl', '无关联工程变更'
+
+    # 按模块归类变更
+    server_changes = [c for c in eng_changes if is_server_code(c)]
+    client_changes = [c for c in eng_changes if is_client_code(c)]
+
+    parts = []
+    if server_changes:
+        parts.append('服务端已完成')
+    else:
+        parts.append('服务端未实现')
+    if client_changes:
+        parts.append('客户端已完成')
+    else:
+        parts.append('客户端未实现')
+
+    remark = '，'.join(parts)
+
+    if server_changes and client_changes:
+        return 'implemented', remark
+    elif server_changes or client_changes:
+        return 'in_progress', remark
+    else:
+        return 'not_impl', remark
+```
 
 ---
 
