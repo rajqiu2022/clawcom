@@ -79,17 +79,21 @@ def _safe_name(raw: str) -> str:
     return s or 'unnamed'
 
 
-def build_remote_base_dir(claw_id: int, claw_name: str) -> str:
+def build_remote_base_dir(claw_id: int, claw_name: str = '', safe_name: str = '') -> str:
     """统一的远端 per-claw 工作目录命名：``/opt/openclaw-agents/claw-<id>-<safe_name>/``
 
     仅 docker 模式使用；systemd 模式直接复用调用方传入的 ``hermes_home``。
+    
+    :param safe_name: 优先使用（从数据库读取，第一次创建时生成并存储）
+    :param claw_name: 备用（当 safe_name 为空时，从 claw.name 生成）
     """
-    return f"{AGENT_ROOT_DIR}/claw-{int(claw_id)}-{_safe_name(claw_name)}"
+    name = safe_name or _safe_name(claw_name or f'claw-{claw_id}')
+    return f"{AGENT_ROOT_DIR}/claw-{int(claw_id)}-{name}"
 
 
-def build_default_systemd_data_dir(claw_id: int, claw_name: str) -> str:
+def build_default_systemd_data_dir(claw_id: int, claw_name: str = '', safe_name: str = '') -> str:
     """systemd 默认 HERMES_HOME：per-agent 私有数据目录。"""
-    return f"{build_remote_base_dir(claw_id, claw_name)}/data"
+    return f"{build_remote_base_dir(claw_id, claw_name, safe_name)}/data"
 
 
 def build_default_systemd_user(claw_id: int) -> str:
@@ -203,6 +207,7 @@ class DeployRequest:
     wecom_bot_id: str = ''
     wecom_bot_secret: str = ''
     owner_wecom_userid: str = ''
+    safe_name: str = ''  # 目录名安全版本（从数据库读取，第一次创建时生成，后续不变）
     work_dirs: list[str] = field(default_factory=list)
     extra_env: dict = field(default_factory=dict)
 
@@ -235,7 +240,9 @@ class DeployRequest:
         """docker：per-claw 根目录；systemd：对外展示用数据目录（HERMES_HOME）。"""
         if self.deploy_method == 'systemd':
             return self.systemd_data_dir()
-        return build_remote_base_dir(self.openclaw_id, self.claw_name)
+        # 优先使用 safe_name（数据库中存储的，第一次创建时生成，后续不变）
+        safe = self.safe_name or ''
+        return build_remote_base_dir(self.openclaw_id, self.claw_name, safe_name=safe)
 
     def container_name(self) -> str:
         """docker 模式返回容器名；systemd 模式返回 ``hermes-gateway-claw-<id>.service``。

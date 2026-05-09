@@ -272,7 +272,9 @@ def _path_in_agent_root(path: str, claw: OpenClawInstance) -> bool:
     """检查路径是否落在本 claw 的私有 /opt/openclaw-agents 子树内。"""
     if not path:
         return False
-    base = build_remote_base_dir(claw.id, claw.name or f'claw-{claw.id}').rstrip('/')
+    # 优先使用 claw.safe_name（数据库中存储的，第一次创建时生成，后续不变）
+    safe = claw.safe_name or ''
+    base = build_remote_base_dir(claw.id, claw.name or f'claw-{claw.id}', safe_name=safe).rstrip('/')
     cleaned = path.rstrip('/')
     return cleaned == base or cleaned.startswith(base + '/')
 
@@ -357,11 +359,15 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
                 if m:
                     hermes_data_dir = m.group(1)
                 else:
+                    # 优先使用 claw.safe_name（数据库中存储的，第一次创建时生成，后续不变）
+                    safe = claw.safe_name or ''
                     hermes_data_dir = build_default_systemd_data_dir(
-                        claw.id, claw.name or f'claw-{claw.id}')
+                        claw.id, claw.name or f'claw-{claw.id}', safe_name=safe)
             else:
+                # 优先使用 claw.safe_name
+                safe = claw.safe_name or ''
                 hermes_data_dir = build_default_systemd_data_dir(
-                    claw.id, claw.name or f'claw-{claw.id}')
+                    claw.id, claw.name or f'claw-{claw.id}', safe_name=safe)
         if hermes_home and (hermes_install_dir or hermes_data_dir):
             raise ValueError('请勿同时填写 hermes_home 与 hermes_install_dir/hermes_data_dir')
         if hermes_install_dir and not hermes_data_dir:
@@ -381,7 +387,9 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
                 raise ValueError(f'{label} 必须为绝对路径')
         work_dir = hermes_home or hermes_data_dir
         if not _path_in_agent_root(work_dir, claw):
-            private_base = build_remote_base_dir(claw.id, claw.name or f'claw-{claw.id}')
+            # 优先使用 claw.safe_name（数据库中存储的，第一次创建时生成，后续不变）
+            safe = claw.safe_name or ''
+            private_base = build_remote_base_dir(claw.id, claw.name or f'claw-{claw.id}', safe_name=safe)
             raise ValueError(
                 f'agent 私有工作目录必须位于 {private_base}/ 下；'
                 f'即 {AGENT_ROOT_DIR} 的本 claw 子目录。共享目录固定为 /opt/agent_share，'
@@ -459,7 +467,9 @@ def create_deployment_record(claw: OpenClawInstance, req: DeployRequest) -> Agen
         container = build_systemd_unit_name(claw.id)
         image = ''
     else:
-        remote_base = build_remote_base_dir(claw.id, claw.name or f'claw-{claw.id}')
+        # 优先使用 claw.safe_name（数据库中存储的，第一次创建时生成，后续不变）
+        safe = claw.safe_name or ''
+        remote_base = build_remote_base_dir(claw.id, claw.name or f'claw-{claw.id}', safe_name=safe)
         container = build_container_name(claw.id)
         image = req.image
 
