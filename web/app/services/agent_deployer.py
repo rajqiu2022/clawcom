@@ -2,12 +2,11 @@
 
 职责
 ----
-- 通过 Paramiko SSH 在远端目标机上：
-  1) 准备 per-claw 工作目录 ``/opt/openclaw-agents/claw-<id>-<safe_name>/``，
-  2) 写入 ``hermes/config/config.yaml`` 与 ``hermes/config/.env``，
-  3) ``docker pull`` 指定镜像，
-  4) ``docker run -d --name hermes-agent-claw-<id> ...`` 启动隔离容器，
-  5) 把状态、日志摘要、错误信息回写到 :class:`AgentDeployment`。
+- **Systemd**：对齐《Hermes Agent 标准化部署指南》v2——拆分目录时
+  ``hermes_install_dir``（venv+源码）+ ``hermes_data_dir``（HERMES_HOME，
+  根目录 ``config.yaml``）；unit ``hermes-gateway-claw-<id>.service``；
+  默认 ``hermes_cli.main gateway run --replace``；兼容单目录 ``hermes_home``。
+- 状态与日志摘要回写 :class:`AgentDeployment`。
 
 设计取舍
 --------
@@ -15,13 +14,14 @@
   只有 host / user / 目录 / 容器名 / 状态会写入 ``agent_deployments`` 表。
 - 部署是 fire-and-forget 的后台线程；OpenClaw 注册流程不会因为部署失败而回滚。
 - 重试只支持「重新输入凭据 + 调相同接口」，不支持自动重跑。
-- 同机多 claw 隔离：目录 / 容器名 / 镜像 mount 都按 ``claw_id`` 区分，
-  绝不共享 ``/opt/hermes-agent`` 这种全局路径。
+- 同机多 claw 隔离：Systemd 按 unit 名 ``hermes-gateway-claw-<id>``，并用
+  ``oclaw_<id>`` 用户 + ``ReadWritePaths`` 限定写入边界。
 
 入口
 ----
 - :func:`spawn_deploy_async` —— 在后台线程跑一次部署，写状态到 ``AgentDeployment``。
-- :func:`build_remote_base_dir` / :func:`build_container_name` —— 命名规则的单一来源。
+- :func:`build_remote_base_dir` / :func:`build_container_name` / :func:`build_systemd_unit_name`
+  —— 命名规则的单一来源。
 """
 
 from __future__ import annotations
@@ -32,10 +32,19 @@ import re
 import shlex
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import StringIO
 from typing import Optional
+
+from app.hermes_models import (
+    DEFAULT_HERMES_LLM_PROVIDER,
+    DEFAULT_HERMES_LLM_MODEL,
+    hermes_config_model,
+    hermes_context_length,
+    normalize_hermes_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +52,28 @@ logger = logging.getLogger(__name__)
 # ---------- 命名规范 ----------
 
 _SAFE_NAME_RE = re.compile(r'[^A-Za-z0-9_]+')
+AGENT_ROOT_DIR = "/opt/openclaw-agents"
+AGENT_SHARE_DIR = "/opt/agent_share"
+AGENT_SERVICE_GROUP = "openclaw_agents"
+_BLOCKED_WORK_DIR_PREFIXES = (
+    '/', '/bin', '/boot', '/dev', '/etc', '/lib', '/lib64', '/proc', '/root',
+    '/run', '/sbin', '/sys', '/usr', '/var/lib/mysql', '/opt/openclaw-web',
+)
 
 
 def _safe_name(raw: str) -> str:
     """把 OpenClaw 名字（可能含中文 / 空格 / 特殊符号）转成路径友好的 ASCII 标识。
 
-    规则：非 ``[A-Za-z0-9_]`` 的字符全部折叠成单个 ``_``，前后下划线去掉，
-    截断到 30 字符；空串兜底为 ``unnamed``。
+    规则：
+    1. 中文 / 非 ASCII 字符直接去掉（不保留）
+    2. 非 ``[A-Za-z0-9_]`` 的 ASCII 字符全部折叠成单个 ``_``
+    3. 转小写（避免大小写敏感问题）
+    4. 前后下划线去掉，截断到 30 字符；空串兜底为 ``unnamed``。
     """
-    s = _SAFE_NAME_RE.sub('_', (raw or '').strip()).strip('_')
+    # 先去掉所有非 ASCII 字符（包括中文）
+    s_ascii = (raw or '').encode('ascii', errors='ignore').decode('ascii')
+    # 替换非 [A-Za-z0-9_] 的字符为 _
+    s = _SAFE_NAME_RE.sub('_', s_ascii.strip()).lower().strip('_')
     if len(s) > 30:
         s = s[:30].rstrip('_')
     return s or 'unnamed'
@@ -62,7 +84,17 @@ def build_remote_base_dir(claw_id: int, claw_name: str) -> str:
 
     仅 docker 模式使用；systemd 模式直接复用调用方传入的 ``hermes_home``。
     """
-    return f"/opt/openclaw-agents/claw-{int(claw_id)}-{_safe_name(claw_name)}"
+    return f"{AGENT_ROOT_DIR}/claw-{int(claw_id)}-{_safe_name(claw_name)}"
+
+
+def build_default_systemd_data_dir(claw_id: int, claw_name: str) -> str:
+    """systemd 默认 HERMES_HOME：per-agent 私有数据目录。"""
+    return f"{build_remote_base_dir(claw_id, claw_name)}/data"
+
+
+def build_default_systemd_user(claw_id: int) -> str:
+    """每个 agent 独立 Linux 服务用户。"""
+    return f"oclaw_{int(claw_id)}"
 
 
 def build_container_name(claw_id: int) -> str:
@@ -71,11 +103,52 @@ def build_container_name(claw_id: int) -> str:
 
 
 def build_systemd_unit_name(claw_id: int) -> str:
-    """统一的 systemd unit 名：``hermes-agent-claw-<id>.service``
+    """Systemd unit 名：``hermes-gateway-claw-<id>.service``
 
-    同机多 claw 隔离：每个 claw 各自一个 unit 文件，互不影响。
+    与《Hermes Agent 标准化部署指南》v2 的 ``hermes-gateway-{name}`` 命名一致，
+    用 ``claw-<id>`` 保证同机多 OpenClaw 不冲突。
     """
-    return f"hermes-agent-claw-{int(claw_id)}.service"
+    return f"hermes-gateway-claw-{int(claw_id)}.service"
+
+
+def normalize_agent_work_dirs(raw) -> list[str]:
+    """Validate extra writable directories for a systemd-deployed Hermes Agent."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            raw_items = parsed if isinstance(parsed, list) else raw.splitlines()
+        except Exception:
+            raw_items = raw.splitlines()
+    elif isinstance(raw, (list, tuple)):
+        raw_items = raw
+    else:
+        raw_items = []
+
+    result = []
+    seen = set()
+    for item in raw_items:
+        path = str(item or '').strip().rstrip('/')
+        if not path:
+            continue
+        if not path.startswith('/'):
+            raise ValueError('工作目录必须为绝对路径')
+        if any(ch.isspace() for ch in path):
+            raise ValueError('工作目录暂不支持包含空格或换行的路径')
+        if '%' in path:
+            raise ValueError('工作目录暂不支持包含 % 的路径')
+        if len(path) > 500:
+            raise ValueError('工作目录路径过长')
+        for blocked in _BLOCKED_WORK_DIR_PREFIXES:
+            if path == blocked or (blocked != '/' and path.startswith(blocked.rstrip('/') + '/')):
+                raise ValueError(f'工作目录不能设置为系统目录：{path}')
+        if path not in seen:
+            result.append(path)
+            seen.add(path)
+    if len(result) > 20:
+        raise ValueError('工作目录最多配置 20 个')
+    return result
 
 
 # ---------- 请求 / 结果 ----------
@@ -85,14 +158,15 @@ def build_systemd_unit_name(claw_id: int) -> str:
 class DeployRequest:
     """一次远端部署所需的全部参数。
 
-    支持两种部署方式：
+    Hub 代建 Hermes Agent 当前统一使用 ``deploy_method='systemd'``：
 
-    - ``deploy_method='docker'``（默认）：Hub 在远端用 ``docker run`` 起一个独立
-      per-claw 容器，需要目标机有 Docker 18+ 且能拉到镜像。``image`` 字段必填。
-    - ``deploy_method='systemd'``：适合 Docker 不可用的老机器（如 CentOS 7 +
-      Docker 1.13），假设目标机 ``hermes_home`` 下已经装好 Hermes（venv +
-      ``hermes_agent`` 模块），Hub 只写 config/.env 并生成 per-claw systemd unit。
-      ``hermes_home`` 字段必填。
+    - ``deploy_method='systemd'``：与《Hermes Agent 标准化部署指南》v2 对齐。
+      **推荐（拆分目录）**：``hermes_install_dir`` 指向已准备好的 venv/源码
+      （只读使用），``hermes_data_dir`` 必须位于
+      ``/opt/openclaw-agents/claw-<id>-<safe>/`` 下作为 ``HERMES_HOME``。
+      **兼容（单目录）**：仅填 ``hermes_home``，也必须位于该 claw 私有目录下。
+      启动默认 ``hermes_cli.main gateway run --replace``，可用 ``hermes_start_mode``
+      切回 ``python -m hermes_agent`` 等旧形态。
 
     敏感字段（``ssh_password`` / ``ssh_private_key`` / ``venus_api_key`` 等）
     只活在请求生命周期内，不落库。
@@ -109,30 +183,62 @@ class DeployRequest:
     ssh_private_key: Optional[str] = None  # PEM 文本（不写盘）
     ssh_key_passphrase: Optional[str] = None
 
-    deploy_method: str = 'docker'  # 'docker' | 'systemd'
+    deploy_method: str = 'systemd'
 
     # docker 专用
     image: str = 'ccr.ccs.tencentyun.com/hermes/hermes-agent:latest'
 
-    # systemd 专用
-    hermes_home: Optional[str] = None  # 目标机已装好的 Hermes 根目录，如 /opt/hermes-xiaohe
-    hermes_python: Optional[str] = None  # 默认 ${hermes_home}/venv/bin/python
-    hermes_module: str = 'hermes_agent'  # 默认 python -m hermes_agent
-    systemd_user: str = 'root'  # systemd unit User=
+    # systemd 专用（与部署指南 v2：INSTALL_DIR + DATA_DIR 对齐）
+    hermes_home: Optional[str] = None  # 兼容：单根目录时 install=data=hermes_home
+    hermes_install_dir: Optional[str] = None  # /opt/hermes-{name}/ 含 venv
+    hermes_data_dir: Optional[str] = None  # /root/.hermes-{name}/ 即 HERMES_HOME
+    hermes_python: Optional[str] = None  # 默认 ${install}/venv/bin/python
+    hermes_module: str = 'hermes_agent'  # hermes_start_mode=module 时使用
+    hermes_start_mode: str = 'gateway'  # 'gateway' | 'module'
+    systemd_user: str = ''  # 空值时自动使用 oclaw_<claw_id>
 
     venus_api_key: Optional[str] = None
+    llm_provider: str = DEFAULT_HERMES_LLM_PROVIDER
+    llm_model: str = DEFAULT_HERMES_LLM_MODEL
+    wecom_bot_id: str = ''
+    wecom_bot_secret: str = ''
+    owner_wecom_userid: str = ''
+    work_dirs: list[str] = field(default_factory=list)
     extra_env: dict = field(default_factory=dict)
 
     triggered_by: str = 'system'
 
+    def systemd_install_dir(self) -> str:
+        """systemd：venv / 源码根目录。"""
+        if self.hermes_install_dir:
+            return self.hermes_install_dir.rstrip('/')
+        return (self.hermes_home or '').rstrip('/')
+
+    def systemd_data_dir(self) -> str:
+        """systemd：HERMES_HOME（数据、config.yaml 根目录）。"""
+        if self.hermes_data_dir:
+            return self.hermes_data_dir.rstrip('/')
+        return (self.hermes_home or '').rstrip('/')
+
+    def systemd_split_layout(self) -> bool:
+        """是否采用指南 v2 的拆分目录（install 与 data 为不同路径）。"""
+        return bool(self.hermes_install_dir and self.hermes_data_dir)
+
+    def systemd_service_user(self) -> str:
+        """systemd 运行用户；root 会被收敛到 per-agent 用户。"""
+        user = (self.systemd_user or '').strip()
+        if not user or user == 'root':
+            return build_default_systemd_user(self.openclaw_id)
+        return user
+
     def remote_base_dir(self) -> str:
-        """docker 模式的远端 per-claw 根目录；systemd 模式直接返回 hermes_home。"""
+        """docker：per-claw 根目录；systemd：对外展示用数据目录（HERMES_HOME）。"""
         if self.deploy_method == 'systemd':
-            return (self.hermes_home or '').rstrip('/')
+            return self.systemd_data_dir()
         return build_remote_base_dir(self.openclaw_id, self.claw_name)
 
     def container_name(self) -> str:
-        """docker 模式返回容器名；systemd 模式返回 unit 名。
+        """docker 模式返回容器名；systemd 模式返回 ``hermes-gateway-claw-<id>.service``。
 
         模型里的 ``container_name`` 字段在两种模式下复用，UI 据 ``deploy_method``
         切换 "容器" / "Unit" 的展示文案。
@@ -253,51 +359,91 @@ class _SSHRunner:
 # ---------- Hermes 配置生成 ----------
 
 
-def _render_config_yaml() -> str:
+def _yaml_quote(s: str) -> str:
+    """双引号 YAML 字符串转义。"""
+    return json.dumps(s or '', ensure_ascii=False)
+
+
+def _render_config_yaml(req: DeployRequest) -> str:
     """生成 Hermes ``config.yaml``。
 
-    全部敏感字段（API Key）通过环境变量 ``${VENUS_API_KEY}`` 注入容器，
-    yaml 里只放占位符，避免凭据落到磁盘。
+    Venus API Key 通过环境变量 ``${VENUS_API_KEY}`` 占位（与 systemd
+    ``EnvironmentFile`` / docker ``--env-file`` 一致）。
+
+    若 ``req`` 带 ``hub_url`` + ``claw_token``，写入 ``hub:`` 节点（与《Hermes Agent
+    标准化部署指南》v2 一致），便于 Gateway 直连 Hub。
     """
-    return (
-        "# Hermes Agent 配置（由 Hub 代建生成）\n"
-        "model:\n"
-        "  default: \"glm-5.1\"\n"
-        "  provider: \"venus\"\n"
-        "  api_mode: \"chat_completions\"\n"
-        "\n"
-        "providers:\n"
-        "  venus:\n"
-        "    type: \"openai_compatible\"\n"
-        "    base_url: \"http://v2.open.venus.oa.com/llmproxy\"\n"
-        "    api_key: \"${VENUS_API_KEY}\"\n"
-        "    default_model: \"glm-5.1\"\n"
-        "    api_mode: \"chat_completions\"\n"
-        "    context_length: 128000\n"
-        "\n"
-        "auxiliary:\n"
-        "  vision:\n"
-        "    model: \"glm-5.1\"\n"
-        "    provider: \"venus\"\n"
-        "    api_mode: \"chat_completions\"\n"
-        "\n"
-        "enable_tools: true\n"
-        "enable_vision: true\n"
-        "log_level: \"INFO\"\n"
-    )
+    selected_model = normalize_hermes_model(req.llm_model)
+    config_model = hermes_config_model(selected_model)
+    context_length = hermes_context_length(selected_model)
+    provider = (req.llm_provider or DEFAULT_HERMES_LLM_PROVIDER).strip().lower() or 'venus'
+    if provider != 'venus':
+        provider = 'venus'
+
+    lines = [
+        "# Hermes Agent 配置（由 Hub 代建生成）",
+        f"# Hub 选择：{selected_model}",
+        "model:",
+        f"  default: {_yaml_quote(config_model)}",
+        f"  provider: {_yaml_quote(provider)}",
+        "  api_mode: \"chat_completions\"",
+        "",
+        "providers:",
+        "  venus:",
+        "    type: \"openai_compatible\"",
+        "    base_url: \"http://v2.open.venus.oa.com/llmproxy\"",
+        "    api_key: \"${VENUS_API_KEY}\"",
+        f"    default_model: {_yaml_quote(config_model)}",
+        "    api_mode: \"chat_completions\"",
+        f"    context_length: {context_length}",
+        "",
+        "auxiliary:",
+        "  vision:",
+        f"    model: {_yaml_quote(config_model)}",
+        "    provider: \"venus\"",
+        "    api_mode: \"chat_completions\"",
+        "",
+        "enable_tools: true",
+        "enable_vision: true",
+        "log_level: \"INFO\"",
+    ]
+    if req.wecom_bot_id and req.wecom_bot_secret:
+        lines.extend([
+            "",
+            "wecom:",
+            f"  key: {_yaml_quote(req.wecom_bot_id)}",
+            f"  secret: {_yaml_quote(req.wecom_bot_secret)}",
+        ])
+    hub_base = (req.hub_url or '').rstrip('/')
+    if hub_base and (req.claw_token or '').strip():
+        lines.extend([
+            "",
+            "hub:",
+            f"  base_url: {_yaml_quote(hub_base)}",
+            f"  api_token: {_yaml_quote(req.claw_token)}",
+            f"  claw_id: {int(req.openclaw_id)}",
+            "  enabled: true",
+        ])
+    return '\n'.join(lines) + '\n'
 
 
 def _render_env_file(req: DeployRequest) -> str:
     """生成 Hermes 进程的环境变量文件。
 
-    docker 模式下路径走容器内的 ``/app/...``；systemd 模式走 ``$HERMES_HOME/...``，
-    需要让 Hermes 能在宿主机正确寻路。
+    docker 模式下路径走容器内的 ``/app/...``；systemd 模式走数据目录
+    （``HERMES_HOME``）：拆分布局时 ``config.yaml`` 在数据根目录，兼容布局在
+    ``{HERMES_HOME}/config/config.yaml``。
     """
     if req.deploy_method == 'systemd':
-        home = (req.hermes_home or '').rstrip('/')
-        session_dir = f"{home}/sessions"
-        config_path = f"{home}/config/config.yaml"
-        log_dir = f"{home}/logs"
+        data = req.systemd_data_dir()
+        if req.systemd_split_layout():
+            session_dir = f"{data}/sessions"
+            config_path = f"{data}/config.yaml"
+            log_dir = f"{data}/logs"
+        else:
+            session_dir = f"{data}/sessions"
+            config_path = f"{data}/config/config.yaml"
+            log_dir = f"{data}/logs"
     else:
         session_dir = "/app/sessions"
         config_path = "/app/config/config.yaml"
@@ -313,7 +459,23 @@ def _render_env_file(req: DeployRequest) -> str:
         f"OPENCLAW_HUB_URL={req.hub_url.rstrip('/')}",
         f"OPENCLAW_CLAW_ID={req.openclaw_id}",
         f"OPENCLAW_TOKEN={req.claw_token}",
+        f"HERMES_LLM_PROVIDER={req.llm_provider or DEFAULT_HERMES_LLM_PROVIDER}",
+        f"HERMES_LLM_MODEL={normalize_hermes_model(req.llm_model)}",
+        f"AGENT_WORK_DIRS={json.dumps(req.work_dirs or [], ensure_ascii=False)}",
     ]
+    if req.wecom_bot_id and req.wecom_bot_secret:
+        lines.extend([
+            f"WECOM_KEY={req.wecom_bot_id}",
+            f"WECOM_BOT_ID={req.wecom_bot_id}",
+            f"WECOM_SECRET={req.wecom_bot_secret}",
+            "WECOM_ALLOW_ALL_USERS=true",
+            "WECOM_DM_POLICY=open",
+        ])
+        if req.owner_wecom_userid:
+            lines.extend([
+                f"WECOM_HOME_CHANNEL={req.owner_wecom_userid}",
+                f"WECOM_HOME_CHANNEL_NAME={req.owner_wecom_userid}",
+            ])
     for k, v in (req.extra_env or {}).items():
         if k and v is not None:
             lines.append(f"{k}={v}")
@@ -321,41 +483,200 @@ def _render_env_file(req: DeployRequest) -> str:
 
 
 def _render_systemd_unit(req: DeployRequest) -> str:
-    """生成 per-claw 的 systemd unit 文件。
+    """生成 per-claw 的 systemd unit（对齐《Hermes Agent 标准化部署指南》v2）。
 
-    设计要点：
-    - ``EnvironmentFile=`` 指向 per-claw ``.env``，VENUS_API_KEY 等敏感值不裸露在 unit 文件里
-    - ``WorkingDirectory`` 与 ``ExecStart`` 都基于 ``hermes_home``，不假设全局路径
-    - ``Restart=always`` + ``StartLimitBurst`` 防 crash-loop
+    - 拆分目录：``VIRTUAL_ENV``/``PATH`` 指向 install_dir，``HERMES_HOME`` 指向 data_dir
+    - 默认 ``hermes_cli.main gateway run --replace``；``hermes_start_mode=module`` 时用
+      ``python -m {hermes_module}``
+    - ``EnvironmentFile`` 指向数据目录下 ``.env``（拆分）或 ``config/.env``（兼容）
+    - 日志走 journal（与指南一致），便于 ``journalctl -u`` 排障
     """
-    home = (req.hermes_home or '').rstrip('/')
-    py = req.hermes_python or f"{home}/venv/bin/python"
-    module = req.hermes_module or 'hermes_agent'
+    inst = req.systemd_install_dir()
+    data = req.systemd_data_dir()
+    py = req.hermes_python or f"{inst}/venv/bin/python"
+    venv_bin = f"{inst}/venv/bin"
+    user = req.systemd_service_user()
+    home_env = f"{data}/home"
+
+    if (req.hermes_start_mode or 'gateway').lower() == 'module':
+        mod = req.hermes_module or 'hermes_agent'
+        exec_start = f"{py} -m {mod}"
+        exec_reload = ''
+    else:
+        exec_start = f"{py} -m hermes_cli.main gateway run --replace"
+        exec_reload = "ExecReload=/bin/kill -USR1 $MAINPID\n"
+
+    if req.systemd_split_layout():
+        env_file = f"{data}/.env"
+        _pre_script = (
+            f"mkdir -p {data}/sessions {data}/logs {data}/scripts && "
+            f"([ -s {data}/sessions/sessions.json ] || echo '{{}}' > {data}/sessions/sessions.json)"
+        )
+    else:
+        env_file = f"{data}/config/.env"
+        _pre_script = (
+            f"mkdir -p {data}/config {data}/sessions {data}/logs && "
+            f"([ -s {data}/sessions/sessions.json ] || echo '{{}}' > {data}/sessions/sessions.json)"
+        )
+    pre = f"/bin/sh -c {shlex.quote(_pre_script)}"
+    read_only_paths = f"ReadOnlyPaths={inst}\n" if inst != data else ""
+    read_write_paths = ' '.join([data, AGENT_SHARE_DIR] + (req.work_dirs or []))
+
     return (
         "[Unit]\n"
-        f"Description=Hermes Agent (Hub-managed, claw {req.openclaw_id} {req.claw_name})\n"
+        f"Description=Hermes Gateway (Hub claw {req.openclaw_id} {req.claw_name})\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "StartLimitIntervalSec=600\n"
+        "StartLimitBurst=5\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"User={user}\n"
+        f"Group={AGENT_SERVICE_GROUP}\n"
+        f"WorkingDirectory={data}\n"
+        f"Environment=\"PATH={venv_bin}:/usr/local/sbin:/usr/local/bin:"
+        f"/usr/sbin:/usr/bin:/sbin:/bin\"\n"
+        f"Environment=\"VIRTUAL_ENV={inst}/venv\"\n"
+        f"Environment=\"HERMES_HOME={data}\"\n"
+        f"Environment=\"AGENT_PRIVATE_DIR={data}\"\n"
+        f"Environment=\"AGENT_SHARE_DIR={AGENT_SHARE_DIR}\"\n"
+        "Environment=\"HERMES_CODEX_STREAMING=false\"\n"
+        f"Environment=\"HOME={home_env}\"\n"
+        "Environment=\"HERMES_LOG_LEVEL=INFO\"\n"
+        f"EnvironmentFile={env_file}\n"
+        f"ExecStartPre={pre}\n"
+        f"ExecStart={exec_start}\n"
+        f"{exec_reload}"
+        "UMask=0077\n"
+        "NoNewPrivileges=true\n"
+        "PrivateTmp=true\n"
+        "ProtectSystem=strict\n"
+        "ProtectHome=true\n"
+        "ProtectControlGroups=true\n"
+        "ProtectKernelModules=true\n"
+        "ProtectKernelTunables=true\n"
+        "RestrictSUIDSGID=true\n"
+        "LockPersonality=true\n"
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n"
+        f"ReadWritePaths={read_write_paths}\n"
+        f"{read_only_paths}"
+        "Restart=on-failure\n"
+        "RestartSec=30\n"
+        "TimeoutStopSec=60\n"
+        "LimitNOFILE=65536\n"
+        "StandardOutput=journal\n"
+        "StandardError=journal\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def _sidecar_unit_name(req: DeployRequest) -> str:
+    return f"openclaw-sidecar-v2-claw-{int(req.openclaw_id)}.service"
+
+
+def _render_sidecar_wrapper(req: DeployRequest) -> str:
+    data = req.systemd_data_dir()
+    py = req.hermes_python or f"{req.systemd_install_dir()}/venv/bin/python"
+    config_path = f"{data}/config.yaml" if req.systemd_split_layout() else f"{data}/config/config.yaml"
+    env_path = f"{data}/.env" if req.systemd_split_layout() else f"{data}/config/.env"
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "MSG=\"\"\n"
+        "TIMEOUT=300\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in\n"
+        "    --message) MSG=\"${2:-}\"; shift 2 ;;\n"
+        "    --timeout) TIMEOUT=\"${2:-300}\"; shift 2 ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "if [ -z \"$MSG\" ]; then\n"
+        "  echo \"missing --message\" >&2\n"
+        "  exit 2\n"
+        "fi\n"
+        f"cd {shlex.quote(data)}\n"
+        f"export HERMES_HOME={shlex.quote(data)}\n"
+        f"export HERMES_CONFIG_PATH={shlex.quote(config_path)}\n"
+        "export HERMES_CODEX_STREAMING=false\n"
+        f"if [ -r {shlex.quote(env_path)} ]; then\n"
+        "  set -a\n"
+        f"  . {shlex.quote(env_path)}\n"
+        "  set +a\n"
+        "fi\n"
+        f"exec {shlex.quote(py)} -m hermes_cli.main chat -Q -t hermes-wecom "
+        "--max-turns 30 --source hub-sidecar -q \"$MSG\"\n"
+    )
+
+
+def _render_sidecar_env(req: DeployRequest) -> str:
+    return (
+        "# hub-sse-sidecar v2 environment（由 Hub 代建生成）\n"
+        f"HUB_URL={(req.hub_url or '').rstrip('/')}\n"
+        f"CLAW_ID={int(req.openclaw_id)}\n"
+        f"CLAW_TOKEN={req.claw_token or ''}\n"
+        "SSE_RECONNECT_SEC=5\n"
+        "CONFIG_REFRESH_SEC=60\n"
+        "TODO_LOOP_SEC=120\n"
+        "PYTHONUNBUFFERED=1\n"
+    )
+
+
+def _render_sidecar_unit(req: DeployRequest) -> str:
+    data = req.systemd_data_dir()
+    user = req.systemd_service_user()
+    env_path = f"{data}/scripts/sidecar.env"
+    script_path = f"{data}/scripts/sidecar_v2.py"
+    read_write_paths = ' '.join([data, AGENT_SHARE_DIR] + (req.work_dirs or []))
+    read_only_paths = (
+        f"ReadOnlyPaths={req.systemd_install_dir()}\n"
+        if req.systemd_install_dir() != data else ""
+    )
+    return (
+        "[Unit]\n"
+        f"Description=OpenClaw Hub SSE Sidecar v2 (claw {int(req.openclaw_id)})\n"
         "After=network-online.target\n"
         "Wants=network-online.target\n"
         "\n"
         "[Service]\n"
         "Type=simple\n"
-        f"User={req.systemd_user or 'root'}\n"
-        f"WorkingDirectory={home}\n"
-        f"EnvironmentFile={home}/config/.env\n"
-        f"ExecStartPre=/bin/bash -c 'mkdir -p {home}/sessions {home}/logs && "
-        f"[ -s {home}/sessions/sessions.json ] || echo \"{{}}\" > {home}/sessions/sessions.json'\n"
-        f"ExecStart={py} -m {module}\n"
-        f"StandardOutput=append:{home}/logs/hermes-agent.log\n"
-        f"StandardError=append:{home}/logs/hermes-agent.log\n"
+        f"User={user}\n"
+        f"Group={AGENT_SERVICE_GROUP}\n"
+        f"WorkingDirectory={data}\n"
+        f"EnvironmentFile={env_path}\n"
+        f"ExecStart=/usr/bin/python3 -u {script_path}\n"
         "Restart=always\n"
         "RestartSec=10\n"
-        "StartLimitBurst=5\n"
-        "StartLimitIntervalSec=300\n"
-        "LimitNOFILE=65536\n"
+        "NoNewPrivileges=true\n"
+        "PrivateTmp=true\n"
+        "ProtectSystem=strict\n"
+        f"ReadWritePaths={read_write_paths}\n"
+        f"{read_only_paths}"
+        "StandardOutput=journal\n"
+        "StandardError=journal\n"
         "\n"
         "[Install]\n"
         "WantedBy=multi-user.target\n"
     )
+
+
+def _work_dir_setup_cmd(req: DeployRequest) -> str:
+    """Create configured work dirs and make their top-level dirs writable."""
+    if not req.work_dirs:
+        return "true"
+    user = req.systemd_service_user()
+    parts = []
+    for path in req.work_dirs:
+        q = shlex.quote(path)
+        parts.append(
+            f"mkdir -p {q} && "
+            f"chown {shlex.quote(user)}:{shlex.quote(AGENT_SERVICE_GROUP)} {q} && "
+            f"chmod 2770 {q}"
+        )
+    return " && ".join(parts)
 
 
 # ---------- 部署主流程 ----------
@@ -388,6 +709,73 @@ def _run_deploy(deployment_id: int, req: DeployRequest, app) -> None:
 
     steps: list = []
 
+    def _create_admin_deploy_notify_todos(dep) -> None:
+        """部署结束后让龙虾王代发企微通知给 owner 用户。"""
+        try:
+            from app.models import ClawTodo, OpenClawInstance
+            claw = OpenClawInstance.query.get(dep.openclaw_id)
+            if not claw:
+                return
+            admin_claws = OpenClawInstance.query.filter(
+                OpenClawInstance.role == 'admin',
+                OpenClawInstance.status != 'deleted',
+            ).all()
+            if not admin_claws:
+                logger.warning('agent deployment %s finished but no admin claw found', dep.id)
+                return
+            status_text = '成功' if dep.status == 'success' else '失败'
+            target_user = (claw.owner or '').strip() or '未配置 owner'
+            desc_lines = [
+                f'OpenClaw「{claw.name}」的 Hermes Agent 部署已{status_text}。',
+                '',
+                f'请给用户 `{target_user}` 发送企微通知。',
+                '',
+                f'- OpenClaw ID：{claw.id}',
+                f'- OpenClaw 名称：{claw.name}',
+                f'- 所属用户：{target_user}',
+                f'- 部署状态：{dep.status}',
+                f'- 目标机：{dep.ssh_user or ""}@{dep.host or ""}',
+                f'- Systemd unit：{dep.container_name or ""}',
+                f'- 目录：{dep.remote_base_dir or ""}',
+            ]
+            if dep.error_message:
+                desc_lines.extend(['', f'失败原因：{dep.error_message}'])
+            desc_lines.extend([
+                '',
+                '通知建议文案：',
+                f'Hermes Agent 部署已{status_text}：{claw.name}（OpenClaw #{claw.id}）。',
+            ])
+            for admin in admin_claws:
+                exists = ClawTodo.query.filter_by(
+                    openclaw_id=admin.id,
+                    verification_target=f'agent-deploy-notify:{dep.id}',
+                    enabled=True,
+                ).first()
+                if exists:
+                    continue
+                db.session.add(ClawTodo(
+                    openclaw_id=admin.id,
+                    title=f'通知用户 Hermes Agent 部署{status_text}：{claw.name}',
+                    description='\n'.join(desc_lines),
+                    schedule_type='once',
+                    urgency_level='interrupt',
+                    priority='P0',
+                    task_category='routine',
+                    verification_target=f'agent-deploy-notify:{dep.id}',
+                    enabled=True,
+                    created_by='Hub',
+                ))
+            db.session.commit()
+            try:
+                from app.api.agent_client import notify_claw
+                for admin in admin_claws:
+                    notify_claw(admin.id)
+            except Exception:
+                logger.exception('notify admin claw failed for deployment %s', dep.id)
+        except Exception:
+            db.session.rollback()
+            logger.exception('create admin deploy notify todo failed for deployment %s', dep.id)
+
     def _flush(status: str, error: Optional[str] = None) -> None:
         with app.app_context():
             dep = db.session.get(AgentDeployment, deployment_id)
@@ -400,6 +788,8 @@ def _run_deploy(deployment_id: int, req: DeployRequest, app) -> None:
             if status in ('success', 'failed') and not dep.finished_at:
                 dep.finished_at = datetime.now()
             db.session.commit()
+            if status in ('success', 'failed'):
+                _create_admin_deploy_notify_todos(dep)
 
     try:
         with app.app_context():
@@ -436,13 +826,21 @@ def _deploy_docker(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) -
                '或改用 deploy_method=systemd。')
         return
 
-    # 1) 创建 per-claw 目录骨架
+    # 1) 创建隔离目录骨架：/opt/openclaw-agents/<claw>/ 私有，/opt/agent_share 共享
     mkdir_cmd = (
         f"mkdir -p "
+        f"{shlex.quote(AGENT_ROOT_DIR)} "
+        f"{shlex.quote(AGENT_SHARE_DIR)} "
         f"{shlex.quote(base + '/hermes/config')} "
         f"{shlex.quote(base + '/hermes/sessions')} "
         f"{shlex.quote(base + '/hermes/logs')} && "
-        f"chmod 755 {shlex.quote(base)} {shlex.quote(base + '/hermes')}"
+        f"chmod 755 {shlex.quote(AGENT_ROOT_DIR)} && "
+        f"chmod 1777 {shlex.quote(AGENT_SHARE_DIR)} && "
+        f"chmod 700 {shlex.quote(base)} && "
+        f"chmod 700 {shlex.quote(base + '/hermes')} && "
+        f"chmod 700 {shlex.quote(base + '/hermes/sessions')} "
+        f"{shlex.quote(base + '/hermes/logs')} && "
+        f"chmod 500 {shlex.quote(base + '/hermes/config')}"
     )
     sr = ssh.run(mkdir_cmd, timeout=30, name='mkdir per-claw dirs')
     _record_step(steps, sr)
@@ -451,7 +849,7 @@ def _deploy_docker(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) -
         return
 
     # 2) 写 config.yaml / .env（敏感值经 base64 中转，避免被 shell 展开）
-    sr = ssh.put_text(_render_config_yaml(),
+    sr = ssh.put_text(_render_config_yaml(req),
                       f'{base}/hermes/config/config.yaml',
                       mode='0644', name='write config.yaml')
     _record_step(steps, sr)
@@ -486,11 +884,19 @@ def _deploy_docker(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) -
         f'--name {shlex.quote(cname)} '
         f'--restart always '
         f'--network host '
+        f'--read-only '
+        f'--tmpfs /tmp:rw,noexec,nosuid,size=128m '
+        f'--tmpfs /run:rw,noexec,nosuid,size=64m '
+        f'--cap-drop ALL '
+        f'--security-opt no-new-privileges:true '
         f'-v {shlex.quote(base + "/hermes/config")}:/app/config:ro '
         f'-v {shlex.quote(base + "/hermes/sessions")}:/app/sessions '
         f'-v {shlex.quote(base + "/hermes/logs")}:/app/logs '
+        f'-v {shlex.quote(AGENT_SHARE_DIR)}:/agent_share '
         f'--env-file {shlex.quote(base + "/hermes/config/.env")} '
         f'-e HERMES_CODEX_STREAMING=false '
+        f'-e AGENT_PRIVATE_DIR=/app/sessions '
+        f'-e AGENT_SHARE_DIR=/agent_share '
         f'{shlex.quote(req.image)}'
     )
     sr = ssh.run(run_cmd, timeout=120, name='docker run')
@@ -516,18 +922,26 @@ def _deploy_docker(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) -
 
 
 def _deploy_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) -> None:
-    """systemd 模式：复用目标机已装好的 Hermes，只刷 config/.env + per-claw unit。
+    """systemd：按《Hermes Agent 标准化部署指南》v2 写数据目录 + unit。
 
-    前置条件：目标机 ``$HERMES_HOME/venv/bin/python`` 必须已存在并能 ``import
-    hermes_agent``。Hub 不会替你装 Hermes 源码（避免外网依赖、git 凭据这些麻烦）。
+    **拆分目录**：``install_dir`` = 源码+venv，``data_dir`` = HERMES_HOME（根目录
+    ``config.yaml``）。**单目录兼容**：仅 ``hermes_home``，配置仍在 ``config/`` 子目录。
+
+    Hub 不远程 git clone / pip install；venv 与源码须已就绪。
     """
-    home = req.remote_base_dir()  # systemd 模式下就是 hermes_home
-    unit_name = req.container_name()  # systemd 模式下就是 unit 名
+    inst = req.systemd_install_dir()
+    data = req.systemd_data_dir()
+    unit_name = req.container_name()
     unit_path = f"/etc/systemd/system/{unit_name}"
-    py = req.hermes_python or f"{home}/venv/bin/python"
+    py = req.hermes_python or f"{inst}/venv/bin/python"
+    split = req.systemd_split_layout()
+    start_mode = (req.hermes_start_mode or 'gateway').lower()
+    service_user = req.systemd_service_user()
 
-    if not home:
-        _flush('failed', 'systemd 模式必须提供 hermes_home（如 /opt/hermes-xiaohe）')
+    if not inst or not data:
+        _flush('failed',
+               'systemd 请填写「安装目录 + 数据目录」或单独填写「单目录 hermes_home」'
+               '（参见部署指南 v2）')
         return
 
     # 0) 基本环境探测
@@ -543,59 +957,143 @@ def _deploy_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) 
     _record_step(steps, sr)
     if not sr.ok:
         _flush('failed',
-               f'未在目标机找到可执行的 Hermes python：{py}。'
-               f'请先在 {home} 下装好 venv（HERMES_HOME/venv/bin/python），或显式传 hermes_python。')
+               f'未在目标机找到可执行 Python：{py}。'
+               f'请确认 venv 在 {shlex.quote(inst + "/venv")}，或显式传 hermes_python。')
         return
 
-    sr = ssh.run(
-        f"{shlex.quote(py)} -c 'import {req.hermes_module}' 2>&1",
-        timeout=30, name=f'import {req.hermes_module}')
-    _record_step(steps, sr)
-    if not sr.ok:
-        _flush('failed',
-               f'目标机的 Hermes venv 无法 import {req.hermes_module}：'
-               f'请确认 hermes_agent 源码已装到 {home} 且依赖完整。')
-        return
+    if start_mode == 'gateway':
+        sr = ssh.run(f"{shlex.quote(py)} -c 'import hermes_cli' 2>&1",
+                     timeout=30, name='import hermes_cli')
+        _record_step(steps, sr)
+        if not sr.ok:
+            _flush('failed',
+                   'venv 无法 import hermes_cli（Gateway 模式）。'
+                   '请升级 Hermes 源码，或在部署参数中将 hermes_start_mode 设为 module。')
+            return
+    else:
+        mod = req.hermes_module or 'hermes_agent'
+        sr = ssh.run(f"{shlex.quote(py)} -c 'import {mod}' 2>&1",
+                     timeout=30, name=f'import {mod}')
+        _record_step(steps, sr)
+        if not sr.ok:
+            _flush('failed',
+                   f'venv 无法 import {mod}，请确认源码已安装到 {inst}。')
+            return
 
-    # 1) 创建 per-claw 目录骨架（沿用 hermes_home 下的 config/sessions/logs）
+    # 1) 隔离目录、共享目录、独立服务用户
+    if split:
+        private_dirs = [data, f'{data}/home', f'{data}/sessions', f'{data}/logs', f'{data}/scripts']
+    else:
+        private_dirs = [data, f'{data}/home', f'{data}/config', f'{data}/sessions', f'{data}/logs']
     mkdir_cmd = (
-        f"mkdir -p {shlex.quote(home + '/config')} "
-        f"{shlex.quote(home + '/sessions')} "
-        f"{shlex.quote(home + '/logs')}"
+        f"groupadd -r {shlex.quote(AGENT_SERVICE_GROUP)} 2>/dev/null || true; "
+        f"id -u {shlex.quote(service_user)} >/dev/null 2>&1 || "
+        f"useradd -r -g {shlex.quote(AGENT_SERVICE_GROUP)} "
+        f"-d {shlex.quote(data + '/home')} -s /sbin/nologin "
+        f"{shlex.quote(service_user)}; "
+        f"usermod -a -G {shlex.quote(AGENT_SERVICE_GROUP)} {shlex.quote(service_user)} 2>/dev/null || true; "
+        f"mkdir -p {shlex.quote(AGENT_ROOT_DIR)} {shlex.quote(AGENT_SHARE_DIR)} "
+        + ' '.join(shlex.quote(p) for p in private_dirs) + "; "
+        f"chown root:{shlex.quote(AGENT_SERVICE_GROUP)} {shlex.quote(AGENT_ROOT_DIR)} "
+        f"{shlex.quote(AGENT_SHARE_DIR)}; "
+        f"chmod 0755 {shlex.quote(AGENT_ROOT_DIR)}; "
+        f"chmod 2770 {shlex.quote(AGENT_SHARE_DIR)}; "
+        f"chown -R {shlex.quote(service_user)}:{shlex.quote(AGENT_SERVICE_GROUP)} {shlex.quote(data)}; "
+        f"chmod 0700 {shlex.quote(data)} {shlex.quote(data + '/home')}; "
+        f"chmod 0700 {shlex.quote(data + '/sessions')} {shlex.quote(data + '/logs')}"
     )
-    sr = ssh.run(mkdir_cmd, timeout=30, name='mkdir hermes dirs')
+    sr = ssh.run(mkdir_cmd, timeout=30, name='mkdir hermes data dirs')
     _record_step(steps, sr)
     if not sr.ok:
         _flush('failed', f'mkdir 失败：{_tail(sr.stderr, 300)}')
         return
 
-    # 2) 写 config.yaml / .env
-    sr = ssh.put_text(_render_config_yaml(),
-                      f'{home}/config/config.yaml',
+    sr = ssh.run(_work_dir_setup_cmd(req), timeout=60, name='mkdir/chown work dirs')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', f'工作目录授权失败：{_tail(sr.stderr or sr.stdout, 500)}')
+        return
+
+    # 清理 #135/旧 manager-hub 时代遗留的 SSE 客户端，避免与 v2 sidecar 抢消息。
+    cleanup_old_sidecar_cmd = (
+        "for p in $(pgrep -f 'sse_client.py$|hub_sse_client_daemon.py$' 2>/dev/null || true); do "
+        "  kill -TERM \"$p\" 2>/dev/null || true; "
+        "done; "
+        f"ts=$(date +%Y%m%d%H%M%S); "
+        f"for f in {shlex.quote(data + '/scripts/sse_client.py')} "
+        f"{shlex.quote(data + '/scripts/hub_sse_client_daemon.py')}; do "
+        f"  [ -f \"$f\" ] && mv \"$f\" \"$f.disabled.$ts\" || true; "
+        f"done"
+    )
+    sr = ssh.run(cleanup_old_sidecar_cmd, timeout=20, name='cleanup legacy sidecar clients')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', f'清理旧 sidecar 客户端失败：{_tail(sr.stderr, 300)}')
+        return
+
+    # 2) config.yaml / .env
+    if split:
+        cfg_path = f'{data}/config.yaml'
+        env_path = f'{data}/.env'
+    else:
+        cfg_path = f'{data}/config/config.yaml'
+        env_path = f'{data}/config/.env'
+
+    sr = ssh.put_text(_render_config_yaml(req), cfg_path,
                       mode='0644', name='write config.yaml')
     _record_step(steps, sr)
     if not sr.ok:
         _flush('failed', '写 config.yaml 失败')
         return
 
-    sr = ssh.put_text(_render_env_file(req),
-                      f'{home}/config/.env',
+    sr = ssh.put_text(_render_env_file(req), env_path,
                       mode='0600', name='write .env')
     _record_step(steps, sr)
     if not sr.ok:
         _flush('failed', '写 .env 失败')
         return
 
-    # 3) 写 per-claw systemd unit 文件
-    sr = ssh.put_text(_render_systemd_unit(req),
-                      unit_path, mode='0644',
+    # put_text runs as SSH user (usually root). The systemd service runs as the
+    # isolated oclaw_<id> user, so the EnvironmentFile must be owned by it.
+    sr = ssh.run(
+        f"chown {shlex.quote(service_user)}:{shlex.quote(AGENT_SERVICE_GROUP)} "
+        f"{shlex.quote(cfg_path)} {shlex.quote(env_path)} && "
+        f"chmod 0644 {shlex.quote(cfg_path)} && "
+        f"chmod 0600 {shlex.quote(env_path)}",
+        timeout=20, name='chown hermes config files')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', f'调整配置文件权限失败：{_tail(sr.stderr, 300)}')
+        return
+
+    verify_cmd = (
+        f"test -r {shlex.quote(cfg_path)} && "
+        f"test -r {shlex.quote(env_path)} && "
+        f"grep -q '^VENUS_API_KEY=' {shlex.quote(env_path)} && "
+        f"grep -q '^HERMES_CONFIG_PATH=' {shlex.quote(env_path)} && "
+        f"grep -q '^model:' {shlex.quote(cfg_path)}"
+    )
+    if req.wecom_bot_id and req.wecom_bot_secret:
+        verify_cmd += (
+            f" && grep -q '^WECOM_KEY=' {shlex.quote(env_path)}"
+            f" && grep -q '^WECOM_SECRET=' {shlex.quote(env_path)}"
+            f" && grep -q '^WECOM_ALLOW_ALL_USERS=true$' {shlex.quote(env_path)}"
+            f" && grep -q '^wecom:' {shlex.quote(cfg_path)}"
+        )
+    sr = ssh.run(verify_cmd, timeout=20, name='verify hermes config/env')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', 'Hermes config.yaml/.env 自检失败：缺少 Venus 或 WeCom 必需配置')
+        return
+
+    # 3) systemd unit
+    sr = ssh.put_text(_render_systemd_unit(req), unit_path, mode='0644',
                       name=f'write {unit_name}')
     _record_step(steps, sr)
     if not sr.ok:
         _flush('failed', f'写 systemd unit 失败：{_tail(sr.stderr, 400)}')
         return
 
-    # 4) reload + enable + restart（用 restart 兼容首次安装与覆盖更新）
     sr = ssh.run('systemctl daemon-reload', timeout=30, name='systemctl daemon-reload')
     _record_step(steps, sr)
     if not sr.ok:
@@ -613,23 +1111,135 @@ def _deploy_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) 
         _flush('failed', f'systemctl restart 失败：{_tail(sr.stderr, 600)}')
         return
 
-    # 5) 5 秒缓冲，再 is-active 确认
     time.sleep(5)
     sr = ssh.run(f'systemctl is-active {shlex.quote(unit_name)}',
                  timeout=20, name=f'systemctl is-active {unit_name}')
     _record_step(steps, sr)
     is_active_ok = sr.ok and 'active' in sr.stdout.strip()
 
-    # 不论成败都拉一段最近日志写回，便于排查
     log_sr = ssh.run(
-        f'tail -n 60 {shlex.quote(home + "/logs/hermes-agent.log")} 2>/dev/null '
-        f'|| journalctl -u {shlex.quote(unit_name)} -n 60 --no-pager',
-        timeout=30, name='hermes recent logs')
+        f'journalctl -u {shlex.quote(unit_name)} -n 80 --no-pager',
+        timeout=30, name='journalctl hermes-gateway')
     _record_step(steps, log_sr)
 
     if not is_active_ok:
         _flush('failed', f'systemd 服务启动后未保持 active：{_tail(sr.stdout, 200)}')
         return
+
+    # 5) Hub SSE sidecar v2：Hermes Gateway 只负责消息平台/cron，
+    # Hub 通信中心的消息/待办需要 sidecar 消费 SSE 并调用 Hermes CLI。
+    if req.hub_url and req.claw_token:
+        sidecar_unit = _sidecar_unit_name(req)
+        sidecar_unit_path = f"/etc/systemd/system/{sidecar_unit}"
+        sidecar_script = f"{data}/scripts/sidecar_v2.py"
+        wrapper_path = f"{data}/scripts/hermes_sidecar_wrapper.sh"
+        sidecar_env_path = f"{data}/scripts/sidecar.env"
+        sidecar_url = (
+            f"{(req.hub_url or '').rstrip('/')}"
+            "/static/skills/hub-sse-sidecar-v2/scripts/sidecar_v2.py"
+        )
+        download_cmd = (
+            f"SIDECAR_URL={shlex.quote(sidecar_url)} "
+            f"SIDECAR_PATH={shlex.quote(sidecar_script)} "
+            "python3 - <<'PY'\n"
+            "import os, urllib.request\n"
+            "url = os.environ['SIDECAR_URL']\n"
+            "path = os.environ['SIDECAR_PATH']\n"
+            "with urllib.request.urlopen(url, timeout=30) as r:\n"
+            "    data = r.read()\n"
+            "if not data.startswith(b'#!/usr/bin/env python3'):\n"
+            "    raise SystemExit('unexpected sidecar content')\n"
+            "with open(path, 'wb') as f:\n"
+            "    f.write(data)\n"
+            "PY\n"
+            f"chmod 0755 {shlex.quote(sidecar_script)}"
+        )
+        sr = ssh.run(download_cmd, timeout=45, name='download sidecar_v2.py')
+        _record_step(steps, sr)
+        if not sr.ok:
+            _flush('failed', f'下载 sidecar_v2.py 失败：{_tail(sr.stderr, 500)}')
+            return
+
+        sr = ssh.put_text(_render_sidecar_wrapper(req), wrapper_path,
+                          mode='0755', name='write hermes sidecar wrapper')
+        _record_step(steps, sr)
+        if not sr.ok:
+            _flush('failed', '写 Hermes sidecar wrapper 失败')
+            return
+
+        sr = ssh.put_text(_render_sidecar_env(req), sidecar_env_path,
+                          mode='0600', name='write sidecar.env')
+        _record_step(steps, sr)
+        if not sr.ok:
+            _flush('failed', '写 sidecar.env 失败')
+            return
+
+        sr = ssh.run(
+            f"chown -R {shlex.quote(service_user)}:{shlex.quote(AGENT_SERVICE_GROUP)} "
+            f"{shlex.quote(data + '/scripts')} && "
+            f"chmod 0700 {shlex.quote(data + '/scripts')} && "
+            f"chmod 0755 {shlex.quote(sidecar_script)} {shlex.quote(wrapper_path)} && "
+            f"chmod 0600 {shlex.quote(sidecar_env_path)}",
+            timeout=20, name='chown sidecar files')
+        _record_step(steps, sr)
+        if not sr.ok:
+            _flush('failed', f'调整 sidecar 文件权限失败：{_tail(sr.stderr, 300)}')
+            return
+
+        # 初始化/刷新 Hub 侧 sidecar 配置中心，确保 v2 知道要调用 Hermes wrapper。
+        selfcheck_url = (
+            f"{(req.hub_url or '').rstrip('/')}/api/openclaws/{int(req.openclaw_id)}/sidecar-config"
+            f"?sidecar_version=2.0.1&agent_type=hermes"
+            f"&openclaw_bin={urllib.parse.quote(wrapper_path, safe='')}"
+            f"&hermes_home={urllib.parse.quote(data, safe='')}"
+            f"&agent_name=main&agent_timeout=300"
+        )
+        selfcheck_cmd = (
+            f"curl -fsS -H {shlex.quote('Authorization: Bearer ' + (req.claw_token or ''))} "
+            f"{shlex.quote(selfcheck_url)} >/tmp/openclaw-sidecar-selfcheck-{int(req.openclaw_id)}.json"
+        )
+        sr = ssh.run(selfcheck_cmd, timeout=30, name='sidecar-config selfcheck')
+        _record_step(steps, sr)
+        if not sr.ok:
+            _flush('failed', f'sidecar 配置自检失败：{_tail(sr.stderr, 500)}')
+            return
+
+        sr = ssh.put_text(_render_sidecar_unit(req), sidecar_unit_path, mode='0644',
+                          name=f'write {sidecar_unit}')
+        _record_step(steps, sr)
+        if not sr.ok:
+            _flush('failed', f'写 sidecar systemd unit 失败：{_tail(sr.stderr, 400)}')
+            return
+
+        sr = ssh.run('systemctl daemon-reload', timeout=30,
+                     name='systemctl daemon-reload sidecar')
+        _record_step(steps, sr)
+        if not sr.ok:
+            _flush('failed', f'sidecar daemon-reload 失败：{_tail(sr.stderr, 300)}')
+            return
+
+        sr = ssh.run(f'systemctl enable {shlex.quote(sidecar_unit)}',
+                     timeout=30, name=f'systemctl enable {sidecar_unit}')
+        _record_step(steps, sr)
+
+        sr = ssh.run(f'systemctl restart {shlex.quote(sidecar_unit)}',
+                     timeout=60, name=f'systemctl restart {sidecar_unit}')
+        _record_step(steps, sr)
+        if not sr.ok:
+            _flush('failed', f'sidecar restart 失败：{_tail(sr.stderr, 600)}')
+            return
+
+        time.sleep(3)
+        sr = ssh.run(f'systemctl is-active {shlex.quote(sidecar_unit)}',
+                     timeout=20, name=f'systemctl is-active {sidecar_unit}')
+        _record_step(steps, sr)
+        if not (sr.ok and 'active' in sr.stdout.strip()):
+            log_sr = ssh.run(
+                f'journalctl -u {shlex.quote(sidecar_unit)} -n 80 --no-pager',
+                timeout=30, name='journalctl sidecar')
+            _record_step(steps, log_sr)
+            _flush('failed', f'sidecar 启动后未保持 active：{_tail(sr.stdout, 200)}')
+            return
 
     _flush('success')
 
