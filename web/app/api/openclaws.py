@@ -4,9 +4,14 @@ from datetime import datetime, date, time
 from functools import wraps
 from flask import request, jsonify, session
 from app import db
+from app.hermes_models import (
+    DEFAULT_HERMES_LLM_PROVIDER,
+    DEFAULT_HERMES_LLM_MODEL,
+    normalize_hermes_model,
+)
 from app.models import (OpenClawInstance, DailyReport, Project, Rule,
                         OpenClawRule, OpenClawSkill, Skill, ClawMessage,
-                        ClawTodo, ClawTodoLog, User,
+                        ClawTodo, ClawTodoLog, User, AgentDeployment,
                         generate_api_token, hash_token, _simple_encrypt)
 from app.api import api_bp
 
@@ -157,6 +162,100 @@ def _parse_project_id(raw):
     return v if v > 0 else None
 
 
+def _parse_llm_fields(data):
+    """Parse model selection from top-level or deploy payload."""
+    deploy = data.get('deploy') if isinstance(data.get('deploy'), dict) else {}
+    raw_model = data.get('llm_model') or deploy.get('llm_model') or DEFAULT_HERMES_LLM_MODEL
+    raw_provider = (data.get('llm_provider') or deploy.get('llm_provider')
+                    or DEFAULT_HERMES_LLM_PROVIDER)
+    provider = (raw_provider or DEFAULT_HERMES_LLM_PROVIDER).strip().lower()
+    if provider != DEFAULT_HERMES_LLM_PROVIDER:
+        raise ValueError('当前仅支持 Venus 平台')
+    return provider, normalize_hermes_model(raw_model)
+
+
+def _parse_work_dirs(data):
+    from app.services.agent_deployer import normalize_agent_work_dirs
+    return normalize_agent_work_dirs(data.get('work_dirs'))
+
+
+def _sync_sidecar_llm_config(claw, actor_name):
+    """Keep sidecar-config version moving when card model changes."""
+    try:
+        from app.models import ClawSidecarConfig
+        cfg = ClawSidecarConfig.query.get(claw.id)
+        if not cfg:
+            return
+        cfg.llm_provider = claw.llm_provider or DEFAULT_HERMES_LLM_PROVIDER
+        cfg.llm_model = claw.llm_model or DEFAULT_HERMES_LLM_MODEL
+        cfg.config_version = (cfg.config_version or 0) + 1
+        cfg.updated_by = actor_name
+    except Exception:
+        logger.exception('sync sidecar llm config failed for claw %s', claw.id)
+
+
+def _has_registered_hermes_agent(claw):
+    """是否通过 Hub 代建过 Hermes Agent（用于卡片设置页签开关）。"""
+    dep = (AgentDeployment.query
+           .filter_by(openclaw_id=claw.id, agent_type='hermes')
+           .order_by(AgentDeployment.created_at.desc())
+           .first())
+    return bool(dep and dep.deploy_method == 'systemd' and dep.status == 'success')
+
+
+def _record_failed_agent_deployment(claw, error_message, actor_name, deploy_opts=None):
+    """部署请求无法下发时也要落库，前端才能锁定卡片并允许重试。"""
+    try:
+        from app.services.agent_deployer import (
+            build_default_systemd_data_dir,
+            build_systemd_unit_name,
+        )
+        host = ''
+        ssh_user = ''
+        if isinstance(deploy_opts, dict):
+            host = (deploy_opts.get('host') or '').strip()
+            if host and deploy_opts.get('ssh_port'):
+                host = f"{host}:{deploy_opts.get('ssh_port')}"
+            ssh_user = (deploy_opts.get('ssh_user') or '').strip()
+        dep = AgentDeployment(
+            openclaw_id=claw.id,
+            agent_type='hermes',
+            deploy_method='systemd',
+            host=host,
+            ssh_user=ssh_user,
+            remote_base_dir=build_default_systemd_data_dir(
+                claw.id, claw.name or f'claw-{claw.id}', safe_name=claw.safe_name or ''),
+            container_name=build_systemd_unit_name(claw.id),
+            image='',
+            status='failed',
+            error_message=error_message,
+            log_tail=error_message,
+            finished_at=datetime.now(),
+            triggered_by=actor_name,
+        )
+        db.session.add(dep)
+        db.session.commit()
+        return dep
+    except Exception:
+        db.session.rollback()
+        logger.exception('record failed agent deployment failed for claw %s', getattr(claw, 'id', '?'))
+        return None
+
+
+def _sync_sidecar_wecom_config(claw, actor_name):
+    """企微绑定变更后推进 sidecar 配置版本。"""
+    try:
+        from app.models import ClawSidecarConfig
+        cfg = ClawSidecarConfig.query.get(claw.id)
+        if not cfg:
+            return
+        cfg.wecom_enabled = bool(claw.wecom_bot_id and claw.wecom_bot_secret)
+        cfg.config_version = (cfg.config_version or 0) + 1
+        cfg.updated_by = actor_name
+    except Exception:
+        logger.exception('sync sidecar wecom config failed for claw %s', claw.id)
+
+
 def require_claw_token(f):
     """OpenClaw API Token 认证装饰器
 
@@ -223,6 +322,16 @@ def list_openclaws():
         d['total_todos'] = total_todos
         d['today_submitted'] = today_submitted
         d['today_approved'] = today_approved
+        latest_dep = (AgentDeployment.query
+                      .filter_by(openclaw_id=c.id, agent_type='hermes')
+                      .order_by(AgentDeployment.created_at.desc())
+                      .first())
+        d['has_hermes_agent'] = bool(
+            latest_dep and latest_dep.deploy_method == 'systemd' and latest_dep.status == 'success'
+        )
+        d['agent_deployment_status'] = latest_dep.status if latest_dep else ''
+        d['agent_deployment_id'] = latest_dep.id if latest_dep else None
+        d['agent_deployment_error'] = latest_dep.error_message if latest_dep else ''
         # 高危操作（删除 / 看 Token / 重置 Token）的权限：仅 owner（super_admin / 绑定者 / 创建者）
         d['can_own'] = _can_own_claw(user, c)
         result.append(d)
@@ -235,7 +344,7 @@ def create_openclaw():
     user = _get_user()
     if not user or user.role not in ('super_admin', 'admin'):
         return jsonify({'error': '需要管理员权限'}), 403
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
 
     # === 模式1：通过旧 Token 恢复 ===
     restore_token = data.get('restore_token')
@@ -254,6 +363,10 @@ def create_openclaw():
                         setattr(claw, field, data[field])
                 if 'project_id' in data:
                     claw.project_id = _parse_project_id(data.get('project_id'))
+                try:
+                    claw.llm_provider, claw.llm_model = _parse_llm_fields(data)
+                except ValueError as e:
+                    return jsonify({'error': str(e)}), 400
                 claw.last_modified_by = _actor_display_name(user)
                 db.session.commit()
                 _ensure_sidecar_v2_enabled(claw)
@@ -301,6 +414,10 @@ def create_openclaw():
             raw_token = generate_api_token()
             existing.api_token_hash = hash_token(raw_token)
             existing.api_token_plain = _simple_encrypt(raw_token)
+            try:
+                existing.llm_provider, existing.llm_model = _parse_llm_fields(data)
+            except ValueError as e:
+                return jsonify({'error': str(e)}), 400
             existing.last_modified_by = _actor_display_name(user)
             db.session.commit()
             _ensure_sidecar_v2_enabled(existing)
@@ -329,6 +446,11 @@ def create_openclaw():
     # 处理 project_id（支持 '__global__' = NULL，仅 admin 角色才有"全平台"语义）
     project_id = _parse_project_id(data.get('project_id'))
 
+    try:
+        llm_provider, llm_model = _parse_llm_fields(data)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
     claw = OpenClawInstance(
         name=data['name'],
         claw_tag=claw_tag,
@@ -345,6 +467,8 @@ def create_openclaw():
         report_schedule=data.get('report_schedule', '15:00,21:00'),
         connection_mode=data.get('connection_mode', 'sse'),
         web_system_url=data.get('web_system_url'),
+        llm_provider=llm_provider,
+        llm_model=llm_model,
         api_token_hash=token_hash,
         api_token_plain=token_encrypted,
         last_modified_by=_actor_display_name(user),
@@ -424,9 +548,12 @@ def create_openclaw():
     create_agent = bool(data.get('create_agent'))
     deploy_opts_raw = data.get('deploy') if isinstance(data.get('deploy'), dict) else None
     if create_agent and deploy_opts_raw and user and user.role != 'super_admin':
-        deployment_payload = {
+        err = '仅超级管理员可代建 Hermes Agent，已忽略部署请求。'
+        dep = _record_failed_agent_deployment(
+            claw, err, _actor_display_name(user), deploy_opts_raw)
+        deployment_payload = dep.to_dict() if dep else {
             'status': 'failed',
-            'error_message': '仅超级管理员可代建 Hermes Agent，已忽略部署请求。',
+            'error_message': err,
         }
         logger.warning('agent deploy denied for claw %d: user=%s role=%s 非 super_admin',
                        claw.id, getattr(user, 'username', '?'), getattr(user, 'role', '?'))
@@ -447,15 +574,21 @@ def create_openclaw():
             dep = trigger_async_deployment(claw, deploy_req)
             deployment_payload = dep.to_dict()
         except ValueError as ve:
-            deployment_payload = {
+            err = f'部署参数无效：{ve}'
+            dep = _record_failed_agent_deployment(
+                claw, err, _actor_display_name(user), deploy_opts_raw)
+            deployment_payload = dep.to_dict() if dep else {
                 'status': 'failed',
-                'error_message': f'部署参数无效：{ve}',
+                'error_message': err,
             }
             logger.warning('agent deploy validation failed for claw %d: %s', claw.id, ve)
         except Exception as e:
-            deployment_payload = {
+            err = f'部署任务下发失败：{e}'
+            dep = _record_failed_agent_deployment(
+                claw, err, _actor_display_name(user), deploy_opts_raw)
+            deployment_payload = dep.to_dict() if dep else {
                 'status': 'failed',
-                'error_message': f'部署任务下发失败：{e}',
+                'error_message': err,
             }
             logger.exception('agent deploy spawn failed for claw %d', claw.id)
 
@@ -488,6 +621,7 @@ def get_openclaw(claw_id):
         return jsonify({'error': '无权访问该 OpenClaw'}), 403
     payload = claw.to_dict()
     payload['can_own'] = _can_own_claw(user, claw)
+    payload['has_hermes_agent'] = _has_registered_hermes_agent(claw)
     return jsonify(payload)
 
 
@@ -496,9 +630,29 @@ def update_openclaw(claw_id):
     """更新 OpenClaw 信息"""
     claw = OpenClawInstance.query.get_or_404(claw_id)
     user = _get_user()
-    if not _can_manage_claw(user, claw):
+    data = request.get_json(silent=True) or {}
+
+    llm_keys = {'llm_provider', 'llm_model'}
+    wecom_keys = {'wecom_bot_id', 'wecom_bot_secret', 'clear_wecom_bot_secret'}
+    work_dir_keys = {'work_dirs'}
+    wants_llm_update = bool(llm_keys & set(data.keys()))
+    wants_wecom_update = bool(wecom_keys & set(data.keys()))
+    wants_work_dir_update = bool(work_dir_keys & set(data.keys()))
+    non_self_settings_update = bool(set(data.keys()) - llm_keys - wecom_keys - work_dir_keys)
+    if non_self_settings_update and not _can_manage_claw(user, claw):
         return jsonify({'error': '无权修改该 OpenClaw'}), 403
-    data = request.get_json()
+    if wants_llm_update and not _can_own_claw(user, claw):
+        return jsonify({'error': '仅本人 / 绑定 OpenClaw / 超级管理员可修改大模型'}), 403
+    if wants_llm_update and not _has_registered_hermes_agent(claw):
+        return jsonify({'error': '仅通过 Hub 注册部署成功的 Hermes Agent 可修改大模型'}), 403
+    if wants_wecom_update and not _can_own_claw(user, claw):
+        return jsonify({'error': '仅本人 / 绑定 OpenClaw / 超级管理员可绑定企微机器人'}), 403
+    if wants_wecom_update and not _has_registered_hermes_agent(claw):
+        return jsonify({'error': '仅通过 Hub 注册部署的 Hermes Agent 可绑定企微机器人'}), 403
+    if wants_work_dir_update and not _can_own_claw(user, claw):
+        return jsonify({'error': '仅本人 / 绑定 OpenClaw / 超级管理员可修改工作目录'}), 403
+    if wants_work_dir_update and not _has_registered_hermes_agent(claw):
+        return jsonify({'error': '仅通过 Hub 注册部署成功的 Hermes Agent 可设置工作目录'}), 403
 
     # 只有 super_admin 可将 OpenClaw 设置为 admin（龙虾王）
     if 'role' in data and data.get('role') == 'admin' and user.role != 'super_admin':
@@ -513,13 +667,41 @@ def update_openclaw(claw_id):
         if field in data:
             setattr(claw, field, data[field])
 
+    if wants_llm_update:
+        try:
+            claw.llm_provider, claw.llm_model = _parse_llm_fields(data)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
+    if wants_wecom_update:
+        if 'wecom_bot_id' in data:
+            claw.wecom_bot_id = (data.get('wecom_bot_id') or '').strip()
+        if data.get('clear_wecom_bot_secret'):
+            claw.wecom_bot_secret = ''
+        secret = (data.get('wecom_bot_secret') or '').strip()
+        if secret:
+            claw.wecom_bot_secret = _simple_encrypt(secret)
+
+    if wants_work_dir_update:
+        try:
+            claw.work_dirs = _parse_work_dirs(data)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
     # 处理 project_id（支持 '__global__' = NULL）
     if 'project_id' in data:
         claw.project_id = _parse_project_id(data.get('project_id'))
 
-    claw.last_modified_by = _actor_display_name(user)
+    actor_name = _actor_display_name(user)
+    claw.last_modified_by = actor_name
+    if wants_llm_update:
+        _sync_sidecar_llm_config(claw, actor_name)
+    if wants_wecom_update:
+        _sync_sidecar_wecom_config(claw, actor_name)
     db.session.commit()
-    return jsonify(claw.to_dict())
+    payload = claw.to_dict()
+    payload['has_hermes_agent'] = _has_registered_hermes_agent(claw)
+    return jsonify(payload)
 
 
 @api_bp.route('/openclaws/<int:claw_id>/regenerate-token', methods=['POST'])
@@ -753,6 +935,13 @@ def get_openclaw_config(claw_id, claw=None):
         'module_name': claw.module_name,
         'report_schedule': claw.report_schedule,
         'web_system_url': claw.web_system_url,
+        'llm_provider': claw.llm_provider or DEFAULT_HERMES_LLM_PROVIDER,
+        'llm_model': claw.llm_model or DEFAULT_HERMES_LLM_MODEL,
+        'wecom': {
+            'bot_id': claw.wecom_bot_id or '',
+            'secret': claw.get_wecom_bot_secret_plain() or '',
+            'enabled': bool(claw.wecom_bot_id and claw.wecom_bot_secret),
+        },
         'skills': installed_skills,
         'rules': installed_rules,
     })
