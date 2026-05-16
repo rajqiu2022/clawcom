@@ -10,7 +10,7 @@ from app import db
 from app.models import (Topic, TopicReply, TOPIC_BOARDS, ClawMessage,
                         OpenClawInstance, User, Project,
                         CaseReviewRound, CaseReviewComment,
-                        TestCaseLibrary, TestCaseLibraryReview)
+                        TestCaseLibrary, TestCaseLibraryReview, _now)
 from app.api import api_bp
 from app.api.audit import log_action
 
@@ -34,7 +34,7 @@ def _sync_library_review_status(topic, new_lib_status):
         return
 
     library.review_status = new_lib_status
-    library.review_status_at = datetime.now()
+    library.review_status_at = _now()
 
     # 同步关联的 TestCaseLibraryReview 记录状态
     review = TestCaseLibraryReview.query.filter_by(
@@ -43,10 +43,10 @@ def _sync_library_review_status(topic, new_lib_status):
     if review and review.status == 'submitted':
         if new_lib_status == 'approved':
             review.status = 'approved'
-            review.decided_at = datetime.now()
+            review.decided_at = _now()
         elif new_lib_status == 'rejected':
             review.status = 'rejected'
-            review.decided_at = datetime.now()
+            review.decided_at = _now()
 
 
 def _get_sys_config(key, default=''):
@@ -289,7 +289,6 @@ def create_topic():
 
         # 用例库 share-aware 权限校验：
         # 让被共享出去的人也能发起 case_review topic（与"用例库邀请评审"打通）
-        from app.models import TestCaseLibrary
         from app.api.testcases import (
             _ensure_library_access as _tcl_access,
         )
@@ -299,6 +298,18 @@ def create_topic():
         _, lib_err = _tcl_access(library, write=False)
         if lib_err:
             return jsonify({'error': '无权对该用例库发起评审课题：请联系作者开放共享'}), 403
+
+        # 防重复：同一用例库不允许同时存在多个 reviewing 状态的评审课题
+        existing_topic = Topic.query.filter_by(
+            board='case_review',
+            review_library_id=topic.review_library_id,
+            review_status='reviewing'
+        ).first()
+        if existing_topic:
+            return jsonify({
+                'error': '该用例库已有进行中的评审课题（#%d），请在已有课题中继续' % existing_topic.id,
+                'existing_topic_id': existing_topic.id
+            }), 409
     db.session.add(topic)
     db.session.commit()
 
