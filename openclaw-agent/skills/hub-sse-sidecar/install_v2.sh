@@ -6,7 +6,7 @@
 #   - ??????????????? Python / systemd
 #
 # ???
-#   HUB_URL=http://your-hub-host:8088 CLAW_ID=5 CLAW_TOKEN=xxxxx \
+#   HUB_URL=http://clawteam.woa.com:18800 CLAW_ID=5 CLAW_TOKEN=xxxxx \
 #     bash install_v2.sh
 #
 # ???????
@@ -22,7 +22,7 @@
 set -euo pipefail
 
 # =============== ?????? ===============
-: "${HUB_URL:????? HUB_URL??? http://your-hub-host:8088}"
+: "${HUB_URL:????? HUB_URL??? http://clawteam.woa.com:18800}"
 : "${CLAW_ID:????? CLAW_ID?? Hub Web ??? claw ???}"
 : "${CLAW_TOKEN:????? CLAW_TOKEN??? claw ? Hub ????? token}"
 
@@ -159,17 +159,103 @@ else
     log "  ? ??? curl??????systemd ???? journalctl ????"
 fi
 
-# =============== Step 6: systemd ?? ===============
+# =============== Step 6: systemd / Windows .bat ===============
+IS_WINDOWS="${IS_WINDOWS:-0}"
+WIN_HOME="${WIN_HOME:-}"
 if [ "$SKIP_SYSTEMD" = "1" ]; then
-    log "Step 6/6: SKIP_SYSTEMD=1??? systemd ??"
-    log ""
-    log "==== ???? ===="
-    log "???????"
-    log "  set -a && source $ENV_FILE && set +a && python3 $SCRIPT_PATH"
-    log ""
-    log "???? sidecar ????? Hub ?????????"
-    log "  curl -sS -H \"Authorization: Bearer \$CLAW_TOKEN\" \\"
-    log "    \"$HUB_URL/api/openclaws/$CLAW_ID/sidecar-deployment-verify?expected_sidecar_version=${EXPECTED_SIDECAR_VERSION}&heartbeat_max_age_sec=180&notify=1\""
+    log "Step 6/6: SKIP_SYSTEMD=1, skipping systemd"
+
+    # ---- Windows: generate .bat + .ps1 launcher ----
+    if [ "$IS_WINDOWS" = "1" ] && [ -n "$WIN_HOME" ]; then
+        # Convert paths for Windows
+        WIN_INSTALL_DIR="$(cygpath -w "$INSTALL_DIR" 2>/dev/null || echo "$WIN_HOME\\.qclaw\\skills\\hub-sse-sidecar")"
+        WIN_SCRIPT_PATH="$(cygpath -w "$SCRIPT_PATH" 2>/dev/null || echo "$WIN_INSTALL_DIR\\sidecar_v2.py")"
+        WIN_ENV_FILE="$(cygpath -w "$ENV_FILE" 2>/dev/null || echo "$WIN_INSTALL_DIR\\sidecar.env")"
+        WIN_LOG_FILE="$(cygpath -w "$LOG_FILE" 2>/dev/null || echo "$WIN_INSTALL_DIR\\logs\\sidecar.log")"
+
+        BAT_FILE="$INSTALL_DIR/start_sidecar.bat"
+        log "  Generating Windows launcher: $BAT_FILE"
+        cat > "$BAT_FILE" << BATEOF
+@echo off
+REM OpenClaw Hub SSE Sidecar v2 - Windows Launcher
+REM claw_id=$CLAW_ID  Generated $(date '+%Y-%m-%d %H:%M:%S')
+REM
+REM Usage:
+REM   Double-click this file, or run from cmd: start_sidecar.bat
+REM   To stop: close the window, or Ctrl+C
+
+setlocal
+
+set HUB_URL=$HUB_URL
+set CLAW_ID=$CLAW_ID
+set CLAW_TOKEN=$CLAW_TOKEN
+
+echo [sidecar] Starting OpenClaw Sidecar v2 (claw_id=%CLAW_ID%)...
+echo [sidecar] Log: $WIN_LOG_FILE
+echo [sidecar] Press Ctrl+C to stop.
+echo.
+
+python "$WIN_SCRIPT_PATH"
+if errorlevel 1 (
+    echo [sidecar][ERROR] Sidecar exited with error. Retrying in 10s...
+    timeout /t 10 /nobreak >nul
+    goto :retry
+)
+goto :eof
+
+:retry
+python "$WIN_SCRIPT_PATH"
+goto :eof
+BATEOF
+
+        STOP_BAT="$INSTALL_DIR/stop_sidecar.bat"
+        log "  Generating Windows stop script: $STOP_BAT"
+        cat > "$STOP_BAT" << STOPEOF
+@echo off
+REM Stop OpenClaw Sidecar v2
+echo [sidecar] Stopping sidecar processes...
+for /f "tokens=2" %%a in ('tasklist /fi "IMAGENAME eq python.exe" /fo list ^| findstr /i "sidecar_v2"') do taskkill /PID %%a /F 2>nul
+wmic process where "CommandLine like '%%sidecar_v2.py%%'" call terminate >nul 2>&1
+echo [sidecar] Done.
+STOPEOF
+
+        # Also generate a convenience .bat in user home
+        WIN_QCLAW_DIR="$HOME/.qclaw"
+        cp -f "$BAT_FILE" "$WIN_QCLAW_DIR/start_sidecar.bat" 2>/dev/null || true
+        cp -f "$STOP_BAT" "$WIN_QCLAW_DIR/stop_sidecar.bat" 2>/dev/null || true
+
+        log ""
+        log "==== Windows deployment complete ===="
+        log ""
+        log "  Start sidecar:"
+        log "    Double-click: $(cygpath -w "$WIN_QCLAW_DIR/start_sidecar.bat" 2>/dev/null || echo "$WIN_HOME\\.qclaw\\start_sidecar.bat")"
+        log "    Or in Git Bash: set -a && source $ENV_FILE && set +a && python3 $SCRIPT_PATH"
+        log ""
+        log "  Stop sidecar:"
+        log "    Double-click: $(cygpath -w "$WIN_QCLAW_DIR/stop_sidecar.bat" 2>/dev/null || echo "$WIN_HOME\\.qclaw\\stop_sidecar.bat")"
+        log "    Or close the command window"
+        log ""
+        log "  Foreground mode (recommended for first run):"
+        log "    cd $(cygpath -w "$INSTALL_DIR" 2>/dev/null) && start_sidecar.bat"
+
+        # Auto-start sidecar in background on Windows
+        log ""
+        log "  Auto-starting sidecar in background..."
+        (
+            export HUB_URL CLAW_ID CLAW_TOKEN
+            nohup python3 "$SCRIPT_PATH" >> "$LOG_FILE" 2>&1 &
+        ) || true
+        log "  Sidecar started (PID: $!). Check log: $LOG_FILE"
+    else
+        # Linux without systemd
+        log ""
+        log "==== Manual start instructions ===="
+        log "  set -a && source $ENV_FILE && set +a && python3 $SCRIPT_PATH"
+        log ""
+        log "  Verify:"
+        log "  curl -sS -H \"Authorization: Bearer \$CLAW_TOKEN\" \\"
+        log "    \"$HUB_URL/api/openclaws/$CLAW_ID/sidecar-deployment-verify?expected_sidecar_version=${EXPECTED_SIDECAR_VERSION}&heartbeat_max_age_sec=180&notify=1\""
+    fi
     exit 0
 fi
 
