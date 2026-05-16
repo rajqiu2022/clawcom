@@ -33,9 +33,11 @@ DEFAULT_MCP_ENTRY = os.environ.get(
 )
 
 # MCP server tarball 下载 URL
+# 历史教训 #126b：claw 实际能直连的是 :18800（gunicorn 真身），不是 443 的 lampp/Apache。
+# clawteam.woa.com:18800 早就关了；https://clawteam.woa.com 撞 lampp Apache 占位 404。
 DEFAULT_MCP_TARBALL_URL = os.environ.get(
     "OPENCLAW_HUB_MCP_TARBALL_URL",
-    "http://9.134.11.169:8088/static/dist/openclaw-hub-mcp.tar.gz",
+    "https://clawteam.woa.com:18800/static/dist/openclaw-hub-mcp.tar.gz",
 )
 
 # 兼容老变量名（保留以免外部脚本崩）
@@ -126,6 +128,16 @@ log() {{ echo "[bootstrap] $*" >&2; }}
 err() {{ echo "[bootstrap][ERROR] $*" >&2; exit 1; }}
 need_cmd() {{ command -v "$1" >/dev/null 2>&1 || err "缺少命令: $1"; }}
 
+# ---- Windows / Git Bash 检测 ----
+IS_WINDOWS=0
+WIN_HOME=""
+if [[ "$OSTYPE" == msys* ]] || [[ "$OSTYPE" == mingw* ]] || [[ "$OSTYPE" == cygwin* ]] || [[ -n "${{WINDIR:-}}" ]]; then
+    IS_WINDOWS=1
+    # Git Bash 中 $HOME 是 /c/Users/xxx，转成 Windows 路径供 .bat 使用
+    WIN_HOME="$(cygpath -w "$HOME" 2>/dev/null || echo "$USERPROFILE")"
+    log "检测到 Windows 环境 (OSTYPE=$OSTYPE)，将跳过 systemd，生成 .bat 启动脚本"
+fi
+
 need_cmd bash
 need_cmd curl
 need_cmd python3
@@ -151,12 +163,20 @@ AGENT_MD_EOF
 chmod 600 "$HOME/.qclaw/agent.md"
 
 log "Step 2/5 清理旧通信进程，避免双 SSE 客户端抢消息"
-pkill -f 'manager-hub/scripts/sse_client.py' 2>/dev/null || true
-pkill -f 'manager-hub/scripts/sseclient.py' 2>/dev/null || true
-pkill -f 'openclaw-sidecar/scripts/sse_client.py' 2>/dev/null || true
-pkill -f 'hub-sse-sidecar/scripts/sse_client.py' 2>/dev/null || true
-pkill -f 'hub-sse-sidecar/scripts/hub_worker.py' 2>/dev/null || true
-pkill -f 'sidecar_v2.py' 2>/dev/null || true
+if [ "$IS_WINDOWS" = "1" ]; then
+    # Windows: 用 taskkill 杀 python sidecar 进程
+    taskkill //F //FI "WINDOWTITLE eq sidecar_v2*" 2>/dev/null || true
+    taskkill //F //FI "IMAGENAME eq python*" //FI "WINDOWTITLE eq hub-sse-sidecar*" 2>/dev/null || true
+    # 兜底：wmic 按命令行匹配
+    wmic process where "CommandLine like '%sidecar_v2.py%'" call terminate 2>/dev/null || true
+else
+    pkill -f 'manager-hub/scripts/sse_client.py' 2>/dev/null || true
+    pkill -f 'manager-hub/scripts/sseclient.py' 2>/dev/null || true
+    pkill -f 'openclaw-sidecar/scripts/sse_client.py' 2>/dev/null || true
+    pkill -f 'hub-sse-sidecar/scripts/sse_client.py' 2>/dev/null || true
+    pkill -f 'hub-sse-sidecar/scripts/hub_worker.py' 2>/dev/null || true
+    pkill -f 'sidecar_v2.py' 2>/dev/null || true
+fi
 
 TMP_DIR="$(mktemp -d)"
 cleanup() {{ rm -rf "$TMP_DIR"; }}
@@ -180,10 +200,14 @@ else
 fi
 
 log "Step 5/5 安装并启动 sidecar v2"
+# Windows 下强制 SKIP_SYSTEMD，由 install_v2.sh 生成 .bat
+export SKIP_SYSTEMD="${{SKIP_SYSTEMD:-$IS_WINDOWS}}"
 HUB_URL="$HUB_URL" \
 CLAW_ID="$CLAW_ID" \
 CLAW_TOKEN="$CLAW_TOKEN" \
 EXPECTED_SIDECAR_VERSION="$EXPECTED_SIDECAR_VERSION" \
+IS_WINDOWS="$IS_WINDOWS" \
+WIN_HOME="$WIN_HOME" \
 bash "$TMP_DIR/install_v2.sh"
 
 log "最终验证 Hub 心跳和 #143 启用状态"
@@ -241,6 +265,18 @@ curl -fsSL -o /tmp/openclaw-bootstrap-{claw_id}.sh {json.dumps(bootstrap_url, en
 bash /tmp/openclaw-bootstrap-{claw_id}.sh
 ```
 
+### Windows 部署（Git Bash）
+
+Windows 上需要先安装 [Git for Windows](https://git-scm.com/download/win)（自带 Git Bash + curl），然后在 **Git Bash** 中执行同一条命令：
+
+```bash
+{bootstrap_cmd}
+```
+
+脚本会自动检测 Windows 环境，跳过 systemd，生成 `start_sidecar.bat` / `stop_sidecar.bat` 启动脚本。部署完成后：
+- **启动**：双击 `~/.qclaw/start_sidecar.bat`
+- **停止**：双击 `~/.qclaw/stop_sidecar.bat`，或直接关闭窗口
+
 ---
 
 ## 身份信息
@@ -288,6 +324,8 @@ bash /tmp/openclaw-bootstrap-{claw_id}.sh
 | `未启用 #143` | 打开注册链接 / bootstrap.sh 会自动启用 #143；若仍失败，到 Skills 页签手动启用 |
 | 仍反复处理旧待办 | 杀掉旧进程：`pkill -f 'sse_client.py|hub_worker.py|sidecar_v2.py'` 后重跑一键命令 |
 | systemd 不可用 | 脚本会提示手动运行 `sidecar_v2.py`，按提示 source `sidecar.env` 后启动 |
+| Windows 上 `pkill` 报错 | 正常现象，已自动 fallback 到 `taskkill`；不影响部署 |
+| Windows 双击 `.bat` 闪退 | 检查系统 PATH 中是否有 python；或在 cmd 中手动运行 `start_sidecar.bat` 查看错误输出 |
 
 ---
 
