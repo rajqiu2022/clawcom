@@ -11,7 +11,7 @@ from sqlalchemy import desc, or_
 from app import db
 from app.models import (
     TestCaseLibrary, TestCase, Project, OpenClawInstance, User,
-    TestCaseLibraryShare, TestCaseLibraryReview, _now,
+    TestCaseLibraryShare, TestCaseLibraryReview, Topic, CaseReviewRound, _now,
 )
 from app.api import api_bp
 from app.api.audit import log_action
@@ -333,6 +333,8 @@ def create_testcase_library():
         project_name=data.get('project_name'),
         module_name=data.get('module_name'),
         owner=owner,
+        created_by=owner,
+        updated_by=owner,
         mindmap={'id': 'root', 'text': data['name'], 'children': []},
     )
     db.session.add(library)
@@ -367,6 +369,8 @@ def get_or_create_library_by_project():
         description=f'{project_name} 项目用例库（自动创建）',
         project_name=project_name,
         owner=data.get('owner', 'system'),
+        created_by=data.get('owner', 'system'),
+        updated_by=data.get('owner', 'system'),
         mindmap={'id': 'root', 'text': f'{project_name} 用例库', 'children': []},
     )
     db.session.add(library)
@@ -409,6 +413,7 @@ def update_testcase_library(library_id):
     if 'name' in data and library.mindmap:
         library.mindmap['text'] = data['name']
 
+    library.updated_by = _operator()
     db.session.commit()
     return jsonify(library.to_dict())
 
@@ -531,6 +536,9 @@ def create_testcase_module(library_id):
     当该目录下有真实用例时，占位用例会被自动清理。
     """
     library = TestCaseLibrary.query.get_or_404(library_id)
+    user, err = _ensure_library_access(library, write=True)
+    if err:
+        return err
     data = request.get_json()
 
     if not data or not data.get('name'):
@@ -566,9 +574,11 @@ def create_testcase_module(library_id):
         mindmap_node_id=generate_mindmap_node_id(),
         module_path=full_path,
         is_placeholder=True,
-        created_by=data.get('created_by', ''),
+        created_by=(data.get('created_by') or getattr(user, '_claw_name', None) or user.username),
+        updated_by=(data.get('created_by') or getattr(user, '_claw_name', None) or user.username),
     )
     db.session.add(placeholder)
+    library.updated_by = _operator()
     db.session.commit()
 
     return jsonify({
@@ -587,6 +597,9 @@ def delete_testcase_module(library_id):
     只删除占位用例。
     """
     library = TestCaseLibrary.query.get_or_404(library_id)
+    _, err = _ensure_library_access(library, write=True)
+    if err:
+        return err
     data = request.get_json()
     path = (data or {}).get('path', '').strip()
     if not path:
@@ -617,6 +630,7 @@ def delete_testcase_module(library_id):
     for p in placeholders:
         db.session.delete(p)
 
+    library.updated_by = _operator()
     db.session.commit()
     return jsonify({'message': f'目录 "{path}" 已删除'})
 
@@ -625,6 +639,9 @@ def delete_testcase_module(library_id):
 def rename_module(library_id):
     """重命名目录（批量更新 module_path）"""
     library = TestCaseLibrary.query.get_or_404(library_id)
+    _, err = _ensure_library_access(library, write=True)
+    if err:
+        return err
     data = request.get_json()
     old_path = data.get('old_path', '')
     new_path = data.get('new_path', '')
@@ -635,6 +652,7 @@ def rename_module(library_id):
     cases = TestCase.query.filter_by(library_id=library_id, module_path=old_path).all()
     for c in cases:
         c.module_path = new_path
+        c.updated_by = _operator()
 
     # 更新子路径
     children = TestCase.query.filter(
@@ -643,7 +661,9 @@ def rename_module(library_id):
     ).all()
     for c in children:
         c.module_path = new_path + c.module_path[len(old_path):]
+        c.updated_by = _operator()
 
+    library.updated_by = _operator()
     db.session.commit()
     return jsonify({'message': f'已重命名 {len(cases) + len(children)} 条用例的目录'})
 
@@ -761,19 +781,12 @@ def create_case(library_id):
         tags=data.get('tags', []),
         module_path=data.get('module_path', ''),
         created_by=(data.get('created_by') or getattr(user, '_claw_name', None) or user.username),
+        updated_by=(data.get('created_by') or getattr(user, '_claw_name', None) or user.username),
     )
     db.session.add(case)
 
-    # 自动清理同路径的占位用例（该目录下已有真实用例，占位不再需要）
-    mp = data.get('module_path', '').strip()
-    if mp:
-        placeholders = TestCase.query.filter_by(
-            library_id=library_id,
-            module_path=mp,
-            is_placeholder=True,
-        ).all()
-        for p in placeholders:
-            db.session.delete(p)
+    # 保留同路径占位用例作为目录元信息载体，不再因真实用例创建而删除。
+    library.updated_by = _operator()
 
     db.session.commit()
 
@@ -807,16 +820,8 @@ def update_case(library_id, case_id):
         if field in data:
             setattr(case, field, data[field])
 
-    # 如果 module_path 变更，清理目标路径的占位用例
-    if 'module_path' in data and data['module_path'] and not case.is_placeholder:
-        mp = data['module_path'].strip()
-        placeholders = TestCase.query.filter_by(
-            library_id=library_id,
-            module_path=mp,
-            is_placeholder=True,
-        ).all()
-        for p in placeholders:
-            db.session.delete(p)
+    case.updated_by = _operator()
+    library.updated_by = _operator()
 
     db.session.commit()
     return jsonify(case.to_dict())
@@ -831,6 +836,7 @@ def delete_case(library_id, case_id):
         return err
     case = TestCase.query.filter_by(library_id=library_id, id=case_id).first_or_404()
     db.session.delete(case)
+    library.updated_by = _operator()
     db.session.commit()
     return jsonify({'message': f'用例 "{case.title}" 已删除'})
 
@@ -876,10 +882,12 @@ def batch_create_cases(library_id):
             tapd_story_url=case_data.get('tapd_story_url', ''),
             tapd_story_title=case_data.get('tapd_story_title', ''),
             created_by=(case_data.get('created_by') or getattr(user, '_claw_name', None) or user.username),
+            updated_by=(case_data.get('created_by') or getattr(user, '_claw_name', None) or user.username),
         )
         db.session.add(case)
         created_cases.append(case)
 
+    library.updated_by = _operator()
     db.session.commit()
 
     return jsonify({
@@ -916,6 +924,7 @@ def batch_delete_cases(library_id):
         TestCase.id.in_(data['case_ids'])
     ).delete(synchronize_session=False)
 
+    library.updated_by = _operator()
     db.session.commit()
 
     return jsonify({'message': f'成功删除 {deleted_count} 个用例'})
@@ -1007,10 +1016,13 @@ def import_cases_yaml(library_id):
             content=content,
             mindmap_node_id=generate_mindmap_node_id(),
             tags=cd.get('tags', []),
+            created_by=_operator(),
+            updated_by=_operator(),
         )
         db.session.add(case)
         created.append(case)
 
+    library.updated_by = _operator()
     db.session.commit()
     return jsonify({'message': f'导入 {len(created)} 条用例', 'count': len(created)}), 201
 
@@ -1041,6 +1053,8 @@ def bind_case_tapd(library_id, case_id):
     if 'tapd_story_title' in data:
         case.tapd_story_title = data['tapd_story_title'] or ''
 
+    case.updated_by = _operator()
+    library.updated_by = _operator()
     db.session.commit()
     return jsonify(case.to_dict())
 
@@ -1087,7 +1101,9 @@ def batch_bind_tapd(library_id):
     for c in cases:
         c.tapd_story_url = tapd_url
         c.tapd_story_title = tapd_title
+        c.updated_by = _operator()
 
+    library.updated_by = _operator()
     db.session.commit()
     return jsonify({'message': f'已为 {len(cases)} 条用例绑定 TAPD 需求', 'count': len(cases)})
 
@@ -1455,6 +1471,28 @@ def _set_library_review_status(library, new_status, current_review_id=None):
         library.current_review_id = None
 
 
+def _sync_topic_review_round(review, new_round_status):
+    """从 testcases 侧操作审批时，反向同步关联课题的评审轮次状态。
+
+    当通过 testcases.html 直接审批/驳回 review 时，确保课题的最新
+    review round 状态也同步更新。
+    """
+    if not review.related_topic_id:
+        return
+    topic = Topic.query.get(review.related_topic_id)
+    if not topic:
+        return
+    # 更新最新轮次状态
+    latest_round = CaseReviewRound.query.filter_by(
+        topic_id=topic.id
+    ).order_by(CaseReviewRound.round_number.desc()).first()
+    if latest_round and latest_round.status == 'pending':
+        latest_round.status = new_round_status
+    # 如果是最终审批通过/驳回，也关闭课题评审状态
+    if new_round_status in ('approved', 'rejected'):
+        topic.review_status = 'closed'
+
+
 @api_bp.route('/testcase-libraries/<int:library_id>/reviews', methods=['GET'])
 def list_library_reviews(library_id):
     """列出某用例库的全部评审记录（含历史）。"""
@@ -1501,27 +1539,65 @@ def submit_library_review(library_id):
         }), 409
 
     data = request.get_json() or {}
+    op_name = _operator()
+    submit_note = (data.get('submit_note') or '').strip()
+    scope_summary = (data.get('scope_summary') or '').strip()[:500]
+
     review = TestCaseLibraryReview(
         library_id=library_id,
         status='submitted',
-        submitted_by=_operator(),
+        submitted_by=op_name,
         submitted_at=_now(),
-        submit_note=(data.get('submit_note') or '').strip(),
-        scope_summary=(data.get('scope_summary') or '').strip()[:500],
+        submit_note=submit_note,
+        scope_summary=scope_summary,
         invited_reviewers=data.get('invited_reviewers') or [],
         related_topic_id=data.get('related_topic_id'),
     )
     db.session.add(review)
     db.session.flush()
 
+    # --- 自动创建 case_review 课题（如果没有 related_topic_id）---
+    if not review.related_topic_id:
+        topic_title = '用例评审：%s' % (library.name or '用例库#%d' % library_id)
+        topic_content = submit_note or scope_summary or '发起用例库整库评审'
+        topic = Topic(
+            title=topic_title,
+            content=topic_content,
+            board='case_review',
+            author_claw_id=getattr(user, 'bound_claw_id', None),
+            author_user_id=getattr(user, 'id', None),
+            author_name=op_name,
+            review_library_id=library_id,
+            review_status='reviewing',
+        )
+        db.session.add(topic)
+        db.session.flush()
+        review.related_topic_id = topic.id
+
     _set_library_review_status(library, 'pending_review',
                                current_review_id=review.id)
+
+    # --- 自动创建评审轮次（CaseReviewRound），以支持评审评分 ---
+    if review.related_topic_id:
+        existing_max = db.session.query(
+            db.func.coalesce(db.func.max(CaseReviewRound.round_number), 0)
+        ).filter_by(topic_id=review.related_topic_id).scalar()
+        round_obj = CaseReviewRound(
+            topic_id=review.related_topic_id,
+            round_number=(existing_max or 0) + 1,
+            description=submit_note or scope_summary or '用例库评审',
+            status='pending',
+            submitted_by=op_name,
+        )
+        db.session.add(round_obj)
+
     db.session.commit()
 
     log_action('submit_review', 'test_case_library', library_id, library.name,
-               operator=_operator(),
-               detail=(f'review#{review.id} scope={review.scope_summary[:60]} '
-                       f'invited={len(review.invited_reviewers or [])}'))
+               operator=op_name,
+               detail=(f'review#{review.id} scope={scope_summary[:60]} '
+                       f'invited={len(review.invited_reviewers or [])} '
+                       f'topic={review.related_topic_id}'))
     return jsonify(review.to_dict()), 201
 
 
@@ -1550,6 +1626,7 @@ def approve_library_review(review_id):
     review.decided_at = _now()
     review.decision_note = (data.get('decision_note') or '').strip()
     _set_library_review_status(library, 'approved')
+    _sync_topic_review_round(review, 'approved')
     db.session.commit()
 
     log_action('approve_review', 'test_case_library', library.id, library.name,
@@ -1583,6 +1660,7 @@ def reject_library_review(review_id):
     review.decided_at = _now()
     review.decision_note = (data.get('decision_note') or '').strip()
     _set_library_review_status(library, 'rejected')
+    _sync_topic_review_round(review, 'rejected')
     db.session.commit()
 
     log_action('reject_review', 'test_case_library', library.id, library.name,
@@ -1641,3 +1719,86 @@ def get_library_review(review_id):
     data['library_name'] = library.name
     data['can_decide'] = _can_review_library(user, library)
     return jsonify(data)
+
+
+@api_bp.route('/testcase-libraries/reviews/<int:review_id>/close',
+              methods=['POST'])
+def close_library_review(review_id):
+    """关闭单条评审（关闭审核）。将该条 review 设为 closed，
+    库状态回退到上一个稳定态。"""
+    review = TestCaseLibraryReview.query.get_or_404(review_id)
+    library = TestCaseLibrary.query.get_or_404(review.library_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    if not _can_manage_library(user, library):
+        return jsonify({'error': '无权关闭该评审'}), 403
+    if review.status not in ('submitted',):
+        return jsonify({'error': '当前评审状态 %s 不可关闭' % review.status}), 400
+
+    review.status = 'closed'
+    review.decided_by = _operator()
+    review.decided_at = _now()
+
+    # 库状态回退
+    prev_approved = TestCaseLibraryReview.query.filter(
+        TestCaseLibraryReview.library_id == library.id,
+        TestCaseLibraryReview.status == 'approved',
+        TestCaseLibraryReview.id != review.id).first()
+    if prev_approved:
+        _set_library_review_status(library, 'approved')
+    else:
+        _set_library_review_status(library, 'draft')
+    db.session.commit()
+
+    log_action('close_review', 'test_case_library', library.id, library.name,
+               operator=_operator(),
+               detail='review#%d 关闭审核' % review.id)
+    return jsonify(review.to_dict())
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/close-review',
+              methods=['POST'])
+def close_library_review_topic(library_id):
+    """关闭整个评审课题：关闭当前进行中的 review 并关闭关联的课题。"""
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未登录'}), 401
+    if not _can_manage_library(user, library):
+        return jsonify({'error': '无权关闭评审'}), 403
+
+    # 关闭所有进行中的 review
+    open_reviews = TestCaseLibraryReview.query.filter_by(
+        library_id=library_id, status='submitted').all()
+    topic_ids = set()
+    for rv in open_reviews:
+        rv.status = 'closed'
+        rv.decided_by = _operator()
+        rv.decided_at = _now()
+        if rv.related_topic_id:
+            topic_ids.add(rv.related_topic_id)
+
+    # 关闭关联的课题（同时关闭 status 和 review_status）
+    for tid in topic_ids:
+        topic = Topic.query.get(tid)
+        if topic:
+            if topic.status != 'closed':
+                topic.status = 'closed'
+            if hasattr(topic, 'review_status') and topic.review_status != 'closed':
+                topic.review_status = 'closed'
+
+    # 库状态回退
+    prev_approved = TestCaseLibraryReview.query.filter_by(
+        library_id=library_id, status='approved').first()
+    if prev_approved:
+        _set_library_review_status(library, 'approved')
+    else:
+        _set_library_review_status(library, 'draft')
+    db.session.commit()
+
+    log_action('close_review_topic', 'test_case_library', library.id,
+               library.name, operator=_operator(),
+               detail='关闭整个评审课题 reviews=%d topics=%s' % (
+                   len(open_reviews), list(topic_ids)))
+    return jsonify({'message': '评审课题已关闭', 'closed_reviews': len(open_reviews)})
