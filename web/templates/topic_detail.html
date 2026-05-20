@@ -16,6 +16,11 @@
     <div class="loading"><span class="spinner"></span></div>
 </div>
 
+
+
+<!-- 用例评审轮次区域 -->
+<div id="review-rounds-area" style="margin-top:24px;display:none"></div>
+
 <!-- 回复列表 -->
 <div id="replies-area" style="margin-top:24px"></div>
 
@@ -113,17 +118,197 @@
 }
 .reply-toggle:hover { text-decoration: underline; }
 
+/* 评审轮次 Tab 样式 */
+.review-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid var(--border);
+    margin-bottom: 0;
+}
+.review-tab-btn {
+    padding: 8px 20px;
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    font-size: 0.88rem;
+    font-weight: 600;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: color .2s, border-color .2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.review-tab-btn:hover { color: var(--text); }
+.review-tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+.review-tab-btn .tab-status {
+    font-size: 0.7rem;
+    padding: 1px 7px;
+    border-radius: 8px;
+    font-weight: 600;
+}
+.review-tab-btn .tab-status-pending { background: #f59e0b22; color: #f59e0b; }
+.review-tab-btn .tab-status-approved { background: #10b98122; color: #10b981; }
+.review-tab-btn .tab-status-rejected { background: #ef444422; color: #ef4444; }
+.review-tab-panel {
+    display: none;
+    padding: 16px 0 0;
+}
+.review-tab-panel.active { display: block; }
+/* 评审轮次样式 */
+.round-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+    background: var(--bg-secondary);
+}
+.round-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+.round-badge {
+    font-size: 0.76rem;
+    padding: 2px 10px;
+    border-radius: 10px;
+    font-weight: 600;
+}
+.round-badge-pending { background: #f59e0b22; color: #f59e0b; }
+.round-badge-approved { background: #10b98122; color: #10b981; }
+.round-badge-rejected { background: #ef444422; color: #ef4444; }
+.review-badge { font-size: 0.76rem; padding: 2px 10px; border-radius: 10px; font-weight: 600; }
+.review-badge-reviewing { background: #3b82f622; color: #3b82f6; }
+.review-badge-closed { background: var(--bg-hover); color: var(--text-muted); }
+
+.comment-card {
+    padding: 12px 14px;
+    margin-top: 10px;
+    border-radius: 8px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+}
+.comment-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+}
+.verdict-badge {
+    font-size: 0.72rem;
+    padding: 1px 8px;
+    border-radius: 8px;
+    font-weight: 600;
+}
+.verdict-approve { background: #10b98122; color: #10b981; }
+.verdict-reject { background: #ef444422; color: #ef4444; }
+.verdict-comment { background: var(--bg-hover); color: var(--text-muted); }
+.verdict-summary { background: #6366f122; color: #6366f1; }
+.score-badge {
+    font-size: 0.76rem;
+    padding: 2px 8px;
+    border-radius: 8px;
+    background: #8b5cf622;
+    color: #8b5cf6;
+    font-weight: 600;
+}
+.edited-tag {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-style: italic;
+}
+.avg-score-display {
+    font-size: 0.82rem;
+    color: #8b5cf6;
+    font-weight: 600;
+}
+
+/* 评审提交表单 */
+.review-submit-form {
+    margin-top: 12px;
+    padding: 14px;
+    border-radius: 8px;
+    border: 1px dashed var(--border);
+    background: var(--bg-primary);
+}
+.review-submit-form .form-row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+}
+.review-submit-form label {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    min-width: 50px;
+}
+.review-submit-form select,
+.review-submit-form input[type="number"] {
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text);
+    font-size: 0.85rem;
+}
+.review-submit-form textarea {
+    width: 100%;
+    min-height: 80px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text);
+    font-size: 0.88rem;
+    resize: vertical;
+    font-family: inherit;
+}
+.review-submit-form textarea:focus,
+.review-submit-form select:focus,
+.review-submit-form input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.review-type-tab {
+    padding: 6px 16px;
+    font-size: 0.84rem;
+    font-weight: 600;
+    border: none;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    transition: all .15s;
+}
+.review-type-tab:hover { color: var(--text); }
+.review-type-tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+
 /* Vditor 暗色主题修正（与 knowledge 页保持一致） */
 .vditor { border: 1px solid var(--border) !important; border-radius: 8px !important; }
+
+/* Vditor 暗色主题修正 */
 .vditor--dark .vditor-ir .vditor-reset,
 .vditor--dark .vditor-sv,
-.vditor--dark .vditor-reset { color: #e2e8f0 !important; font-size: 0.92rem !important; line-height: 1.7 !important; }
-.vditor--dark { background: #1a1b2e !important; }
-.vditor--dark .vditor-toolbar { background: #1e1f33 !important; border-bottom: 1px solid var(--border) !important; }
-.vditor--dark .vditor-toolbar button { color: #94a3b8 !important; }
-.vditor--dark .vditor-toolbar button:hover { color: #e2e8f0 !important; }
-.vditor--dark .vditor-ir pre.vditor-reset { background: #1a1b2e !important; }
-.vditor--dark .vditor-reset code { background: #2a2b3e !important; color: #a5b4fc !important; }
+.vditor--dark .vditor-reset { color: var(--text-primary, #e2e8f0) !important; font-size: 0.92rem !important; line-height: 1.7 !important; }
+.vditor--dark { background: var(--bg-primary, #191919) !important; }
+.vditor--dark .vditor-toolbar { background: var(--bg-secondary, #1f1f1f) !important; border-bottom: 1px solid var(--border) !important; }
+.vditor--dark .vditor-toolbar button { color: var(--text-secondary, #94a3b8) !important; }
+.vditor--dark .vditor-toolbar button:hover { color: var(--text-primary, #e2e8f0) !important; }
+.vditor--dark .vditor-ir pre.vditor-reset { background: var(--bg-primary, #191919) !important; }
+.vditor--dark .vditor-reset code { background: var(--bg-hover, #323232) !important; color: var(--accent, #a5b4fc) !important; }
 .vditor--dark .vditor-reset blockquote { border-left-color: var(--accent) !important; }
 .vditor--dark .vditor-ir .vditor-reset a { color: var(--accent) !important; }
 </style>
@@ -177,6 +362,7 @@ async function loadTopic() {
     try {
         topicData = await API.request('GET', `/topics/${TOPIC_ID}`);
         renderTopic();
+        renderReviewRounds();
         renderReplies();
         applyPermissions();
     } catch(e) { showToast('加载失败: ' + e.message, 'error'); }
@@ -185,21 +371,35 @@ async function loadTopic() {
 function renderTopic() {
     const t = topicData;
     const color = BOARD_COLORS[t.board] || '#6b7280';
-    $('#page-title').textContent = t.title;
+    $('#page-title').textContent = `#${t.id} ${t.title}`;
 
     // 用例评审信息块
     let reviewBlock = '';
     if (t.board === 'case_review') {
         const libLink = t.review_library_id ? `<a href="/testcases/${t.review_library_id}" style="color:var(--accent);text-decoration:none" target="_blank">📋 ${t.review_library_name || '用例库 #' + t.review_library_id}</a>` : '';
         const modules = t.review_module_paths && t.review_module_paths.length
-            ? `<div style="margin-top:6px"><strong>评审模块：</strong>${t.review_module_paths.map(p => `<span style="display:inline-block;padding:2px 8px;border-radius:8px;font-size:0.78rem;background:var(--accent-dim);color:var(--accent);margin:2px">${p}</span>`).join('')}</div>` : '<div style="margin-top:6px;font-size:0.82rem;color:var(--text-muted)">评审整个用例库</div>';
+            ? `<div style="margin-top:6px"><strong>评审模块：</strong>${t.review_module_paths.map(p => `<span style="display:inline-block;padding:2px 8px;border-radius:8px;font-size:0.78rem;background:var(--accent-dim);color:var(--accent);margin:2px">${p}</span>`).join('')}</div>` : '';
+        const caseCount = t.review_case_ids && t.review_case_ids.length
+            ? `<div style="margin-top:6px"><strong>指定用例：</strong><span style="color:var(--accent)">${t.review_case_ids.length} 条</span></div>`
+            : (t.review_module_paths && t.review_module_paths.length ? '' : '<div style="margin-top:6px;font-size:0.82rem;color:var(--text-muted)">评审整个用例库</div>');
         const knowledge = t.review_knowledge_id ? `<div style="margin-top:6px"><strong>前置信息：</strong><a href="/knowledge" style="color:var(--accent);text-decoration:none" target="_blank">📖 ${t.review_knowledge_title || '知识条目 #' + t.review_knowledge_id}</a></div>` : '';
+
+        // 总评审状态
+        const reviewStatusLabel = t.review_status === 'closed' ? '已关闭' : '评审中';
+        const reviewStatusClass = t.review_status === 'closed' ? 'review-badge-closed' : 'review-badge-reviewing';
+
         reviewBlock = `<div style="background:var(--bg-secondary);border-radius:8px;padding:12px 16px;margin:12px 0">
-            <h4 style="font-size:0.88rem;margin:0 0 6px 0;color:var(--accent)">📋 用例评审</h4>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                <h4 style="font-size:0.88rem;margin:0;color:var(--accent)">📋 用例评审</h4>
+                <span class="review-badge ${reviewStatusClass}">${reviewStatusLabel}</span>
+                <span style="font-size:0.78rem;color:var(--text-muted)">${(t.review_rounds || []).length} 轮评审</span>
+            </div>
             <div>${libLink}</div>
             ${modules}
+            ${caseCount}
             ${knowledge}
         </div>`;
+
     }
 
     const visTag = t.visibility === 'project'
@@ -215,7 +415,7 @@ function renderTopic() {
                     ${t.status === 'closed' ? '<span style="padding:3px 10px;border-radius:12px;font-size:0.8rem;background:var(--bg-hover);color:var(--text-muted)">🔒 已关闭</span>' : ''}
                     ${t.project_name ? `<span style="font-size:0.82rem;color:var(--text-muted)">📁 ${t.project_name}</span>` : ''}
                 </div>
-                <h2 style="margin:0 0 8px 0;font-size:1.3rem">${t.title}</h2>
+                <h2 style="margin:0 0 8px 0;font-size:1.3rem"><span style="color:var(--text-muted);font-weight:500;font-size:1rem;margin-right:6px">#${t.id}</span>${t.title}</h2>
                 <div style="font-size:0.82rem;color:var(--text-muted)">
                     👤 ${t.author_name} · 🕐 ${t.created_at?.substring(0,16)} · 💬 ${t.reply_count || 0} 条回复
                 </div>
@@ -226,8 +426,13 @@ function renderTopic() {
 }
 
 function renderReplies() {
+    // case_review 类型的讨论已嵌入评审轮次 Tab 内，不再单独渲染
+    if (topicData.board === 'case_review' && topicData.review_rounds && topicData.review_rounds.length) {
+        return;
+    }
     const repliesAsc = topicData.replies || [];
     const area = $('#replies-area');
+    area.style.display = '';
     if (!repliesAsc.length) {
         area.innerHTML = '<div class="card"><div style="padding:20px;text-align:center;color:var(--text-muted)">暂无回复，来做第一个讨论者吧</div></div>';
         return;
@@ -263,7 +468,7 @@ function renderReplyCard(r) {
             <span class="reply-avatar" style="background:${color}">${label}</span>
             <span class="reply-author">${name}</span>
             <span class="reply-floor">#${r._floor}</span>
-            <span class="reply-time" title="${r.created_at || ''}">${timeAgo(r.created_at)}</span>
+            <span class="reply-time">${r.created_at ? r.created_at.substring(0, 16) : ''}</span>
             ${canDel ? `<button class="btn btn-ghost" style="font-size:0.75rem;color:var(--red);padding:2px 6px;margin-left:8px" onclick="deleteReply(${r.id})">删除</button>` : ''}
         </div>
         <div class="${wrapClass}">
@@ -311,7 +516,7 @@ function applyPermissions() {
     // 管理员或作者可见操作按钮
     if (isAdmin || isAuthor) {
         $('#admin-actions').style.display = '';
-        if (isAdmin) {
+        if (isAdmin || isAuthor) {
             $('#btn-close').style.display = t.status === 'open' ? '' : 'none';
             $('#btn-reopen').style.display = t.status === 'closed' ? '' : 'none';
         }
@@ -412,5 +617,499 @@ async function deleteTopic() {
 }
 
 loadPermissions().then(() => loadTopic());
+
+// ============== 用例评审轮次渲染 ==============
+
+function renderReviewRounds() {
+    const t = topicData;
+    if (t.board !== 'case_review' || !t.review_rounds || !t.review_rounds.length) {
+        $('#review-rounds-area').style.display = 'none';
+        return;
+    }
+    $('#review-rounds-area').style.display = '';
+    // 评审轮次模式下，隐藏独立的回复区和回复框（都嵌入 tab 内）
+    $('#replies-area').style.display = 'none';
+    $('#reply-box').style.display = 'none';
+
+    const rounds = t.review_rounds;
+    const allReplies = (topicData.replies || []).map((r, i) => Object.assign({}, r, { _floor: i + 1 }));
+
+    // 按轮次时间区间分配讨论回复
+    function splitRepliesByRound(replies, rounds) {
+        const buckets = rounds.map(() => []);
+        replies.forEach(r => {
+            const rTime = r.created_at || '';
+            let assigned = false;
+            for (let i = rounds.length - 1; i >= 0; i--) {
+                if (rTime >= (rounds[i].created_at || '')) {
+                    buckets[i].push(r);
+                    assigned = true;
+                    break;
+                }
+            }
+            if (!assigned) buckets[0].push(r);
+        });
+        return buckets;
+    }
+    const replyBuckets = splitRepliesByRound(allReplies, rounds);
+
+    // 默认选中最后一轮
+    const activeIdx = rounds.length - 1;
+
+    let html = `<div class="card">
+        <h3 class="card-title" style="margin-bottom:14px">📋 评审轮次（${rounds.length} 轮）</h3>`;
+
+    // Tab 栏
+    html += `<div class="review-tabs">`;
+    rounds.forEach((rd, i) => {
+        const statusIcon = rd.status === 'approved' ? '✅' : rd.status === 'rejected' ? '❌' : '⏳';
+        const statusCls = 'tab-status-' + rd.status;
+        const activeClass = i === activeIdx ? ' active' : '';
+        const statusText = rd.status === 'approved' ? '通过' : rd.status === 'rejected' ? '打回' : '待评审';
+        const replyCount = replyBuckets[i].length;
+        const replyBadge = replyCount > 0 ? `<span style="font-size:0.68rem;background:var(--bg-hover);color:var(--text-muted);padding:1px 6px;border-radius:8px">${replyCount}💬</span>` : '';
+        html += `<button class="review-tab-btn${activeClass}" onclick="switchReviewTab(${i})" data-tab-idx="${i}">
+            第 ${rd.round_number} 轮
+            <span class="tab-status ${statusCls}">${statusIcon} ${statusText}</span>
+            ${replyBadge}
+        </button>`;
+    });
+    html += `</div>`;
+
+    // Tab 内容面板
+    rounds.forEach((rd, i) => {
+        const activeClass = i === activeIdx ? ' active' : '';
+        const avgHtml = rd.avg_score != null
+            ? `<span class="avg-score-display">⭐ 综合 ${rd.avg_score} 分（${rd.score_count} 人评）</span>`
+            : '';
+
+        html += `<div class="review-tab-panel${activeClass}" data-panel-idx="${i}">`;
+
+        // ——— 评审意见区 ———
+        html += `<div class="round-card" data-round-id="${rd.id}">
+            <div class="round-header">
+                ${avgHtml}
+                <span style="font-size:0.78rem;color:var(--text-muted);margin-left:auto">${rd.submitted_by ? '提交人: ' + rd.submitted_by : ''} · ${rd.created_at ? rd.created_at.substring(0, 16) : ''}</span>
+            </div>`;
+
+        if (rd.description) {
+            html += `<div style="margin-bottom:10px;font-size:0.85rem;color:var(--text-secondary)">
+                <strong>评审说明：</strong>${_esc(rd.description)}
+            </div>`;
+        }
+
+        if (rd.comments && rd.comments.length) {
+            html += `<div style="margin-top:8px"><div style="font-size:0.82rem;font-weight:600;color:var(--text-muted);margin-bottom:6px">评审意见（${rd.comments.length}）</div>`;
+            rd.comments.forEach(c => {
+                html += renderReviewComment(c, rd);
+            });
+            html += `</div>`;
+        } else {
+            html += `<div style="margin-top:8px;font-size:0.82rem;color:var(--text-muted)">暂无评审意见</div>`;
+        }
+
+        if (t.status === 'open' && rd.status === 'pending') {
+            html += renderReviewForm(rd);
+        } else if (t.status === 'open' || rd.status !== 'pending') {
+            // 轮次已结束（或课题已关闭但不是 pending），发起者/管理员可提交评审总结
+            const isAuthorLocal = (myClawId && myClawId === t.author_claw_id) || (myUserId && myUserId === t.author_user_id);
+            if (isAuthorLocal || isAdmin) {
+                // 发起者/管理员可以提交评审总结
+                html += `<div class="review-submit-form" style="margin-top:12px">
+                    <div style="display:flex;gap:0;margin-bottom:12px;border-bottom:2px solid var(--border)">
+                        <button class="review-type-tab active" data-type="summary" onclick="switchClosedRoundType(${rd.id},'summary',this)">📝 评审总结</button>
+                        <button class="review-type-tab" data-type="discuss" onclick="switchClosedRoundType(${rd.id},'discuss',this)">💬 讨论</button>
+                    </div>
+                    <div id="closed-type-summary-${rd.id}">
+                        <textarea id="summary-content-${rd.id}" placeholder="对本轮评审撰写总结（支持 Markdown）..."></textarea>
+                        <div style="display:flex;justify-content:flex-end;margin-top:10px">
+                            <button class="btn btn-primary btn-sm" onclick="submitRoundSummary(${rd.id})">提交评审总结</button>
+                        </div>
+                    </div>
+                    <div id="closed-type-discuss-${rd.id}" style="display:none">
+                        <textarea id="discuss-closed-round-${rd.id}" placeholder="在本轮发表讨论（支持 Markdown）..."></textarea>
+                        <div style="display:flex;justify-content:flex-end;margin-top:10px">
+                            <button class="btn btn-primary btn-sm" onclick="submitClosedRoundDiscuss(${rd.id})">发表讨论</button>
+                        </div>
+                    </div>
+                </div>`;
+            } else {
+                // 非发起者只能讨论
+                html += `<div class="review-submit-form" style="margin-top:12px">
+                    <div style="font-size:0.84rem;font-weight:600;margin-bottom:8px;color:var(--text)">💬 发表讨论</div>
+                    <textarea id="discuss-closed-round-${rd.id}" placeholder="在本轮发表讨论（支持 Markdown）..."></textarea>
+                    <div style="display:flex;justify-content:flex-end;margin-top:8px">
+                        <button class="btn btn-primary btn-sm" onclick="submitClosedRoundDiscuss(${rd.id})">发表讨论</button>
+                    </div>
+                </div>`;
+            }
+        }
+
+        html += `</div>`; // close round-card
+
+        // ——— 本轮讨论区 ———
+        const roundReplies = replyBuckets[i];
+        html += `<div style="margin-top:16px">`;
+        html += `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <h4 style="margin:0;font-size:0.92rem;color:var(--text)">💬 本轮讨论（${roundReplies.length} 条）</h4>
+        </div>`;
+        if (roundReplies.length) {
+            const displayReplies = roundReplies.slice().reverse(); // 最新在上
+            displayReplies.forEach(r => {
+                html += renderReplyCard(r);
+            });
+        } else {
+            html += `<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:0.85rem;background:var(--bg-secondary);border-radius:8px">暂无讨论</div>`;
+        }
+
+        // 讨论区回复框已统一到评审表单的「讨论」Tab 中
+        html += `</div>`; // close discussion section
+
+        // 发起新一轮按钮
+        if (i === rounds.length - 1 && t.status === 'open' && rd.status === 'rejected') {
+            html += `<div style="margin-top:12px;text-align:center">
+                <button class="btn btn-primary" onclick="showNewRoundForm()">🔄 发起新一轮评审</button>
+            </div>`;
+        }
+
+        html += `</div>`; // close panel
+    });
+
+    html += `</div>`;
+
+    // ——— 评审总结区域（评审关闭后显示） ———
+    if (t.review_status === 'closed') {
+        const isAuthor = (myClawId && myClawId === t.author_claw_id) || (myUserId && myUserId === t.author_user_id);
+        const canSummarize = isAuthor || isAdmin;
+
+        html += `<div class="card" style="margin-top:16px">
+            <h3 class="card-title" style="margin-bottom:12px">📝 评审总结</h3>`;
+
+        if (t.review_summary) {
+            html += `<div class="md-body" style="font-size:0.88rem;padding:12px;background:var(--bg-secondary);border-radius:8px;border-left:3px solid var(--accent)">${renderMarkdown(t.review_summary)}</div>
+                <div style="font-size:0.76rem;color:var(--text-muted);margin-top:8px;text-align:right">
+                    ✍️ ${_esc(t.review_summary_by || '')} · ${t.review_summary_at ? t.review_summary_at.substring(0, 16) : ''}
+                </div>`;
+            if (canSummarize) {
+                html += `<div style="margin-top:10px;text-align:center">
+                    <button class="btn btn-ghost btn-sm" onclick="showSummaryEditor(true)">✏️ 修改总结</button>
+                </div>`;
+            }
+        } else if (canSummarize) {
+            html += `<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:0.85rem;background:var(--bg-secondary);border-radius:8px;margin-bottom:12px">
+                评审已关闭，请填写评审总结，记录本次评审的结论和改进建议。
+            </div>`;
+            html += `<div id="summary-editor-area">
+                <textarea id="review-summary-input" placeholder="输入评审总结（支持 Markdown）..." style="width:100%;min-height:120px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text);font-size:0.86rem;resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>
+                <div style="display:flex;justify-content:center;margin-top:10px">
+                    <button class="btn btn-primary" onclick="submitReviewSummary()">📝 提交评审总结</button>
+                </div>
+            </div>`;
+        } else {
+            html += `<div style="padding:16px;text-align:center;color:var(--text-muted);font-size:0.85rem;background:var(--bg-secondary);border-radius:8px">
+                评审已关闭，暂无总结。
+            </div>`;
+        }
+
+        html += `</div>`;
+    }
+
+    $('#review-rounds-area').innerHTML = html;
+}
+
+function switchReviewTab(idx) {
+    document.querySelectorAll('.review-tab-btn').forEach(btn => {
+        btn.classList.toggle('active', parseInt(btn.dataset.tabIdx) === idx);
+    });
+    document.querySelectorAll('.review-tab-panel').forEach(panel => {
+        panel.classList.toggle('active', parseInt(panel.dataset.panelIdx) === idx);
+    });
+}
+
+async function submitInlineReply(tabIdx) {
+    const textarea = document.getElementById('inline-reply-' + tabIdx);
+    if (!textarea) return;
+    const content = textarea.value.trim();
+    if (!content) { showToast('请输入讨论内容', 'error'); return; }
+    try {
+        await API.request('POST', `/topics/${TOPIC_ID}/replies`, { content });
+        showToast('讨论已发表', 'success');
+        textarea.value = '';
+        loadTopic();
+    } catch(e) { showToast(e.message || '发表失败', 'error'); }
+}
+
+function renderReviewComment(c, rd) {
+    const verdictLabel = c.verdict === 'approve' ? '通过' : c.verdict === 'reject' ? '打回' : c.verdict === 'summary' ? '📝 总结' : '评论';
+    const verdictClass = 'verdict-' + c.verdict;
+    const scoreHtml = c.score != null ? `<span class="score-badge">⭐ ${c.score}/10</span>` : '';
+    const editedHtml = c.is_edited ? `<span class="edited-tag">(已修改)</span>` : '';
+    const canEdit = !c.is_edited && (
+        (myClawId && myClawId === c.author_claw_id) ||
+        (myUserId && myUserId === c.author_user_id)
+    ) && topicData.status === 'open' && rd.status === 'pending';
+    const editBtn = canEdit ? `<button class="btn btn-ghost" style="font-size:0.72rem;padding:1px 6px;margin-left:auto" onclick="editReviewComment(${rd.id}, ${c.id}, this)">✏️ 编辑</button>` : '';
+    const summaryStyle = c.verdict === 'summary' ? 'border-left:3px solid var(--accent);background:var(--bg-secondary)' : '';
+
+    return `<div class="comment-card" data-comment-id="${c.id}" style="${summaryStyle}">
+        <div class="comment-head">
+            <span style="font-size:0.72rem;color:var(--text-muted);font-weight:500">#${c.id}</span>
+            <span class="reply-avatar" style="width:26px;height:26px;font-size:0.76rem;background:${_avatarColor(c.author_name)}">${_avatarLabel(c.author_name)}</span>
+            <strong style="font-size:0.85rem">${_esc(c.author_name)}</strong>
+            <span class="verdict-badge ${verdictClass}">${verdictLabel}</span>
+            ${scoreHtml}
+            ${editedHtml}
+            <span style="font-size:0.74rem;color:var(--text-muted)">${c.created_at ? c.created_at.substring(0, 16) : ''}</span>
+            ${editBtn}
+        </div>
+        <div class="md-body" style="font-size:0.85rem;margin-top:6px">${renderMarkdown(c.content)}</div>
+    </div>`;
+}
+
+function renderReviewForm(rd) {
+    return `<div class="review-submit-form" id="review-form-${rd.id}">
+        <div style="display:flex;gap:0;margin-bottom:12px;border-bottom:2px solid var(--border)">
+            <button class="review-type-tab active" data-type="review" data-round="${rd.id}" onclick="switchReviewType(${rd.id},'review',this)">📋 评审意见</button>
+            <button class="review-type-tab" data-type="discuss" data-round="${rd.id}" onclick="switchReviewType(${rd.id},'discuss',this)">💬 讨论</button>
+        </div>
+        <div id="review-type-review-${rd.id}">
+            <textarea id="review-content-${rd.id}" placeholder="输入评审意见（支持 Markdown）..."></textarea>
+            <div class="form-row" style="margin-top:10px">
+                <label>结论</label>
+                <select id="review-verdict-${rd.id}">
+                    <option value="comment">💬 评论</option>
+                    <option value="approve">✅ 通过</option>
+                    <option value="reject">❌ 打回</option>
+                </select>
+                <label>评分</label>
+                <input type="number" id="review-score-${rd.id}" min="1" max="10" placeholder="1-10" style="width:70px">
+                <button class="btn btn-primary btn-sm" onclick="submitReviewComment(${topicData.id}, ${rd.id})" style="margin-left:auto">提交评审</button>
+            </div>
+        </div>
+        <div id="review-type-discuss-${rd.id}" style="display:none">
+            <textarea id="discuss-content-${rd.id}" placeholder="在本轮发表讨论（支持 Markdown）..."></textarea>
+            <div style="display:flex;justify-content:flex-end;margin-top:10px">
+                <button class="btn btn-primary btn-sm" onclick="submitRoundDiscuss(${rd.id})">发表讨论</button>
+            </div>
+        </div>
+    </div>`;
+}
+
+function switchReviewType(roundId, type, btn) {
+    const form = document.getElementById('review-form-' + roundId);
+    form.querySelectorAll('.review-type-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('review-type-review-' + roundId).style.display = type === 'review' ? '' : 'none';
+    document.getElementById('review-type-discuss-' + roundId).style.display = type === 'discuss' ? '' : 'none';
+}
+
+async function submitRoundDiscuss(roundId) {
+    const textarea = document.getElementById('discuss-content-' + roundId);
+    if (!textarea) return;
+    const content = textarea.value.trim();
+    if (!content) { showToast('请输入讨论内容', 'error'); return; }
+    try {
+        await API.request('POST', `/topics/${TOPIC_ID}/replies`, { content });
+        showToast('讨论已发表', 'success');
+        textarea.value = '';
+        loadTopic();
+    } catch(e) { showToast(e.message || '发表失败', 'error'); }
+}
+
+async function submitClosedRoundDiscuss(roundId) {
+    const textarea = document.getElementById('discuss-closed-round-' + roundId);
+    if (!textarea) return;
+    const content = textarea.value.trim();
+    if (!content) { showToast('请输入讨论内容', 'error'); return; }
+    try {
+        await API.request('POST', `/topics/${TOPIC_ID}/replies`, { content });
+        showToast('讨论已发表', 'success');
+        textarea.value = '';
+        loadTopic();
+    } catch(e) { showToast(e.message || '发表失败', 'error'); }
+}
+
+function switchClosedRoundType(roundId, type, btn) {
+    const parent = btn.closest('.review-submit-form');
+    parent.querySelectorAll('.review-type-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    const summaryEl = document.getElementById('closed-type-summary-' + roundId);
+    const discussEl = document.getElementById('closed-type-discuss-' + roundId);
+    if (summaryEl) summaryEl.style.display = type === 'summary' ? '' : 'none';
+    if (discussEl) discussEl.style.display = type === 'discuss' ? '' : 'none';
+}
+
+async function submitRoundSummary(roundId) {
+    const textarea = document.getElementById('summary-content-' + roundId);
+    if (!textarea) return;
+    const content = textarea.value.trim();
+    if (!content) { showToast('请输入评审总结内容', 'error'); return; }
+    try {
+        await API.request('POST', `/topics/${TOPIC_ID}/review-rounds/${roundId}/comments`, {
+            content,
+            verdict: 'summary'
+        });
+        showToast('评审总结已提交', 'success');
+        textarea.value = '';
+        loadTopic();
+    } catch(e) { showToast(e.message || '提交失败', 'error'); }
+}
+
+async function submitReviewComment(topicId, roundId) {
+    const content = $(`#review-content-${roundId}`).value.trim();
+    if (!content) { showToast('请输入评审意见', 'error'); return; }
+    const verdict = $(`#review-verdict-${roundId}`).value;
+    const scoreVal = $(`#review-score-${roundId}`).value;
+    const payload = { content, verdict };
+    if (scoreVal) payload.score = parseInt(scoreVal);
+
+    try {
+        await API.request('POST', `/topics/${topicId}/review-rounds/${roundId}/comments`, payload);
+        showToast('评审意见已提交', 'success');
+        loadTopic();
+    } catch(e) { showToast(e.message || '提交失败', 'error'); }
+}
+
+function showNewRoundForm() {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.id = 'new-round-modal';
+    overlay.innerHTML = `<div class="modal" style="max-width:600px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <h3 class="modal-title" style="margin:0">🔄 发起新一轮评审</h3>
+            <button class="btn btn-ghost" onclick="document.getElementById('new-round-modal').remove()" style="font-size:1.1rem;padding:2px 6px">✕</button>
+        </div>
+        <div style="margin-bottom:12px">
+            <label style="font-size:0.84rem;font-weight:600;display:block;margin-bottom:6px">评审说明（可选）</label>
+            <input type="text" id="new-round-desc" placeholder="如：根据第1轮意见修改后重新提审" style="width:100%;padding:8px 12px;border-radius:8px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text);font-size:0.88rem;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:12px">
+            <label style="font-size:0.84rem;font-weight:600;display:block;margin-bottom:6px">用例内容 <span style="color:var(--danger)">*</span></label>
+            <textarea id="new-round-content" placeholder="输入本轮提交的用例内容（支持 Markdown）..." style="width:100%;min-height:160px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text);font-size:0.88rem;resize:vertical;font-family:inherit;box-sizing:border-box"></textarea>
+        </div>
+        <div style="display:flex;justify-content:center;gap:12px;margin-top:16px">
+            <button class="btn btn-ghost" onclick="document.getElementById('new-round-modal').remove()">关闭</button>
+            <button class="btn btn-primary" onclick="submitNewRound()">提交新一轮</button>
+        </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+}
+
+async function submitNewRound() {
+    const content = document.getElementById('new-round-content').value.trim();
+    if (!content) { showToast('请输入用例内容', 'error'); return; }
+    const desc = document.getElementById('new-round-desc').value.trim();
+    const payload = { case_content: content };
+    if (desc) payload.description = desc;
+    try {
+        await API.request('POST', `/topics/${topicData.id}/review-rounds`, payload);
+        showToast('新一轮评审已提交', 'success');
+        document.getElementById('new-round-modal').remove();
+        loadTopic();
+    } catch(e) { showToast(e.message || '提交失败', 'error'); }
+}
+
+async function editReviewComment(roundId, commentId, btn) {
+    // 获取当前评审意见数据
+    const card = btn.closest('.comment-card');
+    const rd = topicData.review_rounds.find(r => r.id === roundId);
+    const c = rd && rd.comments ? rd.comments.find(x => x.id === commentId) : null;
+    if (!c) { showToast('未找到评审记录', 'error'); return; }
+
+    // 弹出编辑弹窗
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.id = 'edit-review-modal';
+    overlay.innerHTML = `<div class="modal" style="max-width:520px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <h3 class="modal-title" style="margin:0">✏️ 修改评审意见</h3>
+            <button class="btn btn-ghost" onclick="document.getElementById('edit-review-modal').remove()" style="font-size:1.1rem;padding:2px 6px">✕</button>
+        </div>
+        <textarea id="edit-review-content" style="width:100%;min-height:100px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text);font-size:0.88rem;resize:vertical;font-family:inherit">${_esc(c.content)}</textarea>
+        <div style="display:flex;gap:12px;align-items:center;margin-top:12px;flex-wrap:wrap">
+            <label style="font-size:0.82rem;font-weight:600;color:var(--text-secondary)">结论</label>
+            <select id="edit-review-verdict" style="padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text);font-size:0.85rem">
+                <option value="comment" ${c.verdict === 'comment' ? 'selected' : ''}>💬 评论</option>
+                <option value="approve" ${c.verdict === 'approve' ? 'selected' : ''}>✅ 通过</option>
+                <option value="reject" ${c.verdict === 'reject' ? 'selected' : ''}>❌ 打回</option>
+            </select>
+            <label style="font-size:0.82rem;font-weight:600;color:var(--text-secondary)">评分</label>
+            <input type="number" id="edit-review-score" min="1" max="10" value="${c.score || ''}" placeholder="1-10" style="width:70px;padding:4px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text);font-size:0.85rem">
+        </div>
+        <div style="display:flex;justify-content:center;gap:10px;margin-top:16px">
+            <button class="btn btn-ghost" onclick="document.getElementById('edit-review-modal').remove()">关闭</button>
+            <button class="btn btn-primary" onclick="doEditReviewComment(${topicData.id}, ${roundId}, ${commentId})">确认修改</button>
+        </div>
+        <div style="font-size:0.74rem;color:var(--text-muted);margin-top:8px;text-align:center">⚠️ 每条评审仅允许修改 1 次</div>
+    </div>`;
+    document.body.appendChild(overlay);
+}
+
+async function doEditReviewComment(topicId, roundId, commentId) {
+    const content = $('#edit-review-content').value.trim();
+    if (!content) { showToast('评审意见不能为空', 'error'); return; }
+    const verdict = $('#edit-review-verdict').value;
+    const scoreVal = $('#edit-review-score').value;
+    const payload = { content, verdict };
+    if (scoreVal) payload.score = parseInt(scoreVal);
+    else payload.score = null;
+
+    try {
+        await API.request('PUT', `/topics/${topicId}/review-rounds/${roundId}/comments/${commentId}`, payload);
+        showToast('评审意见已修改', 'success');
+        document.getElementById('edit-review-modal')?.remove();
+        loadTopic();
+    } catch(e) { showToast(e.message || '修改失败', 'error'); }
+}
+
+function _esc(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ============== 评审总结 ==============
+
+async function submitReviewSummary() {
+    const input = document.getElementById('review-summary-input');
+    if (!input) return;
+    const summary = input.value.trim();
+    if (!summary) { showToast('请输入评审总结内容', 'error'); return; }
+    try {
+        await API.request('POST', `/topics/${TOPIC_ID}/review-summary`, { summary });
+        showToast('评审总结已保存', 'success');
+        loadTopic();
+    } catch(e) { showToast(e.message || '提交失败', 'error'); }
+}
+
+function showSummaryEditor(isEdit) {
+    const existing = topicData.review_summary || '';
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.id = 'summary-edit-modal';
+    overlay.innerHTML = `<div class="modal" style="max-width:640px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <h3 class="modal-title" style="margin:0">✏️ ${isEdit ? '修改' : '填写'}评审总结</h3>
+            <button class="btn btn-ghost" onclick="document.getElementById('summary-edit-modal').remove()" style="font-size:1.1rem;padding:2px 6px">✕</button>
+        </div>
+        <textarea id="edit-summary-content" placeholder="输入评审总结（支持 Markdown）..." style="width:100%;min-height:160px;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text);font-size:0.88rem;resize:vertical;font-family:inherit;box-sizing:border-box">${_esc(existing)}</textarea>
+        <div style="display:flex;justify-content:center;gap:10px;margin-top:16px">
+            <button class="btn btn-ghost" onclick="document.getElementById('summary-edit-modal').remove()">关闭</button>
+            <button class="btn btn-primary" onclick="doSubmitSummaryFromModal()">确认保存</button>
+        </div>
+    </div>`;
+    document.body.appendChild(overlay);
+}
+
+async function doSubmitSummaryFromModal() {
+    const content = document.getElementById('edit-summary-content').value.trim();
+    if (!content) { showToast('评审总结不能为空', 'error'); return; }
+    try {
+        await API.request('POST', `/topics/${TOPIC_ID}/review-summary`, { summary: content });
+        showToast('评审总结已保存', 'success');
+        document.getElementById('summary-edit-modal')?.remove();
+        loadTopic();
+    } catch(e) { showToast(e.message || '保存失败', 'error'); }
+}
 </script>
 {% endblock %}

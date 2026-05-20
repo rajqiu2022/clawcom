@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, session
+from flask import Blueprint, request, jsonify, session, g
 
 api_bp = Blueprint('api', __name__)
 
@@ -6,7 +6,9 @@ api_bp = Blueprint('api', __name__)
 PUBLIC_PATHS = [
     '/api/v1/auth/login',          # 登录
     '/api/v1/auth/register',       # 注册
+    '/api/v1/auth/woa-callback',   # WOA SSO 回调
     '/api/v1/system-changelog',    # 系统变更日志（公开）
+    '/api/v1/test-reports/shared/',  # 测试报告分享外链匿名只读（MEMORY #134）
 ]
 
 # Token 验证缓存（避免每次请求遍历所有 claw）
@@ -55,9 +57,12 @@ def require_auth():
             return None
 
     # OpenClaw 注册 bootstrap 链接需要在 Agent 尚未接入前可访问；
-    # bootstrap.sh 内部仍会校验 query token，registration-skill 只用于发给目标 Agent。
+    # bootstrap.sh / offline-install-bundle.sh 内部仍会校验 query token，
+    # registration-skill 只用于发给目标 Agent。
     if path.startswith('/api/v1/openclaws/') and (
-            path.endswith('/registration-skill') or path.endswith('/bootstrap.sh')):
+            path.endswith('/registration-skill')
+            or path.endswith('/bootstrap.sh')
+            or path.endswith('/offline-install-bundle.sh')):
         return None
 
     # Web session 登录
@@ -72,6 +77,8 @@ def require_auth():
         if token:
             claw = _verify_bearer_token(token)
             if claw:
+                # 缓存到 flask.g，下游模块直接读取，无需重复验证
+                g._auth_claw = claw
                 return None
             return jsonify({'error': 'Token 无效，请检查 Authorization 头'}), 401
 
@@ -79,7 +86,7 @@ def require_auth():
     return jsonify({'error': '未认证，请在 Header 中携带 Authorization: Bearer {TOKEN} 或先登录 Web'}), 401
 
 
-from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans, engineering, requirements, test_accounts, review_comments, wecom, agent_deployments  # noqa: F401
+from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans, engineering, requirements, test_accounts, review_comments, wecom, agent_deployments, agent_templates, shared_articles, test_reports  # noqa: F401
 
 # 注册 Agent Hub 通信中心蓝图
 api_bp.register_blueprint(agent_hub.agent_hub_bp, url_prefix='/agent-hub')

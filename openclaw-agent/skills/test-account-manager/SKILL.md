@@ -23,7 +23,7 @@
 ## Hub 地址
 
 ```
-Hub API: http://9.134.11.169:8088/api/v1
+Hub API: http://clawteam.woa.com:18800/api/v1
 认证:    Authorization: Bearer {HUB_API_TOKEN}
 ```
 
@@ -296,7 +296,7 @@ DELETE /api/v1/test-accounts/{ID}
 ### 普通 claw 单次任务领用
 
 ```bash
-HUB="http://9.134.11.169:8088/api/v1"
+HUB="http://clawteam.woa.com:18800/api/v1"
 TOKEN="<HUB_API_TOKEN>"
 
 # 1. 找一个空闲的 QQ 号

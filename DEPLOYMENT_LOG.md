@@ -273,7 +273,7 @@ Python 后定义的胜出，**line 103 永远不会被调用**，但保留在文
    - **新增 §5 企微通知最低规范**摘要：触发范围 / 最低内容 4 项 / 执行约束（先 Hub 闭环再企微）
    - **新增 §6 故障排查 mini 表**：7 个高频现象 + 排查/修法
    - 标题改为 `(sidecar-only v1.2)` 显式标版本
-   - 文档顶部链回 [Skill #135](http://9.134.11.169:8088/skills/135) 让 AI 能跳到完整规约
+   - 文档顶部链回 [Skill #135](http://clawteam.woa.com:18800/skills/135) 让 AI 能跳到完整规约
    - 步骤里把"清理旧 sse_client"提升为 §0.4 强约束（带 `manager-hub` 两种脚本名）
 3. 保留 `build_mcp_config_snippets`，因为 `?format=json` 接口仍要返回 `mcp_config_snippets` 字段（兼容历史 MCP host 接入需求）
 4. 已弃用参数（`mcp_entry / mcp_repo / mcp_tarball_url / mcp_install_dir`）保留在签名里加 `# noqa: ARG001` 注释，避免外部老调用方崩
@@ -649,7 +649,7 @@ SELECT LENGTH(template_content) FROM skills WHERE id=121;       -- 15002
 
 ### 部署摘要
 
-- **服务器**：`9.134.11.169:8088`
+- **服务器**：`clawteam.woa.com:18800`
 - **包**：`F:\Code\claw_team\_deploy_requirement_analysis.tgz`（10 个文件）
 - **脚本**：`_deploy_requirement_analysis/deploy.sh`
 - **备份目录**：`/opt/openclaw-web/_backup_requirement_20260422-080655/`
@@ -3038,13 +3038,13 @@ curl -fsSL http://<HUB>:8088/static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1
 `install_v2.sh` 的必填参数是：
 
 ```bash
-HUB_URL=http://9.134.11.169:8088 CLAW_ID=5 CLAW_TOKEN=xxxxx bash install_v2.sh
+HUB_URL=http://clawteam.woa.com:18800 CLAW_ID=5 CLAW_TOKEN=xxxxx bash install_v2.sh
 ```
 
 脚本第 25-27 行明确校验：
 
 ```bash
-: "${HUB_URL:?必须设置 HUB_URL，例如 http://9.134.11.169:8088}"
+: "${HUB_URL:?必须设置 HUB_URL，例如 http://clawteam.woa.com:18800}"
 : "${CLAW_ID:?必须设置 CLAW_ID，到 Hub Web 端注册 claw 后获得}"
 : "${CLAW_TOKEN:?必须设置 CLAW_TOKEN，注册 claw 时 Hub 返回的明文 token}"
 ```

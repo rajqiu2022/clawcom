@@ -354,7 +354,18 @@ async function loadTAPDConfig() {
     try {
         const cfg = await API.get('/tapd/config');
         if (cfg.configured) {
-            $('#tapd-status').innerHTML = '<span style="color:var(--green)">✅ 已连接</span>';
+            const user = cfg.api_user || '已保存';
+            const updated = cfg.updated_at ? ` · 更新于 ${String(cfg.updated_at).substring(0,16)}` : '';
+            $('#tapd-api-user').placeholder = `已保存：${user}，重新保存请输入完整账号`;
+            $('#tapd-api-password').placeholder = cfg.password_configured
+                ? '已保存，重新保存请输入完整 Token/Password'
+                : 'TAPD 应用 API Password';
+            $('#tapd-status').innerHTML =
+                `<span style="color:var(--green)">✅ 已生效</span>` +
+                `<span style="color:var(--text-muted)"> · 账号 ${user}${updated}</span>` +
+                `<div style="color:var(--text-muted);margin-top:4px">出于安全原因，Token/Password 不回显；如需更换，请重新输入完整账号和 Token 后保存。</div>`;
+        } else {
+            $('#tapd-status').innerHTML = '<span style="color:var(--text-muted)">未配置 TAPD 凭证</span>';
         }
     } catch (e) {}
 }

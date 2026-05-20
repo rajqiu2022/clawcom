@@ -1,3 +1,4 @@
+import os
 import uuid
 import logging
 from datetime import datetime, date, time
@@ -257,30 +258,9 @@ def _sync_sidecar_wecom_config(claw, actor_name):
 
 
 def require_claw_token(f):
-    """OpenClaw API Token 认证装饰器
-
-    用于 OpenClaw 自身调用的接口（heartbeat、report、config）。
-    优先验证 URL 中 claw_id 对应的 Token；
-    如果不匹配，回退遍历所有 OpenClawInstance 验证（支持 Token 与 claw_id 不一致的场景）。
-    """
-    @wraps(f)
-    def decorated(claw_id, *args, **kwargs):
-        claw = OpenClawInstance.query.get_or_404(claw_id)
-
-        auth_header = request.headers.get('Authorization', '')
-        if not auth_header.startswith('Bearer '):
-            return jsonify({'error': '缺少认证 Token'}), 401
-
-        token = auth_header[7:]  # 去掉 "Bearer "
-        # 优先匹配 claw_id 对应的 Token
-        if claw.verify_token(token):
-            return f(claw_id, claw=claw, *args, **kwargs)
-        # 回退：遍历所有非删除的 OpenClawInstance 验证 Token
-        for c in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
-            if c.verify_token(token):
-                return f(claw_id, claw=c, *args, **kwargs)
-        return jsonify({'error': 'Token 无效或不匹配'}), 403
-    return decorated
+    """OpenClaw API Token 认证装饰器 — 统一版本（防越权）"""
+    from app.api.auth_utils import require_claw_token as _unified
+    return _unified(f)
 
 
 @api_bp.route('/openclaws', methods=['GET'])
@@ -798,7 +778,10 @@ def get_registration_skill_for_claw(claw_id):
     claw = OpenClawInstance.query.get_or_404(claw_id)
     _ensure_sidecar_v2_enabled(claw)
     token = claw.get_token_plain() or ''
-    hub_url = 'http://9.134.11.169:8088'
+    # 历史教训 #126b：与 bootstrap.sh 接口保持一致，不用 request.host_url，强制走 env / 固定 fallback。
+    # 详见 get_bootstrap_script_for_claw 注释。
+    hub_url = (os.environ.get('HUB_PUBLIC_URL')
+               or 'https://clawteam.woa.com:18800').rstrip('/')
     project_name = claw.project.name if claw.project else (claw.project_name or '未指定')
 
     skill_links = [
@@ -887,7 +870,14 @@ def get_bootstrap_script_for_claw(claw_id):
             headers={'Cache-Control': 'no-store'},
         )
 
-    hub_url = 'http://9.134.11.169:8088'
+    # 历史教训 #126b：
+    # - 千万不能用 request.host_url！它随请求来源变（curl 127.0.0.1 时拿到 http://127.0.0.1:18800/，
+    #   浏览器走 NGN 时拿到 https://clawteam.woa.com/），结果发给 claw 全不通。
+    # - https://clawteam.woa.com (443) 在 testserver 上是 lampp/Apache 占的（SLB 默认 vhost 404 真凶），
+    #   不是 Hub 真身。Hub 真身只在 :18800（gunicorn）。
+    # - claw 实际可达的稳定 URL = http://clawteam.woa.com:18800（直连 Flask，绕开 Apache/SLB）。
+    hub_url = (os.environ.get('HUB_PUBLIC_URL')
+               or 'https://clawteam.woa.com:18800').rstrip('/')
     project_name = claw.project.name if claw.project else (claw.project_name or '未指定')
     script = build_bootstrap_script(
         hub_url=hub_url,
@@ -902,6 +892,127 @@ def get_bootstrap_script_for_claw(claw_id):
         mimetype='text/x-shellscript; charset=utf-8',
         headers={
             'Content-Disposition': f'inline; filename="openclaw-bootstrap-{claw.id}.sh"',
+            'Cache-Control': 'no-store',
+        },
+    )
+
+
+@api_bp.route('/openclaws/<int:claw_id>/offline-install-bundle.sh', methods=['GET'])
+def get_offline_install_bundle_for_claw(claw_id):
+    """生成 self-contained 离线安装脚本（绕过 NGN/SLB 限制场景）。
+
+    背景：`clawteam.woa.com` 走 NGN 网关；目标机器不在公司信任网段
+    （非 21.x.x.x / 10.x.x.x 等，如外网 / AI Sandbox / Mac 桌面 / 海外节点）时，
+    SLB 会把无 SSO cookie 的请求路由到默认 Apache 占位（server header
+    `Apache/2.4.37 (Unix) PHP/5.6.39`），返 404 Error 页。导致：
+      ① curl bootstrap.sh 拿到 404 错误页；
+      ② 即使脚本被复制过去，内部 `curl $HUB_URL/static/skills/...` 也 404。
+
+    本接口在浏览器（已认证）端被调用，返回 self-contained 脚本：
+      - bootstrap.sh / install_v2.sh / sidecar_v2.py / cleanup_v1.sh 四份资源 base64 内联
+      - 启动时自动改写 bootstrap.sh 里 3 处 curl 为 cp 本地文件
+      - 用户 scp 这一个文件到任何机器 bash 即可装好 sidecar
+    """
+    from flask import Response
+    import base64
+    from app.api.registration_bootstrap import build_bootstrap_script
+
+    claw = OpenClawInstance.query.get_or_404(claw_id)
+    token = (request.args.get('token') or request.args.get('claw_token')
+             or request.args.get('api_token') or '').strip()
+    user = _get_user()
+    token_ok = bool(token and claw.verify_token(token))
+    if not token_ok and not _can_own_claw(user, claw):
+        return Response('#!/usr/bin/env bash\necho "offline-bundle 鉴权失败" >&2\nexit 1\n',
+                        status=403, mimetype='text/x-shellscript; charset=utf-8')
+
+    _ensure_sidecar_v2_enabled(claw)
+    raw_token = token if token_ok else (claw.get_token_plain() or '')
+    if not raw_token:
+        return Response('#!/usr/bin/env bash\necho "该 OpenClaw 尚未生成 API Token" >&2\nexit 1\n',
+                        status=404, mimetype='text/x-shellscript; charset=utf-8')
+
+    hub_url = (os.environ.get('HUB_PUBLIC_URL')
+               or request.host_url.rstrip('/')
+               or 'https://clawteam.woa.com').rstrip('/')
+    project_name = claw.project.name if claw.project else (claw.project_name or '未指定')
+    bootstrap_sh = build_bootstrap_script(
+        hub_url=hub_url, claw_id=claw.id, claw_name=claw.name or '',
+        role=claw.role or 'test_member', project_name=project_name,
+        api_token=raw_token,
+    )
+
+    static_root = os.path.abspath(os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        '..', 'static', 'skills', 'hub-sse-sidecar-v2'))
+
+    def _read_or_empty(path):
+        try:
+            with open(path, 'rb') as f:
+                return f.read()
+        except (FileNotFoundError, OSError) as e:
+            logger.warning(f'[offline-bundle] 读取 {path} 失败: {e}')
+            return b''
+
+    install_v2_sh = _read_or_empty(os.path.join(static_root, 'install_v2.sh'))
+    sidecar_v2_py = _read_or_empty(os.path.join(static_root, 'scripts', 'sidecar_v2.py'))
+    cleanup_v1_sh = _read_or_empty(os.path.join(static_root, 'scripts', 'cleanup_v1.sh'))
+
+    if not install_v2_sh or not sidecar_v2_py:
+        return Response(
+            f'#!/usr/bin/env bash\necho "[ERROR] Hub 端缺失 v2 静态资源（{static_root}）" >&2\nexit 1\n',
+            status=500, mimetype='text/x-shellscript; charset=utf-8')
+
+    def _b64(data):
+        return base64.b64encode(data).decode('ascii')
+
+    bundle = '#!/usr/bin/env bash\n'
+    bundle += f'# OpenClaw 离线安装包 (claw_id={claw.id}, name={claw.name or ""})\n'
+    bundle += '# 适用：目标机器不在公司信任网段、无法 curl $HUB_URL/static/... 的场景。\n'
+    bundle += '#\n# 用法：\n'
+    bundle += f'#   scp openclaw-{claw.id}-offline-install.sh user@target:~/\n'
+    bundle += f'#   ssh user@target \'bash ~/openclaw-{claw.id}-offline-install.sh\'\n'
+    bundle += '#\n# 已内联 4 份资源（base64）：bootstrap.sh / install_v2.sh / sidecar_v2.py / cleanup_v1.sh\n'
+    bundle += 'set -euo pipefail\n\n'
+    bundle += f'WORK_DIR="$(mktemp -d -t openclaw-offline-{claw.id}-XXXXXX)"\n'
+    bundle += "trap 'rm -rf \"$WORK_DIR\"' EXIT\n"
+    bundle += 'mkdir -p "$WORK_DIR/scripts"\n\n'
+    bundle += 'echo "[offline-install] 解码内联资源 -> $WORK_DIR"\n'
+    bundle += "base64 -d > \"$WORK_DIR/bootstrap.sh\" <<'__BOOT_B64__'\n"
+    bundle += _b64(bootstrap_sh.encode('utf-8')) + '\n__BOOT_B64__\n'
+    bundle += "base64 -d > \"$WORK_DIR/install_v2.sh\" <<'__INST_B64__'\n"
+    bundle += _b64(install_v2_sh) + '\n__INST_B64__\n'
+    bundle += "base64 -d > \"$WORK_DIR/scripts/sidecar_v2.py\" <<'__SIDE_B64__'\n"
+    bundle += _b64(sidecar_v2_py) + '\n__SIDE_B64__\n'
+    bundle += "base64 -d > \"$WORK_DIR/scripts/cleanup_v1.sh\" <<'__CLEAN_B64__'\n"
+    bundle += _b64(cleanup_v1_sh or b'#!/usr/bin/env bash\nexit 0\n') + '\n__CLEAN_B64__\n'
+    bundle += 'chmod +x "$WORK_DIR/bootstrap.sh" "$WORK_DIR/install_v2.sh" \\\n'
+    bundle += '         "$WORK_DIR/scripts/sidecar_v2.py" "$WORK_DIR/scripts/cleanup_v1.sh"\n\n'
+    bundle += '# 改写 bootstrap.sh 里 3 处 curl $HUB_URL/static/... 为 cp 本地文件\n'
+    bundle += 'echo "[offline-install] 重写 bootstrap.sh：远程 curl -> 本地 cp"\n'
+    bundle += "export WORK_DIR\npython3 - <<'__PY__'\n"
+    bundle += 'import os, pathlib, re\n'
+    bundle += "work = os.environ['WORK_DIR']\n"
+    bundle += "p = pathlib.Path(work) / 'bootstrap.sh'\n"
+    bundle += 's = p.read_text()\n'
+    bundle += "for fname, target in [('install_v2.sh', f'{work}/install_v2.sh'),\n"
+    bundle += "                       ('sidecar_v2.py', f'{work}/scripts/sidecar_v2.py'),\n"
+    bundle += "                       ('cleanup_v1.sh', f'{work}/scripts/cleanup_v1.sh')]:\n"
+    bundle += "    pat = r'curl -fsSL -o \"\\$TMP_DIR[^\"]*' + re.escape(fname) + r'\" \\\\\\n\\s*\"\\$HUB_URL/static/skills/hub-sse-sidecar-v2/[^\"]+\"( \\|\\| true)?'\n"
+    bundle += "    def _repl(m, t=target, fn=fname):\n"
+    bundle += "        sub_dir = 'scripts/' if fn.endswith('.py') or fn == 'cleanup_v1.sh' else ''\n"
+    bundle += "        tail = ' || true' if (m.group(1) or '') else ''\n"
+    bundle += "        return f'cp \"{t}\" \"$TMP_DIR/{sub_dir}{fn}\"' + tail\n"
+    bundle += "    s = re.sub(pat, _repl, s)\n"
+    bundle += "p.write_text(s)\nprint('[offline-install] bootstrap.sh 重写完成')\n__PY__\n\n"
+    bundle += 'echo "[offline-install] 执行 bootstrap.sh"\n'
+    bundle += 'bash "$WORK_DIR/bootstrap.sh" "$@"\n'
+
+    return Response(
+        bundle,
+        mimetype='text/x-shellscript; charset=utf-8',
+        headers={
+            'Content-Disposition': f'attachment; filename="openclaw-{claw.id}-offline-install.sh"',
             'Cache-Control': 'no-store',
         },
     )

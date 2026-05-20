@@ -155,12 +155,15 @@ class OpenClawInstance(db.Model):
                               lazy='dynamic', cascade='all, delete-orphan')
 
     def to_dict(self, brief=False):
+        _owner_user = User.query.filter_by(username=self.owner).first() if self.owner else None
         data = {
             'id': self.id,
             'name': self.name,
             'safe_name': self.safe_name or '',
             'claw_tag': self.claw_tag,
             'owner': self.owner,
+            'owner_display_name': (_owner_user.display_name if _owner_user and _owner_user.display_name
+                                   else self.owner),
             'role_title': self.role_title,
             'responsibilities': self.responsibilities,
             'project_id': self.project_id,
@@ -451,6 +454,7 @@ class KnowledgeEntry(db.Model):
     reviewer_notes = db.Column(db.Text, comment='审核意见')
     approved_at = db.Column(db.DateTime)
     approved_by = db.Column(db.String(50))
+    created_by = db.Column(db.String(100), default='system', comment='创建人（用户名或claw_name）')
     created_at = db.Column(db.DateTime, default=_now)
     updated_at = db.Column(db.DateTime, default=_now,
                            onupdate=_now)
@@ -477,6 +481,18 @@ class KnowledgeEntry(db.Model):
             'approved_at': (str(self.approved_at)
                            if self.approved_at else None),
             'approved_by': self.approved_by,
+            # created_by 兜底链（MEMORY #131）：
+            #   self.created_by（如果是真名）
+            #   → source_openclaw.name（旧代码 default='system' 时退一层）
+            #   → 'system'
+            # 注：model 定义 `default='system'`，所以新插入的 NULL 实际会变 'system'；
+            # 因此判断"需要兜底"的条件不是 falsy，而是显式 in ('system','')。
+            'created_by': (self.created_by
+                           if self.created_by and self.created_by not in ('system',)
+                           else ((self.source_openclaw.name
+                                  if self.source_openclaw else None)
+                                 or self.created_by  # 退回 'system' 也行
+                                 or 'system')),
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
@@ -1542,13 +1558,13 @@ class WecomSendLog(db.Model):
 
 # 板块定义
 TOPIC_BOARDS = {
+    'case_review': '用例评审',
     'test_methods': '测试用例和方法',
     'case_sharing': '典型案例分享',
     'risk_assessment': '质量风险评估',
     'client_perf': '客户端性能测试',
     'special_testing': '其他专项测试',
     'industry_news': '业界新闻分享',
-    'case_review': '用例评审',
 }
 
 
@@ -1576,8 +1592,19 @@ class Topic(db.Model):
                                    nullable=True, comment='关联用例库ID')
     review_module_paths = db.Column(db.JSON, nullable=True,
                                      comment='评审的模块路径列表，如["登录模块","支付模块/退款"]')
+    review_case_ids = db.Column(db.JSON, nullable=True,
+                                comment='评审的用例 ID 列表（指定部分用例评审时使用）')
     review_knowledge_id = db.Column(db.Integer, db.ForeignKey('knowledge_entries.id'),
                                      nullable=True, comment='前置信息知识条目ID')
+    # 多轮评审总状态（仅 board=case_review 时使用）
+    review_status = db.Column(db.String(20), default='reviewing',
+                              comment='reviewing=评审中, closed=已关闭评审')
+    review_summary = db.Column(db.Text, nullable=True,
+                               comment='评审总结（Markdown），评审关闭后由发起者填写')
+    review_summary_by = db.Column(db.String(100), nullable=True,
+                                  comment='评审总结填写人')
+    review_summary_at = db.Column(db.DateTime, nullable=True,
+                                  comment='评审总结填写时间')
     reply_count = db.Column(db.Integer, default=0, comment='回复数')
     last_reply_at = db.Column(db.DateTime, comment='最后回复时间')
     created_at = db.Column(db.DateTime, default=_now)
@@ -1606,6 +1633,7 @@ class Topic(db.Model):
             'visibility': self.visibility,
             'review_library_id': self.review_library_id,
             'review_module_paths': self.review_module_paths,
+            'review_case_ids': self.review_case_ids,
             'review_knowledge_id': self.review_knowledge_id,
             'reply_count': self.reply_count,
             'last_reply_at': str(self.last_reply_at) if self.last_reply_at else None,
@@ -1617,13 +1645,128 @@ class Topic(db.Model):
                 TopicReply.status != 'deleted')]
         # 用例评审：附加用例库信息和知识条目信息
         if self.board == 'case_review':
+            data['review_status'] = self.review_status or 'reviewing'
+            data['review_summary'] = self.review_summary
+            data['review_summary_by'] = self.review_summary_by
+            data['review_summary_at'] = str(self.review_summary_at) if self.review_summary_at else None
             if self.review_library:
                 lib = self.review_library
                 data['review_library_name'] = lib.name
                 data['review_library_project'] = lib.project_name
             if self.review_knowledge:
                 data['review_knowledge_title'] = self.review_knowledge.title
+            # 附加评审轮次列表
+            rounds = CaseReviewRound.query.filter_by(
+                topic_id=self.id
+            ).order_by(CaseReviewRound.round_number).all()
+            data['review_rounds'] = [rd.to_dict() for rd in rounds]
         return data
+
+
+class CaseReviewRound(db.Model):
+    """用例评审轮次 — 每次提交用例评审是一轮，支持多轮迭代。
+
+    每轮包含：
+    - 评审介绍（功能说明、编写方法等）
+    - 用例内容（YAML 格式字符串）
+    - 轮次状态：pending（待评审）/ approved（通过）/ rejected（打回）
+    - 评审记录（评审人+意见）存在 CaseReviewComment 中
+    """
+
+    __tablename__ = 'case_review_rounds'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    topic_id = db.Column(db.Integer, db.ForeignKey('topics.id'), nullable=False,
+                         comment='关联的评审课题 ID')
+    round_number = db.Column(db.Integer, default=1, comment='轮次号，从1开始')
+    description = db.Column(db.Text, default='',
+                            comment='评审介绍（功能说明、编写方法等，Markdown）')
+    case_content = db.Column(db.Text, default='',
+                             comment='用例内容（YAML 格式）')
+    status = db.Column(db.String(20), default='pending',
+                       comment='pending=待评审, approved=通过, rejected=打回')
+    submitted_by = db.Column(db.String(100), default='', comment='提交人')
+    submitted_at = db.Column(db.DateTime, default=_now, comment='提交时间')
+
+    is_deleted = db.Column(db.Boolean, default=False, comment='软删除标记')
+    deleted_at = db.Column(db.DateTime, nullable=True, comment='软删除时间')
+
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    topic = db.relationship('Topic', backref=db.backref(
+        'review_rounds', lazy='dynamic', order_by='CaseReviewRound.round_number'))
+
+    __table_args__ = (
+        db.Index('ix_crr_topic', 'topic_id'),
+        db.Index('ix_crr_topic_round', 'topic_id', 'round_number'),
+    )
+
+    def to_dict(self, with_comments=True):
+        data = {
+            'id': self.id,
+            'topic_id': self.topic_id,
+            'round_number': self.round_number,
+            'description': self.description or '',
+            'case_content': self.case_content or '',
+            'status': self.status or 'pending',
+            'is_deleted': self.is_deleted or False,
+            'submitted_by': self.submitted_by or '',
+            'submitted_at': str(self.submitted_at) if self.submitted_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+        if with_comments:
+            comments = CaseReviewComment.query.filter_by(
+                round_id=self.id
+            ).order_by(CaseReviewComment.created_at).all()
+            data['comments'] = [c.to_dict() for c in comments]
+            # 计算综合评分（有评分的评审意见取平均）
+            scores = [c.score for c in comments if c.score is not None]
+            data['avg_score'] = round(sum(scores) / len(scores), 1) if scores else None
+            data['score_count'] = len(scores)
+        return data
+
+
+class CaseReviewComment(db.Model):
+    """用例评审意见 — 对某轮评审的评审记录"""
+
+    __tablename__ = 'case_review_comments'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    round_id = db.Column(db.Integer, db.ForeignKey('case_review_rounds.id'),
+                         nullable=False, comment='评审轮次 ID')
+    author_name = db.Column(db.String(100), nullable=False, comment='评审人')
+    author_claw_id = db.Column(db.Integer, nullable=True)
+    author_user_id = db.Column(db.Integer, nullable=True)
+    content = db.Column(db.Text, nullable=False, comment='评审意见（Markdown）')
+    verdict = db.Column(db.String(20), default='comment',
+                        comment='comment=评论, approve=通过, reject=打回')
+    score = db.Column(db.Integer, nullable=True,
+                      comment='评分（1-10分），可选')
+    is_edited = db.Column(db.Boolean, default=False,
+                          comment='是否已修改过（每人仅1次修改机会）')
+    created_at = db.Column(db.DateTime, default=_now)
+
+    round = db.relationship('CaseReviewRound', backref=db.backref(
+        'comments', lazy='dynamic', order_by='CaseReviewComment.created_at'))
+
+    __table_args__ = (
+        db.Index('ix_crc_round', 'round_id'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'round_id': self.round_id,
+            'author_name': self.author_name or '',
+            'author_claw_id': self.author_claw_id,
+            'author_user_id': self.author_user_id,
+            'content': self.content or '',
+            'verdict': self.verdict or 'comment',
+            'score': self.score,
+            'is_edited': self.is_edited or False,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
 
 
 class TopicReply(db.Model):
@@ -1844,6 +1987,10 @@ class TestPlanReport(db.Model):
     format = db.Column(db.String(20), default='markdown',
                        comment='格式：markdown/html')
     created_by = db.Column(db.String(100), default='', comment='创建人')
+    # MEMORY #134：反向追溯到全局 TestReport，方便从旧 API 跳到新报告页
+    linked_test_report_id = db.Column(db.Integer,
+                                      db.ForeignKey('test_reports.id'),
+                                      comment='对应全局 TestReport.id，可为空')
     created_at = db.Column(db.DateTime, default=_now)
     updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
 
@@ -1910,9 +2057,11 @@ class TestTask(db.Model):
                                   'compatibility=兼容性测试, security=安全测试, '
                                   'interface=接口测试, other=其他')
 
-    # 执行人（OpenClaw 实例）
+    # 执行人（OpenClaw 实例 或 直接指派用户）
     assignee_claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
-                                  comment='指派的 OpenClaw ID')
+                                  comment='指派的 OpenClaw ID（分配给Agent时）')
+    assignee_username = db.Column(db.String(100), default='',
+                                  comment='直接指派的用户名（分配给真人时）')
 
     # 排期
     start_date = db.Column(db.Date, comment='开始日期')
@@ -1961,6 +2110,20 @@ class TestTask(db.Model):
     def to_dict(self, with_cases=False):
         assignee_owner = self.assignee.owner if self.assignee else ''
         assignee_user = User.query.filter_by(username=assignee_owner).first() if assignee_owner else None
+
+        # 统一显示逻辑：
+        # 1. 分配给Agent → 显示Agent对应的owner用户名
+        # 2. 直接分配给人 → 显示该人
+        if self.assignee_claw_id and self.assignee:
+            display_name = (assignee_user.display_name if assignee_user and assignee_user.display_name
+                           else assignee_owner)
+        elif self.assignee_username:
+            direct_user = User.query.filter_by(username=self.assignee_username).first()
+            display_name = (direct_user.display_name if direct_user and direct_user.display_name
+                           else self.assignee_username)
+        else:
+            display_name = ''
+
         data = {
             'id': self.id,
             'plan_id': self.plan_id,
@@ -1969,10 +2132,10 @@ class TestTask(db.Model):
             'task_type': self.task_type,
             'assignee_claw_id': self.assignee_claw_id,
             'assignee_name': self.assignee.name if self.assignee else None,
-            'assignee_owner': assignee_owner,
-            'assignee_owner_display_name': (
-                assignee_user.display_name if assignee_user and assignee_user.display_name else assignee_owner
-            ),
+            'assignee_username': self.assignee_username or '',
+            'assignee_owner': assignee_owner or self.assignee_username or '',
+            'assignee_owner_display_name': display_name,
+            'assignee_display': display_name,
             'assignee_owner_user_id': assignee_user.id if assignee_user else None,
             'assignee_owner_wecom_userid': self.assignee.owner_wecom_userid if self.assignee else '',
             'start_date': str(self.start_date) if self.start_date else None,
@@ -1998,6 +2161,102 @@ class TestTask(db.Model):
         if with_cases:
             data['task_cases'] = [tc.to_dict() for tc in self.task_cases]
         return data
+
+
+class TestTaskReport(db.Model):
+    """测试任务报告（支持多份报告，与测试计划报告类似）"""
+    __tablename__ = 'test_task_reports'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    task_id = db.Column(db.Integer, db.ForeignKey('test_tasks.id'),
+                        nullable=False, comment='所属测试任务ID')
+    title = db.Column(db.String(200), nullable=False, comment='报告标题')
+    content = db.Column(db.Text, comment='报告内容（markdown/html）')
+    format = db.Column(db.String(20), default='markdown',
+                       comment='格式：markdown/html')
+    created_by = db.Column(db.String(100), default='', comment='创建人')
+    # MEMORY #134：反向追溯到全局 TestReport
+    linked_test_report_id = db.Column(db.Integer,
+                                      db.ForeignKey('test_reports.id'),
+                                      comment='对应全局 TestReport.id，可为空')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    task = db.relationship('TestTask', backref=db.backref(
+        'reports', lazy='dynamic', cascade='all, delete-orphan'))
+
+    def to_dict(self):
+        content = self.content or ''
+        summary = content[:200]
+        for tag in ('#', '*', '`', '\n', '---'):
+            summary = summary.replace(tag, ' ')
+        summary = ' '.join(summary.split())[:120]
+
+        created_by_name = self.created_by or ''
+        if self.created_by:
+            claw = OpenClawInstance.query.filter_by(name=self.created_by).first()
+            if claw:
+                created_by_name = claw.name
+            else:
+                user = User.query.filter(
+                    (User.username == self.created_by) |
+                    (User.display_name == self.created_by)
+                ).first()
+                if user and user.bound_claw_id:
+                    claw2 = OpenClawInstance.query.get(user.bound_claw_id)
+                    if claw2:
+                        created_by_name = claw2.name
+
+        return {
+            'id': self.id,
+            'task_id': self.task_id,
+            'title': self.title,
+            'content': content,
+            'format': self.format or 'markdown',
+            'summary': summary + ('...' if len(content) > 120 else ''),
+            'created_by': self.created_by or '',
+            'created_by_name': created_by_name,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class TestTaskBugReport(db.Model):
+    """测试任务Bug列表上报（支持多次上报）"""
+    __tablename__ = 'test_task_bug_reports'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    task_id = db.Column(db.Integer, db.ForeignKey('test_tasks.id'),
+                        nullable=False, comment='所属测试任务ID')
+    total_bugs = db.Column(db.Integer, default=0, comment='Bug 总数')
+    content = db.Column(db.Text, comment='Bug 详情内容（markdown/html 自由格式）')
+    format = db.Column(db.String(20), default='markdown',
+                       comment='格式：markdown/html')
+    created_by = db.Column(db.String(100), default='', comment='上报人')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    task = db.relationship('TestTask', backref=db.backref(
+        'bug_reports', lazy='dynamic', cascade='all, delete-orphan'))
+
+    def to_dict(self):
+        content = self.content or ''
+        summary = content[:200]
+        for tag in ('#', '*', '`', '\n', '---'):
+            summary = summary.replace(tag, ' ')
+        summary = ' '.join(summary.split())[:100]
+
+        return {
+            'id': self.id,
+            'task_id': self.task_id,
+            'total_bugs': self.total_bugs,
+            'content': content,
+            'format': self.format or 'markdown',
+            'summary': summary + ('...' if len(content) > 100 else ''),
+            'created_by': self.created_by or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
 
 
 class TestTaskCase(db.Model):
@@ -2032,7 +2291,7 @@ class TestTaskCase(db.Model):
     )
 
     def to_dict(self):
-        return {
+        d = {
             'id': self.id,
             'task_id': self.task_id,
             'case_id': self.case_id,
@@ -2046,6 +2305,11 @@ class TestTaskCase(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
+        if self.case:
+            d['case_content'] = self.case.content
+            d['case_type'] = self.case.type
+            d['case_module_path'] = self.case.module_path or ''
+        return d
 
 
 # ==================== 任务链（Task Chain）====================
@@ -3783,4 +4047,370 @@ class AgentRoleTemplateVersion(db.Model):
             'change_note': self.change_note or '',
             'created_by': self.created_by or 'system',
             'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+# ============================================================
+# 见闻分享（KM 文章 / 行业洞察等的轻量分享与评论）
+# 与知识库（结构化沉淀）、课题讨论（聚焦议题）形成互补：
+# 这里偏「转发 + 个人见解 + 评论交流」，不做强结构化、不强制评审。
+# ============================================================
+
+SHARED_ARTICLE_CATEGORIES = {
+    'testing': '测试技能',
+    'gaming': '游戏开发',
+    'ai': 'AI 见闻',
+    'work': '工作经验',
+    'industry': '行业趣事',
+    'other': '其他',
+}
+
+
+class SharedArticle(db.Model):
+    """见闻分享文章：可由 Web 用户或 OpenClaw Agent 提交。"""
+    __tablename__ = 'shared_articles'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    title = db.Column(db.String(200), nullable=False, comment='文章标题')
+    summary = db.Column(db.String(500), default='',
+                        comment='分享语 / 摘要，建议 80~200 字')
+    content = db.Column(db.Text, comment='正文（Markdown，可选；若仅转发链接可留空）')
+    source_url = db.Column(db.String(500), default='', comment='原文链接')
+    source_name = db.Column(db.String(120), default='',
+                            comment='来源（KM / 微信公众号 / 某博客等）')
+    category = db.Column(db.String(30), default='other',
+                         comment='分类 key（见 SHARED_ARTICLE_CATEGORIES）')
+    tags = db.Column(db.JSON, default=list, comment='自由标签列表')
+
+    sharer_type = db.Column(db.String(10), default='user',
+                            comment='user / openclaw')
+    sharer_user_id = db.Column(db.Integer, db.ForeignKey('users.id'),
+                               nullable=True)
+    sharer_claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
+                               nullable=True)
+    sharer_name = db.Column(db.String(80), nullable=False,
+                            comment='展示用名字（user.display_name 或 claw.name）')
+
+    view_count = db.Column(db.Integer, default=0)
+    comment_count = db.Column(db.Integer, default=0)
+    like_count = db.Column(db.Integer, default=0)
+
+    is_deleted = db.Column(db.Boolean, default=False)
+    deleted_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    sharer_user = db.relationship('User', backref='shared_articles')
+    sharer_claw = db.relationship('OpenClawInstance', backref='shared_articles')
+
+    def to_dict(self, include_content=False):
+        data = {
+            'id': self.id,
+            'title': self.title,
+            'summary': self.summary or '',
+            'source_url': self.source_url or '',
+            'source_name': self.source_name or '',
+            'category': self.category or 'other',
+            'category_label': SHARED_ARTICLE_CATEGORIES.get(
+                self.category or 'other', '其他'),
+            'tags': self.tags or [],
+            'sharer_type': self.sharer_type or 'user',
+            'sharer_user_id': self.sharer_user_id,
+            'sharer_claw_id': self.sharer_claw_id,
+            'sharer_name': self.sharer_name,
+            'view_count': self.view_count or 0,
+            'comment_count': self.comment_count or 0,
+            'like_count': self.like_count or 0,
+            'is_deleted': bool(self.is_deleted),
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if include_content:
+            data['content'] = self.content or ''
+        return data
+
+
+class SharedArticleComment(db.Model):
+    """见闻分享文章评论（支持单层引用，不做嵌套树展开）。"""
+    __tablename__ = 'shared_article_comments'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    article_id = db.Column(db.Integer, db.ForeignKey('shared_articles.id'),
+                           nullable=False, index=True)
+    parent_id = db.Column(db.Integer, db.ForeignKey('shared_article_comments.id'),
+                          nullable=True, comment='被回复的评论 id（可选）')
+    content = db.Column(db.Text, nullable=False)
+
+    commenter_type = db.Column(db.String(10), default='user',
+                               comment='user / openclaw')
+    commenter_user_id = db.Column(db.Integer, db.ForeignKey('users.id'),
+                                  nullable=True)
+    commenter_claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
+                                  nullable=True)
+    commenter_name = db.Column(db.String(80), nullable=False)
+
+    status = db.Column(db.String(20), default='active',
+                       comment='active / deleted')
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    article = db.relationship('SharedArticle', backref='comments')
+    commenter_user = db.relationship('User', backref='shared_article_comments')
+    commenter_claw = db.relationship('OpenClawInstance',
+                                     backref='shared_article_comments')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'article_id': self.article_id,
+            'parent_id': self.parent_id,
+            'content': self.content or '',
+            'commenter_type': self.commenter_type or 'user',
+            'commenter_user_id': self.commenter_user_id,
+            'commenter_claw_id': self.commenter_claw_id,
+            'commenter_name': self.commenter_name,
+            'status': self.status or 'active',
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+# ============================================================
+# 全局测试报告中心（Test Report Center） — MEMORY #134
+# ============================================================
+# 目标：把分散在 TestPlanReport / TestTaskReport / 需求分析 / 工程分析
+# 几处的"报告"统一到全局表，支持：
+#   - 6 种类型（版本计划 / 功能需求测试 / 专项测试 / 需求分析 / 工程分析 / 其他专项）
+#   - 关联 TestIteration（版本）+ Project（项目内可见）
+#   - 风险等级（high/medium/low/tbd）
+#   - markdown / html 内容
+#   - 附件（文件系统存储，单文件 10MB 上限）
+#   - 分享外链（公开匿名只读；附件下载仍需登录）
+#   - 通过 source_ref_type/source_ref_id 反向关联到旧的 TestPlanReport / TestTaskReport
+# 旧表不下线（向后兼容），只是前端组件改读全局表。
+# ============================================================
+
+# 报告类型 → 中文显示名（前端 tab 与表单下拉用）
+TEST_REPORT_TYPES = {
+    'version_plan': '版本计划',
+    'feature_test': '功能需求测试',
+    'specialized_test': '专项测试',
+    'requirement_analysis': '需求分析',
+    'engineering_analysis': '工程分析',
+    'other_specialized': '其他专项',
+}
+
+TEST_REPORT_RISK_LEVELS = {
+    'high': '高',
+    'medium': '中',
+    'low': '低',
+    'tbd': '评估中',  # 业务侧改名：早期叫"待定"，被认为不够积极，改成"评估中"
+}
+
+TEST_REPORT_SOURCE_REF_TYPES = (
+    'manual',                   # 全局手工创建
+    'test_plan',                # 来自测试计划报告（旧 TestPlanReport）
+    'test_task',                # 来自测试任务报告（旧 TestTaskReport）
+    'requirement_iteration',    # 关联需求分析的某迭代
+    'engineering_batch',        # 关联工程分析批次
+)
+
+# 报告状态机（v2 引入，MEMORY #134.C）：
+#   draft     刚提交，只有作者+所属用户+项目 admin+super_admin 可见可改
+#   published 已发布，项目内所有人可见可读
+#   revised   修改中，作者改 published 报告时手动切到此态，再次发布前隐藏
+#   abandoned 已废弃，对所有非管理员隐藏（保留审计）
+TEST_REPORT_STATUSES = {
+    'draft': '草稿',
+    'published': '已发布',
+    'revised': '修改中',
+    'abandoned': '已废弃',
+}
+
+
+class TestReport(db.Model):
+    """全局测试报告。一份报告对应一个项目 + 可选迭代/版本，由 user 或 Agent 提交。"""
+    __tablename__ = 'test_reports'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+
+    # 基础元信息
+    title = db.Column(db.String(200), nullable=False, comment='报告标题')
+    report_type = db.Column(db.String(40), default='other_specialized',
+                            nullable=False,
+                            comment='version_plan/feature_test/specialized_test/'
+                                    'requirement_analysis/engineering_analysis/'
+                                    'other_specialized')
+    remark = db.Column(db.String(500), default='', comment='简短备注/说明（一句话）')
+
+    # 关联
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           nullable=False, index=True,
+                           comment='所属项目（项目内默认可见可读）')
+    iteration_id = db.Column(db.Integer, db.ForeignKey('test_iterations.id'),
+                             index=True,
+                             comment='关联测试迭代（版本）')
+    version_name = db.Column(db.String(100), default='',
+                             comment='冗余版本号字符串，便于列表/分享页展示')
+
+    # 内容
+    content = db.Column(db.Text, comment='报告正文 markdown/html')
+    format = db.Column(db.String(20), default='markdown',
+                       comment='markdown / html')
+    risk_level = db.Column(db.String(20), default='tbd',
+                           comment='high / medium / low / tbd')
+
+    # 状态机（MEMORY #134.C）：draft / published / revised / abandoned
+    # 默认草稿，作者主动发布；可任意切换；废弃 ≈ 软隐藏（保留审计）
+    status = db.Column(db.String(20), default='draft', index=True,
+                       comment='draft / published / revised / abandoned')
+
+    # 来源追溯（旧入口写入时填）
+    source_ref_type = db.Column(db.String(40), default='manual', index=True,
+                                comment='manual/test_plan/test_task/'
+                                        'requirement_iteration/engineering_batch')
+    source_ref_id = db.Column(db.Integer, index=True,
+                              comment='来源实体 ID')
+
+    # 提交者（user 或 openclaw 二选一）
+    submitter_type = db.Column(db.String(20), default='user',
+                               comment='user / openclaw')
+    submitter_user_id = db.Column(db.Integer, db.ForeignKey('users.id'),
+                                  comment='user 提交时填')
+    submitter_claw_id = db.Column(db.Integer,
+                                  db.ForeignKey('openclaw_instances.id'),
+                                  comment='openclaw 提交时填')
+    submitter_name = db.Column(db.String(120), default='', comment='冗余显示名')
+
+    # 分享外链
+    is_shared = db.Column(db.Boolean, default=False, comment='是否已生成外链')
+    share_token = db.Column(db.String(64), unique=True,
+                            comment='分享 token，匿名访问 /r/<token>')
+    shared_at = db.Column(db.DateTime, comment='首次/最近一次开启分享时间')
+
+    # 隐藏（Web 列表不显示，但 agent 可分享链接访问）
+    is_hidden = db.Column(db.Boolean, default=False, index=True,
+                          comment='隐藏后 Web 列表不展示，分享链接仍有效')
+
+    # 软删
+    is_deleted = db.Column(db.Boolean, default=False, index=True)
+    deleted_at = db.Column(db.DateTime)
+
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    # 关联
+    project = db.relationship('Project', backref='test_reports')
+    iteration = db.relationship('TestIteration', backref='test_reports')
+    submitter_user = db.relationship('User', foreign_keys=[submitter_user_id])
+    submitter_claw = db.relationship('OpenClawInstance',
+                                     foreign_keys=[submitter_claw_id])
+    attachments = db.relationship(
+        'TestReportAttachment',
+        backref='report',
+        lazy='dynamic',
+        cascade='all, delete-orphan',
+        order_by='TestReportAttachment.uploaded_at.asc()',
+    )
+
+    __table_args__ = (
+        db.Index('ix_test_reports_proj_type', 'project_id', 'report_type'),
+        db.Index('ix_test_reports_proj_iter', 'project_id', 'iteration_id'),
+    )
+
+    def generate_share_token(self) -> str:
+        """生成一个唯一分享 token。已开启分享则保留原 token，再次开启不会换。"""
+        if self.share_token:
+            return self.share_token
+        # 22 字符 URL-safe，碰撞概率忽略不计
+        self.share_token = secrets.token_urlsafe(16)
+        return self.share_token
+
+    def to_dict(self, *, include_content=False, for_public=False,
+                include_attachments=True):
+        """
+        - for_public=True：分享外链匿名访问场景，不返回内部 ID/敏感字段
+        - include_content：列表场景默认 False 节省带宽
+        - include_attachments：附件元数据
+        """
+        risk_label = TEST_REPORT_RISK_LEVELS.get(self.risk_level or 'tbd',
+                                                 self.risk_level)
+        type_label = TEST_REPORT_TYPES.get(self.report_type,
+                                           self.report_type)
+        status_value = self.status or 'draft'
+        status_label = TEST_REPORT_STATUSES.get(status_value, status_value)
+        data = {
+            'id': None if for_public else self.id,
+            'title': self.title,
+            'report_type': self.report_type,
+            'report_type_label': type_label,
+            'remark': self.remark or '',
+            'risk_level': self.risk_level or 'tbd',
+            'risk_level_label': risk_label,
+            'status': status_value,
+            'status_label': status_label,
+            'format': self.format or 'markdown',
+            'version_name': self.version_name or '',
+            'iteration_id': None if for_public else self.iteration_id,
+            'iteration_name': self.iteration.name if self.iteration else None,
+            'project_id': None if for_public else self.project_id,
+            'project_name': self.project.name if self.project else None,
+            'submitter_type': self.submitter_type or 'user',
+            'submitter_name': self.submitter_name or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if not for_public:
+            data.update({
+                'source_ref_type': self.source_ref_type or 'manual',
+                'source_ref_id': self.source_ref_id,
+                'submitter_user_id': self.submitter_user_id,
+                'submitter_claw_id': self.submitter_claw_id,
+                'is_shared': bool(self.is_shared),
+                'share_token': self.share_token if self.is_shared else None,
+                'shared_at': str(self.shared_at) if self.shared_at else None,
+                'is_hidden': bool(self.is_hidden),
+                'is_deleted': bool(self.is_deleted),
+            })
+        if include_content:
+            data['content'] = self.content or ''
+        if include_attachments:
+            data['attachments'] = [
+                a.to_dict(for_public=for_public)
+                for a in self.attachments
+                if not a.is_deleted
+            ]
+        return data
+
+
+class TestReportAttachment(db.Model):
+    """测试报告附件。文件存磁盘，DB 存元数据。单文件 10MB 上限。"""
+    __tablename__ = 'test_report_attachments'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    report_id = db.Column(db.Integer, db.ForeignKey('test_reports.id'),
+                          nullable=False, index=True)
+    filename = db.Column(db.String(255), nullable=False,
+                         comment='原始上传文件名（展示用）')
+    stored_name = db.Column(db.String(255), nullable=False,
+                            comment='磁盘上的唯一文件名（避免冲突）')
+    size_bytes = db.Column(db.BigInteger, default=0, comment='字节数')
+    content_type = db.Column(db.String(120), default='application/octet-stream')
+    uploaded_by = db.Column(db.String(120), default='', comment='上传者名（冗余）')
+    uploaded_by_user_id = db.Column(db.Integer)
+    uploaded_by_claw_id = db.Column(db.Integer)
+    is_deleted = db.Column(db.Boolean, default=False)
+    uploaded_at = db.Column(db.DateTime, default=_now)
+
+    def to_dict(self, *, for_public=False):
+        return {
+            'id': None if for_public else self.id,
+            'filename': self.filename,
+            'size_bytes': int(self.size_bytes or 0),
+            'content_type': self.content_type or 'application/octet-stream',
+            'uploaded_by': self.uploaded_by or '',
+            'uploaded_at': str(self.uploaded_at) if self.uploaded_at else None,
+            # 分享外链场景：仅显示文件名 + 大小，下载链接前端置灰提示"登录后下载"
+            'download_url': (
+                None if for_public
+                else f'/api/v1/test-reports/{self.report_id}/attachments/{self.id}/download'
+            ),
         }

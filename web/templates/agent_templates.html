@@ -1,0 +1,459 @@
+{% extends "base.html" %}
+{% block title %}Agent 模板库 - OpenClaw 管理系统{% endblock %}
+{% block nav_agent_templates %}active{% endblock %}
+{% block page_title %}Agent 模板库{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <select id="template-status-filter" class="form-input" style="width:170px" onchange="loadTemplates()">
+        <option value="">全部状态</option>
+        <option value="draft">草稿</option>
+        <option value="pending_review">待审核</option>
+        <option value="approved">已通过</option>
+        <option value="rejected">已拒绝</option>
+        <option value="archived">已归档</option>
+    </select>
+</div>
+{% endblock %}
+
+{% block content %}
+<div style="display:grid;grid-template-columns:320px 1fr;gap:14px;min-height:640px">
+    <div class="card" style="padding:12px;display:flex;flex-direction:column;gap:10px">
+        <div class="form-group" style="margin:0">
+            <label class="form-label">搜索模板</label>
+            <input id="tpl-q" class="form-input" placeholder="输入模板名/Key" oninput="renderTemplateList()">
+        </div>
+        <div id="tpl-list" style="display:flex;flex-direction:column;gap:8px;max-height:560px;overflow:auto"></div>
+    </div>
+
+    <div class="card" style="padding:16px">
+        <div id="tpl-empty" style="color:var(--text-muted)">请选择左侧模板，或创建一个新模板。</div>
+        <div id="tpl-editor" style="display:none">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+                <div>
+                    <div id="tpl-title" style="font-size:1.05rem;font-weight:600"></div>
+                    <div id="tpl-meta" style="font-size:0.82rem;color:var(--text-muted)"></div>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button class="btn btn-ghost" onclick="deleteTemplate()">删除</button>
+                    <button class="btn btn-ghost" onclick="applyTemplate()">应用到 Agent</button>
+                    <button class="btn btn-ghost" onclick="showVersions()">版本历史</button>
+                    <button class="btn btn-ghost" onclick="submitReview('pending_review')">提交审核</button>
+                    <button class="btn btn-ghost" onclick="submitReview('approved')">审核通过</button>
+                    <button class="btn btn-ghost" onclick="submitReview('rejected')">驳回</button>
+                    <button class="btn btn-primary" onclick="saveTemplate()">保存</button>
+                </div>
+            </div>
+
+            <div class="tab-bar">
+                <div class="tab-item active" data-tab="basic" onclick="switchTab('basic')">基础信息</div>
+                <div class="tab-item" data-tab="skills" onclick="switchTab('skills')">Skills</div>
+                <div class="tab-item" data-tab="rules" onclick="switchTab('rules')">Rules</div>
+                <div class="tab-item" data-tab="schedules" onclick="switchTab('schedules')">定时任务</div>
+                <div class="tab-item" data-tab="files" onclick="switchTab('files')">文件列表</div>
+                <div class="tab-item" data-tab="versions" onclick="switchTab('versions')">版本历史</div>
+            </div>
+
+            <div id="tab-basic" class="tab-panel" style="margin-top:12px">
+                <div class="form-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                    <div class="form-group">
+                        <label class="form-label">模板名称</label>
+                        <input id="f-name" class="form-input">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">模板 Key</label>
+                        <input id="f-key" class="form-input" placeholder="例如 test-agent-role-a">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">身份名字</label>
+                        <input id="f-profile-name" class="form-input" placeholder="例如：大赫">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">角色</label>
+                        <input id="f-role-name" class="form-input" placeholder="例如：测试负责人">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">主要职责（支持 {% raw %}{{file:path/to.md}}{% endraw %} 引用）</label>
+                    <textarea id="f-main-resp" class="form-textarea" rows="7"></textarea>
+                </div>
+                <div id="ref-validation-box" style="margin-top:8px;font-size:0.82rem;color:var(--text-muted)"></div>
+            </div>
+
+            <div id="tab-skills" class="tab-panel" style="display:none;margin-top:12px">
+                <div class="form-group">
+                    <label class="form-label">技能说明（文本）</label>
+                    <textarea id="f-skills-summary" class="form-textarea" rows="6"></textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">安装 Skill ID（逗号分隔）</label>
+                    <input id="f-skill-ids" class="form-input" placeholder="1,2,3">
+                </div>
+            </div>
+
+            <div id="tab-rules" class="tab-panel" style="display:none;margin-top:12px">
+                <div class="form-group">
+                    <label class="form-label">规则说明（文本）</label>
+                    <textarea id="f-rules-summary" class="form-textarea" rows="6"></textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Rule ID（逗号分隔）</label>
+                    <input id="f-rule-ids" class="form-input" placeholder="10,11,12">
+                </div>
+            </div>
+
+            <div id="tab-schedules" class="tab-panel" style="display:none;margin-top:12px">
+                <div class="form-group">
+                    <label class="form-label">定时任务说明（文本）</label>
+                    <textarea id="f-schedules-summary" class="form-textarea" rows="6"></textarea>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">定时任务 JSON（数组）</label>
+                    <textarea id="f-schedules-json" class="form-textarea" rows="8" style="font-family:monospace" placeholder='[{"name":"daily sync","cron":"0 10 * * *","enabled":true}]'></textarea>
+                </div>
+            </div>
+
+            <div id="tab-files" class="tab-panel" style="display:none;margin-top:12px">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+                    <input id="upload-dir" class="form-input" style="max-width:240px" placeholder="子目录（可选）">
+                    <input id="upload-file" type="file" class="form-input" style="max-width:280px">
+                    <button class="btn btn-primary" onclick="uploadFile()">上传文件</button>
+                </div>
+                <div id="files-wrap" style="display:flex;flex-direction:column;gap:8px"></div>
+            </div>
+            <div id="tab-versions" class="tab-panel" style="display:none;margin-top:12px">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px">
+                    <div style="font-size:0.88rem;color:var(--text-muted)">选择历史版本可回滚，回滚后会生成新版本。</div>
+                    <button class="btn btn-ghost" onclick="showVersions()">刷新版本</button>
+                </div>
+                <div id="versions-wrap" style="display:flex;flex-direction:column;gap:8px"></div>
+            </div>
+        </div>
+    </div>
+</div>
+<div class="modal-overlay" id="file-preview-modal">
+    <div class="modal" style="max-width:900px">
+        <div class="modal-title" id="file-preview-title">文件预览</div>
+        <pre id="file-preview-content" style="max-height:62vh;overflow:auto;background:#111827;color:#e5e7eb;padding:12px;border-radius:8px;font-size:0.82rem;line-height:1.45;white-space:pre-wrap"></pre>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeFilePreview()">关闭</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let templates = [];
+let current = null;
+
+function esc(s){ return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function mapStatus(s){
+    return {
+        draft:'草稿',
+        pending_review:'待审核',
+        approved:'已通过',
+        rejected:'已拒绝',
+        archived:'已归档',
+    }[s] || s;
+}
+function parseIds(v){
+    return (v || '').split(',').map(x => parseInt(x.trim(),10)).filter(n => Number.isInteger(n) && n > 0);
+}
+
+async function loadTemplates(){
+    try {
+        const st = document.getElementById('template-status-filter').value;
+        const q = st ? `?status=${encodeURIComponent(st)}` : '';
+        templates = await API.get(`/agent-templates${q}`);
+        renderTemplateList();
+        if (current) {
+            const latest = templates.find(x => x.id === current.id);
+            if (latest) await openTemplate(latest.id);
+        }
+    } catch(e){
+        showToast(`加载失败: ${e.message}`, 'error');
+    }
+}
+
+function renderTemplateList(){
+    const box = document.getElementById('tpl-list');
+    const keyword = (document.getElementById('tpl-q').value || '').trim().toLowerCase();
+    const list = templates.filter(t => {
+        if (!keyword) return true;
+        return (t.name || '').toLowerCase().includes(keyword) || (t.template_key || '').toLowerCase().includes(keyword);
+    });
+    if (!list.length) {
+        box.innerHTML = '<div style="color:var(--text-muted);padding:8px">暂无模板</div>';
+        return;
+    }
+    box.innerHTML = list.map(t => `
+        <button class="btn btn-ghost" style="text-align:left;justify-content:flex-start;padding:10px;${current && current.id===t.id?'border-color:var(--accent);':''}" onclick="openTemplate(${t.id})">
+            <div style="display:flex;flex-direction:column;gap:2px">
+                <span style="font-weight:600">${esc(t.name)}</span>
+                <span style="font-size:0.75rem;color:var(--text-muted)">${esc(t.template_key)} · ${mapStatus(t.status)}</span>
+            </div>
+        </button>
+    `).join('');
+}
+
+async function openTemplate(id){
+    try{
+        current = await API.get(`/agent-templates/${id}`);
+        document.getElementById('tpl-empty').style.display = 'none';
+        document.getElementById('tpl-editor').style.display = '';
+        document.getElementById('tpl-title').textContent = current.name;
+        document.getElementById('tpl-meta').textContent = `Key: ${current.template_key} | 状态: ${mapStatus(current.status)} | 版本: v${current.current_version || 1}`;
+        document.getElementById('f-name').value = current.name || '';
+        document.getElementById('f-key').value = current.template_key || '';
+        document.getElementById('f-profile-name').value = current.profile_name || '';
+        document.getElementById('f-role-name').value = current.role_name || '';
+        document.getElementById('f-main-resp').value = current.main_responsibility || '';
+        document.getElementById('f-skills-summary').value = current.skills_summary || '';
+        document.getElementById('f-rules-summary').value = current.rules_summary || '';
+        document.getElementById('f-schedules-summary').value = current.schedules_summary || '';
+        document.getElementById('f-skill-ids').value = (current.installed_skill_ids || []).join(',');
+        document.getElementById('f-rule-ids').value = (current.rule_ids || []).join(',');
+        document.getElementById('f-schedules-json').value = JSON.stringify(current.schedule_items || [], null, 2);
+        renderReferenceValidation();
+        renderFiles();
+        renderVersions();
+        renderTemplateList();
+    } catch(e){
+        showToast(`打开模板失败: ${e.message}`, 'error');
+    }
+}
+
+function collectPayload(){
+    let scheduleItems = [];
+    const raw = document.getElementById('f-schedules-json').value.trim();
+    if (raw) scheduleItems = JSON.parse(raw);
+    if (!Array.isArray(scheduleItems)) throw new Error('定时任务 JSON 必须是数组');
+    return {
+        name: document.getElementById('f-name').value.trim(),
+        template_key: document.getElementById('f-key').value.trim(),
+        profile_name: document.getElementById('f-profile-name').value.trim(),
+        role_name: document.getElementById('f-role-name').value.trim(),
+        main_responsibility: document.getElementById('f-main-resp').value.trim(),
+        skills_summary: document.getElementById('f-skills-summary').value.trim(),
+        rules_summary: document.getElementById('f-rules-summary').value.trim(),
+        schedules_summary: document.getElementById('f-schedules-summary').value.trim(),
+        installed_skill_ids: parseIds(document.getElementById('f-skill-ids').value),
+        rule_ids: parseIds(document.getElementById('f-rule-ids').value),
+        schedule_items: scheduleItems,
+        bump_version: true,
+        change_note: '页面编辑保存',
+    };
+}
+
+async function saveTemplate(){
+    if (!current) return;
+    try{
+        const payload = collectPayload();
+        current = await API.put(`/agent-templates/${current.id}`, payload);
+        showToast('已保存', 'success');
+        await loadTemplates();
+        await openTemplate(current.id);
+    } catch(e){
+        showToast(`保存失败: ${e.message}`, 'error');
+    }
+}
+
+async function applyTemplate(){
+    if (!current) return;
+    const target = await customPrompt({title:'应用模板', msg:'请输入目标 OpenClaw ID（数字）', placeholder:'例如 4', defaultVal:'', multiline:false});
+    if (target === null) return;
+    const targetId = parseInt((target || '').trim(), 10);
+    if (!Number.isInteger(targetId) || targetId <= 0) {
+        return showToast('目标 OpenClaw ID 非法', 'error');
+    }
+    try{
+        const result = await API.post(`/agent-templates/${current.id}/apply`, {
+            target_claw_id: targetId,
+            strict_references: true,
+        });
+        const s = result.summary || {};
+        showToast(`应用成功：Skill ${((s.skills_installed||0)+(s.skills_reenabled||0))}，Rule ${((s.rules_installed||0)+(s.rules_reenabled||0))}`, 'success');
+        await openTemplate(current.id);
+    } catch(e){
+        showToast(`应用失败: ${e.message}`, 'error');
+    }
+}
+
+async function submitReview(status){
+    if (!current) return;
+    const comment = await customPrompt({title:'审核操作', msg:'审核意见（可选）', placeholder:'输入审核意见...', defaultVal:'', multiline:true});
+    if (comment === null) return;
+    try{
+        await API.post(`/agent-templates/${current.id}/review`, {status, review_comment: comment || ''});
+        showToast('状态已更新', 'success');
+        await loadTemplates();
+        await openTemplate(current.id);
+    } catch(e){
+        showToast(`操作失败: ${e.message}`, 'error');
+    }
+}
+
+async function deleteTemplate(){
+    if (!current) return;
+    if (!await customConfirm({type:'danger', title:'确认删除', msg:`确认删除模板「${current.name}」？此操作不可恢复。`})) return;
+    try{
+        await API.del(`/agent-templates/${current.id}`);
+        current = null;
+        document.getElementById('tpl-editor').style.display = 'none';
+        document.getElementById('tpl-empty').style.display = '';
+        showToast('模板已删除', 'success');
+        await loadTemplates();
+    } catch(e){
+        showToast(`删除失败: ${e.message}`, 'error');
+    }
+}
+
+function switchTab(tab){
+    document.querySelectorAll('.tab-item').forEach(el => el.classList.remove('active'));
+    document.querySelector(`.tab-item[data-tab="${tab}"]`)?.classList.add('active');
+    document.querySelectorAll('.tab-panel').forEach(el => el.style.display = 'none');
+    document.getElementById(`tab-${tab}`).style.display = '';
+}
+
+function renderFiles(){
+    const wrap = document.getElementById('files-wrap');
+    if (!current || !(current.files || []).length) {
+        wrap.innerHTML = '<div style="color:var(--text-muted)">暂无文件</div>';
+        return;
+    }
+    wrap.innerHTML = current.files.map(f => `
+        <div style="display:flex;justify-content:space-between;align-items:center;border:1px solid var(--border);border-radius:8px;padding:8px 10px">
+            <div style="display:flex;flex-direction:column;gap:2px">
+                <div style="font-size:0.9rem">${esc(f.relative_path)}</div>
+                <div style="font-size:0.75rem;color:var(--text-muted)">${(f.file_size || 0)} bytes · SHA ${esc((f.sha256 || '').slice(0,12))}</div>
+            </div>
+            <div style="display:flex;gap:8px">
+                <button class="btn btn-ghost" onclick="previewFile(${f.id})">预览</button>
+                <a class="btn btn-ghost" href="/api/v1/agent-templates/${current.id}/files/${f.id}/download" target="_blank">下载</a>
+                <button class="btn btn-ghost" onclick="deleteFile(${f.id})">删除</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderReferenceValidation(){
+    const box = document.getElementById('ref-validation-box');
+    const info = current?.reference_validation || null;
+    if (!info) {
+        box.innerHTML = '';
+        return;
+    }
+    if (info.valid) {
+        box.innerHTML = `✅ 引用校验通过，共 ${info.total_references || 0} 处引用`;
+        box.style.color = 'var(--green,#16a34a)';
+        return;
+    }
+    const misses = (info.missing_references || []).map(r => `${r.field}: ${r.reference}`).join('；');
+    box.innerHTML = `⚠️ 存在 ${info.missing_count || 0} 处失效引用：${esc(misses)}`;
+    box.style.color = 'var(--orange,#f59e0b)';
+}
+
+async function uploadFile(){
+    if (!current) return showToast('请先选择模板', 'error');
+    const input = document.getElementById('upload-file');
+    if (!input.files || !input.files[0]) return showToast('请选择文件', 'error');
+    const fd = new FormData();
+    fd.append('file', input.files[0]);
+    fd.append('dir', document.getElementById('upload-dir').value.trim());
+    try{
+        const resp = await fetch(`/api/v1/agent-templates/${current.id}/files`, {method:'POST', body:fd});
+        const json = await resp.json();
+        if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
+        showToast('上传成功', 'success');
+        input.value = '';
+        await openTemplate(current.id);
+    } catch(e){
+        showToast(`上传失败: ${e.message}`, 'error');
+    }
+}
+
+async function deleteFile(fileId){
+    if (!current) return;
+    if (!await customConfirm({type:'danger', title:'确认删除', msg:'确认删除该文件？'})) return;
+    try{
+        await API.del(`/agent-templates/${current.id}/files/${fileId}`);
+        showToast('文件已删除', 'success');
+        await openTemplate(current.id);
+    } catch(e){
+        showToast(`删除失败: ${e.message}`, 'error');
+    }
+}
+
+async function previewFile(fileId){
+    if (!current) return;
+    try{
+        const resp = await fetch(`/api/v1/agent-templates/${current.id}/files/${fileId}/preview`);
+        const contentType = (resp.headers.get('content-type') || '').toLowerCase();
+        if (contentType.startsWith('image/')) {
+            window.open(`/api/v1/agent-templates/${current.id}/files/${fileId}/preview`, '_blank');
+            return;
+        }
+        const json = await resp.json();
+        if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
+        if (!json.previewable) throw new Error(json.error || '该文件暂不支持预览');
+        document.getElementById('file-preview-title').textContent = `文件预览：${json.file?.relative_path || ''}`;
+        document.getElementById('file-preview-content').textContent = json.content || '';
+        document.getElementById('file-preview-modal').classList.add('active');
+    } catch(e){
+        showToast(`预览失败: ${e.message}`, 'error');
+    }
+}
+
+function closeFilePreview(){
+    document.getElementById('file-preview-modal').classList.remove('active');
+    document.getElementById('file-preview-content').textContent = '';
+}
+
+async function showVersions(){
+    if (!current) return;
+    try {
+        const rows = await API.get(`/agent-templates/${current.id}/versions`);
+        current._versions = rows;
+        renderVersions();
+        switchTab('versions');
+    } catch (e) {
+        showToast(`加载版本失败: ${e.message}`, 'error');
+    }
+}
+
+function renderVersions(){
+    const wrap = document.getElementById('versions-wrap');
+    if (!wrap) return;
+    const rows = current?._versions || [];
+    if (!rows.length) {
+        wrap.innerHTML = '<div style="color:var(--text-muted)">暂无版本记录</div>';
+        return;
+    }
+    wrap.innerHTML = rows.map(v => `
+        <div style="display:flex;justify-content:space-between;align-items:center;border:1px solid var(--border);border-radius:8px;padding:8px 10px;gap:10px">
+            <div style="display:flex;flex-direction:column;gap:2px">
+                <div style="font-weight:600">v${v.version_no} · ${esc(v.action || 'save')}</div>
+                <div style="font-size:0.78rem;color:var(--text-muted)">${esc(v.change_note || '-')} · ${esc(v.created_by || '')} · ${esc(v.created_at || '')}</div>
+            </div>
+            <button class="btn btn-ghost" onclick="rollbackVersion(${v.version_no})">回滚到此版本</button>
+        </div>
+    `).join('');
+}
+
+async function rollbackVersion(versionNo){
+    if (!current) return;
+    if (!await customConfirm({type:'warning', title:'确认回滚', msg:`确认回滚到 v${versionNo}？当前内容将被覆盖。`})) return;
+    try{
+        await API.post(`/agent-templates/${current.id}/rollback`, {version_no: versionNo});
+        showToast(`已回滚到 v${versionNo}`, 'success');
+        await openTemplate(current.id);
+        await showVersions();
+    } catch(e){
+        showToast(`回滚失败: ${e.message}`, 'error');
+    }
+}
+
+loadTemplates();
+</script>
+{% endblock %}

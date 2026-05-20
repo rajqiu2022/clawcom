@@ -97,8 +97,9 @@
         <!-- 页签切换 -->
         <div style="display:flex;gap:0;border-bottom:2px solid var(--border);margin-bottom:12px">
             <button class="dashboard-subtab active" id="todo-subtab-today" onclick="switchTodoSubTab('today')">📌 今日待办 <span id="detail-todos-badge" class="tag tag-blue" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
-            <button class="dashboard-subtab" id="todo-subtab-submitted" onclick="switchTodoSubTab('submitted')">📝 待审核 <span id="detail-submitted-badge" class="tag tag-yellow" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
             <button class="dashboard-subtab" id="todo-subtab-history" onclick="switchTodoSubTab('history')">📋 近3天记录</button>
+            <button class="dashboard-subtab" id="todo-subtab-daily" onclick="switchTodoSubTab('daily')">🔁 每日任务 <span id="detail-daily-badge" class="tag tag-blue" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
+            <button class="dashboard-subtab" id="todo-subtab-submitted" onclick="switchTodoSubTab('submitted')">📝 待审核 <span id="detail-submitted-badge" class="tag tag-yellow" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
         </div>
         <!-- 今日待办面板 -->
         <div id="todo-panel-today">
@@ -111,6 +112,10 @@
         <!-- 近3天记录面板 -->
         <div id="todo-panel-history" style="display:none">
             <div id="todo-completed-list"></div>
+        </div>
+        <!-- 每日任务面板 -->
+        <div id="todo-panel-daily" style="display:none">
+            <div id="todo-daily-list"></div>
         </div>
     </div>
 </div>
@@ -1073,6 +1078,14 @@ async function loadTodos() {
         const pending = todos.filter(t => _isTodoDueToday(t) && (!t.today_status || t.today_status === 'pending'));
         let submitted = todos.filter(t => t.today_status === 'submitted');
         const approved = todos.filter(t => _isTodoDueToday(t) && (t.today_status === 'approved' || t.today_status === 'completed'));
+        const dailyTodos = todos
+            .filter(t => t.enabled && (t.schedule_type || 'daily') === 'daily')
+            .sort((a, b) => {
+                const at = a.schedule_time || '99:99';
+                const bt = b.schedule_time || '99:99';
+                if (at !== bt) return at.localeCompare(bt);
+                return String(a.title || '').localeCompare(String(b.title || ''));
+            });
 
         // 龙虾王查看全局待审核（跨 OpenClaw）
         if (clawData?.role === 'admin') {
@@ -1085,7 +1098,7 @@ async function loadTodos() {
         }
         window._detailSubmittedTodos = submitted;
 
-        $('#todo-stats').textContent = `待完成 ${pending.length} / 已提交 ${submitted.length} / 已审核 ${approved.length}`;
+        $('#todo-stats').textContent = `待完成 ${pending.length} / 每日任务 ${dailyTodos.length} / 已提交 ${submitted.length} / 已审核 ${approved.length}`;
 
         // 更新今日待办badge
         const todayBadge = document.getElementById('detail-todos-badge');
@@ -1097,6 +1110,17 @@ async function loadTodos() {
                 todayBadge.style.display = 'none';
             }
         }
+
+        const dailyBadge = document.getElementById('detail-daily-badge');
+        if (dailyBadge) {
+            if (dailyTodos.length > 0) {
+                dailyBadge.style.display = '';
+                dailyBadge.textContent = dailyTodos.length;
+            } else {
+                dailyBadge.style.display = 'none';
+            }
+        }
+        renderDailyTodos(dailyTodos);
 
         // 待完成列表
         if (!pending.length && !submitted.length && !approved.length) {
@@ -1149,6 +1173,54 @@ async function loadTodos() {
         // 同步加载近3天记录
         loadCompletedTodos();
     } catch(e) { showToast('加载待办失败:'+e.message,'error'); }
+}
+
+function renderDailyTodos(dailyTodos) {
+    const list = $('#todo-daily-list');
+    if (!list) return;
+    if (!dailyTodos.length) {
+        list.innerHTML = '<div class="empty-state"><div class="empty-state-text">暂无启用中的每日任务</div></div>';
+        return;
+    }
+    list.innerHTML = dailyTodos.map(t => renderDailyTodoItem(t)).join('');
+}
+
+function renderDailyTodoItem(t) {
+    const urg = urgencyLabels[t.urgency_level] || urgencyLabels.flexible;
+    const statusMap = {
+        submitted: '<span class="tag tag-yellow" style="font-size:0.72rem">今日已提交</span>',
+        approved: '<span class="tag tag-green" style="font-size:0.72rem">今日已审核</span>',
+        completed: '<span class="tag tag-green" style="font-size:0.72rem">今日已完成</span>',
+        skipped: '<span class="tag" style="background:#6b7280;color:#fff;font-size:0.72rem">今日已删除</span>',
+        retry_failed: '<span class="tag" style="background:#ef4444;color:#fff;font-size:0.72rem">今日失败</span>',
+    };
+    const statusLabel = statusMap[t.today_status] || '<span class="tag tag-blue" style="font-size:0.72rem">今日待执行</span>';
+    const timeLabel = t.schedule_time ? `每天 ${t.schedule_time}` : '每天（不限时间）';
+    const descShort = t.description ? (t.description.length > 100 ? t.description.substring(0, 100) + '...' : t.description) : '';
+    return `<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer"
+        onclick="showDetailTodoModal('pending',${t.id})">
+        <div style="font-size:1.25rem">🔁</div>
+        <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span style="font-weight:600">${t.title}</span>
+                <span style="font-size:0.7rem;color:var(--text-muted);font-family:monospace;opacity:0.7" title="任务ID">#${t.id}</span>
+                <span class="tag" style="background:${urg.color};color:#fff;font-size:0.72rem">${urg.icon} ${urg.label}</span>
+                <span style="font-size:0.78rem;color:var(--text-muted)">${timeLabel}</span>
+                ${statusLabel}
+            </div>
+            ${descShort ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px;white-space:pre-line;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${descShort.replace(/\n/g, '\n')}</div>` : ''}
+            <div style="font-size:0.75rem;color:var(--text-muted);margin-top:2px">
+                ${(t.template_created_at || t.created_at) ? `创建于 ${formatTime(t.template_created_at || t.created_at)}` : ''}
+                ${t.created_by ? ` · 创建者 ${t.created_by}` : ''}
+                ${t.today_completed_at ? ` · 今日提交 ${t.today_completed_at.substring(11,16)}` : ''}
+            </div>
+        </div>
+        ${canEditClaw ? `<div style="display:flex;gap:4px">
+            <button class="btn btn-ghost" style="padding:2px 6px;font-size:0.78rem" onclick="event.stopPropagation();editTodo(${t.id})">编辑</button>
+            <button class="btn btn-ghost" style="padding:2px 6px;font-size:0.78rem;color:var(--text-muted)" onclick="event.stopPropagation();deleteTodo(${t.id})" title="只删除今天这次，明天仍会生成">删除今日</button>
+            <button class="btn btn-ghost" style="padding:2px 6px;font-size:0.78rem;color:var(--red)" onclick="event.stopPropagation();deleteTodo(${t.id}, true)" title="彻底删除每日模板，后续不再重复">彻底删除</button>
+        </div>` : ''}
+    </div>`;
 }
 
 function renderTodoItem(t) {
@@ -1228,6 +1300,7 @@ function switchTodoSubTab(sub) {
     document.getElementById('todo-panel-today').style.display = sub === 'today' ? '' : 'none';
     document.getElementById('todo-panel-submitted').style.display = sub === 'submitted' ? '' : 'none';
     document.getElementById('todo-panel-history').style.display = sub === 'history' ? '' : 'none';
+    document.getElementById('todo-panel-daily').style.display = sub === 'daily' ? '' : 'none';
 }
 
 function showDetailTodoModal(type, index) {
@@ -1380,11 +1453,31 @@ async function editTodo(id) {
     } catch(e) { showToast('加载失败','error'); }
 }
 
-async function deleteTodo(id) {
-    if (!await customConfirm('确定删除此待办？')) return;
+async function deleteTodo(id, permanent=false) {
+    const todo = window._detailAllTodos ? window._detailAllTodos.find(x => x.id === id) : null;
+    const isDaily = todo && (todo.schedule_type || 'daily') === 'daily';
+    const deleteCurrentOnly = isDaily && !permanent;
+    const confirmText = deleteCurrentOnly
+        ? '确定删除今天这次每日任务？明天还会继续生成。'
+        : (isDaily
+            ? '确定彻底删除这个每日任务？后续不会再重复。'
+            : '确定删除此待办？');
+    if (!await customConfirm(confirmText)) return;
     try {
-        await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${id}`,{method:'DELETE'});
-        showToast('已删除','success'); loadTodos();
+        if (deleteCurrentOnly) {
+            const resp = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${id}/skip`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({result_summary: '已在 Hub 页面删除今日任务'})
+            });
+            if (!resp.ok) throw new Error('删除今日任务失败');
+            showToast('已删除今天这次，后续每日任务保留', 'success');
+        } else {
+            const resp = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${id}`,{method:'DELETE'});
+            if (!resp.ok) throw new Error('删除失败');
+            showToast(isDaily ? '已彻底删除每日任务' : '已删除', 'success');
+        }
+        loadTodos();
     } catch(e) { showToast('删除失败','error'); }
 }
 

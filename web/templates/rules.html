@@ -309,7 +309,6 @@ function renderRules() {
             <div class="skill-card-header">
                 <span class="skill-name">${r.display_name}</span>
                 <span style="font-size:0.72rem;color:var(--text-muted);margin-left:6px">#${r.id}</span>
-                ${categoryTag(r)}
                 ${reviewStatusTag(r)}
             </div>
             ${_canEditRule(r) ? `<div style="margin-top:6px" onclick="event.stopPropagation()">

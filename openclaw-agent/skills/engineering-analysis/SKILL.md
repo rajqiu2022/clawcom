@@ -24,7 +24,7 @@
 ## Hub 地址
 
 ```
-Hub 地址: http://9.134.11.169:8088
+Hub 地址: http://clawteam.woa.com:18800
 API 前缀: /api/v1
 ```
 
@@ -574,7 +574,7 @@ DELETE /api/v1/engineering/refresh/{BATCH_ID}
 # 与其等管理员驳回，不如自己清理重提。
 def cleanup_my_bad_batch(batch_id: int):
     r = requests.delete(
-        f'http://9.134.11.169:8088/api/v1/engineering/refresh/{batch_id}',
+        f'http://clawteam.woa.com:18800/api/v1/engineering/refresh/{batch_id}',
         headers={'Authorization': f'Bearer {HUB_API_TOKEN}'},
         timeout=30,
     )
@@ -770,7 +770,7 @@ import requests
 
 def call_llm_via_hub(prompt):
     resp = requests.post(
-        'http://9.134.11.169:8088/api/v1/system/llm-call',
+        'http://clawteam.woa.com:18800/api/v1/system/llm-call',
         headers={'Authorization': f'Bearer {HUB_API_TOKEN}'},
         json={'prompt': prompt, 'response_format': 'json'},
         timeout=120,
@@ -798,7 +798,7 @@ payload = {
 }
 
 resp = requests.post(
-    'http://9.134.11.169:8088/api/v1/engineering/refresh',
+    'http://clawteam.woa.com:18800/api/v1/engineering/refresh',
     headers={'Authorization': f'Bearer {HUB_API_TOKEN}'},
     json=payload,
     timeout=60,
@@ -1006,7 +1006,7 @@ flowchart TD
 ```python
 import requests, json
 
-HUB = "http://9.134.11.169:8088"
+HUB = "http://clawteam.woa.com:18800"
 TOKEN = os.environ["HUB_API_TOKEN"]
 H = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
 
@@ -1177,7 +1177,7 @@ DELETE /api/v1/engineering/shares/{share_id}
 **做法 A（推荐）：调 `/engineering/resolve` 一步到位**
 
 ```bash
-GET /api/v1/engineering/resolve?url=http://9.134.11.169:8088/engineering/architecture/87
+GET /api/v1/engineering/resolve?url=http://clawteam.woa.com:18800/engineering/architecture/87
 Authorization: Bearer <your_token>
 
 # 返回：

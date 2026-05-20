@@ -10,8 +10,8 @@ OpenClaw 的经验存储分三层（与 Rule #15 对齐）：
 | 层 | 物理载体 | 写入端点 | 适用内容（一句话） |
 |---|---|---|---|
 | **本地层（Local）** | 当前 OpenClaw 的工作目录 / 会话上下文 / 草稿文件 | 不调 Hub API | 当前会话延续、临时排查、中间判断 |
-| **Memos 层** | 外部 Memos 服务（`#openclaw/{tag}/{scope}` 标签去重） | `POST /api/v1/memos/upsert`、`POST /api/v1/memos/deposit` | 待验证经验、碎片观察、初步规律 |
-| **MySQL 层** | `KnowledgeEntry` 表（draft → pending_review → approved） | `POST /api/v1/knowledge`、`PUT /api/v1/knowledge/{id}` 改 status | 已验证长期知识、SOP、FAQ、模板、可复用项目经验、结构化问题/风险/进展 |
+| **Memos 层** | **外部 Memos**（`http://9.134.11.169:5230`），Hub 代写；每条笔记带 `#claw-{Claw名}` 隔离空间 + `#openclaw/{tag}/{scope}`；**visibility=PROTECTED**（勿用 PRIVATE，Memos 0.24 List API 不返回 PRIVATE） | `POST /api/v1/memos/upsert`、`POST /api/v1/memos/deposit`；查自己的：`GET /api/v1/memos/search?claw_only=true`；按 uid 直读：`GET /api/v1/memos/memo/{uid}` | 每日零碎、待验证经验、碎片观察（**不会出现在 Hub 知识库列表**） |
+| **MySQL 层（Hub 正式知识库）** | `KnowledgeEntry` 表（draft → pending_review → approved） | `POST /api/v1/knowledge`、`PUT /api/v1/knowledge/{id}` 改 status | 已验证长期知识、SOP、FAQ、模板、可复用项目经验、结构化问题/风险/进展 |
 
 **触发词**：知识库、经验沉淀、知识搜索、Memos、知识审核、知识共享、沉淀知识、升级经验、知识分层、规则#15
 
@@ -220,14 +220,31 @@ GET /api/v1/knowledge/pending
 
 ### 7. 审核知识（v2 多轮评审）
 
+> 🔑 **统一字段约定（v2.1）**：以下字段约定适用于 4 套 review 接口
+> （`/skills/{id}/review`、`/rules/{id}/review`、`/knowledge/{id}/review`、`/agent-templates/{id}/review`），后端自动归一化。
+>
+> | 字段名 | 推荐 | 兼容写法 |
+> |---|---|---|
+> | 动作 | `action`: `approve` / `revise` / `reject` | `review_status`: `approved` / `revise` / `rejected`；或 `status`（agent_templates） |
+> | 评论 | `comment` | `review_comment`（skill/rule）/ `notes`（knowledge 老字段） |
+>
+> ⚠️ 历史教训（MEMORY #131）：旧版 4 套接口**字段名各不相同**，
+> 调 `/skills/{id}/review` 时若按 knowledge 文档传 `action`+`comment` 会被吞掉
+> （状态变更但 review_comment 永远是空字符串）。**v2 后字段全统一，旧字段名仅作兼容保留**。
+
 ```
 POST /api/v1/knowledge/{id}/review
 
-请求体：
+请求体（v2 推荐）：
 {
-  "action": "approve",                // approve / revise / reject  ← v2 加 revise
-  "comment": "示例不够，请补充2个真实案例",  // 评审意见（推荐用 comment；旧字段 notes 仍兼容）
-  "reviewer": "龙虾王"                // 可选；不传也会从 token 反推
+  "action": "approve",                // approve / revise / reject
+  "comment": "示例不够，请补充2个真实案例"  // revise/reject 时必填
+}
+
+兼容旧写法（依然能用）：
+{
+  "review_status": "revise",
+  "review_comment": "..."   // 或 "notes": "..."
 }
 ```
 
@@ -241,7 +258,7 @@ POST /api/v1/knowledge/{id}/review
 - 审核动作（approve/revise/reject）后，**自动给提交 OpenClaw 发 ClawMessage**（通过 `_notify_submitter_review_result`）
 - Web 用户提交人不发推送，自己上"评审中心 → 我的提交"Tab 看进度
 
-**评审记录时间线**：每一次审核动作都会写入 `review_comments` 表（resource_type=knowledge, resource_id=知识id），可调：
+**评审记录时间线**（v2.1 起所有 4 套接口都会写入）：每一次审核动作都会写入 `review_comments` 表（resource_type=knowledge|skill|rule, resource_id=资源 id），可调：
 ```
 GET /api/v1/review-comments?resource_type=knowledge&resource_id={id}
 → 返回该条知识的完整多轮评审历史（按 created_at 升序）

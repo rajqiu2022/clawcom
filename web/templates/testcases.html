@@ -21,12 +21,52 @@
 
 /* 左侧目录 */
 .tc-sidebar {
-    width: 250px; min-width: 220px; border-right: 1px solid var(--border);
+    width: 340px; min-width: 260px; max-width: 560px; border-right: 1px solid var(--border);
     display: flex; flex-direction: column; background: var(--bg-card); border-radius: var(--radius) 0 0 var(--radius);
+    position: relative; flex: 0 0 340px; transition: width 0.18s ease, flex-basis 0.18s ease;
 }
-.tc-sidebar-header { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.tc-sidebar.collapsed {
+    width: 64px !important; min-width: 64px; max-width: 64px; flex-basis: 64px !important;
+}
+.tc-sidebar-header { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+.tc-sidebar-header .form-input { flex: 1; min-width: 0; }
 .tc-sidebar-tree { flex: 1; overflow-y: auto; padding: 6px 0; }
 .tc-sidebar-footer { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; }
+.tc-sidebar-toggle {
+    width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg-secondary); color: var(--text-secondary); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+    transition: all 0.15s;
+}
+.tc-sidebar-toggle:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); }
+.tc-sidebar-resizer {
+    position: absolute; top: 0; right: -5px; width: 10px; height: 100%;
+    cursor: col-resize; z-index: 8;
+}
+.tc-sidebar-resizer::after {
+    content: ''; position: absolute; top: 12px; bottom: 12px; left: 4px; width: 2px;
+    border-radius: 2px; background: transparent; transition: background 0.15s;
+}
+.tc-sidebar-resizer:hover::after,
+body.tc-resizing-sidebar .tc-sidebar-resizer::after { background: var(--accent); }
+body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
+.tc-sidebar.collapsed .tc-sidebar-header { justify-content: center; padding: 10px 6px; }
+.tc-sidebar.collapsed .tc-sidebar-header .form-input,
+.tc-sidebar.collapsed .tc-sidebar-footer,
+.tc-sidebar.collapsed .tc-sidebar-resizer,
+.tc-sidebar.collapsed .tc-tree-name,
+.tc-sidebar.collapsed .tc-tree-cnt,
+.tc-sidebar.collapsed .tc-tree-creator,
+.tc-sidebar.collapsed .tc-tree-info,
+.tc-sidebar.collapsed .tc-tree-add,
+.tc-sidebar.collapsed .tc-tree-del { display: none !important; }
+.tc-sidebar.collapsed .tc-sidebar-toggle { transform: rotate(180deg); }
+.tc-sidebar.collapsed .tc-tree-lib,
+.tc-sidebar.collapsed .tc-tree-dir { justify-content: center; padding: 9px 0 !important; gap: 0; border-left-width: 0; }
+.tc-sidebar.collapsed .tc-tree-lib .tc-tree-arrow,
+.tc-sidebar.collapsed .tc-tree-dir .tc-tree-arrow,
+.tc-sidebar.collapsed .tc-tree-dir span[style*="width:12px"] { display: none; }
+.tc-sidebar.collapsed .tc-tree-sub { padding-left: 0; }
 
 .tc-tree-lib {
     font-weight: 600; font-size: 0.86rem; padding: 7px 12px; cursor: pointer;
@@ -57,6 +97,27 @@
 .tc-tree-dir .tc-tree-arrow.open { transform: rotate(90deg); }
 .tc-tree-sub { padding-left: 14px; }
 .tc-tree-sub.collapsed { display: none; }
+.tc-tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-tree-creator {
+    font-size: 0.66rem; color: var(--text-muted); background: var(--bg-secondary);
+    border: 1px solid var(--border); border-radius: 999px; padding: 0 6px;
+    max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tc-tree-info {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--border);
+    color: var(--text-muted); font-size: 0.7rem; cursor: pointer;
+    opacity: 0.75; transition: all 0.15s; flex-shrink: 0;
+}
+.tc-tree-info:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); opacity: 1; }
+.tc-info-grid { display: grid; grid-template-columns: 96px 1fr; gap: 8px 14px; font-size: 0.86rem; }
+.tc-info-label { color: var(--text-muted); }
+.tc-info-value { color: var(--text-primary); min-width: 0; word-break: break-word; }
+.tc-info-section-title { font-size: 0.82rem; color: var(--text-muted); margin: 16px 0 8px; font-weight: 600; }
+.tc-review-row {
+    border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px;
+    margin-bottom: 8px; background: var(--bg-secondary);
+}
 
 /* 右侧主区 */
 .tc-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -292,14 +353,16 @@
 {% block content %}
 <div class="tc-layout">
     <!-- 左侧目录树 -->
-    <div class="tc-sidebar">
+    <div class="tc-sidebar" id="tc-sidebar">
         <div class="tc-sidebar-header">
+            <button class="tc-sidebar-toggle" id="tc-sidebar-toggle" type="button" onclick="toggleTestcaseSidebar()" title="收缩目录栏">‹</button>
             <input type="text" class="form-input" id="tree-search" placeholder="🔍 搜索..." style="font-size:0.82rem;padding:5px 10px" oninput="renderTree()">
         </div>
         <div class="tc-sidebar-tree" id="sidebar-tree"></div>
         <div class="tc-sidebar-footer">
             <button class="btn btn-primary btn-sm" onclick="openCreateLibraryModal()" style="flex:1;font-size:0.78rem">+ 新建用例库</button>
         </div>
+        <div class="tc-sidebar-resizer" id="tc-sidebar-resizer" title="拖拽调整目录宽度"></div>
     </div>
     <!-- 右侧 Tab 区 -->
     <div class="tc-main">
@@ -448,6 +511,17 @@
     </div>
 </div>
 
+<!-- 用例库/目录信息弹窗 -->
+<div class="modal-overlay" id="tc-info-modal">
+    <div class="modal" style="max-width:560px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+            <h2 class="modal-title" style="margin:0">目录信息 · <span id="tc-info-title" style="color:var(--text-muted)"></span></h2>
+            <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="closeTestcaseInfoModal()">✕</span>
+        </div>
+        <div id="tc-info-body"></div>
+    </div>
+</div>
+
 <!-- TAPD 需求绑定弹窗 -->
 <div class="modal-overlay" id="tapd-bind-modal">
     <div class="modal" style="max-width:520px">
@@ -539,9 +613,11 @@
     </div>
     <input type="hidden" id="lib-review-libid">
 
-    <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:6px;margin-bottom:14px;font-size:0.85rem">
-      当前状态：<span id="lib-review-current-status">--</span>
-      <span id="lib-review-current-id" style="color:var(--text-muted);margin-left:8px"></span>
+    <div style="background:var(--bg-secondary);padding:10px 12px;border-radius:6px;margin-bottom:14px;font-size:0.85rem;display:flex;justify-content:space-between;align-items:center">
+      <div>当前状态：<span id="lib-review-current-status">--</span>
+        <span id="lib-review-current-id" style="color:var(--text-muted);margin-left:8px"></span>
+      </div>
+      <div id="lib-review-top-actions" style="display:flex;gap:6px"></div>
     </div>
 
     <form id="lib-review-form" style="background:var(--bg-secondary);padding:10px;border-radius:8px;margin-bottom:14px">
@@ -584,9 +660,80 @@ let pageSize = 20;
 
 const PRIO_CLS = { P0:'p0', P1:'p1', P2:'p2', P3:'p3' };
 function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function fmtMetaTime(s) {
+    if (!s) return '-';
+    return String(s).substring(0, 16).replace('T', ' ');
+}
+function actorLabel(s) { return (s && String(s).trim()) || '-'; }
+function realCasesOf(cases) { return (cases || []).filter(c => !c.is_placeholder); }
+
+function dirCases(cases, path, includePlaceholders = true) {
+    if (path === null) return includePlaceholders ? (cases || []) : realCasesOf(cases);
+    return (cases || []).filter(c => {
+        if (!includePlaceholders && c.is_placeholder) return false;
+        const mp = (c.module_path || '').trim();
+        if (path === '') return !mp;
+        return mp === path || mp.startsWith(path + '/');
+    });
+}
+
+function calcNodeInfo(lib, path) {
+    const cases = casesCache[lib.id] || [];
+    if (path === null) {
+        const real = realCasesOf(cases);
+        return {
+            type: 'library',
+            name: lib.name || `用例库 #${lib.id}`,
+            path: '',
+            creator: lib.created_by || lib.owner || '-',
+            createdAt: lib.created_at,
+            updater: lib.updated_by || '-',
+            updatedAt: lib.updated_at,
+            caseCount: real.length,
+            dirCount: uniqueDirPaths(cases).length,
+        };
+    }
+
+    const scopedAll = dirCases(cases, path, true);
+    const scopedReal = dirCases(cases, path, false);
+    const exact = (cases || []).filter(c => (c.module_path || '').trim() === path);
+    const placeholder = exact.find(c => c.is_placeholder);
+    const createdSource = placeholder || earliestBy(scopedAll, 'created_at') || {};
+    const updatedSource = latestBy(scopedAll, 'updated_at') || {};
+    return {
+        type: 'module',
+        name: path === '' ? '未分类' : path.split('/').pop(),
+        path,
+        creator: createdSource.created_by || lib.created_by || lib.owner || '-',
+        createdAt: createdSource.created_at || lib.created_at,
+        updater: updatedSource.updated_by || updatedSource.created_by || lib.updated_by || '-',
+        updatedAt: updatedSource.updated_at || lib.updated_at,
+        caseCount: scopedReal.length,
+        dirCount: uniqueDirPaths(scopedAll).filter(p => path && p.startsWith(path + '/')).length,
+    };
+}
+
+function uniqueDirPaths(cases) {
+    const paths = new Set();
+    (cases || []).forEach(c => {
+        const mp = (c.module_path || '').trim();
+        if (!mp) return;
+        const parts = mp.split('/');
+        for (let i = 1; i <= parts.length; i++) paths.add(parts.slice(0, i).join('/'));
+    });
+    return Array.from(paths);
+}
+
+function earliestBy(items, key) {
+    return (items || []).filter(x => x && x[key]).sort((a, b) => String(a[key]).localeCompare(String(b[key])))[0];
+}
+function latestBy(items, key) {
+    return (items || []).filter(x => x && x[key]).sort((a, b) => String(b[key]).localeCompare(String(a[key])))[0];
+}
 
 // ==================== 初始化 ====================
 async function init() {
+    initSidebarResize();
     try {
         const projects = await API.listProjects();
         const sel = $('#project-filter');
@@ -599,6 +746,66 @@ async function init() {
     if (urlLibId) {
         selectNode(urlLibId, null);
     }
+}
+
+function applySidebarWidth(width) {
+    const sidebar = $('#tc-sidebar');
+    if (!sidebar) return;
+    if (sidebar.classList.contains('collapsed')) return;
+    const clamped = Math.max(260, Math.min(560, Number(width) || 340));
+    sidebar.style.width = clamped + 'px';
+    sidebar.style.flexBasis = clamped + 'px';
+}
+
+function setSidebarCollapsed(collapsed) {
+    const sidebar = $('#tc-sidebar');
+    const toggle = $('#tc-sidebar-toggle');
+    if (!sidebar) return;
+    sidebar.classList.toggle('collapsed', !!collapsed);
+    if (toggle) {
+        toggle.title = collapsed ? '展开目录栏' : '收缩目录栏';
+        toggle.setAttribute('aria-label', toggle.title);
+    }
+    localStorage.setItem('testcases.sidebar.collapsed', collapsed ? '1' : '0');
+    if (!collapsed) {
+        applySidebarWidth(localStorage.getItem('testcases.sidebar.width') || 340);
+    }
+}
+
+function toggleTestcaseSidebar() {
+    const sidebar = $('#tc-sidebar');
+    setSidebarCollapsed(!(sidebar && sidebar.classList.contains('collapsed')));
+}
+
+function initSidebarResize() {
+    const sidebar = $('#tc-sidebar');
+    const handle = $('#tc-sidebar-resizer');
+    if (!sidebar || !handle) return;
+    const saved = localStorage.getItem('testcases.sidebar.width');
+    if (saved) applySidebarWidth(saved);
+    setSidebarCollapsed(localStorage.getItem('testcases.sidebar.collapsed') === '1');
+
+    let startX = 0;
+    let startWidth = 0;
+    const onMove = (e) => {
+        const width = startWidth + (e.clientX - startX);
+        applySidebarWidth(width);
+    };
+    const onUp = () => {
+        document.body.classList.remove('tc-resizing-sidebar');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        localStorage.setItem('testcases.sidebar.width', Math.round(sidebar.getBoundingClientRect().width));
+    };
+    handle.addEventListener('mousedown', (e) => {
+        if (sidebar.classList.contains('collapsed')) return;
+        e.preventDefault();
+        startX = e.clientX;
+        startWidth = sidebar.getBoundingClientRect().width;
+        document.body.classList.add('tc-resizing-sidebar');
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
 }
 
 async function loadTree() {
@@ -659,19 +866,26 @@ function renderTree() {
 
         const reviewBadge = libReviewBadgeHtml(lib);
         const sharedBadge = libSharedBadgeHtml(lib);
+        const libInfo = calcNodeInfo(lib, null);
+        const libCreatorBadge = libInfo.creator && libInfo.creator !== '-'
+            ? `<span class="tc-tree-creator" title="创建者：${escHtml(libInfo.creator)}">${escHtml(libInfo.creator)}</span>`
+            : '';
         const canShare = lib.can_share || lib.shared_with_me === false /* fallback：若后端没返回 can_share，作者本人前端按可共享渲染由后端二次校验兜底 */;
         const shareBtn = `<span class="tc-tree-add" style="color:#3b82f6" onclick="event.stopPropagation();openLibShareDialog(${lib.id}, '${(lib.name || '').replace(/'/g, "\\'")}')" title="共享/邀请评审">👥</span>`;
-        const reviewBtn = lib.can_manage ? `<span class="tc-tree-add" style="color:#10b981" onclick="event.stopPropagation();openLibReviewDialog(${lib.id}, '${(lib.name || '').replace(/'/g, "\\'")}')" title="发起/查看评审">📝</span>` : '';
+        const canReview = lib.can_manage || (lib.shared_with_me && lib.my_share_permission && lib.my_share_permission !== 'readonly');
+        const reviewBtn = canReview ? `<span class="tc-tree-add" style="color:#10b981" onclick="event.stopPropagation();openLibReviewDialog(${lib.id}, '${(lib.name || '').replace(/'/g, "\\'")}')" title="发起/查看评审">📝</span>` : '';
         html += `<div class="tc-tree-lib${isLibSel ? ' active' : ''}" onclick="selectNode(${lib.id}, null)" style="color:${isLibSel ? 'var(--accent)' : ''}">
-            <span class="tc-tree-arrow${libCollapsed ? '' : ' open'}" onclick="event.stopPropagation();toggleLib(${lib.id})">›</span> ${libCollapsed ? '📁' : '📂'} ${escHtml(lib.name)}
+            <span class="tc-tree-arrow${libCollapsed ? '' : ' open'}" onclick="event.stopPropagation();toggleLib(${lib.id})">›</span> ${libCollapsed ? '📁' : '📂'} <span class="tc-tree-name">${escHtml(lib.name)}</span>
             ${reviewBadge}${sharedBadge}
-            <span class="tc-tree-cnt">${cases.length}</span>
+            ${libCreatorBadge}
+            <span class="tc-tree-info" onclick="event.stopPropagation();openTestcaseInfoModal(${lib.id}, null)" title="查看用例库信息">i</span>
+            <span class="tc-tree-cnt">${realCasesOf(cases).length}</span>
             <span class="tc-tree-add" onclick="event.stopPropagation();openSubdirModal(${lib.id}, '')" title="新增子目录">+</span>
             ${shareBtn}
             ${reviewBtn}
         </div>`;
 
-        function renderDir(tree, parentPath, depth) {
+        function renderDir(tree, parentPath, depth, inheritedCreator) {
             let h = '';
             for (const [name, node] of Object.entries(tree).sort((a,b) => a[0].localeCompare(b[0]))) {
                 const path = parentPath ? parentPath + '/' + name : name;
@@ -681,17 +895,28 @@ function renderTree() {
                 const collapsedKey = lib.id + ':' + path;
                 const isCollapsed = collapsedDirs.has(collapsedKey);
                 if (search && !name.toLowerCase().includes(search)) continue;
+                const info = calcNodeInfo(lib, path);
+                const showCreator = info.creator && info.creator !== '-' && info.creator !== inheritedCreator;
+                const creatorBadge = showCreator
+                    ? `<span class="tc-tree-creator" title="创建者：${escHtml(info.creator)}">${escHtml(info.creator)}</span>`
+                    : '';
                 h += `<div class="tc-tree-dir${isActive ? ' active' : ''}" style="padding-left:${indent}px" onclick="selectNode(${lib.id}, '${path.replace(/'/g, "\\'")}')">
-                    ${hasKids ? `<span class="tc-tree-arrow${isCollapsed ? '' : ' open'}" onclick="event.stopPropagation();toggleDir('${collapsedKey.replace(/'/g, "\\'")}')">›</span>` : '<span style="width:12px;flex-shrink:0"></span>'} ${hasKids ? (isCollapsed ? '📁' : '📂') : '📄'} ${escHtml(name)} <span class="tc-tree-cnt">${node._count}</span>
+                    ${hasKids ? `<span class="tc-tree-arrow${isCollapsed ? '' : ' open'}" onclick="event.stopPropagation();toggleDir('${collapsedKey.replace(/'/g, "\\'")}')">›</span>` : '<span style="width:12px;flex-shrink:0"></span>'} ${hasKids ? (isCollapsed ? '📁' : '📂') : '📄'} <span class="tc-tree-name">${escHtml(name)}</span>
+                    ${creatorBadge}
+                    <span class="tc-tree-info" onclick="event.stopPropagation();openTestcaseInfoModal(${lib.id}, ${JSON.stringify(path)})" title="查看目录信息">i</span>
+                    <span class="tc-tree-cnt">${node._count}</span>
                     <span class="tc-tree-add" onclick="event.stopPropagation();openSubdirModal(${lib.id}, '${path.replace(/'/g, "\\'")}')" title="新增子目录">+</span>
                     <span class="tc-tree-del" onclick="event.stopPropagation();openDelDirModal(${lib.id}, '${path.replace(/'/g, "\\'")}', '${name.replace(/'/g, "\\'")}')" title="删除目录">×</span>
                 </div>`;
-                if (hasKids) h += `<div class="tc-tree-sub${isCollapsed ? ' collapsed' : ''}">` + renderDir(node._children, path, depth + 1) + '</div>';
+                if (hasKids) {
+                    h += `<div class="tc-tree-sub${isCollapsed ? ' collapsed' : ''}">` +
+                        renderDir(node._children, path, depth + 1, info.creator || inheritedCreator) + '</div>';
+                }
             }
             return h;
         }
 
-        html += `<div class="tc-tree-sub${libCollapsed ? ' collapsed' : ''}">` + renderDir(dirs, '', 0) + '</div>';
+        html += `<div class="tc-tree-sub${libCollapsed ? ' collapsed' : ''}">` + renderDir(dirs, '', 0, libInfo.creator) + '</div>';
     });
 
     el.innerHTML = html;
@@ -1399,6 +1624,79 @@ $('#tapd-bind-form').addEventListener('submit', async e => {
 
 // ==================== 用例库 共享 / 评审 ====================
 
+function closeTestcaseInfoModal() {
+    document.getElementById('tc-info-modal').classList.remove('active');
+}
+
+async function openTestcaseInfoModal(libId, path) {
+    const lib = allLibraries.find(l => l.id === libId);
+    if (!lib) return;
+    const info = calcNodeInfo(lib, path);
+    const title = path === null ? (lib.name || `用例库 #${libId}`) : (path || '未分类');
+    document.getElementById('tc-info-title').textContent = title;
+    const body = document.getElementById('tc-info-body');
+    body.innerHTML = renderInfoBody(info, []);
+    document.getElementById('tc-info-modal').classList.add('active');
+
+    try {
+        const res = await API.request('GET', `/testcase-libraries/${libId}/reviews`);
+        const related = filterRelatedReviews(res.reviews || [], path).slice(0, 8);
+        body.innerHTML = renderInfoBody(info, related);
+    } catch (e) {
+        body.innerHTML = renderInfoBody(info, [], '评审记录加载失败：' + (e.message || ''));
+    }
+}
+
+function renderInfoBody(info, reviews, reviewError = '') {
+    const scopeText = info.type === 'library'
+        ? '整个用例库'
+        : (info.path ? `目录：${info.path}` : '未分类目录');
+    const reviewHtml = reviewError
+        ? `<div style="color:#ef4444;font-size:0.82rem">${escHtml(reviewError)}</div>`
+        : (reviews.length ? reviews.map(renderInfoReviewRow).join('') :
+            '<div style="color:var(--text-muted);font-size:0.82rem;padding:8px 0">暂无相关评审记录</div>');
+    return `
+        <div class="tc-info-grid">
+            <div class="tc-info-label">范围</div><div class="tc-info-value">${escHtml(scopeText)}</div>
+            <div class="tc-info-label">创建者</div><div class="tc-info-value">${escHtml(actorLabel(info.creator))}</div>
+            <div class="tc-info-label">创建时间</div><div class="tc-info-value">${escHtml(fmtMetaTime(info.createdAt))}</div>
+            <div class="tc-info-label">修改者</div><div class="tc-info-value">${escHtml(actorLabel(info.updater))}</div>
+            <div class="tc-info-label">最后修改</div><div class="tc-info-value">${escHtml(fmtMetaTime(info.updatedAt))}</div>
+            <div class="tc-info-label">用例数</div><div class="tc-info-value">${info.caseCount || 0} 条</div>
+            <div class="tc-info-label">子目录数</div><div class="tc-info-value">${info.dirCount || 0} 个</div>
+        </div>
+        <div class="tc-info-section-title">相关评审记录</div>
+        <div>${reviewHtml}</div>
+    `;
+}
+
+function filterRelatedReviews(reviews, path) {
+    if (path === null) return reviews;
+    return (reviews || []).filter(r => {
+        const type = r.scope_type || 'library';
+        const modulePath = (r.scope_module_path || '').trim();
+        if (type === 'library' || !modulePath) return true;
+        return modulePath === path || modulePath.startsWith(path + '/') || path.startsWith(modulePath + '/');
+    });
+}
+
+function renderInfoReviewRow(r) {
+    const badge = reviewStatusBadge(r.status || 'submitted');
+    const scope = r.scope_summary || r.scope_module_path || (r.scope_type === 'library' ? '整库评审' : '未标注范围');
+    return `<div class="tc-review-row">
+        <div style="display:flex;justify-content:space-between;gap:10px;align-items:center">
+            <div style="font-weight:600;color:var(--text-primary)">#${r.id} ${badge}</div>
+            <div style="font-size:0.76rem;color:var(--text-muted)">${escHtml(fmtMetaTime(r.submitted_at || r.created_at))}</div>
+        </div>
+        <div style="font-size:0.82rem;color:var(--text-secondary);margin-top:4px">${escHtml(scope)}</div>
+        <div style="font-size:0.76rem;color:var(--text-muted);margin-top:4px">
+            发起：${escHtml(actorLabel(r.submitted_by))}
+            ${r.decided_by ? ` · 处理：${escHtml(actorLabel(r.decided_by))}` : ''}
+            ${r.decision_note ? ` · ${escHtml(r.decision_note)}` : ''}
+        </div>
+    </div>`;
+}
+
 function libReviewBadgeHtml(lib) {
     const st = lib && lib.review_status;
     if (!st || st === 'draft') return '';
@@ -1575,6 +1873,7 @@ const REVIEW_STATUS_MAP = {
     approved:       { txt: '已通过', color: '#10b981' },
     rejected:       { txt: '已拒绝', color: '#ef4444' },
     withdrawn:      { txt: '已撤回', color: '#6b7280' },
+    closed:         { txt: '已关闭', color: '#6b7280' },
 };
 function reviewStatusBadge(st) {
     const c = REVIEW_STATUS_MAP[st] || { txt: st || '-', color: '#6b7280' };
@@ -1584,9 +1883,21 @@ function reviewStatusBadge(st) {
 async function loadLibReviewList() {
     const libId = document.getElementById('lib-review-libid').value;
     const lib = (allLibraries || []).find(x => x.id == libId);
-    document.getElementById('lib-review-current-status').innerHTML = reviewStatusBadge(lib && lib.review_status || 'draft');
+    const curStatus = lib && lib.review_status || 'draft';
+    document.getElementById('lib-review-current-status').innerHTML = reviewStatusBadge(curStatus);
     document.getElementById('lib-review-current-id').textContent =
         (lib && lib.current_review_id) ? `(当前 review #${lib.current_review_id})` : '';
+
+    // 顶部操作按钮：评审中时显示"关闭评审"
+    const topActions = document.getElementById('lib-review-top-actions');
+    if (curStatus === 'pending_review') {
+        topActions.innerHTML = `<button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="closeLibReviewTopic(${libId})">🔒 关闭评审</button>`;
+        // 隐藏发起表单
+        document.getElementById('lib-review-form').style.display = 'none';
+    } else {
+        topActions.innerHTML = '';
+        document.getElementById('lib-review-form').style.display = '';
+    }
 
     const el = document.getElementById('lib-review-list');
     el.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:18px">加载中...</div>';
@@ -1601,9 +1912,10 @@ async function loadLibReviewList() {
             const isOpen = rv.status === 'submitted';
             const actions = [];
             if (isOpen) {
-                actions.push(`<button class="btn btn-primary btn-sm" onclick="approveLibReview(${rv.id})">✓ 通过</button>`);
-                actions.push(`<button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="rejectLibReview(${rv.id})">✕ 拒绝</button>`);
-                actions.push(`<button class="btn btn-ghost btn-sm" onclick="withdrawLibReview(${rv.id})">↩ 撤回</button>`);
+                actions.push(`<button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="closeLibReviewRound(${rv.id})">🔒 关闭审核</button>`);
+            }
+            if (rv.related_topic_id) {
+                actions.push(`<button class="btn btn-ghost btn-sm" onclick="window.open('/topics/${rv.related_topic_id}','_blank')">👁 查看</button>`);
             }
             return `<div style="padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:6px">
                 <div style="display:flex;justify-content:space-between;align-items:center">
@@ -1626,43 +1938,38 @@ document.getElementById('lib-review-form').addEventListener('submit', async (ev)
     const scope = document.getElementById('lib-review-scope').value.trim();
     const note = document.getElementById('lib-review-note').value.trim();
     try {
-        await API.request('POST', `/testcase-libraries/${libId}/reviews`, {
+        const res = await API.request('POST', `/testcase-libraries/${libId}/reviews`, {
             scope_summary: scope,
             submit_note: note,
         });
-        showToast('已发起评审', 'success');
+        showToast('已发起评审，正在跳转课题...', 'success');
         document.getElementById('lib-review-scope').value = '';
         document.getElementById('lib-review-note').value = '';
-        loadLibReviewList();
         await loadTree();
+        closeLibReviewDialog();
+        // 跳转到关联的课题页面
+        if (res.related_topic_id) {
+            window.open('/topics/' + res.related_topic_id, '_blank');
+        }
     } catch (e) { showToast('发起失败：' + e.message, 'error'); }
 });
 
-async function approveLibReview(reviewId) {
-    const note = prompt('通过意见（可选）') || '';
+// 关闭单条评审（关闭审核）
+async function closeLibReviewRound(reviewId) {
+    if (!await customConfirm('确认关闭该轮审核？关闭后该轮评审状态变为已关闭。')) return;
     try {
-        await API.request('POST', `/testcase-libraries/reviews/${reviewId}/approve`, { decision_note: note });
-        showToast('已通过', 'success');
+        await API.request('POST', `/testcase-libraries/reviews/${reviewId}/close`, {});
+        showToast('审核已关闭', 'success');
         loadLibReviewList(); await loadTree();
     } catch (e) { showToast('操作失败：' + e.message, 'error'); }
 }
 
-async function rejectLibReview(reviewId) {
-    const note = prompt('拒绝原因（必填）');
-    if (note === null) return;
-    if (!note.trim()) { showToast('请填写拒绝原因', 'warning'); return; }
+// 关闭整个评审课题
+async function closeLibReviewTopic(libId) {
+    if (!await customConfirm('确认关闭整个评审课题？关闭后当前评审结束，课题状态变为已关闭。')) return;
     try {
-        await API.request('POST', `/testcase-libraries/reviews/${reviewId}/reject`, { decision_note: note });
-        showToast('已拒绝', 'success');
-        loadLibReviewList(); await loadTree();
-    } catch (e) { showToast('操作失败：' + e.message, 'error'); }
-}
-
-async function withdrawLibReview(reviewId) {
-    if (!confirm('确认撤回此次评审？')) return;
-    try {
-        await API.request('POST', `/testcase-libraries/reviews/${reviewId}/withdraw`, {});
-        showToast('已撤回', 'success');
+        await API.request('POST', `/testcase-libraries/${libId}/close-review`, {});
+        showToast('评审课题已关闭', 'success');
         loadLibReviewList(); await loadTree();
     } catch (e) { showToast('操作失败：' + e.message, 'error'); }
 }

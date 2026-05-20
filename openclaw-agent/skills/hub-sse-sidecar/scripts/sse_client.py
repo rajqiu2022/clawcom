@@ -84,7 +84,7 @@ def load_config(path: str) -> dict:
 
 
 CFG = load_config(CONFIG_FILE)
-HUB_URL = CFG.get("HUB_URL", "http://9.134.11.169:8088").rstrip("/")
+HUB_URL = CFG.get("HUB_URL", "http://clawteam.woa.com:18800").rstrip("/")
 CLAW_ID = CFG.get("CLAW_ID")
 TOKEN = CFG.get("API_TOKEN")
 if not CLAW_ID or not TOKEN:
@@ -211,6 +211,7 @@ def should_trigger_worker(event_type: str, data: dict):
             "msg_id": data.get("id"),
             "sender": data.get("sender_name", ""),
             "sender_claw_id": data.get("sender_claw_id"),
+            "from_claw_id": data.get("from_claw_id"),
             "msg_type": data.get("msg_type", "text"),
             "content": data.get("content", ""),
             "summary": (

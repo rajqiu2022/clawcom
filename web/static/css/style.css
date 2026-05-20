@@ -720,6 +720,28 @@ a:hover { color: var(--accent-hover); }
     box-shadow: 0 2px 8px var(--red-dim);
 }
 
+.btn-success {
+    background: rgba(16, 185, 129, 0.12);
+    color: #10b981;
+    border: 1px solid transparent;
+}
+.btn-success:hover {
+    background: #10b981;
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.25);
+}
+
+.btn-info {
+    background: rgba(59, 130, 246, 0.12);
+    color: #3b82f6;
+    border: 1px solid transparent;
+}
+.btn-info:hover {
+    background: #3b82f6;
+    color: #fff;
+    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.25);
+}
+
 .btn-sm { padding: 5px 12px; font-size: 0.82rem; border-radius: 6px; }
 .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .btn:disabled, .btn[disabled] { opacity: .5; cursor: not-allowed; transform: none !important; box-shadow: none !important; }

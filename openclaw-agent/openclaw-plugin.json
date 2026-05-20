@@ -12,7 +12,7 @@
   "entry_point": "python main.py",
   "working_directory": ".",
   "env": {
-    "MANAGER_URL": "http://9.134.11.169:8088",
+    "MANAGER_URL": "http://clawteam.woa.com:18800",
     "CLAW_ID": "4",
     "API_TOKEN": "oc_tk_bb780b6341d4abcdbd9b012bb4a651ede6db441353060fa1",
     "OPENCLAW_DIR": "/root/.qclaw",

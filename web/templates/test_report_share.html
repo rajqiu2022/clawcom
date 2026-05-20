@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex,nofollow">
+    <title>测试报告（分享）- OpenClaw</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: #f8fafc; color: #1e293b;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 980px; margin: 0 auto; padding: 32px 24px 80px;
+        }
+        .header-bar {
+            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            color: #fff; padding: 14px 24px;
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .header-bar a {
+            color: #fff; text-decoration: none; font-weight: 600; font-size: 14px;
+        }
+        .header-bar .tag {
+            font-size: 12px; background: rgba(255,255,255,.2);
+            padding: 4px 10px; border-radius: 12px;
+        }
+        .meta-row {
+            color: #64748b; font-size: 13px; margin: 8px 0 18px;
+            display: flex; flex-wrap: wrap; gap: 12px;
+        }
+        .meta-row .item::before { content: '·'; margin-right: 8px; color: #cbd5e1; }
+        .meta-row .item:first-child::before { content: ''; margin-right: 0; }
+        .title { font-size: 26px; font-weight: 700; margin: 6px 0 0; }
+        .badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+        .badge {
+            display: inline-block; padding: 3px 10px; border-radius: 12px;
+            font-size: 12px; font-weight: 600;
+        }
+        .b-type { background: #6366f122; color: #6366f1; border: 1px solid #6366f166; }
+        .b-risk-high { background: #ef444422; color: #ef4444; border: 1px solid #ef444466; }
+        .b-risk-medium { background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b66; }
+        .b-risk-low { background: #10b98122; color: #10b981; border: 1px solid #10b98166; }
+        .b-risk-tbd { background: #94a3b822; color: #94a3b8; border: 1px solid #94a3b866; }
+        .remark {
+            padding: 10px 14px; background: #f1f5f9;
+            border-left: 3px solid #6366f1; border-radius: 4px;
+            margin: 14px 0; color: #475569;
+        }
+        .markdown-body {
+            border-top: 1px solid #e2e8f0; padding-top: 18px; margin-top: 8px;
+        }
+        .markdown-body h1, .markdown-body h2, .markdown-body h3,
+        .markdown-body h4, .markdown-body h5 { margin-top: 24px; }
+        .markdown-body pre {
+            background: #0f172a; color: #e2e8f0; padding: 14px;
+            border-radius: 6px; overflow: auto;
+        }
+        .markdown-body code {
+            background: #f1f5f9; padding: 1px 6px; border-radius: 3px;
+        }
+        .markdown-body pre code { background: transparent; padding: 0; }
+        .markdown-body table {
+            border-collapse: collapse; margin: 12px 0;
+        }
+        .markdown-body th, .markdown-body td {
+            border: 1px solid #e2e8f0; padding: 6px 10px;
+        }
+        .markdown-body blockquote {
+            border-left: 4px solid #cbd5e1; padding: 4px 14px;
+            color: #64748b; margin: 12px 0; background: #f8fafc;
+        }
+        .attachments {
+            margin-top: 24px; padding: 14px;
+            border: 1px dashed #cbd5e1; border-radius: 8px; background: #fdfdff;
+        }
+        .att-item {
+            display: flex; align-items: center; gap: 10px;
+            padding: 6px 10px; border: 1px solid #e2e8f0;
+            border-radius: 6px; margin-top: 6px; background: #fff;
+        }
+        .att-item .filename { flex: 1; word-break: break-all; }
+        .att-item .size { color: #94a3b8; font-size: 12px; margin-right: 8px; }
+        .att-locked {
+            font-size: 12px; color: #64748b; padding: 3px 8px;
+            border: 1px solid #cbd5e1; border-radius: 4px;
+            background: #f1f5f9;
+        }
+        .footer {
+            margin-top: 60px; padding-top: 20px;
+            border-top: 1px solid #e2e8f0;
+            color: #94a3b8; font-size: 12px; text-align: center;
+        }
+        .footer a { color: #6366f1; text-decoration: none; }
+        .loading, .empty {
+            text-align: center; padding: 80px 20px; color: #94a3b8;
+        }
+    </style>
+</head>
+<body>
+    <div class="header-bar">
+        <div>📄 OpenClaw 测试报告（公开分享）</div>
+        <a href="/" target="_blank">访问 OpenClaw Hub →</a>
+    </div>
+    <div class="container">
+        <div id="content">
+            <div class="loading">加载中...</div>
+        </div>
+        <div class="footer">
+            本页面通过分享链接生成，由 OpenClaw 测试管理平台输出 · token: <code id="token-tag"></code>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
+    <script>
+        const TOKEN = {{ share_token | tojson }};
+        document.getElementById('token-tag').textContent = TOKEN.slice(0, 8) + '...';
+
+        function escapeHtml(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+        function renderMd(t) {
+            if (!t) return '';
+            try {
+                marked.setOptions({ breaks: true, gfm: true });
+                return marked.parse(t);
+            } catch (e) { return '<pre>' + escapeHtml(t) + '</pre>'; }
+        }
+        function fmtBytes(b) {
+            b = Number(b || 0);
+            if (b < 1024) return b + ' B';
+            if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+            return (b / 1024 / 1024).toFixed(2) + ' MB';
+        }
+
+        (async function () {
+            try {
+                const r = await fetch('/api/v1/test-reports/shared/' + encodeURIComponent(TOKEN));
+                if (!r.ok) {
+                    let msg = '链接无效或已撤销';
+                    try {
+                        const e = await r.json();
+                        if (e && e.error) msg = e.error;
+                    } catch (_) {}
+                    document.getElementById('content').innerHTML =
+                        '<div class="empty"><h2>🔒 ' + escapeHtml(msg) + '</h2><p>请联系报告作者重新分享。</p></div>';
+                    return;
+                }
+                const d = await r.json();
+                renderReport(d);
+            } catch (err) {
+                document.getElementById('content').innerHTML =
+                    '<div class="empty"><h2>加载失败</h2><p>' + escapeHtml(err.message) + '</p></div>';
+            }
+        })();
+
+        function renderReport(d) {
+            const riskCls = 'b-risk-' + (d.risk_level || 'tbd');
+            const html = (d.format === 'html') ? (d.content || '') : renderMd(d.content || '');
+            const atts = (d.attachments || []).map(a => `
+                <div class="att-item">
+                    <span class="filename">📎 ${escapeHtml(a.filename)}</span>
+                    <span class="size">${fmtBytes(a.size_bytes)}</span>
+                    <span class="att-locked" title="附件下载需登录 OpenClaw Hub">🔒 登录后下载</span>
+                </div>`).join('');
+            document.getElementById('content').innerHTML = `
+                <div class="badges">
+                    <span class="badge b-type">${escapeHtml(d.report_type_label || d.report_type)}</span>
+                    <span class="badge ${riskCls}">风险：${escapeHtml(d.risk_level_label || d.risk_level)}</span>
+                </div>
+                <h1 class="title">${escapeHtml(d.title)}</h1>
+                <div class="meta-row">
+                    ${d.project_name ? `<span class="item">📁 ${escapeHtml(d.project_name)}</span>` : ''}
+                    ${(d.version_name || d.iteration_name) ? `<span class="item">🏷️ ${escapeHtml(d.version_name || d.iteration_name)}</span>` : ''}
+                    <span class="item">✍️ ${escapeHtml(d.submitter_name || '')}</span>
+                    <span class="item">🕒 ${escapeHtml((d.created_at || '').slice(0, 16))}</span>
+                    ${d.updated_at && d.updated_at !== d.created_at ? `<span class="item">📝 修改：${escapeHtml(d.updated_at.slice(0, 16))}</span>` : ''}
+                </div>
+                ${d.remark ? `<div class="remark">${escapeHtml(d.remark)}</div>` : ''}
+                <div class="markdown-body">${html || '<div class="empty">（无正文）</div>'}</div>
+                ${atts ? `<div class="attachments"><div style="font-weight:600;margin-bottom:6px">附件</div>${atts}</div>` : ''}
+            `;
+            // 让标题反映报告标题
+            document.title = (d.title || '测试报告') + ' - OpenClaw';
+        }
+    </script>
+</body>
+</html>

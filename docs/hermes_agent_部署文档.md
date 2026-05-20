@@ -1,9 +1,45 @@
 # Hermes Agent 部署指南（Venus 大模型配置）
 
 > 适用版本：Hermes Agent 最新版  
-> 最后更新：2026-04-27  
+> 最后更新：2026-05-01  
 > 适用平台：Linux (CentOS/Ubuntu)  
 > ⚠️ 公司内网部署，严禁数据出境
+
+## 环境与文档分叉（必读）
+
+- **Systemd + venv 标准化流程**（目录拆分、`hermes-gateway-*`、SSH 到 **Agent 机**、与 Hub 分离等）：以仓库外 **`F:/Code/hermes agent/部署指南.md`（v2）** 为准；其中 **§一** 规定 Agent 目标机 **`9.134.51.249:36000`**（密钥 `~/.ssh/id_9.134.51.249`），**Hub** 仍为 **`http://clawteam.woa.com:18800`**（`HUB_BASE_URL` / `hub.base_url`）。
+- **本文档**：侧重 Docker / 单机目录示例与 Venus 配置说明；Hub 代建、249 机 SSH 操作请交叉阅读上述《部署指南》。
+
+### Hub 代建隔离约束（2026-04-30 起）
+
+Hub 新建 OpenClaw 同步部署 Hermes Agent 时，工作目录必须遵循以下边界：
+
+- Hub 代建 **不开放 Docker 模式**，统一使用 systemd 隔离部署；旧 Docker 示例仅作为手工部署参考
+- 私有根目录：`/opt/openclaw-agents/`
+- 每个 Agent 只能写自己的子目录：`/opt/openclaw-agents/claw-<id>-<safe_name>/...`
+- 共享目录：`/opt/agent_share`，所有 Agent 均可写，用于明确需要跨 Agent 交换的文件
+- 除上述两个写路径外，systemd unit 使用 `ProtectSystem=strict` + `ReadWritePaths` 做写入隔离；默认服务用户为 `oclaw_<id>`，不再以 root 跑 Agent
+- `hermes_install_dir` 可以指向已预装的 venv/源码目录，但仅作为只读运行时；`HERMES_HOME` / 数据目录必须在本 Agent 私有目录下
+
+### Hub 代建标准部署流程（2026-05-01 固化）
+
+Hub 上新建 OpenClaw 并勾选“同步部署 Hermes Agent”后，后端部署器会按以下顺序自动完成，不需要手工登录 Agent 机补配置：
+
+1. 读取 Hub 服务端默认部署配置：目标机 `deploy_default_host`、SSH 凭据、`deploy_default_hermes_install_dir`、`deploy_venus_api_key`。
+2. 创建本 Agent 独立服务用户 `oclaw_<id>`、私有目录 `/opt/openclaw-agents/claw-<id>-<safe_name>/data` 和共享目录 `/opt/agent_share`。
+3. 写入 `config.yaml`：模型使用 Hub 选择项映射后的 Venus 真实模型；配置 `hub:` 节点；若已绑定企微 Bot，则写入 `wecom.key/secret`。
+4. 写入 `.env`：包括 `VENUS_API_KEY`、`HERMES_CONFIG_PATH`、`HERMES_CODEX_STREAMING=false`、`WECOM_KEY/WECOM_SECRET`、`WECOM_HOME_CHANNEL`、`WECOM_ALLOW_ALL_USERS=true`、`WECOM_DM_POLICY=open`。
+5. 自检 `config.yaml/.env` 是否包含 Venus 与企微必需配置，修正 owner 与权限：`config.yaml=0644`、`.env=0600`，归属 `oclaw_<id>:openclaw_agents`。
+6. 写入并启动 `hermes-gateway-claw-<id>.service`，使用 `ProtectSystem=strict`、`ReadWritePaths=<agent_data> /opt/agent_share`，并确认 systemd `active`。
+7. 下载 Hub 静态资产中的 `sidecar_v2.py`，写入 `hermes_sidecar_wrapper.sh` 和 `sidecar.env`。wrapper 会显式加载 Agent 的 `.env`，确保 Hub 消息侧的 Hermes CLI 与 gateway 使用同一套 Venus/WeCom 配置。
+8. 调 Hub `/sidecar-config` 初始化配置中心，写入并启动 `openclaw-sidecar-v2-claw-<id>.service`，确认 sidecar `active`。
+
+部署成功的最低验收条件：
+
+- `hermes-gateway-claw-<id>.service` 为 `active`
+- `openclaw-sidecar-v2-claw-<id>.service` 为 `active`
+- 远端 `.env` 含 `VENUS_API_KEY` 和（有企微时）`WECOM_ALLOW_ALL_USERS=true`
+- Hub 通信中心消息能进入 `processing → done/failed` 状态机
 
 ---
 
@@ -176,14 +212,16 @@ python -m hermes_agent
 
 ## 三、Venus 大模型配置详解
 
-### 3.1 支持的模型列表（Venus 平台）
+### 3.1 支持的模型列表（Hub 代建选择项）
 
 | 模型名称 | 上下文长度 | 特点 | 适用场景 |
 |---------|----------|------|---------|
-| `glm-5.1` | 128K | 通用能力强 | 日常对话、代码、分析 |
+| `venus` | 128K | 默认项，走 Venus 平台默认模型（当前渲染为 `glm-5.1`） | 新建 OpenClaw 同步部署 Hermes Agent 的默认选择 |
 | `kimi-k2.6` | 200K | 长上下文 | 长文档分析、多轮对话 |
-| `qwen3.5-plus` | 200K | 阿里通义千问 | 中文场景优化 |
-| `deepseek-r1` | 128K | 推理能力强 | 复杂问题推理 |
+| `glm-5.1` | 128K | 通用能力强 | 日常对话、代码、分析 |
+| `deepseek-v4-flash` | 128K | 速度优先 | 快速问答、轻量代码分析 |
+| `deepseek-v4-pro` | 128K | 推理与代码能力强 | 复杂问题推理、代码分析 |
+| `hunyuan-v3` | 128K | 腾讯混元模型 | 通用对话、内部知识处理 |
 
 ### 3.2 config.yaml 关键字段说明
 
@@ -217,6 +255,13 @@ providers:
 ## 四、企微机器人与图片/文件收发配置
 
 ### 4.1 配置企微机器人
+
+Hub 代建部署成功的 Hermes Agent 可在 **OpenClaw 卡片 → 设置 → 企微绑定** 中维护：
+
+- `Bot ID / Key`：明文保存并展示，便于确认当前绑定
+- `Secret`：加密存储，前端不回显；留空表示不修改，填写新值表示覆盖
+- 入口仅对 Hub 代建 systemd 部署成功的 Hermes Agent 显示，普通 OpenClaw 不显示该页签
+- 保存后 Hub 会推进 sidecar 配置版本；Agent 拉取 `/sidecar-config` 或 `/config` 时可拿到最新 wecom 配置
 
 在 `config/config.yaml` 中新增 `wecom` 节点：
 
@@ -474,6 +519,8 @@ HERMES_CODEX_STREAMING=false
 # 企微机器人
 WECOM_KEY=your-wecom-key
 WECOM_SECRET=your-wecom-secret
+WECOM_ALLOW_ALL_USERS=true    # Hub 代建默认开放，不走 pairing 配对
+WECOM_DM_POLICY=open
 
 # 可选
 HERMES_LOG_LEVEL=INFO

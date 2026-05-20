@@ -45,6 +45,9 @@ const API = {
     installSkill(clawId, skillId) {
         return this.post(`/openclaws/${clawId}/skills`, { skill_id: skillId });
     },
+    batchAssignSkill(skillId, clawIds) {
+        return this.post(`/skills/${skillId}/assign`, { openclaw_ids: clawIds });
+    },
     uninstallSkill(clawId, skillId) {
         return this.del(`/openclaws/${clawId}/skills/${skillId}`);
     },

@@ -27,7 +27,7 @@ if command -v docker &> /dev/null; then
     docker compose down 2>/dev/null || true
     docker compose up -d --build
     echo "=== 部署完成 ==="
-    echo "访问: http://$(hostname -I | awk '{print $1}'):8088"
+    echo "访问: http://$(hostname -I | awk '{print $1}'):18800"
 else
     echo "未检测到 Docker，使用直接部署..."
     
@@ -37,8 +37,8 @@ else
     # 启动
     source .env 2>/dev/null || true
     export FLASK_ENV=production
-    gunicorn -w 4 -b 0.0.0.0:8088 --timeout 120 -D run:app
+    gunicorn -w 4 -b 0.0.0.0:18800 --timeout 120 -D run:app
     
     echo "=== 部署完成 ==="
-    echo "访问: http://$(hostname -I | awk '{print $1}'):8088"
+    echo "访问: http://$(hostname -I | awk '{print $1}'):18800"
 fi

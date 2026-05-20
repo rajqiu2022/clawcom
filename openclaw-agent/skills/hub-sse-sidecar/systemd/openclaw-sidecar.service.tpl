@@ -1,6 +1,6 @@
 [Unit]
 Description=OpenClaw Hub SSE Sidecar (claw __CLAW_ID__)
-Documentation=http://9.134.11.169:8088/static/skills/hub-sse-sidecar/SKILL.md
+Documentation=http://clawteam.woa.com:18800/static/skills/hub-sse-sidecar/SKILL.md
 After=network-online.target
 Wants=network-online.target
 

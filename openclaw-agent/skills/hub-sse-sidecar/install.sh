@@ -5,7 +5,7 @@
 #   CLAW_ID=6 API_TOKEN=oc_tk_xxx bash ~/.qclaw/skills/hub-sse-sidecar/install.sh
 #
 # 用法 2（不通过 Hub install_skill，直接 curl + 一键）：
-#   curl -fsSL http://9.134.11.169:8088/static/skills/hub-sse-sidecar/install.sh \
+#   curl -fsSL http://clawteam.woa.com:18800/static/skills/hub-sse-sidecar/install.sh \
 #     | CLAW_ID=6 API_TOKEN=oc_tk_xxx bash
 #
 # 必填环境变量：
@@ -13,7 +13,7 @@
 #   API_TOKEN         — Hub API token（从 /registration-skill 拿）
 #
 # 可选环境变量（有默认值）：
-#   HUB_URL           — 默认 http://9.134.11.169:8088
+#   HUB_URL           — 默认 http://clawteam.woa.com:18800
 #   AGENT_TYPE        — 后端 AI agent 类型，默认 openclaw
 #                       openclaw → sidecar 调 PATH 里的 `openclaw agent --message ...`
 #                       hermes   → 自动生成 $INSTALL_DIR/scripts/run_hermes.sh wrapper，
@@ -68,7 +68,7 @@ done
 : "${CLAW_ID:?需要设置 CLAW_ID 环境变量（你的 claw id）}"
 : "${API_TOKEN:?需要设置 API_TOKEN 环境变量（Hub API token）}"
 
-HUB_URL="${HUB_URL:-http://9.134.11.169:8088}"
+HUB_URL="${HUB_URL:-http://clawteam.woa.com:18800}"
 AGENT_TYPE="${AGENT_TYPE_OVERRIDE:-${AGENT_TYPE:-openclaw}}"
 HERMES_HOME="${HERMES_HOME:-/root/hermes-agent}"
 CUSTOM_AGENT_BIN="${CUSTOM_AGENT_BIN:-}"

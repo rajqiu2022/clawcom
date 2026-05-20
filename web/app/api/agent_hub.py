@@ -552,6 +552,182 @@ def web_list_claw_messages():
     })
 
 
+def _claw_name_map(ids):
+    if not ids:
+        return {}
+    claws = OpenClawInstance.query.filter(OpenClawInstance.id.in_(list(ids))).all()
+    return {c.id: c.name for c in claws}
+
+
+def _claw_name_id_map():
+    claws = OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all()
+    return {c.name: c.id for c in claws if c.name}
+
+
+def _inferred_from_claw_id(m, name_to_id=None):
+    """Infer sender claw when historical rows have from_claw_id set to receiver.
+
+    Some older Web/Admin-triggered rows were stored as
+    claw_id=<receiver>, from_claw_id=<receiver>, sender_name=<real claw>.
+    The communication center should display those by the real sender name.
+    """
+    if m.from_claw_id and m.from_claw_id != m.claw_id:
+        return m.from_claw_id
+    name_to_id = name_to_id or {}
+    sender_id = name_to_id.get(m.sender_name or '')
+    if sender_id and sender_id != m.claw_id:
+        return sender_id
+    return None
+
+
+def _serialize_claw_message(m, name_map=None, name_to_id=None):
+    name_map = name_map or {}
+    inferred_from_id = _inferred_from_claw_id(m, name_to_id)
+    d = m.to_dict()
+    d['claw_name'] = name_map.get(m.claw_id) or (m.claw.name if m.claw else '未知')
+    d['display_from_claw_id'] = inferred_from_id
+    if inferred_from_id:
+        d['from_claw_name'] = name_map.get(inferred_from_id) or m.sender_name
+    else:
+        d['from_claw_name'] = (
+            name_map.get(m.from_claw_id)
+            or (m.from_claw.name if m.from_claw else None)
+            if m.from_claw_id else None
+        )
+    return d
+
+
+@agent_hub_bp.route('/web/claw-conversations', methods=['GET'])
+def web_list_claw_conversations():
+    """Web 管理端 - 通信中心会话列表。
+
+    分组：
+    - admin: Web/Admin 与某个 claw 的消息来往
+    - claw_pair: 两个 claw 之间的对话记录
+    """
+    user = _get_web_user()
+    visible_ids = [c.id for c in _visible_claw_query_for_user(user).all()]
+    if not visible_ids:
+        return jsonify({'admin_conversations': [], 'claw_conversations': []})
+
+    limit = min(max(request.args.get('limit', 500, type=int), 1), 2000)
+    messages = (ClawMessage.query
+                .filter(ClawMessage.claw_id.in_(visible_ids))
+                .order_by(ClawMessage.created_at.desc())
+                .limit(limit)
+                .all())
+    all_ids = set(visible_ids)
+    for m in messages:
+        if m.from_claw_id:
+            all_ids.add(m.from_claw_id)
+    name_map = _claw_name_map(all_ids)
+    name_to_id = _claw_name_id_map()
+
+    admin_map = {}
+    pair_map = {}
+    for m in messages:
+        inferred_from_id = _inferred_from_claw_id(m, name_to_id)
+        if inferred_from_id:
+            if inferred_from_id not in visible_ids and m.claw_id not in visible_ids:
+                continue
+            if inferred_from_id not in name_map:
+                inferred_claw = OpenClawInstance.query.get(inferred_from_id)
+                name_map[inferred_from_id] = inferred_claw.name if inferred_claw else f'OpenClaw#{inferred_from_id}'
+            a, b = sorted([int(inferred_from_id), int(m.claw_id)])
+            key = f'{a}:{b}'
+            bucket = pair_map.setdefault(key, {
+                'type': 'claw_pair',
+                'key': key,
+                'claw_a_id': a,
+                'claw_b_id': b,
+                'claw_a_name': name_map.get(a, f'OpenClaw#{a}'),
+                'claw_b_name': name_map.get(b, f'OpenClaw#{b}'),
+                'message_count': 0,
+                'last_message': None,
+            })
+        else:
+            key = str(m.claw_id)
+            bucket = admin_map.setdefault(key, {
+                'type': 'admin',
+                'key': key,
+                'claw_id': m.claw_id,
+                'claw_name': name_map.get(m.claw_id, f'OpenClaw#{m.claw_id}'),
+                'message_count': 0,
+                'last_message': None,
+            })
+
+        bucket['message_count'] += 1
+        if bucket['last_message'] is None:
+            bucket['last_message'] = _serialize_claw_message(m, name_map, name_to_id)
+
+    admin_convs = sorted(
+        admin_map.values(),
+        key=lambda x: (x['last_message'] or {}).get('created_at') or '',
+        reverse=True,
+    )
+    claw_convs = sorted(
+        pair_map.values(),
+        key=lambda x: (x['last_message'] or {}).get('created_at') or '',
+        reverse=True,
+    )
+    return jsonify({
+        'admin_conversations': admin_convs,
+        'claw_conversations': claw_convs,
+        'total': len(admin_convs) + len(claw_convs),
+    })
+
+
+@agent_hub_bp.route('/web/claw-conversation-messages', methods=['GET'])
+def web_list_claw_conversation_messages():
+    """Web 管理端 - 某个通信中心会话的明细消息。"""
+    user = _get_web_user()
+    visible_ids = [c.id for c in _visible_claw_query_for_user(user).all()]
+    kind = request.args.get('type') or 'admin'
+    limit = min(max(request.args.get('limit', 200, type=int), 1), 500)
+
+    if kind == 'admin':
+        claw_id = request.args.get('claw_id', type=int)
+        if not claw_id:
+            return jsonify({'error': 'claw_id 必填'}), 400
+        if claw_id not in visible_ids:
+            return jsonify({'error': '无权查看该会话'}), 403
+        query = ClawMessage.query.filter(
+            ClawMessage.claw_id == claw_id,
+            db.or_(
+                ClawMessage.from_claw_id.is_(None),
+                ClawMessage.from_claw_id == claw_id,
+            )
+        )
+        ids = {claw_id}
+    elif kind == 'claw_pair':
+        claw_a_id = request.args.get('claw_a_id', type=int)
+        claw_b_id = request.args.get('claw_b_id', type=int)
+        if not claw_a_id or not claw_b_id:
+            return jsonify({'error': 'claw_a_id / claw_b_id 必填'}), 400
+        if claw_a_id not in visible_ids and claw_b_id not in visible_ids:
+            return jsonify({'error': '无权查看该会话'}), 403
+        name_map = _claw_name_map({claw_a_id, claw_b_id})
+        name_a = name_map.get(claw_a_id)
+        name_b = name_map.get(claw_b_id)
+        query = ClawMessage.query.filter(db.or_(
+            db.and_(ClawMessage.from_claw_id == claw_a_id, ClawMessage.claw_id == claw_b_id),
+            db.and_(ClawMessage.from_claw_id == claw_b_id, ClawMessage.claw_id == claw_a_id),
+            db.and_(ClawMessage.claw_id == claw_a_id, ClawMessage.sender_name == name_b),
+            db.and_(ClawMessage.claw_id == claw_b_id, ClawMessage.sender_name == name_a),
+        ))
+        ids = {claw_a_id, claw_b_id}
+    else:
+        return jsonify({'error': 'type 只能是 admin 或 claw_pair'}), 400
+
+    messages = query.order_by(ClawMessage.created_at.asc()).limit(limit).all()
+    name_map = _claw_name_map(ids)
+    name_to_id = _claw_name_id_map()
+    return jsonify({
+        'messages': [_serialize_claw_message(m, name_map, name_to_id) for m in messages],
+        'count': len(messages),
+    })
+
+
 def _schedule_ai_replies(claws, user_content, sender_name):
     """为聊天消息生成AI回复（同步执行，避免 gevent 环境下异步协程被回收）
 

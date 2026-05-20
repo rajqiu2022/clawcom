@@ -388,25 +388,32 @@ perf-baseline=性能基线 | pitfall=踩坑记录 | workflow=流程规范 | best
     {
         'name': 'tapd-integration',
         'display_name': 'TAPD 集成',
-        'description': '查询 TAPD 项目管理数据：需求列表、Bug 列表、迭代进度、Dashboard 统计，指导测试工作。',
+        'description': '经 Hub 代理查询 TAPD（与 openclaw_tapd_skills.json 场景对齐）：需求/Bug/迭代、需求分析缓存与刷新、自建用例库绑定；不含通用写 TAPD 与项目成员 API。',
         'category': 'standard',
         'is_standard': True,
         'trigger_phrase': 'TAPD',
         'scope': 'global',
         'template_content': '''# TAPD 集成 (tapd-integration)
 
-完整文档通过 Hub API 拉取: GET /api/v1/skills/{SKILL_ID}/raw
+与 micro-cloud `openclaw_tapd_skills.json`（goApi 上 6 个 TAPD 工具）**使用场景对齐**；OpenClaw 须走 Hub：`{HUB_URL}/api/v1` + `Authorization: Bearer`，**不要**使用 JSON 里的 `:8080/goApi`。
 
-## 核心 API
-- GET /api/v1/tapd/config — 获取 TAPD 配置
-- PUT /api/v1/tapd/config — 更新配置（管理员）
-- GET /api/v1/tapd/stories — 需求列表（支持 iteration_id/status/keyword 筛选）
-- GET /api/v1/tapd/bugs — Bug 列表（支持 severity/status/keyword 筛选）
-- GET /api/v1/tapd/iterations — 迭代列表
-- GET /api/v1/tapd/dashboard — 统计看板
+完整文档: GET /api/v1/skills/{SKILL_ID}/raw（或仓库 `openclaw-agent/skills/tapd-integration/SKILL.md`）。
+
+## 能力速览（对照 JSON）
+- 部分通用 GET: GET /api/v1/tapd/stories|bugs|story-title|iterations（迭代列表为 Hub 缓存）
+- Bug 列表: GET /api/v1/tapd/bugs（`iteration_name` 先解析为 `iteration_id`）
+- 按发布/分类/迭代名筛需求: `tapd/stories` + `GET /api/v1/requirements/tapd-cache/...` 与 `requirements/iterations/{id}/items`
+- 用例: Hub `GET /api/v1/testcase-libraries/...`（非 TAPD 平台原生用例树）
+- **Hub 未提供**: 任意 `api_url` 单入口、通用 POST 写 TAPD、项目成员列表
+
+## 其它常用
+- GET /api/v1/tapd/config | PUT ...（管理员凭证）
+- GET /api/v1/tapd/dashboard
+- 需求缓存/刷新: /api/v1/requirements/tapd-cache/*、tapd-refresh-requests、agent/tapd-refresh-queue
+- 测试计划 TAPD Bug: GET /api/v1/test-plans/{plan_id}/tasks/{task_id}/tapd-bugs
 
 ## 触发词
-- TAPD、需求列表、Bug列表、迭代、Bug统计、待测需求、致命Bug
+TAPD、需求、Bug、迭代、Dashboard、用例库、tapd-integration
 ''',
     },
     {
@@ -511,7 +518,7 @@ REGISTRATION_SKILL = {
 ## Hub 信息
 
 ```
-Hub 地址: http://9.134.11.169:8088
+Hub 地址: https://clawteam.woa.com:18800
 API 前缀: /api/v1
 SSE 端点: /api/openclaws/{CLAW_ID}/events （注意：无 /v1/ 前缀）
 ```
@@ -533,7 +540,7 @@ Content-Type: application/json
 > 注意：目前注册需要由管理员在 Web 界面操作，获得 CLAW_ID 和 API_TOKEN 后配置到本地。
 > 如果你的 CLAW_ID 和 HUB_API_TOKEN 已经配置好了，直接跳到第二步。
 
-**Web 界面注册**：访问 http://9.134.11.169:8088 → OpenClaw 管理 → 新建 OpenClaw
+**Web 界面注册**：访问 https://clawteam.woa.com:18800 → OpenClaw 管理 → 新建 OpenClaw
 
 **API 注册**（管理员操作）：
 
@@ -802,7 +809,7 @@ OpenClaw 接入后应在本地保存连接信息：
 **~/.qclaw/hub_config.json**：
 ```json
 {
-  "hub_url": "http://9.134.11.169:8088",
+  "hub_url": "https://clawteam.woa.com:18800",
   "claw_id": 5,
   "api_token": "oc_tk_xxxxxxxxx",
   "connection_mode": "sse",
@@ -842,6 +849,51 @@ OpenClaw 接入后应在本地保存连接信息：
 - "查看待办"
 - "今日待办"
 - "完成待办"
+''',
+},
+{
+    'name': 'agent-template-manager',
+    'display_name': 'Agent 模板库管理',
+    'description': '管理 Agent 身份模板库：编辑、版本回滚、文件引用校验和模板应用到目标 OpenClaw。',
+    'category': 'standard',
+    'is_standard': False,
+    'trigger_phrase': '管理 agent 模板库',
+    'scope': 'global',
+    'template_content': '''# Agent 模板库管理 (agent-template-manager)
+
+## 核心能力
+
+1) 模板 CRUD
+- GET /api/v1/agent-templates
+- POST /api/v1/agent-templates
+- GET /api/v1/agent-templates/{id}
+- PUT /api/v1/agent-templates/{id}
+- DELETE /api/v1/agent-templates/{id}
+
+2) 审核与提交
+- POST /api/v1/agent-templates/{id}/review
+- POST /api/v1/agent-templates/submit
+
+3) 应用模板到目标 Agent（真实落地）
+- POST /api/v1/agent-templates/{id}/apply
+  参数: {"target_claw_id": 14, "strict_references": true}
+  动作: 安装/启用 Skill + Rule + 同步定时任务
+
+4) 版本历史与回滚
+- GET /api/v1/agent-templates/{id}/versions
+- POST /api/v1/agent-templates/{id}/rollback
+
+5) 文件管理与引用校验
+- GET /api/v1/agent-templates/{id}/files
+- POST /api/v1/agent-templates/{id}/files
+- GET /api/v1/agent-templates/{id}/files/{file_id}/preview
+- GET /api/v1/agent-templates/{id}/references/validate
+
+## 引用语法
+- {{file:docs/owner.md}}
+
+## 推荐流程
+创建模板 -> 上传文件 -> 引用校验 -> 提交审核 -> 审核通过 -> apply 到目标 OpenClaw
 ''',
 }
 

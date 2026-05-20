@@ -28,7 +28,7 @@ OpenClaw Manager 子agent 主入口（**LEGACY / FALLBACK 模式**）
     3. 默认值
 
 环境变量（作为备选）：
-    MANAGER_URL      - Manager服务地址，默认 http://9.134.11.169:8088
+    MANAGER_URL      - Manager服务地址，默认 http://clawteam.woa.com:18800
     CLAW_ID          - OpenClaw实例ID
     API_TOKEN        - OpenClaw的API Token
     OPENCLAW_DIR     - OpenClaw配置目录，默认 /root/.qclaw

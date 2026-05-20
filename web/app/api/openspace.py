@@ -169,6 +169,7 @@ def openspace_analyze():
             scope='global',
             source_type='openspace',
             status='pending_review',
+            created_by='OpenSpace 进化引擎',
         )
         db.session.add(entry)
         created_knowledge += 1

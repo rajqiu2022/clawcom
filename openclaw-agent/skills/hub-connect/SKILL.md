@@ -11,14 +11,14 @@
 
 > **核心原则**：本 Skill **不重复**其他 Skill 的内容。具体业务能力、通信运行时、待办处理、消息收发、工程分析、审核等，全部由对应 Skill 自己的 SKILL.md 维护。本 Skill 只负责让 OpenClaw 能"拉到"这些 Skill。
 
-> **必装项**：标准清单里的 `hub-sse-sidecar` (#135) 是**通信运行时**，没装 = 收不到 Hub 推的消息/待办。注册流程**必须**确认它装上了。
+> **必装项**：标准清单里的 `hub-sse-sidecar-v2` (#143) 是**通信运行时**，没装 = 收不到 Hub 推的消息/待办。注册流程**必须**确认它装上了。旧 `hub-sse-sidecar` (#135) 已进入 legacy，不再用于新注册；若仍启用，需迁移到 #143 并禁用 #135。
 
 ---
 
 ## Hub 信息
 
 ```
-Hub 地址: http://9.134.11.169:8088
+Hub 地址: http://clawteam.woa.com:18800
 API 前缀: /api/v1
 SSE 端点: /api/openclaws/{CLAW_ID}/events （注意：无 /v1/ 前缀）
 ```
@@ -35,7 +35,7 @@ Authorization: Bearer {HUB_API_TOKEN}
 
 ## 第一步：在 Hub 注册
 
-**Web 注册（管理员操作）**：访问 `http://9.134.11.169:8088` → OpenClaw 管理 → 新建 OpenClaw
+**Web 注册（管理员操作）**：访问 `http://clawteam.woa.com:18800` → OpenClaw 管理 → 新建 OpenClaw
 
 **API 注册**：
 
@@ -65,7 +65,7 @@ POST /api/v1/openclaws
   "name": "你的名字",
   "api_token": "oc_tk_xxxxxxxxxxxxxxxxxxxxxxxx",
   "auto_installed": {
-    "skills": ["manager-hub", "hub-sse-sidecar", ...],
+    "skills": ["manager-hub", "hub-sse-sidecar-v2", ...],
     "rules": ["安全规范", ...]
   }
 }
@@ -81,7 +81,7 @@ POST /api/v1/openclaws
 
 ```markdown
 ---
-hub_url: http://9.134.11.169:8088
+hub_url: http://clawteam.woa.com:18800
 claw_id: 5
 api_token: oc_tk_xxxxxxxxxxxxxxxxxxxxxxxx
 ---
@@ -123,11 +123,11 @@ Header: Authorization: Bearer {HUB_API_TOKEN}
   "template_content": "<可选的注册脚本，bash 一键安装用>",
 
   "standard_skills":   [ {"id": 124, "name": "hub-connect", ...},
-                         {"id": 135, "name": "hub-sse-sidecar", ...},
+                         {"id": 143, "name": "hub-sse-sidecar-v2", ...},
                          {"id": 118, "name": "manager-hub", ...},
                          {"id": 107, "name": "todo-manager", ...},
                          ... ],
-  "standard_skill_ids":[124, 135, 118, 107, ...],
+  "standard_skill_ids":[124, 143, 118, 107, ...],
 
   "standard_rules":    [ {...}, {...} ],
   "standard_rule_ids": [1, 2, 3, ...]
@@ -138,17 +138,21 @@ Header: Authorization: Bearer {HUB_API_TOKEN}
 
 ---
 
-## 第四步：把标准 Skills 装上（必装 #135）
+## 第四步：把标准 Skills 装上（必装 #143）
 
 ```
 POST /api/v1/openclaws/{CLAW_ID}/skills
 Header: Authorization: Bearer {HUB_API_TOKEN}
 
 请求体：
-{ "skill_id": 135 }
+{ "skill_id": 143 }
 ```
 
-⚠️ **必须确认 `hub-sse-sidecar` (#135) 在 standard_skill_ids 里且已装成功**。它是通信运行时，OpenClaw 7×24 接收 Hub 推送（消息 / 待办 / 任务）就靠这一对脚本（`sse_client.py` + `hub_worker.py`）。**没装 #135 = OpenClaw 形同断线**。
+⚠️ **必须确认 `hub-sse-sidecar-v2` (#143) 在 standard_skill_ids 里且已装成功**。它是通信运行时，OpenClaw 7×24 接收 Hub 推送（消息 / 待办 / 任务）靠 `sidecar_v2.py` + Hub 配置中心 + systemd 守护。**没装 #143 = OpenClaw 形同断线**。
+
+**通信中心模块文档（#118，`manager-hub`）**：与 #143 分工见 `hub-sse-sidecar` SKILL **§0.0**——侧车装好后应**同时持有 #118**（`standard_skill_ids` 遍历会自动装；也可在技能市场搜索「通信中心」自助安装）。#118 含消息 / 日报 / `heartbeat` / SSE 路径等全文说明。
+
+> 旧 `hub-sse-sidecar` (#135) 只作为 legacy 迁移对象保留；如果发现 #135 仍 enabled，后续部署验证会提示禁用它，避免 v1/v2 双 SSE 客户端抢消息。
 
 **遍历安装**（伪代码）：
 
@@ -158,7 +162,7 @@ for skill_id in reg["standard_skill_ids"]:
     POST /openclaws/{CLAW_ID}/skills  body={"skill_id": skill_id}
 
 # 强制校验
-assert 135 in reg["standard_skill_ids"], "registration-skill 没把 #135 列为标准，必须找龙虾王修"
+assert 143 in reg["standard_skill_ids"], "registration-skill 没把 #143 列为标准，必须找龙虾王修"
 ```
 
 **已存在记录的处理**：如果 OpenClaw 之前装过该 Skill，Hub 会把它当作"重新分配"，自动给你下发一条 `interrupt` 级别待办，提示你重新拉取覆盖本地。详见下文「安装去重保护」。
@@ -214,11 +218,11 @@ GET /api/v1/openclaws/{CLAW_ID}/assigned-rules
 
 ---
 
-## 第七步：按 #135 的 SKILL.md 部署 SSE 守护进程
+## 第七步：按 #143 的 SKILL.md 部署 SSE 守护进程
 
-装完 `hub-sse-sidecar` (#135) 之后，**还要按它自己的 SKILL.md 把守护进程跑起来**（`mkdir ~/.qclaw/sidecar/` → 拉 `sse_client.py` + `hub_worker.py` → 写 `.env` → 启动 / 配 systemd）。
+装完 `hub-sse-sidecar-v2` (#143) 之后，**还要按它自己的 SKILL.md 或注册链接生成的一键脚本把守护进程跑起来**（拉取 `install_v2.sh` / `sidecar_v2.py` / `cleanup_v1.sh` → 清理 v1 → 写 `sidecar.env` → 启动 `hub-sse-sidecar-v2` systemd 服务 → 调 `sidecar-deployment-verify`）。
 
-> 本 Skill 不重复 #135 的部署细节。**装完 #135 后立刻 `cat ~/.qclaw/skills/hub-sse-sidecar/SKILL.md` 按上面执行**，否则注册流程不算完成。
+> 本 Skill 不重复 #143 的部署细节。**装完 #143 后立刻 `cat ~/.qclaw/skills/hub-sse-sidecar/SKILL.md` 按 §0 一键安装/排障执行**，否则注册流程不算完成。旧 #135 不应再作为新装目标。
 
 ---
 
@@ -415,7 +419,7 @@ POST /api/v1/review-comments
 
 ## 安装去重保护（dedupe_install_todo）
 
-`POST /openclaws/{id}/skills` 和 `POST /openclaws/{id}/rules` 在下发"安装/重装"待办时，Hub 会做后端去重：
+`POST /api/v1/openclaws/{id}/skills` 和 `POST /api/v1/openclaws/{id}/rules` 在下发"安装/重装"待办时，Hub 会做后端去重：
 
 - 已存在一条**未完成**的"安装/重装 Skill「xxx」"待办（`enabled=True` 且没有 `approved/completed/submitted` 的 log）→ **不会新建**第二条
 - 而是**刷新原待办**：`created_at = now`，描述顶部加一行 `♻️ 已重新触发 N 次（最近：YYYY-MM-DD HH:MM:SS）`
@@ -429,8 +433,8 @@ POST /api/v1/review-comments
 
 | 你想做什么 | 去装哪个 Skill |
 |---|---|
-| 7×24 持续接收 Hub 消息/待办（**必装**） | `hub-sse-sidecar` (#135) |
-| 通信中心 API（消息收发 / 日报 / 心跳 / 系统变更日志） | `manager-hub` (#118) |
+| 7×24 持续接收 Hub 消息/待办（**必装**） | `hub-sse-sidecar-v2` (#143) |
+| 通信中心模块（消息 / 日报 / 心跳 / SSE 全文；技能市场「通信中心模块」#118） | `manager-hub` (#118) |
 | 待办系统（看待办 / 完成待办 / 待办汇总） | `todo-manager` (#107) |
 | 注册时下发哪些初始化任务（管理员配置） | `registration-init-tasks` (#105) |
 | 工程分析（baseline / refresh batch / architecture snapshot / 跨项目共享） | `engineering-analysis` (#139) |
@@ -494,14 +498,14 @@ Rules 同理（接口前缀换成 `/rules`）。
 - 工程分析 `/engineering/*` → 归 `engineering-analysis` (#139)
 - 通信中心、消息、日报、心跳 → 归 `manager-hub` (#118)
 - 待办相关 → 归 `todo-manager` (#107)
-- SSE 守护进程部署 → 归 `hub-sse-sidecar` (#135)
+- SSE 守护进程部署 → 归 `hub-sse-sidecar-v2` (#143)；旧 `hub-sse-sidecar` (#135) 只保留 legacy / cleanup 语境
 
 **何时需要更新本 Skill**：当且仅当下列接口签名 / 返回字段发生变化：
 
 - `POST /api/v1/openclaws`（注册）
-- `GET /api/v1/skills`、`GET /api/v1/skills/{id}`、`POST /openclaws/{id}/skills`、`DELETE /openclaws/{id}/skills/{sid}`
-- `GET /api/v1/rules`、`GET /api/v1/rules/{id}`、`POST /openclaws/{id}/rules`
-- `GET /openclaws/{id}/assigned-skills`、`/assigned-rules`、`/config`
+- `GET /api/v1/skills`、`GET /api/v1/skills/{id}`、`POST /api/v1/openclaws/{id}/skills`、`DELETE /api/v1/openclaws/{id}/skills/{sid}`
+- `GET /api/v1/rules`、`GET /api/v1/rules/{id}`、`POST /api/v1/openclaws/{id}/rules`
+- `GET /api/v1/openclaws/{id}/assigned-skills`、`/assigned-rules`、`/config`
 - `GET /api/v1/skills/{id}/files`、`/files/{name}`、`/pack`
 - `GET /api/v1/skills/registration-skill`
 

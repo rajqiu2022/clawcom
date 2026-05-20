@@ -74,6 +74,90 @@ def add_review_comment(resource_type, resource_id, action,
     return rc
 
 
+# === 评审 payload 归一化（v2 统一字段约定）=========================
+#
+# 历史问题（见 MEMORY #130）：4 套 review 接口的字段名各不相同：
+#   - /skills/<id>/review:           review_status + review_comment
+#   - /rules/<id>/review:            review_status + review_comment
+#   - /knowledge/<id>/review:        action       + notes
+#   - /agent-templates/<id>/review:  status       + review_comment
+# 龙虾王照着 knowledge-manager SKILL 文档调 skill 时传 action/comment
+# 都被 .get('review_status', '') 接成空串 → 状态不变 / comment 丢失。
+#
+# 新规约：所有接口都接受 **三套字段** 任意一套，归一化为同一组 (action, comment)。
+#
+# action（推荐，v2）            == review_status（兼容）  == 内部 status
+#   approve                        approved                approved
+#   revise                         revise                  revise
+#   reject                         rejected                rejected
+#
+# 评论字段优先级：comment > review_comment > notes
+ACTION_FROM_INPUT = {
+    'approve': 'approve',
+    'approved': 'approve',
+    'revise': 'revise',
+    'reject': 'reject',
+    'rejected': 'reject',
+}
+
+# 内部统一存到资源表 .review_status 字段的值
+STATUS_FROM_ACTION = {
+    'approve': 'approved',
+    'revise':  'revise',
+    'reject':  'rejected',
+}
+
+
+def parse_review_action(data, allowed_actions=('approve', 'revise', 'reject')):
+    """统一解析评审 payload，归一化字段命名。
+
+    Args:
+        data: request body dict（可能为 None）
+        allowed_actions: 该资源支持的 action 集合（如 knowledge 早期不支持 revise，
+            可传 ('approve', 'reject') 强制拒绝；现已统一支持三种）
+
+    Returns:
+        (action, comment, error_msg)
+        - action: 'approve' / 'revise' / 'reject' 之一；解析失败为 None
+        - comment: str（已 strip）
+        - error_msg: 失败原因；成功为 None
+
+    Examples:
+        >>> parse_review_action({'action': 'revise', 'comment': '请补充示例'})
+        ('revise', '请补充示例', None)
+        >>> parse_review_action({'review_status': 'approved', 'review_comment': 'ok'})
+        ('approve', 'ok', None)
+        >>> parse_review_action({'action': 'xxx'})
+        (None, '', 'action 必须为 approve / revise / reject ...')
+    """
+    if not data:
+        return None, '', 'request body 为空（必须 application/json + action 字段）'
+
+    raw = (
+        data.get('action')
+        or data.get('review_status')
+        or data.get('status')
+        or ''
+    )
+    raw = str(raw).strip().lower()
+    action = ACTION_FROM_INPUT.get(raw)
+
+    if action not in allowed_actions:
+        return None, '', (
+            f'action 必须为 {" / ".join(allowed_actions)}'
+            '（也可用兼容字段 review_status: approved/revise/rejected）'
+        )
+
+    comment = (
+        data.get('comment')
+        or data.get('review_comment')
+        or data.get('notes')
+        or ''
+    )
+    comment = str(comment).strip()
+    return action, comment, None
+
+
 @api_bp.route('/review-comments', methods=['POST'])
 def create_review_comment():
     """添加纯评论（不变更状态）。

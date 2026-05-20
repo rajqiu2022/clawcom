@@ -36,17 +36,8 @@ def _get_session_user():
 
 
 def _get_token_claw():
-    auth = request.headers.get('Authorization', '')
-    if not auth.startswith('Bearer '):
-        return None
-    token = auth[7:]
-    if not token:
-        return None
-    for claw in OpenClawInstance.query.filter(
-            OpenClawInstance.status != 'deleted').all():
-        if claw.verify_token(token):
-            return claw
-    return None
+    from app.api.auth_utils import get_current_claw
+    return get_current_claw()
 
 
 def _resolve_actor():

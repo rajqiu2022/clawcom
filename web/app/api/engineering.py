@@ -1552,7 +1552,7 @@ def toggle_public_share_off(resource_type, resource_id):
 # ==================== Resolve（贴 URL 取数据）====================
 #
 # OpenClaw 之间或人 → claw 之间引用分析结果时的反向解析助手：
-#   贴一个 web 链接（http://hub:8088/engineering/architecture/123）
+#   贴一个 web 链接（http://hub:18800/engineering/architecture/123）
 #   返回 { type, id, title, summary, project_id, viewable, api_endpoint, ...}
 # 让接收方完全免去 URL 解析。
 
@@ -1601,7 +1601,7 @@ def _resolve_url_to_resource(raw_url):
 def resolve_engineering_url():
     """通用反向解析：贴一个工程分析 URL 即可拿到结构化引用信息。
 
-    Query: ?url=http://hub:8088/engineering/architecture/123
+    Query: ?url=http://hub:18800/engineering/architecture/123
            或 ?url=/engineering/refresh/45
 
     返回：

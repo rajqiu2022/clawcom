@@ -1579,6 +1579,11 @@ def submit_library_review(library_id):
 
     # --- 自动创建评审轮次（CaseReviewRound），以支持评审评分 ---
     if review.related_topic_id:
+        # 关闭旧的 pending 轮次（确保同一时刻只有一轮开放）
+        old_pending = CaseReviewRound.query.filter_by(
+            topic_id=review.related_topic_id, status='pending').all()
+        for opr in old_pending:
+            opr.status = 'rejected'
         existing_max = db.session.query(
             db.func.coalesce(db.func.max(CaseReviewRound.round_number), 0)
         ).filter_by(topic_id=review.related_topic_id).scalar()

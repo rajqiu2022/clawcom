@@ -19,23 +19,8 @@ from app.api import api_bp
 
 def _is_admin_user():
     """检查当前请求是否来自超级管理员（Web session 的 super_admin 或 admin 角色的 OpenClaw Token）"""
-    # Web session 认证 — super_admin / admin
-    uid = flask_session.get('user_id')
-    if uid:
-        user = User.query.get(uid)
-        if user and user.role in ('super_admin', 'admin'):
-            return True
-
-    # Bearer Token 认证 — admin 角色的 OpenClaw（龙虾王）Token 映射为超级管理员
-    auth = request.headers.get('Authorization', '')
-    if auth.startswith('Bearer '):
-        token = auth[7:]
-        for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
-            if claw.verify_token(token):
-                if claw.role == 'admin':
-                    return True
-                break
-    return False
+    from app.api.auth_utils import is_admin_user
+    return is_admin_user()
 
 
 def _resolve_claw_project_id(claw):
@@ -85,14 +70,8 @@ def _get_session_user():
 
 
 def _get_token_claw():
-    auth = request.headers.get('Authorization', '')
-    if not auth.startswith('Bearer '):
-        return None
-    token = auth[7:]
-    for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
-        if claw.verify_token(token):
-            return claw
-    return None
+    from app.api.auth_utils import get_current_claw
+    return get_current_claw()
 
 
 def _collect_user_project_ids(user):
@@ -468,6 +447,61 @@ def list_submitted_todos():
             'description': todo.description or '',
             'openclaw_name': claw.name,
             'openclaw_id': claw.id,
+            'created_by': todo.created_by,
+            'today_status': 'submitted',
+            'today_completed_at': str(log.completed_at) if log.completed_at else None,
+            'result_summary': log.result_summary or '',
+            'log_date': str(log.log_date),
+        })
+
+    return jsonify(items)
+
+
+@api_bp.route('/openclaws/<int:claw_id>/todos/submitted', methods=['GET'])
+def list_claw_submitted_todos(claw_id):
+    """指定 OpenClaw 的待审核队列（submitted）"""
+    OpenClawInstance.query.get_or_404(claw_id)
+    user = _get_session_user()
+    token_claw = _get_token_claw()
+    if user:
+        if user.role not in ('super_admin', 'admin'):
+            return jsonify({'error': '仅管理员可查看待审核队列'}), 403
+        if user.role == 'admin' and not _can_review_todo_for_claw(claw_id):
+            return jsonify({'error': '无权查看该 OpenClaw 的待审核队列'}), 403
+    elif token_claw:
+        if token_claw.role != 'admin' and token_claw.id != claw_id:
+            return jsonify({'error': '无权查看该 OpenClaw 的待审核队列'}), 403
+    else:
+        return jsonify({'error': '仅管理员或目标 OpenClaw 可查看待审核队列'}), 403
+
+    days = request.args.get('days', type=int)
+    if days is None:
+        days = 0
+    limit = request.args.get('limit', 500, type=int)
+    since = None if days <= 0 else (date.today() - timedelta(days=max(1, days) - 1))
+
+    logs_query = (ClawTodoLog.query
+                  .filter(ClawTodoLog.status == 'submitted',
+                          ClawTodoLog.openclaw_id == claw_id))
+    if since is not None:
+        logs_query = logs_query.filter(ClawTodoLog.log_date >= since)
+    logs = (logs_query
+            .order_by(ClawTodoLog.completed_at.desc(), ClawTodoLog.created_at.desc())
+            .limit(limit)
+            .all())
+
+    claw = OpenClawInstance.query.get(claw_id)
+    items = []
+    for log in logs:
+        todo = ClawTodo.query.get(log.todo_id)
+        if not todo:
+            continue
+        items.append({
+            'id': todo.id,
+            'title': todo.title,
+            'description': todo.description or '',
+            'openclaw_name': claw.name if claw else '',
+            'openclaw_id': claw_id,
             'created_by': todo.created_by,
             'today_status': 'submitted',
             'today_completed_at': str(log.completed_at) if log.completed_at else None,

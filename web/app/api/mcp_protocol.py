@@ -21,7 +21,8 @@ def require_claw_token(f):
         if not auth.startswith("Bearer "):
             return json.dumps({"error": "Missing auth token"}), 401
         token = auth[7:]
-        claw = OpenClawInstance.query.filter_by(api_token_hash=hash_token(token)).first()
+        from app.api.auth_utils import _resolve_claw_from_token
+        claw = _resolve_claw_from_token(token)
         if not claw:
             return json.dumps({"error": "Invalid token"}), 403
         return f(claw=claw, *args, **kwargs)

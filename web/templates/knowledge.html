@@ -99,7 +99,8 @@
 }
 .kn-card-submitter-avatar.claw { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
 .kn-card-submitter-avatar.space { background: linear-gradient(135deg, #f59e0b, #f97316); }
-.kn-card-submitter-avatar.manual { background: linear-gradient(135deg, #6b7280, #4b5563); }
+.kn-card-submitter-avatar.manual { background: linear-gradient(135deg, #059669, #10b981); }
+.kn-card-submitter-avatar.manual::before { content: '👤'; font-size: 0.68rem; }
 .kn-card-time {
     font-size: 0.74rem;
     color: var(--text-muted);
@@ -309,12 +310,23 @@ function escapeHtml(str) {
 }
 
 function getSubmitterInfo(e) {
+    // 优先使用 created_by（所有来源都有）
+    if (e.created_by && e.created_by !== 'system') {
+        const name = e.created_by;
+        // 根据 source_type 决定样式
+        if (e.source_type === 'openclaw') {
+            return { name, avatarClass: 'claw', initial: name.charAt(0) };
+        } else if (e.source_type === 'openspace') {
+            return { name, avatarClass: 'space', initial: name.charAt(0) };
+        }
+        return { name, avatarClass: 'manual', initial: name.charAt(0) };
+    }
+    // 兼容旧数据：无 created_by 时按原逻辑
     if (e.source_type === 'openclaw') {
         let name;
         if (e.source_openclaw_name) {
             name = e.source_openclaw_name;
         } else if (e.source_openclaw_id) {
-            // FK 失效（claw 已删除或 ID 错误）
             name = `Agent #${e.source_openclaw_id} (已删除)`;
         } else {
             name = '未知 Agent (无 ID)';
@@ -324,7 +336,6 @@ function getSubmitterInfo(e) {
     if (e.source_type === 'openspace') {
         return { name: 'OpenSpace', avatarClass: 'space', initial: 'OS' };
     }
-    // manual 不再展示提交人徽标
     return null;
 }
 
@@ -435,7 +446,11 @@ async function loadPending() {
 }
 
 async function reviewEntry(id, action) {
-    const notes = action === 'reject' ? prompt('拒绝原因（可选）：') : '';
+    let notes = '';
+    if (action === 'reject') {
+        notes = await customPrompt({title: '拒绝原因', msg: '请输入拒绝原因（可选）：', placeholder: '请输入原因...'});
+        if (notes === null) return; // User cancelled
+    }
     try {
         await API.reviewKnowledge(id, { action, notes });
         showToast(action === 'approve' ? '已通过' : '已拒绝', 'success');
@@ -476,7 +491,9 @@ async function showDetail(id) {
             ${renderMarkdown(e.content)}
         </div>
     `;
+    window._detailEntryData = e;
     $('#detail-actions').innerHTML = `
+        <button class="btn btn-ghost" onclick="showFullKnowledge()">全屏查看</button>
         <button class="btn btn-ghost" onclick="closeDetailModal()">关闭</button>
         <button class="btn btn-primary" onclick="closeDetailModal();showEditModal(${e.id})">编辑</button>
     `;
@@ -485,6 +502,58 @@ async function showDetail(id) {
 
 function closeDetailModal() {
     $('#detail-modal').classList.remove('active');
+}
+
+// 全屏查看知识详情
+let fullKnowledgeModal = null;
+function showFullKnowledge() {
+    const e = window._detailEntryData;
+    if (!e) return;
+    if (!fullKnowledgeModal) {
+        fullKnowledgeModal = document.createElement('div');
+        fullKnowledgeModal.id = 'full-knowledge-modal';
+        fullKnowledgeModal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:var(--bg, #1a1a2e);z-index:10000;display:flex;flex-direction:column;overflow:hidden';
+        fullKnowledgeModal.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid var(--border);flex-shrink:0">
+                <span id="full-kn-title" style="font-weight:600;font-size:1.15rem"></span>
+                <button onclick="closeFullKnowledge()" style="background:none;border:none;color:var(--text-muted);font-size:1.6rem;cursor:pointer;line-height:1;padding:4px 8px">&times;</button>
+            </div>
+            <div id="full-kn-body" style="flex:1;overflow:auto;padding:24px 32px"></div>
+            <div style="padding:12px 24px;border-top:1px solid var(--border);text-align:right;flex-shrink:0">
+                <button class="btn btn-primary" onclick="closeFullKnowledge()">关闭</button>
+            </div>`;
+        document.body.appendChild(fullKnowledgeModal);
+    }
+    const src = sourceLabels[e.source_type] || null;
+    const submitter = getSubmitterInfo(e);
+    document.getElementById('full-kn-title').textContent = e.title;
+    document.getElementById('full-kn-body').innerHTML = `
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px">
+            ${src ? `<span class="tag ${src[0]}">${src[1]}</span>` : ''}
+            <span class="tag tag-accent">${categoryLabels[e.category] || e.category}</span>
+            <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
+            ${e.project_name ? `<span class="tag tag-blue">${escapeHtml(e.project_name)}</span>` : ''}
+            ${e.scope ? `<span class="tag tag-blue">${e.scope}</span>` : ''}
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;font-size:0.85rem;color:var(--text-muted);margin-bottom:16px">
+            ${submitter ? `
+            <span class="kn-card-submitter-avatar ${submitter.avatarClass}">${submitter.initial}</span>
+            <span>${escapeHtml(submitter.name)}</span>
+            <span>·</span>
+            ` : ''}
+            <span>创建: ${e.created_at || '未知'}</span>
+            ${e.approved_by ? ` · 审核: ${e.approved_by}` : ''}
+            ${e.reviewer_notes ? ` · 审核意见: ${e.reviewer_notes}` : ''}
+        </div>
+        <div class="markdown-body" style="line-height:1.8;font-size:0.95rem;color:var(--text-primary);padding:20px 24px;background:var(--bg-secondary);border-radius:var(--radius-sm)">
+            ${renderMarkdown(e.content)}
+        </div>
+    `;
+    fullKnowledgeModal.style.display = 'flex';
+    closeDetailModal();
+}
+function closeFullKnowledge() {
+    if (fullKnowledgeModal) fullKnowledgeModal.style.display = 'none';
 }
 
 // Vditor 编辑器实例
