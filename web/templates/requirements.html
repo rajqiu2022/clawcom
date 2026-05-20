@@ -14,20 +14,24 @@
     <button class="btn btn-ghost" id="btn-refresh" onclick="triggerRefresh()" title="通知 OpenClaw Agent 刷新 TAPD 数据">
         🔄 实时刷新
     </button>
+    <button class="btn btn-ghost" id="btn-delete-iteration" onclick="deleteIterationData()" title="删除当前迭代的所有需求分析数据，可重新上传" style="color:var(--red)">
+        🗑️ 删除迭代数据
+    </button>
     <span id="refresh-status" style="font-size:0.78rem;color:var(--text-muted)"></span>
 </div>
 {% endblock %}
 
 {% block head %}
 <style>
-.req-layout { display:flex; gap:0; min-height:calc(100vh - 120px); }
+.req-layout { display:flex; gap:12px; align-items:flex-start; }
 .req-col {
-    background:var(--bg-card); border-right:1px solid var(--border);
+    background:var(--bg-card); border:1px solid var(--border);
+    border-radius:var(--radius);
     display:flex; flex-direction:column;
+    overflow:hidden;
 }
-.req-col.left { width:340px; min-width:300px; border-radius:var(--radius) 0 0 var(--radius); }
 .req-col.mid { flex:1; min-width:0; }
-.req-col.right { width:380px; min-width:340px; border-right:none; border-radius:0 var(--radius) var(--radius) 0; }
+.req-col.right { width:420px; min-width:380px; }
 
 .req-section-title {
     padding:10px 14px; font-size:0.78rem; color:var(--text-muted);
@@ -35,21 +39,34 @@
     border-bottom:1px solid var(--border); background:var(--bg-secondary);
     display:flex; justify-content:space-between; align-items:center;
 }
-.req-list { flex:1; overflow-y:auto; padding:8px; }
+.req-list { max-height:calc(100vh - 330px); overflow-y:auto; padding:0; }
 .req-empty { padding:30px 14px; text-align:center; color:var(--text-muted); font-size:0.84rem; }
 
-.req-card {
-    padding:10px 12px; border:1px solid var(--border); border-radius:8px;
-    margin-bottom:6px; cursor:pointer; background:var(--bg-secondary);
-    transition:all 0.15s;
+.req-table { width:100%; border-collapse:collapse; font-size:0.82rem; }
+.req-table th {
+    position:sticky; top:0; z-index:2;
+    padding:8px 10px; text-align:left; font-size:0.72rem; font-weight:600;
+    color:var(--text-muted); text-transform:uppercase; letter-spacing:0.3px;
+    background:var(--bg-secondary); border-bottom:1px solid var(--border);
+    white-space:nowrap;
 }
-.req-card:hover { border-color:var(--accent); }
-.req-card.active { border-color:var(--accent); background:var(--accent-dim); }
-.req-card .title { font-size:0.86rem; font-weight:600; color:var(--text-primary); margin-bottom:4px; line-height:1.35; }
-.req-card .meta { font-size:0.72rem; color:var(--text-muted); display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
-.req-card .badge { padding:1px 6px; border-radius:4px; font-size:0.68rem; }
+.req-table td {
+    padding:8px 10px; border-bottom:1px solid var(--border);
+    vertical-align:middle; color:var(--text-primary);
+}
+.req-table tr { cursor:pointer; transition:background 0.12s; }
+.req-table tbody tr:hover { background:var(--bg-secondary); }
+.req-table tbody tr.active { background:var(--accent-dim); }
+.req-table .col-title { max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+.req-table .col-id { font-family:monospace; font-size:0.72rem; color:var(--text-secondary); white-space:nowrap; }
+.req-table .col-pills { white-space:nowrap; }
+.req-table .col-owner { max-width:100px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.req-table .col-time { font-size:0.72rem; color:var(--text-muted); white-space:nowrap; }
 
 .status-pill { padding:2px 8px; border-radius:99px; font-size:0.72rem; white-space:nowrap; }
+.status-planning   { background:#8b5cf622; color:#7c3aed; }
+.status-status_1   { background:#94a3b822; color:#475569; }
+.status-status_2   { background:#f59e0b22; color:#b45309; }
 .status-status_3   { background:#3b82f622; color:#1d4ed8; }
 .status-status_22  { background:#eab30822; color:#b45309; }
 .status-status_4   { background:#22c55e22; color:#16a34a; }
@@ -66,6 +83,15 @@
 .priority-Middle      { background:#eab30822; color:#b45309; }
 .priority-Low         { background:#94a3b822; color:#475569; }
 .priority-Nice        { background:#a3e63522; color:#65a30d; }
+.completeness-S      { background:#3b82f622; color:#1d4ed8; cursor:pointer; text-decoration:underline; font-weight:700; }
+.completeness-A      { background:#22c55e22; color:#16a34a; cursor:pointer; text-decoration:underline; font-weight:700; }
+.completeness-B      { background:#f9731622; color:#c2410c; cursor:pointer; text-decoration:underline; font-weight:700; }
+.completeness-C      { background:#ef444422; color:#b91c1c; cursor:pointer; text-decoration:underline; font-weight:700; }
+/* 兼容旧中文分级 */
+.completeness-极高   { background:#3b82f622; color:#1d4ed8; cursor:pointer; text-decoration:underline; }
+.completeness-高    { background:#22c55e22; color:#16a34a; cursor:pointer; text-decoration:underline; }
+.completeness-普通   { background:#f9731622; color:#c2410c; cursor:pointer; text-decoration:underline; }
+.completeness-较低   { background:#ef444422; color:#b91c1c; cursor:pointer; text-decoration:underline; }
 
 .req-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; padding:12px; border-bottom:1px solid var(--border); background:var(--bg-card); }
 .req-stat { background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; padding:10px; text-align:center; }
@@ -76,7 +102,7 @@
 .req-tab { padding:10px 14px; cursor:pointer; font-size:0.84rem; color:var(--text-muted); border-bottom:2px solid transparent; }
 .req-tab:hover { color:var(--text-primary); }
 .req-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
-.req-body { flex:1; overflow-y:auto; padding:14px; }
+.req-body { max-height:calc(100vh - 320px); overflow-y:auto; padding:14px; }
 
 .req-detail-block { margin-bottom:16px; }
 .req-detail-block h4 {
@@ -92,17 +118,21 @@
     border-radius:6px; padding:10px; font-size:0.84rem;
     max-height:240px; overflow-y:auto; white-space:pre-wrap;
 }
+.ts-list { margin:0; padding-left:18px; font-size:0.84rem; list-style:disc outside; }
+.ts-list ul { margin:2px 0; padding-left:16px; list-style:circle outside; }
+.ts-list li { margin:3px 0; line-height:1.5; }
 
 .change-row {
-    display:grid; grid-template-columns:90px 90px 110px 1fr 70px;
-    gap:8px; padding:8px 10px; border:1px solid var(--border);
-    border-radius:6px; margin-bottom:5px; font-size:0.8rem;
-    background:var(--bg-secondary); align-items:center;
+    padding:10px 12px; border:1px solid var(--border);
+    border-radius:6px; margin-bottom:8px; font-size:0.82rem;
+    background:var(--bg-secondary); word-break:break-word;
 }
+.change-row .change-header { display:flex; gap:8px; align-items:center; margin-bottom:6px; flex-wrap:wrap; }
 .change-row .field { font-weight:600; }
 .change-row .old { color:var(--red); text-decoration:line-through; opacity:0.7; }
 .change-row .new { color:var(--green); }
-.change-row .change-type { font-size:0.7rem; padding:2px 6px; border-radius:4px; text-align:center; }
+.change-row .change-content { margin-top:4px; line-height:1.5; }
+.change-row .change-type { font-size:0.7rem; padding:2px 6px; border-radius:4px; text-align:center; display:inline-block; }
 .ct-added         { background:#22c55e22; color:#16a34a; }
 .ct-modified      { background:#3b82f622; color:#1d4ed8; }
 .ct-status_changed{ background:#eab30822; color:#b45309; }
@@ -132,30 +162,35 @@
     border:1px solid var(--border); border-radius:6px;
     background:var(--bg-secondary); color:var(--text-primary);
 }
+.req-pagination {
+    display:flex; align-items:center; justify-content:space-between;
+    gap:8px; padding:8px; border-top:1px solid var(--border);
+    background:var(--bg-card);
+}
+.req-pagination .meta { font-size:0.78rem; color:var(--text-muted); }
+.req-pagination .actions { display:flex; gap:6px; align-items:center; }
+
+.req-detail-toolbar {
+    display:flex; align-items:center; justify-content:flex-end;
+    gap:8px; padding:8px 14px; border-bottom:1px solid var(--border);
+    background:var(--bg-card);
+}
+.req-detail-toolbar select {
+    width:120px; padding:5px 8px; font-size:0.78rem;
+    border:1px solid var(--border); border-radius:6px;
+    background:var(--bg-secondary); color:var(--text-primary);
+}
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="req-layout" id="req-root">
-    <!-- 左栏：变更日志（按当前迭代） -->
-    <div class="req-col left">
-        <div class="req-section-title">
-            <span>📈 近期变更</span>
-            <select id="changes-days" onchange="loadChanges()" style="background:var(--bg-secondary); border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:0.72rem; color:var(--text-primary)">
-                <option value="3">近 3 天</option>
-                <option value="7" selected>近 7 天</option>
-                <option value="14">近 14 天</option>
-                <option value="30">近 30 天</option>
-                <option value="">全部</option>
-            </select>
-        </div>
-        <div class="req-list" id="changes-list">
-            <div class="req-empty">请先选择迭代</div>
-        </div>
-    </div>
-
     <!-- 中栏：需求列表 -->
     <div class="req-col mid">
+        <div class="req-graph-toolbar" style="padding:8px 14px;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:center">
+            <button class="btn btn-primary" onclick="showGraphModal()" style="font-size:0.82rem;padding:6px 14px">📊 需求图谱</button>
+            <span style="font-size:0.78rem;color:var(--text-muted)">查看功能域聚类与一致性问题</span>
+        </div>
         <div class="req-stats" id="req-stats" style="display:none">
             <div class="req-stat"><div class="val" id="stat-total">-</div><div class="label">需求总数</div></div>
             <div class="req-stat"><div class="val" id="stat-recent-changes">-</div><div class="label">近 7 天变更</div></div>
@@ -167,25 +202,47 @@
             <input type="text" id="req-search-input" placeholder="搜索标题 / Story ID / 处理人..." oninput="onSearch()">
         </div>
         <div class="req-filter-bar">
-            <select id="filter-status" onchange="loadItems()"><option value="">全部状态</option></select>
-            <select id="filter-version" onchange="loadItems()"><option value="">全部版本</option></select>
-            <select id="filter-baseline" onchange="loadItems()"><option value="">全部基线</option></select>
-            <select id="filter-risk" onchange="loadItems()">
+            <select id="filter-status" onchange="onItemsFilterChange()"><option value="">全部状态</option></select>
+            <select id="filter-version" onchange="onItemsFilterChange()"><option value="">全部版本</option></select>
+            <select id="filter-baseline" onchange="onItemsFilterChange()"><option value="">全部基线</option></select>
+            <select id="filter-risk" onchange="onItemsFilterChange()">
                 <option value="">全部风险</option>
                 <option value="critical">极高</option>
                 <option value="high">高</option>
                 <option value="medium">中</option>
                 <option value="low">低</option>
             </select>
+            <select id="filter-impl" onchange="onItemsFilterChange()">
+                <option value="">实现状态</option>
+                <option value="not_impl">未实现</option>
+                <option value="in_progress">实现中</option>
+                <option value="implemented">已实现</option>
+                <option value="unknown">未评估</option>
+            </select>
+            <select id="items-page-size" onchange="onPageSizeChange()" style="max-width:120px;flex:0 0 120px">
+                <option value="20" selected>20 / 页</option>
+                <option value="50">50 / 页</option>
+                <option value="100">100 / 页</option>
+            </select>
         </div>
         <div class="req-list" id="items-list">
             <div class="req-empty">请先选择迭代</div>
+        </div>
+        <div class="req-pagination" id="items-pagination" style="display:none">
+            <div class="meta" id="items-page-meta">第 1 / 1 页，共 0 条</div>
+            <div class="actions">
+                <button class="btn btn-ghost" id="items-prev-btn" onclick="changeItemsPage(-1)">上一页</button>
+                <button class="btn btn-ghost" id="items-next-btn" onclick="changeItemsPage(1)">下一页</button>
+            </div>
         </div>
     </div>
 
     <!-- 右栏：需求详情 -->
     <div class="req-col right">
-        <div class="req-section-title"><span>📄 需求详情</span></div>
+        <div class="req-section-title">
+            <span>📄 需求详情</span>
+            <button class="btn btn-ghost" id="btn-delete-item" onclick="deleteCurrentItem()" title="删除当前需求记录" style="color:var(--red); font-size:0.72rem; padding:2px 8px; display:none">🗑️ 删除</button>
+        </div>
         <div class="req-tabs">
             <div class="req-tab active" data-tab="basic" onclick="switchTab('basic')">基础</div>
             <div class="req-tab" data-tab="testing" onclick="switchTab('testing')">测试</div>
@@ -193,8 +250,22 @@
             <div class="req-tab" data-tab="cases" onclick="switchTab('cases')">用例</div>
             <div class="req-tab" data-tab="logs" onclick="switchTab('logs')">变更</div>
         </div>
+        <div class="req-detail-toolbar" id="detail-toolbar" style="display:none">
+            <select id="detail-page-size" onchange="onDetailPageSizeChange()">
+                <option value="20" selected>20 / 页</option>
+                <option value="50">50 / 页</option>
+                <option value="100">100 / 页</option>
+            </select>
+        </div>
         <div class="req-body" id="detail-body">
             <div class="req-empty">请从中栏选择需求</div>
+        </div>
+        <div class="req-pagination" id="detail-pagination" style="display:none">
+            <div class="meta" id="detail-page-meta">第 1 / 1 页，共 0 条</div>
+            <div class="actions">
+                <button class="btn btn-ghost" id="detail-prev-btn" onclick="changeDetailPage(-1)">上一页</button>
+                <button class="btn btn-ghost" id="detail-next-btn" onclick="changeDetailPage(1)">下一页</button>
+            </div>
         </div>
     </div>
 </div>
@@ -207,9 +278,17 @@ const State = {
     currentIterationId: {% if initial_iteration_id %}{{ initial_iteration_id }}{% else %}null{% endif %},
     items: [],
     currentItem: null,
+    itemsPage: 1,
+    itemsPageSize: 20,
+    itemsTotal: 0,
+    itemsPages: 1,
     summary: null,
     changes: [],
     currentTab: 'basic',
+    detailPage: 1,
+    detailPageSize: 20,
+    detailPages: 1,
+    detailTotal: 0,
     activeRefreshReqId: null,
     refreshPollTimer: null,
 };
@@ -231,9 +310,92 @@ const API = {
 };
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function pillStatus(s){ if(!s) return ''; const cls = `status-${esc(s)}`; return `<span class="status-pill ${cls.match(/status-status_/) ? cls : 'status-default'}">${esc(s)}</span>`; }
+function statusLabel(s){
+    const map = {
+        planning:'规划中',
+        status_1:'草稿',
+        status_2:'评审中',
+        status_3:'转测试',
+        status_4:'已完成',
+        status_22:'测试中',
+        status_resolved:'已解决',
+        status_closed:'已关闭',
+        resolved:'已解决',
+        statusclosed:'已关闭'
+    };
+    return map[s] || s;
+}
+function pillStatus(s){
+    if(!s) return '';
+    const cls = `status-${esc(s)}`;
+    const known = /^(status-status_\d+|status-status_resolved|status-status_closed|status-planning)$/.test(cls);
+    return `<span class="status-pill ${known ? cls : 'status-default'}">${esc(statusLabel(s))}</span>`;
+}
 function pillRisk(r){ const cls = `risk-${r||'low'}`; return `<span class="status-pill ${cls}">${esc(r||'low')}</span>`; }
 function pillPriority(p){ if(!p) return ''; const k = String(p).split(' ')[0]; return `<span class="status-pill priority-${k}">${esc(p)}</span>`; }
+function pillImplStatus(s, remark){
+    if(!s) return '';
+    const raw = String(s).trim();
+    const normMap = {
+        not_impl: 'not_impl', '未实现': 'not_impl', '未开发': 'not_impl',
+        in_progress: 'in_progress', '实现中': 'in_progress', '开发中': 'in_progress',
+        implemented: 'implemented', '已实现': 'implemented', '已完成': 'implemented',
+        unknown: 'unknown', '未评估': 'unknown'
+    };
+    const k = normMap[raw] || raw;
+    if (k === 'unknown') return '';
+    const map = {
+        not_impl:['未实现','#e74c3c'],
+        in_progress:['实现中','#f39c12'],
+        implemented:['已实现','#27ae60']
+    };
+    const [label, color] = map[k] || [raw,'#999'];
+    const tip = remark ? ` title="${esc(remark)}"` : '';
+    return `<span class="status-pill" style="background:${color};color:#fff;cursor:${remark?'help':'default'}"${tip}>${label}</span>`;
+}
+function renderTestSuggestions(s){
+    if (!s) return '<span style="color:var(--text-muted)">(空)</span>';
+    let data = null;
+    if (typeof s === 'string') {
+        const t = s.trim();
+        if (!t) return '<span style="color:var(--text-muted)">(空)</span>';
+        // 先尝试整体解析
+        try { data = JSON.parse(t); } catch(e) {
+            // 尝试按行解析 JSONL（每行一个 JSON 对象）
+            const lines = t.split('\n').map(l => l.trim()).filter(Boolean);
+            const parsed = [];
+            let allJson = true;
+            for (const line of lines) {
+                try { parsed.push(JSON.parse(line)); } catch(e2) { allJson = false; break; }
+            }
+            data = allJson ? parsed : {'_text': t};
+        }
+    } else {
+        data = s;
+    }
+    if (Array.isArray(data)) {
+        if (!data.length) return '<span style="color:var(--text-muted)">(空)</span>';
+        return '<ul class="ts-list">' + data.map(item => {
+            if (item && typeof item === 'object') {
+                // 支持 {type, desc} 格式
+                if (item.type && item.desc) {
+                    return `<li><b>${esc(item.type)}</b>：${esc(item.desc)}</li>`;
+                }
+                if (item.title) {
+                    const pts = Array.isArray(item.points) ? item.points.map(p => `<li>${esc(String(p))}</li>`).join('') : '';
+                    return `<li><b>${esc(item.title)}</b>${pts ? '<ul>'+pts+'</ul>' : ''}</li>`;
+                }
+            }
+            return `<li>${esc(typeof item === 'object' ? JSON.stringify(item) : String(item))}</li>`;
+        }).join('') + '</ul>';
+    }
+    if (data && typeof data === 'object') {
+        if (data._text) return `<div class="text-content">${esc(data._text)}</div>`;
+        if (data.text) return `<div class="text-content">${esc(data.text)}</div>`;
+        if (data.title) return `<div class="text-content"><b>${esc(data.title)}</b></div>`;
+    }
+    return `<div class="text-content">${esc(String(data))}</div>`;
+}
 
 // =================== 入口 ===================
 async function init(){
@@ -249,6 +411,8 @@ async function init(){
             await loadIterations();
         }
         document.getElementById('filter-iteration').value = State.currentIterationId;
+        await onIterationChange();
+    } else if (document.getElementById('filter-iteration').value) {
         await onIterationChange();
     }
 }
@@ -275,11 +439,71 @@ async function onProjectChange(){
     State.currentIterationId = null;
     State.currentItem = null;
     document.getElementById('filter-iteration').value = '';
+    State.detailPage = 1;
+    renderDetailPagination(false);
     document.getElementById('detail-body').innerHTML = '<div class="req-empty">请从中栏选择需求</div>';
     document.getElementById('items-list').innerHTML = '<div class="req-empty">请先选择迭代</div>';
+    document.getElementById('items-pagination').style.display = 'none';
     document.getElementById('changes-list').innerHTML = '<div class="req-empty">请先选择迭代</div>';
     document.getElementById('req-stats').style.display = 'none';
     await loadIterations();
+    if (document.getElementById('filter-iteration').value) {
+        await onIterationChange();
+    }
+}
+
+async function pickDefaultIteration(list){
+    if (!Array.isArray(list) || !list.length) return null;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const parseDate = (s) => {
+        if (!s) return null;
+        const d = new Date(`${s}T00:00:00`);
+        if (Number.isNaN(d.getTime())) return null;
+        d.setHours(0, 0, 0, 0);
+        return d;
+    };
+
+    const enriched = list.map(it => ({
+        it,
+        status: String(it.status || '').toLowerCase(),
+        start: parseDate(it.start_date),
+        end: parseDate(it.end_date),
+    }));
+
+    // 1) 优先：当前生效计划（status=active）对应的迭代
+    try {
+        const params = [];
+        params.push('status=active');
+        if (State.currentProjectId) params.push(`project_id=${State.currentProjectId}`);
+        const plans = await API.get('/test-plans?' + params.join('&'));
+        const activePlans = Array.isArray(plans) ? plans : [];
+        if (activePlans.length) {
+            // 取最近开始的 active 计划
+            activePlans.sort((a, b) => {
+                const as = a.start_date || '';
+                const bs = b.start_date || '';
+                return bs.localeCompare(as);
+            });
+            const targetIterationId = activePlans[0].iteration_id;
+            if (targetIterationId) {
+                const match = enriched.find(x => Number(x.it.id) === Number(targetIterationId));
+                if (match) return match.it;
+            }
+        }
+    } catch(e) {
+        console.warn('pickDefaultIteration: failed to fetch active plans', e);
+    }
+
+    // 2) 其次：最近开始的迭代（start_date <= today，取开始日期最晚的）
+    const started = enriched.filter(x => x.start && x.start <= today);
+    if (started.length) {
+        started.sort((a, b) => b.start.getTime() - a.start.getTime());
+        return started[0].it;
+    }
+
+    // 3) 兜底：列表中最后一个迭代（API 按 created_at desc 排序，第一个就是最新的）
+    return list[0];
 }
 
 async function loadIterations(){
@@ -296,7 +520,20 @@ async function loadIterations(){
             `<option value="${it.id}">${esc(it.name)} ${it.version_name ? '· '+esc(it.version_name) : ''}</option>`
         ).join('');
         // 如果当前选中的迭代仍在新列表里，恢复选中；否则保持空
-        if (cur && list.some(it => String(it.id) === cur)) sel.value = cur;
+        if (cur && list.some(it => String(it.id) === cur)) {
+            sel.value = cur;
+            State.currentIterationId = parseInt(cur);
+        } else if (State.currentIterationId && list.some(it => Number(it.id) === Number(State.currentIterationId))) {
+            sel.value = String(State.currentIterationId);
+        } else {
+            const preferred = await pickDefaultIteration(list);
+            if (preferred) {
+                sel.value = String(preferred.id);
+                State.currentIterationId = Number(preferred.id);
+            } else {
+                State.currentIterationId = null;
+            }
+        }
     } catch(e) {
         console.error(e);
     }
@@ -306,15 +543,19 @@ async function onIterationChange(){
     const id = document.getElementById('filter-iteration').value;
     State.currentIterationId = id ? parseInt(id) : null;
     State.currentItem = null;
+    State.itemsPage = 1;
+    State.detailPage = 1;
+    renderDetailPagination(false);
     document.getElementById('detail-body').innerHTML = '<div class="req-empty">请从中栏选择需求</div>';
     if (!State.currentIterationId) {
         document.getElementById('items-list').innerHTML = '<div class="req-empty">请先选择迭代</div>';
+        document.getElementById('items-pagination').style.display = 'none';
         document.getElementById('changes-list').innerHTML = '<div class="req-empty">请先选择迭代</div>';
         document.getElementById('req-stats').style.display = 'none';
         return;
     }
     history.replaceState(null,'',`/requirements/iterations/${State.currentIterationId}`);
-    await Promise.all([loadSummary(), loadItems(), loadChanges()]);
+await Promise.all([loadSummary(), loadItems()]);
 }
 
 async function loadSummary(){
@@ -333,7 +574,7 @@ async function loadSummary(){
         const fs = document.getElementById('filter-status');
         const cur = fs.value;
         fs.innerHTML = '<option value="">全部状态</option>' + Object.entries(s.status_distribution||{}).sort((a,b)=>b[1]-a[1])
-            .map(([k,v]) => `<option value="${esc(k)}">${esc(k)} (${v})</option>`).join('');
+            .map(([k,v]) => `<option value="${esc(k)}">${esc(statusLabel(k))} (${v})</option>`).join('');
         fs.value = cur;
 
         const fv = document.getElementById('filter-version');
@@ -353,7 +594,27 @@ async function loadSummary(){
 let _searchTimer = null;
 function onSearch(){
     clearTimeout(_searchTimer);
+    State.itemsPage = 1;
     _searchTimer = setTimeout(loadItems, 250);
+}
+
+function onItemsFilterChange(){
+    State.itemsPage = 1;
+    loadItems();
+}
+
+function onPageSizeChange(){
+    const v = parseInt(document.getElementById('items-page-size').value || '20', 10);
+    State.itemsPageSize = [20, 50, 100].includes(v) ? v : 20;
+    State.itemsPage = 1;
+    loadItems();
+}
+
+function changeItemsPage(delta){
+    const next = State.itemsPage + delta;
+    if (next < 1 || next > State.itemsPages) return;
+    State.itemsPage = next;
+    loadItems();
 }
 
 async function loadItems(){
@@ -365,14 +626,25 @@ async function loadItems(){
     const version = document.getElementById('filter-version').value; if (version) params.set('tapd_version', version);
     const baseline = document.getElementById('filter-baseline').value; if (baseline) params.set('tapd_baseline_id', baseline);
     const risk = document.getElementById('filter-risk').value; if (risk) params.set('risk_level', risk);
+    const impl = document.getElementById('filter-impl').value; if (impl) params.set('impl_status', impl);
+    params.set('page', String(State.itemsPage));
+    params.set('page_size', String(State.itemsPageSize));
 
     const list = document.getElementById('items-list');
     list.innerHTML = '<div class="req-empty">加载中...</div>';
     try {
         const data = await API.get(`/requirements/iterations/${State.currentIterationId}/items?${params}`);
         State.items = data.items || [];
+        State.itemsTotal = Number(data.total || 0);
+        State.itemsPage = Number(data.page || State.itemsPage);
+        State.itemsPageSize = Number(data.page_size || State.itemsPageSize);
+        State.itemsPages = Math.max(1, Number(data.pages || 1));
+        const sizeSel = document.getElementById('items-page-size');
+        if (String(State.itemsPageSize) !== sizeSel.value) sizeSel.value = String(State.itemsPageSize);
         renderItemsList();
+        renderItemsPagination();
     } catch(e){
+        document.getElementById('items-pagination').style.display = 'none';
         list.innerHTML = `<div class="req-empty">加载失败: ${esc(e.message)}</div>`;
     }
 }
@@ -380,47 +652,121 @@ async function loadItems(){
 function renderItemsList(){
     const list = document.getElementById('items-list');
     if (!State.items.length) { list.innerHTML = '<div class="req-empty">暂无需求，等待 OpenClaw Agent 推送快照</div>'; return; }
-    list.innerHTML = State.items.map(it => `
-        <div class="req-card ${State.currentItem && State.currentItem.id === it.id ? 'active' : ''}" onclick="selectItem(${it.id})">
-            <div class="title">${esc(it.title || '(无标题)')}</div>
-            <div class="meta">
-                <span style="font-family:monospace; color:var(--text-secondary)">#${esc(it.tapd_story_id)}</span>
-                ${pillStatus(it.status)}
-                ${pillPriority(it.priority_label)}
-                ${it.tapd_version ? `<span class="badge" style="background:var(--bg-card); border:1px solid var(--border)">${esc(it.tapd_version)}</span>` : ''}
-                ${it.risk_level && it.risk_level !== 'low' ? pillRisk(it.risk_level) : ''}
-            </div>
-            <div class="meta" style="margin-top:3px">
-                <span>👤 ${esc(it.owner || '-')}</span>
-                ${it.tapd_module ? `<span>📦 ${esc(it.tapd_module)}</span>` : ''}
-            </div>
-        </div>
-    `).join('');
+    list.innerHTML = `
+        <table class="req-table">
+            <thead><tr>
+                <th>标题</th><th>ID</th><th>状态</th><th>优先级</th><th>完整度</th><th>版本</th><th>处理人</th><th>录入时间</th><th>实现状态</th>
+            </tr></thead>
+            <tbody>${State.items.map(it => `
+                <tr class="${State.currentItem && State.currentItem.id === it.id ? 'active' : ''}" onclick="selectItem(${it.id})">
+                    <td class="col-title">${esc(it.title || '(无标题)')}</td>
+                    <td class="col-id">${esc(it.tapd_story_id)}</td>
+                    <td class="col-pills">${pillStatus(it.status)}</td>
+                    <td class="col-pills">${pillPriority(it.priority_label)}</td>
+                    <td class="col-pills">${it.completeness ? `<span class="completeness-${esc(it.completeness)}" title="点击查看说明" onclick="event.stopPropagation();selectItem(${it.id});setTimeout(()=>showCompletenessModal(),100)">${esc(it.completeness)}</span>` : '<span style="color:var(--text-muted)">-</span>'}</td>
+                    <td class="col-pills">${it.tapd_version ? esc(it.tapd_version) : '-'}</td>
+                    <td class="col-owner">${esc(it.owner || '-')}</td>
+                    <td class="col-time">${it.created_at ? esc(it.created_at).slice(0,16) : '-'}</td>
+                    <td class="col-pills">${pillImplStatus(it.impl_status, it.impl_remark)}</td>
+                </tr>
+            `).join('')}</tbody>
+        </table>`;
+}
+
+function renderItemsPagination(){
+    const bar = document.getElementById('items-pagination');
+    if (!State.currentIterationId) {
+        bar.style.display = 'none';
+        return;
+    }
+    bar.style.display = '';
+    document.getElementById('items-page-meta').textContent =
+        `第 ${State.itemsPage} / ${State.itemsPages} 页，共 ${State.itemsTotal} 条`;
+    document.getElementById('items-prev-btn').disabled = State.itemsPage <= 1;
+    document.getElementById('items-next-btn').disabled = State.itemsPage >= State.itemsPages;
 }
 
 async function selectItem(id){
     try {
         State.currentItem = await API.get(`/requirements/items/${id}`);
+        State.detailPage = 1;
         renderItemsList();
         renderDetail();
+        document.getElementById('btn-delete-item').style.display = '';
     } catch(e){
         document.getElementById('detail-body').innerHTML = `<div class="req-empty">加载失败: ${esc(e.message)}</div>`;
     }
 }
 
+async function deleteCurrentItem(){
+    if (!State.currentItem) return;
+    const it = State.currentItem;
+    if (!confirm(`确定要删除需求「${it.title || it.tapd_story_id}」的记录吗？\n\n删除后可通过重新推送快照恢复。此操作不可撤销！`)) return;
+    try {
+        await API.del(`/requirements/items/${it.id}`);
+        State.currentItem = null;
+        document.getElementById('btn-delete-item').style.display = 'none';
+        document.getElementById('detail-body').innerHTML = '<div class="req-empty">已删除，请从中栏选择需求</div>';
+        await Promise.all([loadSummary(), loadItems()]);
+    } catch(e){
+        alert('删除失败: ' + e.message);
+    }
+}
+
 function switchTab(t){
     State.currentTab = t;
+    State.detailPage = 1;
     document.querySelectorAll('.req-tab').forEach(el => el.classList.toggle('active', el.dataset.tab === t));
     renderDetail();
+}
+
+function onDetailPageSizeChange(){
+    const v = parseInt(document.getElementById('detail-page-size').value || '20', 10);
+    State.detailPageSize = [20, 50, 100].includes(v) ? v : 20;
+    State.detailPage = 1;
+    renderDetail();
+}
+
+function changeDetailPage(delta){
+    const next = State.detailPage + delta;
+    if (next < 1 || next > State.detailPages) return;
+    State.detailPage = next;
+    renderDetail();
+}
+
+function applyDetailPagination(arr){
+    const total = arr.length;
+    State.detailTotal = total;
+    State.detailPages = Math.max(1, Math.ceil(total / State.detailPageSize));
+    if (State.detailPage > State.detailPages) State.detailPage = State.detailPages;
+    const start = (State.detailPage - 1) * State.detailPageSize;
+    return arr.slice(start, start + State.detailPageSize);
+}
+
+function renderDetailPagination(show){
+    const bar = document.getElementById('detail-pagination');
+    const toolbar = document.getElementById('detail-toolbar');
+    if (!show) {
+        bar.style.display = 'none';
+        toolbar.style.display = 'none';
+        return;
+    }
+    bar.style.display = '';
+    toolbar.style.display = '';
+    document.getElementById('detail-page-meta').textContent =
+        `第 ${State.detailPage} / ${State.detailPages} 页，共 ${State.detailTotal} 条`;
+    document.getElementById('detail-prev-btn').disabled = State.detailPage <= 1;
+    document.getElementById('detail-next-btn').disabled = State.detailPage >= State.detailPages;
 }
 
 function renderDetail(){
     const body = document.getElementById('detail-body');
     const it = State.currentItem;
-    if (!it) { body.innerHTML = '<div class="req-empty">请从中栏选择需求</div>'; return; }
+    if (!it) { renderDetailPagination(false); body.innerHTML = '<div class="req-empty">请从中栏选择需求</div>'; return; }
     const t = State.currentTab;
 
     if (t === 'basic') {
+        renderDetailPagination(false);
         body.innerHTML = `
             <div class="req-detail-block">
                 <h4>${esc(it.title || '(无标题)')}</h4>
@@ -436,6 +782,12 @@ function renderDetail(){
                 <div class="row"><span class="k">基线</span><span class="v" style="font-family:monospace">${esc(it.tapd_baseline_id || '-')}</span></div>
                 <div class="row"><span class="k">需测试</span><span class="v">${esc(it.need_test || '-')}</span></div>
                 <div class="row"><span class="k">评审进度</span><span class="v">${esc(it.review_progress || '-')}</span></div>
+                <div class="row"><span class="k">实现状态</span><span class="v">${pillImplStatus(it.impl_status, it.impl_remark) || '<span style="color:var(--text-secondary)">未评估</span>'}${it.impl_remark ? `<span style="margin-left:8px;color:var(--text-secondary);font-size:12px">${esc(it.impl_remark)}</span>` : ''}</span></div>
+                <div class="row"><span class="k">完整度</span><span class="v">${it.completeness ? `<span class="status-pill completeness-${esc(it.completeness)}" onclick="showCompletenessModal()" title="点击查看说明">${esc(it.completeness)}</span>` : '<span style="color:var(--text-muted)">-</span>'}</span></div>
+            </div>
+            <div class="req-detail-block">
+                <h4>💡 测试点建议</h4>
+                ${renderTestSuggestions(it.test_suggestions)}
             </div>
             <div class="req-detail-block">
                 <h4>📝 描述</h4>
@@ -443,6 +795,7 @@ function renderDetail(){
             </div>
         `;
     } else if (t === 'testing') {
+        renderDetailPagination(false);
         body.innerHTML = `
             <div class="req-detail-block">
                 <h4>✅ 测试验收（custom_field_eight）</h4>
@@ -456,37 +809,51 @@ function renderDetail(){
                 <h4>📊 测试结果</h4>
                 <div class="text-content">${esc(it.test_result || '(空)')}</div>
             </div>
-            <div class="req-detail-block">
-                <h4>🤖 AI 用例设计</h4>
-                <button class="btn btn-primary" onclick="alert('阶段 2 接入：从此需求一键调用 ai_generator.by_requirement')">从该需求生成用例（待开发）</button>
-            </div>
+
         `;
     } else if (t === 'engineering') {
-        body.innerHTML = `<div class="req-empty">加载中...</div>`;
-        API.get(`/requirements/items/${it.id}/engineering-changes`).then(data => {
-            const changes = data.changes || [];
-            if (!changes.length) { body.innerHTML = '<div class="req-empty">该需求当前无关联工程变更</div>'; return; }
-            body.innerHTML = `
-                <div class="req-detail-block">
-                    <h4>🛠️ 关联工程变更（共 ${changes.length} 项）</h4>
-                    ${changes.map(c => `
-                        <div class="eng-link-row">
-                            <div class="file">${esc(c.change ? c.change.file_path : '(已删除)')}</div>
-                            <div class="meta">
-                                ${c.change ? `<span>变更=${esc(c.change.change_type)}</span> · <span>风险=${c.change.risk_score}</span> · <span>模块=${esc(c.change.module_name||'-')}</span>` : ''}
-                                · 来源=${esc(c.link.link_source)} · 可信度=${c.link.confidence}%
-                            </div>
-                        </div>
-                    `).join('')}
-                </div>
-            `;
-        }).catch(e => { body.innerHTML = `<div class="req-empty">加载失败: ${esc(e.message)}</div>`; });
-    } else if (t === 'cases') {
-        const links = it.testcase_links || [];
+        if (!it._engineeringChanges) {
+            renderDetailPagination(false);
+            body.innerHTML = `<div class="req-empty">加载中...</div>`;
+            API.get(`/requirements/items/${it.id}/engineering-changes`).then(data => {
+                it._engineeringChanges = data.changes || [];
+                renderDetail();
+            }).catch(e => { body.innerHTML = `<div class="req-empty">加载失败: ${esc(e.message)}</div>`; });
+            return;
+        }
+        const allChanges = it._engineeringChanges || [];
+        if (!allChanges.length) { renderDetailPagination(false); body.innerHTML = '<div class="req-empty">该需求当前无关联工程变更</div>'; return; }
+        const changes = applyDetailPagination(allChanges);
+        renderDetailPagination(true);
         body.innerHTML = `
             <div class="req-detail-block">
-                <h4>🧪 已绑定用例（共 ${links.length} 条）</h4>
-                ${links.length ? links.map(l => `
+                <h4>🛠️ 关联工程函数（共 ${allChanges.length} 项）</h4>
+                ${changes.map(c => {
+                    const fp = c.link?.file_path || c.change?.file_path || '(已删除)';
+                    const sym = c.link?.symbol_name || '-';
+                    const sl = c.link?.start_line;
+                    const eln = c.link?.end_line;
+                    const lineRange = (sl || eln) ? ` · 行号=${sl || '?'}-${eln || '?'}` : '';
+                    return `
+                    <div class="eng-link-row">
+                        <div class="file">${esc(fp)}</div>
+                        <div style="font-size:0.8rem;color:var(--text-primary);margin-top:4px">函数/方法：<b>${esc(sym)}</b>${lineRange}</div>
+                        <div class="meta">
+                            ${c.change ? `<span>变更=${esc(c.change.change_type)}</span> · <span>风险=${c.change.risk_score}</span> · <span>模块=${esc(c.change.module_name||'-')}</span>` : ''}
+                            · 来源=${esc(c.link.link_source)} · 可信度=${c.link.confidence}%
+                        </div>
+                    </div>`;
+                }).join('')}
+            </div>
+        `;
+    } else if (t === 'cases') {
+        const allLinks = it.testcase_links || [];
+        const links = applyDetailPagination(allLinks);
+        renderDetailPagination(allLinks.length > 0);
+        body.innerHTML = `
+            <div class="req-detail-block">
+                <h4>🧪 已绑定用例（共 ${allLinks.length} 条）</h4>
+                ${allLinks.length ? links.map(l => `
                     <div class="case-link-row">
                         <span style="font-family:monospace">case#${l.test_case_id}</span> ·
                         <span>${esc(l.link_type)}</span> ·
@@ -501,20 +868,24 @@ function renderDetail(){
             </div>
         `;
     } else if (t === 'logs') {
-        const logs = it.change_logs || [];
+        const allLogs = it.change_logs || [];
+        const logs = applyDetailPagination(allLogs);
+        renderDetailPagination(allLogs.length > 0);
         body.innerHTML = `
             <div class="req-detail-block">
-                <h4>📜 字段变更日志（共 ${logs.length} 条）</h4>
-                ${logs.length ? logs.map(l => `
+                <h4>📜 字段变更日志（共 ${allLogs.length} 条）</h4>
+                ${allLogs.length ? logs.map(l => `
                     <div class="change-row">
-                        <span class="change-type ct-${esc(l.change_type)}">${esc(l.change_type)}</span>
-                        <span class="impact-${l.impact_level}">${esc(l.impact_level)}</span>
-                        <span class="field">${esc(l.field_name || '-')}</span>
-                        <span>
-                            ${l.old_value ? `<span class="old">${esc(l.old_value).slice(0,60)}</span> → ` : ''}
-                            <span class="new">${esc(l.new_value || '').slice(0,60)}</span>
-                        </span>
-                        <span style="font-size:0.7rem; color:var(--text-muted)">${esc(l.change_date)}</span>
+                        <div class="change-header">
+                            <span class="change-type ct-${esc(l.change_type)}">${esc(l.change_type)}</span>
+                            <span class="impact-${l.impact_level}">${esc(l.impact_level)}</span>
+                            <span class="field">${esc(l.field_name || '-')}</span>
+                            <span style="font-size:0.7rem; color:var(--text-muted); margin-left:auto">${esc(l.change_date)}</span>
+                        </div>
+                        <div class="change-content">
+                            ${l.old_value ? `<span class="old">${esc(l.old_value).slice(0,120)}</span><br>→ ` : ''}
+                            <span class="new">${esc(l.new_value || '').slice(0,120)}</span>
+                        </div>
                     </div>
                 `).join('') : '<div class="req-empty">无变更</div>'}
             </div>
@@ -539,36 +910,19 @@ async function deleteCaseLink(id){
     } catch(e){ alert(e.message); }
 }
 
-async function loadChanges(){
-    if (!State.currentIterationId) return;
-    const days = document.getElementById('changes-days').value;
-    const params = new URLSearchParams();
-    if (days) params.set('days', days);
-    const list = document.getElementById('changes-list');
-    list.innerHTML = '<div class="req-empty">加载中...</div>';
+async function deleteIterationData(){
+    if (!State.currentIterationId) { alert('请先选择迭代'); return; }
+    const iterName = document.getElementById('filter-iteration').selectedOptions[0]?.text || '';
+    if (!confirm(`确定要删除迭代「${iterName}」的所有需求分析数据吗？\n\n删除后可重新上传快照恢复。此操作不可撤销！`)) return;
     try {
-        const data = await API.get(`/requirements/iterations/${State.currentIterationId}/changes?${params}`);
-        const logs = data.changes || [];
-        if (!logs.length) { list.innerHTML = '<div class="req-empty">该时段暂无变更</div>'; return; }
-        // 按 requirement_item_id 聚合，按日期倒序
-        list.innerHTML = logs.slice(0, 200).map(l => `
-            <div class="req-card" onclick="selectItem(${l.requirement_item_id})">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:3px">
-                    <span class="change-type ct-${esc(l.change_type)}" style="font-size:0.7rem; padding:1px 6px; border-radius:4px">${esc(l.change_type)}</span>
-                    <span class="impact-${l.impact_level}" style="font-size:0.7rem">${esc(l.impact_level)}</span>
-                </div>
-                <div style="font-size:0.78rem; color:var(--text-primary); margin-bottom:2px">
-                    <strong>${esc(l.field_name || '新增/移除')}</strong>
-                </div>
-                <div style="font-size:0.72rem; color:var(--text-muted)">
-                    ${l.old_value ? `<span class="old" style="text-decoration:line-through">${esc(String(l.old_value).slice(0,40))}</span> → ` : ''}
-                    <span style="color:var(--green)">${esc(String(l.new_value||'').slice(0,40))}</span>
-                </div>
-                <div style="font-size:0.7rem; color:var(--text-muted); margin-top:3px">${esc(l.change_date)} · req#${l.requirement_item_id}</div>
-            </div>
-        `).join('');
+        const res = await API.del(`/requirements/iterations/${State.currentIterationId}/data`);
+        alert(`已删除：${res.deleted_items || 0} 条需求、${res.deleted_logs || 0} 条变更日志`);
+        await loadItems();
+        State.detailPage = 1;
+        renderDetailPagination(false);
+        document.getElementById('detail-body').innerHTML = '<div class="req-empty">请从中栏选择需求</div>';
     } catch(e){
-        list.innerHTML = `<div class="req-empty">加载失败: ${esc(e.message)}</div>`;
+        alert('删除失败: ' + e.message);
     }
 }
 
@@ -606,7 +960,7 @@ function pollRefresh(){
                 statusEl.textContent = `✓ 刷新完成 (${r.finished_at || ''})`;
                 document.getElementById('btn-refresh').disabled = false;
                 State.activeRefreshReqId = null;
-                await Promise.all([loadSummary(), loadItems(), loadChanges()]);
+await Promise.all([loadSummary(), loadItems()]);
             } else if (r.status === 'failed') {
                 statusEl.textContent = `✗ 刷新失败: ${r.error_message || '-'}`;
                 document.getElementById('btn-refresh').disabled = false;
@@ -620,6 +974,167 @@ function pollRefresh(){
     }, 3000);
 }
 
+// =================== 完整度弹框（Markdown 渲染） ===================
+function renderMarkdown(md){
+    if (!md) return '';
+    let h = esc(md);
+    // 代码块
+    h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+        `<pre style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;padding:10px;overflow-x:auto;font-size:0.82rem;margin:8px 0"><code>${code}</code></pre>`);
+    // 标题
+    h = h.replace(/^### (.+)$/gm, '<h4 style="margin:12px 0 6px;font-size:0.9rem">$1</h4>');
+    h = h.replace(/^## (.+)$/gm, '<h3 style="margin:14px 0 8px">$1</h3>');
+    h = h.replace(/^# (.+)$/gm, '<h2 style="margin:16px 0 8px">$1</h2>');
+    // 粗体、斜体
+    h = h.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+    h = h.replace(/\*(.+?)\*/g, '<i>$1</i>');
+    // 行内代码
+    h = h.replace(/`([^`]+)`/g, '<code style="background:var(--bg-secondary);padding:1px 4px;border-radius:3px;font-size:0.82rem">$1</code>');
+    // 链接
+    h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color:var(--accent)">$1</a>');
+    // 无序列表
+    h = h.replace(/^- (.+)$/gm, '<li>$1</li>');
+    h = h.replace(/(<li>.*<\/li>)/s, '<ul style="padding-left:18px;margin:6px 0">$1</ul>');
+    // 有序列表
+    h = h.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+    // 引用
+    h = h.replace(/^> (.+)$/gm, '<blockquote style="border-left:3px solid var(--border);padding-left:10px;color:var(--text-secondary);margin:6px 0">$1</blockquote>');
+    // 水平线
+    h = h.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--border);margin:12px 0">');
+    // 段落（连续两个换行）
+    h = h.replace(/\n\n/g, '<br><br>');
+    return h;
+}
+
+function showCompletenessModal(){
+    const overlay = document.getElementById('completeness-modal');
+    if (!overlay || !State.currentItem) return;
+    const it = State.currentItem;
+    overlay.querySelector('.modal-title').textContent = (it.completeness || '?') + ' — 完整度说明';
+    overlay.querySelector('.modal-body').innerHTML = renderMarkdown(it.completeness_desc || '（无说明）');
+    overlay.style.display = 'flex';
+}
+function closeCompletenessModal(){
+    const overlay = document.getElementById('completeness-modal');
+    if (overlay) overlay.style.display = 'none';
+}
+
 init();
 </script>
+
+<!-- 完整度说明弹框 -->
+<div id="completeness-modal" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.45);z-index:9999;justify-content:center;align-items:center;padding:24px">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;width:620px;max-width:95vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,0.25)">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--border)">
+      <span class="modal-title" style="font-weight:700;font-size:1rem"></span>
+      <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="closeCompletenessModal()">✕</span>
+    </div>
+    <div class="modal-body" style="padding:18px;overflow-y:auto;font-size:0.88rem;line-height:1.7"></div>
+    <div style="display:flex;justify-content:flex-end;gap:10px;padding:12px 18px;border-top:1px solid var(--border)">
+      <button class="btn btn-primary" onclick="closeCompletenessModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 需求分析图谱弹框 -->
+<div id="graph-modal" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.45);z-index:9999;justify-content:center;align-items:center;padding:24px">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;width:900px;max-width:95vw;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,0.25)">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--border)">
+      <span style="font-weight:700;font-size:1rem">📊 需求分析图谱</span>
+      <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="closeGraphModal()">✕</span>
+    </div>
+    <div id="graph-modal-body" style="padding:18px;overflow-y:auto;font-size:0.88rem;line-height:1.7;flex:1">
+      <div class="req-empty">加载中...</div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:10px;padding:12px 18px;border-top:1px solid var(--border)">
+      <button class="btn btn-primary" onclick="closeGraphModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+async function showGraphModal(){
+    const overlay = document.getElementById('graph-modal');
+    const body = document.getElementById('graph-modal-body');
+    overlay.style.display = 'flex';
+    body.innerHTML = '<div class="req-empty">加载中...</div>';
+
+    if (!State.currentIterationId) {
+        body.innerHTML = '<div class="req-empty">请先选择迭代</div>';
+        return;
+    }
+
+    try {
+        const [clusters, issues] = await Promise.all([
+            API.get(`/requirements/iterations/${State.currentIterationId}/domain-clusters`),
+            API.get(`/requirements/iterations/${State.currentIterationId}/consistency-issues`)
+        ]);
+
+        let html = '';
+
+        // 功能域聚类
+        html += `<div class="req-detail-block">
+            <h4>🗂️ 功能域聚类（共 ${clusters.length} 个域）</h4>`;
+        if (clusters.length === 0) {
+            html += '<div class="req-empty">暂无功能域聚类数据</div>';
+        } else {
+            html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px">';
+            clusters.forEach(c => {
+                html += `<div style="border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg-secondary)">
+                    <div style="font-weight:700;font-size:0.9rem;margin-bottom:6px">${esc(c.domain_name)}</div>
+                    <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:4px">需求数：<b>${c.requirement_count || 0}</b></div>
+                    <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:8px">平均质量分：<b>${(c.avg_score || 0).toFixed(1)}</b></div>
+                    ${c.top_issues && c.top_issues !== '[]' ? `<div style="font-size:0.78rem;color:var(--text-secondary)">${esc(JSON.parse(c.top_issues).slice(0,3).join('；'))}</div>` : ''}
+                </div>`;
+            });
+            html += '</div>';
+        }
+        html += '</div>';
+
+        // 一致性问题
+        html += `<div class="req-detail-block" style="margin-top:16px">
+            <h4>⚠️ 一致性问题（共 ${issues.length} 条）</h4>`;
+        if (issues.length === 0) {
+            html += '<div class="req-empty">暂无一致性问题</div>';
+        } else {
+            issues.forEach(issue => {
+                const severityColor = issue.severity === '高' ? 'var(--red)' : issue.severity === '中' ? 'var(--orange)' : 'var(--green)';
+                const statusBadge = issue.status === 'open' ? '<span style="background:var(--red);color:white;padding:2px 8px;border-radius:99px;font-size:0.72rem">待处理</span>' : '<span style="background:var(--green);color:white;padding:2px 8px;border-radius:99px;font-size:0.72rem">已修复</span>';
+                html += `<div style="border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px;background:var(--bg-secondary)">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                        <span style="font-weight:600;font-size:0.84rem">${esc(issue.issue_type)}</span>
+                        <div style="display:flex;gap:8px;align-items:center">
+                            <span style="color:${severityColor};font-size:0.78rem;font-weight:600">${esc(issue.severity)}</span>
+                            ${statusBadge}
+                        </div>
+                    </div>
+                    ${issue.domain ? `<div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:4px">功能域：${esc(issue.domain)}</div>` : ''}
+                    <div style="font-size:0.84rem;line-height:1.5;margin-top:6px">${esc(issue.detail || '')}</div>
+                    ${issue.status === 'open' ? `<button class="btn btn-ghost" style="margin-top:8px;font-size:0.78rem;padding:4px 10px" onclick="resolveIssue(${issue.id})">标记为已修复</button>` : ''}
+                </div>`;
+            });
+        }
+        html += '</div>';
+
+        body.innerHTML = html;
+    } catch(e) {
+        body.innerHTML = `<div class="req-empty">加载失败: ${esc(e.message)}</div>`;
+    }
+}
+
+function closeGraphModal(){
+    document.getElementById('graph-modal').style.display = 'none';
+}
+
+async function resolveIssue(issueId){
+    if (!confirm('确认标记为已修复？')) return;
+    try {
+        await API.put(`/requirements/consistency-issues/${issueId}`, {status: 'closed'});
+        await showGraphModal(); // 刷新
+    } catch(e){
+        alert('操作失败: ' + e.message);
+    }
+}
+</script>
+
 {% endblock %}

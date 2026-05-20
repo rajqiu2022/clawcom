@@ -21,6 +21,10 @@
         } catch(e) {}
     })();
     </script>
+    <!-- Hub 公开 URL：所有"发给 claw / Agent 用的链接"必须用 window.HUB_PUBLIC_URL 拼，
+         严禁用 location.origin（浏览器可能从 https://clawteam.woa.com 进，撞 lampp Apache 必 404）。
+         详见 MEMORY #127。 -->
+    <script>window.HUB_PUBLIC_URL = {{ hub_public_url|tojson }};</script>
     <!-- 全局工具函数 (window._localDateToday 等)，必须在 content block 之前加载 -->
     <script src="{{ url_for('static', filename='js/utils.js') }}?v=20260425a"></script>
     {% block head %}{% endblock %}
@@ -80,6 +84,10 @@
                             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3H3v6l9 12 9-12V3z"/><path d="M7 7h2M11 7h2M15 7h2M9 11h2M13 11h2"/></svg></span>
                             <span>工作规范</span>
                         </a>
+                        <a href="/agent-templates" class="nav-item nav-sub {% block nav_agent_templates %}{% endblock %}" id="nav-agent-templates-link" style="display:none">
+                            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4h10M7 8h10M5 12h14M7 16h10M9 20h6"/></svg></span>
+                            <span>Agent 模板库</span>
+                        </a>
                         <a href="/hub" class="nav-item nav-sub {% block nav_hub %}{% endblock %}" id="nav-hub-link" style="display:none">
                             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg></span>
                             <span>通信中心</span>
@@ -87,6 +95,10 @@
                         <a href="/review" class="nav-item nav-sub {% block nav_review %}{% endblock %}" id="nav-review-link" style="display:none">
                             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9z"/><polyline points="9 13 11 15 15 11"/></svg></span>
                             <span>评审中心</span>
+                        </a>
+                        <a href="/shared-articles" class="nav-item nav-sub {% block nav_shared_articles %}{% endblock %}">
+                            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14l-4-3-4 3-4-3-4 3z"/><path d="M8 8h8M8 12h6"/></svg></span>
+                            <span>见闻分享</span>
                         </a>
                     </div>
                 </div>
@@ -108,6 +120,10 @@
                         <a href="/testplans" class="nav-item nav-sub {% block nav_testplans %}{% endblock %}">
                             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9h18M8 3v4M16 3v4"/></svg></span>
                             <span>测试计划</span>
+                        </a>
+                        <a href="/test-reports" class="nav-item nav-sub {% block nav_test_reports %}{% endblock %}">
+                            <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h12l4 4v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/><path d="M16 4v4h4M7 13h10M7 17h6"/></svg></span>
+                            <span>测试报告</span>
                         </a>
                         <a href="/engineering" class="nav-item nav-sub {% block nav_engineering %}{% endblock %}">
                             <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 1 5.7 5.7L8 24H4v-4L14.7 6.3z"/><path d="M13 8l3 3"/></svg></span>
@@ -162,7 +178,7 @@
                         </span>
                         <span id="theme-label">浅色</span>
                     </button>
-                    <a href="#" onclick="doLogout()" style="color:var(--red);font-size:0.78rem;text-decoration:none;opacity:0.7;transition:opacity 0.15s" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">登出</a>
+                    <a href="/logout" onclick="return doLogout(event)" style="color:var(--red);font-size:0.78rem;text-decoration:none;opacity:0.7;transition:opacity 0.15s" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">登出</a>
                 </div>
                 <div class="version">v5.2.0</div>
             </div>
@@ -206,11 +222,42 @@
                 const badges = {super_admin:' 🛡️', admin:' 📋', user:'', guest:' 👁️'};
                 el.textContent = (currentUser.display_name || currentUser.username) + (badges[currentUser.role] || '');
             }
+            // NGN 旁路提示横幅：当前 session 已绕开 OA 自动登录（测试别人账号场景）
+            if (currentUser && currentUser.bypass_ngn) {
+                const bar = document.createElement('div');
+                bar.className = 'banner banner-warning';
+                bar.style.cssText = 'border-radius:0;border-left:none;border-right:none;border-top:none;justify-content:center;background:rgba(234,179,8,0.12);color:#a16207';
+                const who = currentUser.impersonator
+                    ? `🎭 已切换为 <b>${currentUser.username}</b>（原身份：${currentUser.impersonator}）`
+                    : `🔧 NGN 旁路模式：当前账号 <b>${currentUser.username}</b>，未走 OA 自动登录`;
+                bar.innerHTML = `<span>${who} — 点击右下角"登出"可恢复 OA 自动登录</span>`;
+                document.querySelector('.main-content')?.prepend(bar);
+            }
+            // super_admin 专属：在用户名旁加"🎭 切换身份"按钮
+            if (currentUser && currentUser.role === 'super_admin') {
+                const userBox = document.getElementById('user-info');
+                if (userBox && !document.getElementById('btn-impersonate')) {
+                    const btn = document.createElement('button');
+                    btn.id = 'btn-impersonate';
+                    btn.type = 'button';
+                    btn.title = '切换为其他用户（仅 super_admin，免密码）';
+                    btn.style.cssText = 'background:transparent;border:none;cursor:pointer;font-size:0.95rem;padding:0 4px;opacity:0.7;transition:opacity 0.15s';
+                    btn.onmouseover = () => btn.style.opacity = '1';
+                    btn.onmouseout = () => btn.style.opacity = '0.7';
+                    btn.textContent = '🎭';
+                    btn.onclick = doImpersonate;
+                    // 插入在登出按钮前
+                    const logoutLink = userBox.querySelector('a[href="/logout"]');
+                    if (logoutLink) userBox.insertBefore(btn, logoutLink);
+                    else userBox.appendChild(btn);
+                }
+            }
             // 根据权限显示菜单
             function showNav(id, flag) { const e = document.getElementById(id); if (e && flag) e.style.display = ''; }
             showNav('nav-hub-link', perms.nav_hub);
             showNav('nav-settings-link', perms.nav_settings);
             showNav('nav-audit-link', perms.nav_audit_logs);
+            showNav('nav-agent-templates-link', perms.nav_agent_templates);
             showNav('nav-users-link', perms.nav_users);
             showNav('nav-office-link', true);
             showNav('nav-review-link', perms.nav_review);
@@ -229,9 +276,29 @@
             }
         }
     })();
-    async function doLogout() {
-        await fetch('/api/v1/auth/logout', {method:'POST'});
-        window.location.href = '/login';
+    function doLogout(ev) {
+        // clawteam.woa.com 接入了 NGN 网关。仅清自己 session 不够 —— 浏览器
+        // 仍持有 passport ticket，下次访问会被 NGN 立刻自动登录回来。
+        // 必须让浏览器直接 GET 跳到 /logout，由后端 302 转发到 passport 全局
+        // signout 把 OA 状态一并清掉。fetch() 不行，必须是页面级跳转。
+        if (ev) ev.preventDefault();
+        window.location.href = '/logout';
+        return false;
+    }
+    // super_admin 专属：免密码切换为任意用户身份（NGN 旁路）
+    async function doImpersonate() {
+        const target = window.prompt(
+            '切换为哪个用户？\n（输入 username，免密码；设置 NGN 旁路，登出后恢复）',
+            ''
+        );
+        if (!target || !target.trim()) return;
+        try {
+            const res = await API.post('/auth/impersonate', { username: target.trim() });
+            alert(`✅ ${res.message}\n3 秒后刷新页面...`);
+            setTimeout(() => location.href = '/', 600);
+        } catch (err) {
+            alert('❌ 切换失败：' + (err.message || err));
+        }
     }
 
     // ============ 主题切换 ============
@@ -318,7 +385,7 @@
                 +   (type === 'danger' ? _SVG.danger : (type === 'info' ? _SVG.info : _SVG.warning))
                 + '</div>'
                 + '<div class="modal-title">' + _esc(title) + '</div>'
-                + '<div class="modal-desc">' + _esc(opts.msg || '') + '</div>'
+                + '<div class="modal-desc" style="white-space:pre-line">' + _esc(opts.msg || '') + '</div>'
                 + '<div class="modal-actions">'
                 +   '<button class="btn btn-ghost" id="_cf_cancel">' + _esc(cancel) + '</button>'
                 +   '<button class="btn ' + (type === 'danger' ? 'btn-danger' : 'btn-primary') + '" id="_cf_ok">' + _esc(ok) + '</button>'

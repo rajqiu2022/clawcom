@@ -58,7 +58,7 @@ def load_config(path: str) -> dict:
 
 
 CFG = load_config(CONFIG_FILE)
-HUB_URL = CFG.get("HUB_URL", "http://your-hub-host:8088").rstrip("/")
+HUB_URL = CFG.get("HUB_URL", "http://clawteam.woa.com:18800").rstrip("/")
 CLAW_ID = CFG.get("CLAW_ID")
 TOKEN = CFG.get("API_TOKEN")
 OPENCLAW_BIN = CFG.get("OPENCLAW_BIN", "openclaw")
@@ -239,7 +239,9 @@ def build_chat_prompt(task: dict) -> str:
     msg_id = task.get("msg_id")
     sender = task.get("sender", "未知发件人")
     content = task.get("content", "")
-    return (
+    # from_claw_id 来自 SSE 推送的 message payload
+    from_claw_id = task.get("from_claw_id") or task.get("sender_claw_id")
+    prompt = (
         f"[Hub聊天处理任务]\n"
         f"你只处理当前这条消息，不要处理历史 backlog。\n"
         f"\n"
@@ -248,17 +250,30 @@ def build_chat_prompt(task: dict) -> str:
         f"- 内容: {content}\n"
         f"\n"
         f"必须完成：\n"
-        f"1) 生成自然回复，禁止发送协议说明/状态模板（如“我已收到消息”“根据通信协议”）。\n"
+        f"1) 生成自然回复，禁止发送协议说明/状态模板（如'我已收到消息''根据通信协议'）。\n"
         f"2) 把回复写回当前消息 id={msg_id} 的闭环接口：\n"
         f"   PUT {HUB_URL}/api/openclaws/{CLAW_ID}/messages/{msg_id}/read\n"
         f"   Body: {{\"reply\": \"<你的回复>\"}}\n"
-        f"3) 可选：通过企微发一句提示“已在Hub回复”。\n"
-        f"4) 禁止调用 send-to-claw 给自己发消息，禁止发送“重复消息处理/系统状态播报”模板。\n"
+    )
+    # 如果是 claw→claw 消息，要求用 send-to-claw 回复发送方
+    if from_claw_id:
+        prompt += (
+            f"3) 使用 send-to-claw 工具回复发送方（target_claw_ids=[{from_claw_id}]），"
+            f"让对方能在聊天记录中看到你的回复。\n"
+            f"4) 通过企微通知 owner 有新消息到达并已回复。\n"
+            f"5) 禁止调用 send-to-claw 给自己发消息，禁止发送'重复消息处理/系统状态播报'模板。\n"
+        )
+    else:
+        prompt += (
+            f"3) 可选：通过企微发一句提示'已在Hub回复'。\n"
+            f"4) 禁止调用 send-to-claw 给自己发消息，禁止发送'重复消息处理/系统状态播报'模板。\n"
+        )
+    prompt += (
         f"\n"
         f"为防兜底丢失，请在 stdout 最后一行额外输出：\n"
         f"HUB_REPLY::<与你写回Hub的同一条回复文本>\n"
     )
-
+    return prompt
 
 def build_todos_prompt(task: dict) -> str:
     todos = task.get("todos", [])
@@ -280,8 +295,10 @@ def build_todos_prompt(task: dict) -> str:
         f"  Authorization: Bearer <你的 token>\n"
         f"  Body: {{\"result_summary\": \"<完成结果简述>\"}}\n"
         f"\n"
-        f"如果某条待办需要更长时间，可以先回复 \"已开始处理\"，做完后再调 complete。\n"
-        f"待办有实质进展时，请通过你已有的企微通道给用户一条简短进度提醒。\n"
+        f"重要：这些待办是新分配给你的任务。你必须:\n"
+        f"1. 立即通过企微通知用户（owner）有新待办任务需要处理\n"
+        f"2. 通知内容应包括：待办标题、优先级、任务类型\n"
+        f"3. 如果某条待办需要更长时间，可以先回复 \"已开始处理\"，做完后再调 complete\n"
         f"\n"
         f"输出要求（用于自动校验）：请在最后一行输出\n"
         f"TODO_DONE_IDS::<用逗号分隔的已提交todo_id列表，例如 101,102；若无则留空>\n"

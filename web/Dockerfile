@@ -14,6 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 应用代码
 COPY . .
 
-EXPOSE 8088
+EXPOSE 18800
 
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:8088", "--timeout", "120", "run:app"]
+CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:18800", "--timeout", "120", "run:app"]

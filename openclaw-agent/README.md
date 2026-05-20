@@ -32,7 +32,7 @@
 ```
 ┌─────────────────────────┐         SSE          ┌─────────────────────────┐
 │     openclaw-manager     │◄─────────────────────│      子agent 插件        │
-│   (your-hub-host:8088)    │                      │   (部署在OpenClaw服务器) │
+│   (clawteam.woa.com:18800)    │                      │   (部署在OpenClaw服务器) │
 │                         │                      │                         │
 │  GET /api/openclaws/<id>/│                      │  SSE Client             │
 │       events (SSE)       │                      │  Task Executor          │
@@ -69,7 +69,7 @@ pip install -r requirements.txt
 
 ```markdown
 ---
-hub_url: http://your-hub-host:8088
+hub_url: http://clawteam.woa.com:18800
 claw_id: 4
 api_token: oc_tk_your_token_here
 ---
@@ -84,7 +84,7 @@ api_token: oc_tk_your_token_here
 **方式二：环境变量（备选）**
 
 ```bash
-export MANAGER_URL="http://your-hub-host:8088"
+export MANAGER_URL="http://clawteam.woa.com:18800"
 export CLAW_ID="4"
 export API_TOKEN="oc_tk_your_token_here"
 export OPENCLAW_DIR="/root/.qclaw"

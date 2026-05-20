@@ -12,7 +12,7 @@
   "entry_point": "python main.py",
   "working_directory": ".",
   "env": {
-    "MANAGER_URL": "http://your-hub-host:8088",
+    "MANAGER_URL": "http://clawteam.woa.com:18800",
     "CLAW_ID": "4",
     "API_TOKEN": "oc_tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     "OPENCLAW_DIR": "/root/.qclaw",

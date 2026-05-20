@@ -76,8 +76,8 @@
             <div class="form-group">
                 <label class="form-label">头像</label>
                 <div style="display:flex;align-items:center;gap:12px">
-                    <div id="avatar-preview" class="avatar-preview-box">🤖</div>
-                    <input type="hidden" name="avatar" id="avatar-input" value="🤖">
+                    <div id="avatar-preview" class="avatar-preview-box">🐱</div>
+                    <input type="hidden" name="avatar" id="avatar-input" value="🐱">
                     <div id="avatar-picker" class="avatar-picker"></div>
                     <button type="button" class="btn btn-sm" onclick="randomAvatar()" style="font-size:0.78rem;white-space:nowrap">🎲 随机</button>
                 </div>
@@ -113,15 +113,15 @@
                 </div>
                 <div class="form-group">
                     <label class="form-label">所属模块</label>
-                    <input class="form-input" name="module_name" id="module-input" list="module-options" placeholder="选择或输入模块">
-                    <datalist id="module-options">
-                        <option value="外围系统">
-                        <option value="核心单局">
-                        <option value="商业化">
-                        <option value="客户端性能">
-                        <option value="服务器专项">
-                        <option value="其他专项">
-                    </datalist>
+                    <select class="form-input" name="module_name" id="module-input">
+                        <option value="">-- 选择模块 --</option>
+                        <option value="外围系统">外围系统</option>
+                        <option value="核心单局">核心单局</option>
+                        <option value="商业化">商业化</option>
+                        <option value="客户端性能">客户端性能</option>
+                        <option value="服务器专项">服务器专项</option>
+                        <option value="其他专项">其他专项</option>
+                    </select>
                 </div>
             </div>
             <div class="form-group">
@@ -143,69 +143,33 @@
                 </label>
                 <div style="font-size:0.78rem;color:var(--text-muted);margin-top:6px;padding-left:24px;line-height:1.6">
                     勾选后 Hub 会先建 OpenClaw、生成 Token，再自动部署一个 per-claw Hermes（目录 / unit 名按 claw id 隔离，不会和别的 claw 互相覆盖）。<br>
-                    Venus API Key 仅用于本次部署，<strong>不会落库</strong>。该操作仅 <strong>超级管理员</strong> 可执行。
+                    Venus API Key 使用 Hub 服务端预置密钥，页面不展示也不提交。该操作仅 <strong>超级管理员</strong> 可执行。
                 </div>
             </div>
             <div id="create-agent-fields" style="display:none;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">
                 <input type="hidden" name="deploy_method" value="systemd">
                 <div class="form-group" style="margin-bottom:10px">
-                    <label class="form-label">Venus API Key *</label>
-                    <input class="form-input" type="password" name="deploy_venus_api_key" placeholder="如 your-venus-api-key（仅本次部署使用）">
-                </div>
-                <div class="form-group" style="margin-bottom:10px">
-                    <label class="form-label">目录布局 *</label>
-                    <select class="form-input" name="hermes_layout" id="hermes-layout" onchange="onHermesLayoutChange()">
-                        <option value="split" selected>标准拆分（推荐）：安装目录 + 数据目录（HERMES_HOME）</option>
-                        <option value="legacy">单目录兼容（旧机）：install 与 data 同一根路径</option>
+                    <label class="form-label">大模型 *</label>
+                    <select class="form-input" name="llm_model" id="create-llm-model">
+                        <option value="venus" selected>Venus（默认）</option>
+                        <option value="kimi-k2.6">Kimi 2.6</option>
+                        <option value="glm-5.1">GLM 5.1</option>
+                        <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+                        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+                        <option value="hunyuan-v3">Hunyuan V3</option>
                     </select>
-                </div>
-                <div id="hermes-split-fields">
-                    <div class="two-col">
-                        <div class="form-group" style="margin-bottom:10px">
-                            <label class="form-label">安装目录（venv + 源码）*</label>
-                            <input class="form-input" name="deploy_hermes_install_dir" placeholder="/opt/hermes-xiaohe">
-                        </div>
-                        <div class="form-group" style="margin-bottom:10px">
-                            <label class="form-label">数据目录（HERMES_HOME）*</label>
-                            <input class="form-input" name="deploy_hermes_data_dir" placeholder="/root/.hermes-xiaohe">
-                        </div>
-                    </div>
-                    <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:10px;line-height:1.55">
-                        与《Hermes Agent 标准化部署指南》一致：<code>config.yaml</code> 写在数据目录<strong>根</strong>下；
-                        systemd 服务名为 <code>hermes-gateway-claw-&lt;id&gt;.service</code>，
-                        启动命令为 <code>python -m hermes_cli.main gateway run --replace</code>。
+                    <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
+                        当前统一走 Venus 平台；选择会写入 Hermes <code>config.yaml</code>，卡片上也可后续修改。
                     </div>
                 </div>
-                <div id="hermes-legacy-fields" style="display:none">
-                    <div class="form-group" style="margin-bottom:10px">
-                        <label class="form-label">Hermes 根目录（单目录）*</label>
-                        <input class="form-input" name="deploy_hermes_home" placeholder="如 /opt/hermes-xiaohe（含 venv/ 与 config/）">
-                        <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
-                            兼容旧布局：配置写在 <code>{根}/config/config.yaml</code>，默认启动方式为 <strong>Module</strong>（<code>python -m hermes_agent</code>），可在下方改为 Gateway。
-                        </div>
-                    </div>
-                </div>
-                <div class="form-group" style="margin-bottom:10px">
-                    <label class="form-label">启动方式</label>
-                    <select class="form-input" name="deploy_hermes_start_mode" id="deploy-hermes-start-mode">
-                        <option value="gateway">Gateway（hermes_cli.main gateway run --replace）</option>
-                        <option value="module">Module（python -m hermes_agent 等）</option>
-                    </select>
-                </div>
-                <div class="two-col">
-                    <div class="form-group" style="margin-bottom:10px">
-                        <label class="form-label">Python 可执行文件（可选）</label>
-                        <input class="form-input" name="deploy_hermes_python" placeholder="缺省 {安装目录}/venv/bin/python">
-                    </div>
-                    <div class="form-group" style="margin-bottom:10px">
-                        <label class="form-label">Systemd User（可选）</label>
-                        <input class="form-input" name="deploy_systemd_user" placeholder="root" value="root">
-                    </div>
-                </div>
-                <div class="form-group" style="margin-bottom:0">
-                    <label class="form-label">Module 模式下的包名（可选）</label>
-                    <input class="form-input" name="deploy_hermes_module" placeholder="hermes_agent" value="hermes_agent">
-                    <div style="font-size:0.7rem;color:var(--text-muted);margin-top:4px">仅当启动方式为 Module 时使用。</div>
+                <input type="hidden" name="hermes_layout" value="split">
+                <input type="hidden" name="deploy_hermes_start_mode" value="gateway">
+                <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:10px;line-height:1.55">
+                    安装目录和数据目录使用 Hub 服务端默认值：运行时安装目录由服务端配置，私有数据目录自动生成在
+                    <code>/opt/openclaw-agents/&lt;claw&gt;/data</code>；
+                    <code>/opt/agent_share</code> 是所有 Agent 的共享写目录。<br>
+                    systemd 服务名为 <code>hermes-gateway-claw-&lt;id&gt;.service</code>，
+                    启动命令为 <code>python -m hermes_cli.main gateway run --replace</code>。
                 </div>
             </div>
             </div><!-- /create-agent-block -->
@@ -235,11 +199,19 @@
             <div style="margin-bottom:12px">
                 <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:6px">📋 注册 Skill 链接</label>
                 <div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;position:relative">
-                    <code id="reg-skill-url-in-token" style="word-break:break-all;font-size:0.82rem;color:var(--accent)"></code>
-                    <button class="btn btn-primary btn-sm" onclick="copyRegSkillUrlFromToken()"
-                            style="position:absolute;top:8px;right:8px;font-size:0.78rem;min-width:54px">复制</button>
+                    <code id="reg-skill-url-in-token" style="word-break:break-all;font-size:0.82rem;color:var(--accent);display:block;padding-right:120px"></code>
+                    <div style="position:absolute;top:8px;right:8px;display:flex;gap:4px">
+                        <button class="btn btn-ghost btn-sm" onclick="downloadRegistrationSkillFromToken()"
+                                style="font-size:0.72rem;padding:4px 8px" title="浏览器已通过 NGN 认证，可直接拉 markdown 触发下载">📥 下载</button>
+                        <button class="btn btn-primary btn-sm" onclick="copyRegSkillUrlFromToken()"
+                                style="font-size:0.78rem;min-width:54px">复制</button>
+                    </div>
                 </div>
                 <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">发给 OpenClaw 使用者，保存为 SKILL.md 即可接入 Hub</div>
+                <div style="font-size:0.72rem;color:#eab308;margin-top:4px;line-height:1.55">
+                    ⚠️ 链接固定走 <code>:18800</code> 端口（testserver 本机 lampp 抢了 443，<code>https://...</code> 必 404）。
+                    能直连 :18800 的网段可直接 <code>curl</code>；不通的请用 <b>📥 下载</b> 拿本地 SKILL.md 文件。
+                </div>
             </div>
             <div style="margin-bottom:12px">
                 <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:6px">🚀 一键部署命令（推荐直接丢给 Agent）</label>
@@ -249,6 +221,12 @@
                             style="position:absolute;top:8px;right:8px;font-size:0.78rem;min-width:54px">复制</button>
                 </div>
                 <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">Agent 执行后会自动安装 #143、启动 SSE、回传验证结果</div>
+                <div style="font-size:0.72rem;color:#eab308;margin-top:6px;line-height:1.55">
+                    ⚠️ <b>仅在公司信任网段（21.x.x.x / 10.x.x.x 等）可直接 curl</b>。<br>
+                    若目标机器在受限环境（外网 / AI Sandbox / Mac 桌面 / 海外节点）会拿到 SLB 默认 Apache 占位 404，请改用
+                    <button class="btn btn-ghost btn-sm" onclick="downloadOfflineBundle()"
+                            style="margin-left:4px;font-size:0.72rem;padding:2px 8px">📦 下载离线安装包</button>
+                </div>
             </div>
             <div id="token-warning" style="background:rgba(234,179,8,0.1);border:1px solid rgba(234,179,8,0.3);border-radius:8px;padding:12px;margin-bottom:12px;display:none">
                 <p style="font-size:0.85rem;color:#eab308;margin:0">
@@ -262,11 +240,19 @@
             <div style="margin-bottom:12px">
                 <label style="font-size:0.82rem;font-weight:600;display:block;margin-bottom:6px">📋 注册 Skill 链接</label>
                 <div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;position:relative">
-                    <code id="reg-skill-url-in-token-nokey" style="word-break:break-all;font-size:0.82rem;color:var(--accent)"></code>
-                    <button class="btn btn-primary btn-sm" onclick="copyRegSkillUrlFromToken2()"
-                            style="position:absolute;top:8px;right:8px;font-size:0.78rem;min-width:54px">复制</button>
+                    <code id="reg-skill-url-in-token-nokey" style="word-break:break-all;font-size:0.82rem;color:var(--accent);display:block;padding-right:120px"></code>
+                    <div style="position:absolute;top:8px;right:8px;display:flex;gap:4px">
+                        <button class="btn btn-ghost btn-sm" onclick="downloadRegistrationSkillFromTokenNokey()"
+                                style="font-size:0.72rem;padding:4px 8px" title="浏览器已通过 NGN 认证，可直接拉 markdown 触发下载">📥 下载</button>
+                        <button class="btn btn-primary btn-sm" onclick="copyRegSkillUrlFromToken2()"
+                                style="font-size:0.78rem;min-width:54px">复制</button>
+                    </div>
                 </div>
                 <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">发给 OpenClaw 使用者，保存为 SKILL.md 即可接入 Hub</div>
+                <div style="font-size:0.72rem;color:#eab308;margin-top:4px;line-height:1.55">
+                    ⚠️ 链接固定走 <code>:18800</code> 端口（testserver 本机 lampp 抢了 443，<code>https://...</code> 必 404）。
+                    能直连 :18800 的网段可直接 <code>curl</code>；不通的请用 <b>📥 下载</b> 拿本地 SKILL.md 文件。
+                </div>
             </div>
         </div>
         <div class="modal-actions">
@@ -354,7 +340,7 @@
 <div class="modal-overlay" id="avatar-modal">
     <div class="modal" style="max-width:480px">
         <h2 class="modal-title">🎭 选择头像</h2>
-        <p style="color:var(--text-secondary);margin-bottom:8px;font-size:0.88rem">选择一个机器人头像，或点击🎲随机生成</p>
+        <p style="color:var(--text-secondary);margin-bottom:8px;font-size:0.88rem">选择一个可爱动物或人物头像，或点击🎲随机生成</p>
         <div id="avatar-edit-grid" class="avatar-edit-grid"></div>
         <div style="display:flex;align-items:center;gap:12px;margin-top:8px">
             <button type="button" class="btn btn-sm" onclick="randomEditAvatar()">🎲 随机</button>
@@ -363,6 +349,82 @@
         <div class="modal-actions">
             <button class="btn btn-ghost" onclick="closeAvatarModal()">取消</button>
             <button class="btn btn-primary" onclick="confirmAvatar()">确认</button>
+        </div>
+    </div>
+</div>
+
+<!-- Hermes Agent 部署进度弹窗 -->
+<div class="modal-overlay" id="deploy-progress-modal">
+    <div class="modal" style="max-width:620px">
+        <h2 class="modal-title">Hermes Agent 部署进度</h2>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+            <strong style="font-size:0.92rem">部署状态</strong>
+            <span id="progress-deploy-status-pill" style="font-size:0.78rem;padding:2px 10px;border-radius:999px;background:rgba(234,179,8,0.15);color:#eab308">读取中...</span>
+        </div>
+        <div id="progress-deploy-meta" style="font-size:0.82rem;color:var(--text-muted);line-height:1.8;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:12px"></div>
+        <details id="progress-deploy-details" style="margin-top:10px;font-size:0.78rem">
+            <summary style="cursor:pointer;color:var(--text-secondary)">展开部署日志</summary>
+            <pre id="progress-deploy-log" style="white-space:pre-wrap;word-break:break-all;background:var(--bg-primary);border:1px solid var(--border);border-radius:6px;padding:10px;margin-top:6px;max-height:260px;overflow:auto;font-size:0.74rem"></pre>
+        </details>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="closeDeploymentProgressModal()">关闭</button>
+            <button class="btn btn-primary" onclick="refreshDeploymentProgressModal()">刷新</button>
+        </div>
+    </div>
+</div>
+
+<!-- OpenClaw 卡片设置弹窗 -->
+<div class="modal-overlay" id="claw-settings-modal">
+    <div class="modal" style="max-width:520px">
+        <h2 class="modal-title">OpenClaw 设置</h2>
+        <p style="color:var(--text-secondary);margin-bottom:12px;font-size:0.88rem" id="claw-settings-subtitle">
+            修改后会保存到 OpenClaw，并同步给 sidecar 配置中心。
+        </p>
+        <div style="display:flex;gap:8px;margin-bottom:14px;border-bottom:1px solid var(--border);padding-bottom:8px">
+            <button type="button" class="btn btn-sm" id="settings-tab-model" onclick="switchClawSettingsTab('model')">大模型</button>
+            <button type="button" class="btn btn-sm" id="settings-tab-wecom" onclick="switchClawSettingsTab('wecom')" style="display:none">企微绑定</button>
+            <button type="button" class="btn btn-sm" id="settings-tab-workdirs" onclick="switchClawSettingsTab('workdirs')" style="display:none">工作目录</button>
+        </div>
+        <div id="settings-panel-model">
+            <div class="form-group">
+                <label class="form-label">大模型</label>
+                <select class="form-input" id="settings-llm-model-select"></select>
+            </div>
+        </div>
+        <div id="settings-panel-wecom" style="display:none">
+            <div style="font-size:0.78rem;color:var(--text-muted);line-height:1.6;margin-bottom:10px">
+                仅 Hub 代建部署的 Hermes Agent 显示该页签。Secret 不会回显，留空表示不修改。
+            </div>
+            <div class="form-group">
+                <label class="form-label">Bot ID / Key</label>
+                <input class="form-input" id="settings-wecom-bot-id" placeholder="如 your-wecom-bot-id">
+            </div>
+            <div class="form-group">
+                <label class="form-label">Secret</label>
+                <input class="form-input" id="settings-wecom-secret" type="password" placeholder="已保存则留空；填写新值会覆盖">
+                <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px" id="settings-wecom-secret-hint"></div>
+            </div>
+        </div>
+        <div id="settings-panel-workdirs" style="display:none">
+            <div style="font-size:0.78rem;color:var(--text-muted);line-height:1.6;margin-bottom:10px">
+                每行一个绝对路径。保存后 Hub 会同步 systemd <code>ReadWritePaths</code> 并重启 Agent；
+                这些目录会作为该 Agent 的额外可写工作目录。
+            </div>
+            <div class="form-group">
+                <label class="form-label">额外工作目录</label>
+                <textarea class="form-textarea" id="settings-work-dirs"
+                          placeholder="/opt/agent_work/racinggo&#10;/data/test-output"
+                          style="min-height:120px;font-family:monospace"></textarea>
+                <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">
+                    不要填写系统根目录及其子目录，例如 /etc、/usr、/root、/opt/openclaw-web。
+                    建议使用 /opt/agent_work/&lt;项目&gt; 或 /opt/agent_share/&lt;项目&gt;。
+                </div>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-ghost" onclick="restartCurrentHermesAgent()">重启 Agent</button>
+            <button class="btn btn-ghost" onclick="closeClawSettingsModal()">取消</button>
+            <button class="btn btn-primary" onclick="confirmClawSettings()">保存</button>
         </div>
     </div>
 </div>
@@ -484,6 +546,18 @@
     box-shadow: 0 4px 12px rgba(0,0,0,0.1);
 }
 
+.claw-item.deploying {
+    cursor: default;
+    opacity: 0.92;
+    position: relative;
+}
+
+.claw-item.deploying:hover {
+    border-color: var(--border);
+    transform: none;
+    box-shadow: none;
+}
+
 .claw-item-header {
     display: flex;
     align-items: flex-start;
@@ -537,6 +611,44 @@
 .claw-avatar-wrap:hover .claw-avatar-edit-badge {
     opacity: 1;
     transform: scale(1.15);
+}
+.deploy-panel {
+    margin-top: 12px;
+    padding: 11px 12px;
+    border: 1px solid rgba(59,130,246,0.28);
+    border-radius: 10px;
+    background: rgba(59,130,246,0.08);
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+}
+.deploy-panel.failed {
+    border-color: rgba(239,68,68,0.3);
+    background: rgba(239,68,68,0.08);
+}
+.deploy-panel-title {
+    font-size: 0.86rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.deploy-panel-desc {
+    margin-top: 2px;
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+.deploy-panel-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-shrink: 0;
+}
+.deploy-panel .btn {
+    white-space: nowrap;
+}
+.deploy-panel .btn-primary {
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 4px 12px rgba(245,158,11,0.22);
 }
 .avatar-preview-box {
     width: 48px; height: 48px;
@@ -763,6 +875,15 @@ let filteredClaws = [];
 let canViewTokens = false;  // 是否有权限查看 Token
 let isSuperAdmin = false;   // 是否超级管理员（控制"代建 Hermes Agent"开关可见性）
 
+const HERMES_LLM_MODELS = [
+    { value: 'venus', label: 'Venus（默认）' },
+    { value: 'kimi-k2.6', label: 'Kimi 2.6' },
+    { value: 'glm-5.1', label: 'GLM 5.1' },
+    { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+    { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+    { value: 'hunyuan-v3', label: 'Hunyuan V3' },
+];
+
 const ROLE_LABELS = {
     'admin': { text: '管理员', cls: 'admin' },
     'test_manager': { text: '测试经理', cls: 'test_manager' },
@@ -771,6 +892,12 @@ const ROLE_LABELS = {
     'test_member': { text: '测试成员', cls: 'test_member' },
     'test_executor': { text: '测试执行', cls: 'test_executor' },
 };
+
+function llmModelLabel(value) {
+    const key = value || 'venus';
+    const hit = HERMES_LLM_MODELS.find(m => m.value === key);
+    return hit ? hit.label : key;
+}
 
 async function loadClaws() {
     try {
@@ -921,6 +1048,7 @@ function renderClaws() {
     // 绑定点击事件
     document.querySelectorAll('.claw-item').forEach(item => {
         item.addEventListener('click', () => {
+            if (item.dataset.disabled === 'true') return;
             location.href = '/openclaws/' + item.dataset.id;
         });
     });
@@ -943,13 +1071,33 @@ function formatRelTime(dtStr) {
 function renderClawCard(c) {
     const roleInfo = ROLE_LABELS[c.role] || { text: '测试成员', cls: 'test_member' };
     const onlineCount = filteredClaws.filter(cl => ['工作','学习','摸鱼','online'].includes(cl.status)).length;
+    const modelValue = c.llm_model || 'venus';
+    const modelLabel = llmModelLabel(modelValue);
+    const hasHermesAgent = !!c.has_hermes_agent;
+    const hasWecom = !!(c.wecom_bot_id || c.has_wecom_bot_secret);
+    const isDeployingAgent = ['pending', 'in_progress'].includes(c.agent_deployment_status || '');
+    const deployFailed = (c.agent_deployment_status || '') === 'failed';
+    const isAgentDeployLocked = isDeployingAgent || deployFailed;
+    const itemCls = isAgentDeployLocked ? 'claw-item deploying' : 'claw-item';
+    const disabledAttr = isAgentDeployLocked ? ' data-disabled="true"' : '';
+    const deployPanel = isAgentDeployLocked ? `
+        <div class="deploy-panel ${deployFailed ? 'failed' : ''}">
+            <div>
+                <div class="deploy-panel-title">${deployFailed ? 'Hermes Agent 部署失败' : 'Hermes Agent 部署中'}</div>
+                <div class="deploy-panel-desc">${deployFailed ? '当前仅可查看进度或重新部署。' : '部署完成前暂不可进入详情或修改设置。'}</div>
+            </div>
+            <div class="deploy-panel-actions">
+                <button class="btn btn-sm" onclick="event.stopPropagation(); viewDeploymentProgress(${c.id})">查看进度</button>
+                ${deployFailed && isSuperAdmin ? `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); redeployHermesAgent(${c.id})">重新部署</button>` : ''}
+            </div>
+        </div>` : '';
 
     return `
-    <div class="claw-item" data-id="${c.id}">
+    <div class="${itemCls}" data-id="${c.id}"${disabledAttr}>
         <div class="claw-item-header">
-            <div class="claw-avatar-wrap" onclick="event.stopPropagation(); openAvatarModal(${c.id}, '${(c.avatar || '🤖').replace(/'/g, "\\'")}')" title="点击修改图标">
-                <div class="claw-avatar-lg">${c.avatar || '🤖'}</div>
-                <span class="claw-avatar-edit-badge" aria-label="修改图标">✏️</span>
+            <div class="claw-avatar-wrap" ${isAgentDeployLocked ? '' : `onclick="event.stopPropagation(); openAvatarModal(${c.id}, '${(c.avatar || '🐱').replace(/'/g, "\\'")}')" title="点击修改头像"`}>
+                <div class="claw-avatar-lg">${c.avatar || '🐱'}</div>
+                ${isAgentDeployLocked ? '' : '<span class="claw-avatar-edit-badge" aria-label="修改图标">✏️</span>'}
             </div>
             <div class="claw-main-info">
                 <div class="claw-name-row">
@@ -970,11 +1118,19 @@ function renderClawCard(c) {
             <span class="claw-meta-tag" style="color:var(--yellow)">📝 ${c.today_submitted || 0} 已提交</span>
            
         </div>
+        <div class="claw-meta-row" style="margin-top:4px">
+            ${hasHermesAgent ? `<span class="claw-meta-tag" title="Hermes 大模型">🧠 ${modelLabel}</span>` : ''}
+            ${hasHermesAgent ? `<span class="claw-meta-tag" title="Hub 代建 Hermes Agent">Hermes</span>` : ''}
+            ${hasWecom ? `<span class="claw-meta-tag" title="已绑定企微机器人">企微</span>` : ''}
+            ${c.can_own && hasHermesAgent && !isAgentDeployLocked ? `<button class="btn btn-sm" onclick="event.stopPropagation(); openClawSettingsModal(${c.id})"
+                    style="padding:3px 8px;font-size:0.72rem;">设置</button>` : ''}
+        </div>
         <div class="claw-desc">${c.responsibilities || '暂无描述'}</div>
+        ${deployPanel}
         <div class="claw-modified-row" title="${c.last_modified_by ? c.last_modified_by + ' 修改于 ' + (c.updated_at || '') : '更新于 ' + (c.updated_at || '-')}">
             ${c.last_modified_by ? `<span class="claw-modified-by">${c.last_modified_by}</span> 修改` : '最近修改'} · ${formatRelTime(c.updated_at)}
         </div>
-        ${c.can_own ? `<div class="claw-token-row">
+        ${c.can_own && !isAgentDeployLocked ? `<div class="claw-token-row">
             <span class="token-preview" style="color:var(--text-secondary);font-size:0.8rem;font-family:monospace;">
                 🔑 ${c.api_token_preview || '未设置'}
             </span>
@@ -984,6 +1140,129 @@ function renderClawCard(c) {
             </button>
         </div>` : ''}
     </div>`;
+}
+
+let settingsClawId = null;
+let settingsActiveTab = 'model';
+
+function _settingsClaw() {
+    return allClaws.find(c => c.id === settingsClawId);
+}
+
+function switchClawSettingsTab(tab) {
+    settingsActiveTab = tab || 'model';
+    document.getElementById('settings-panel-model').style.display = settingsActiveTab === 'model' ? '' : 'none';
+    document.getElementById('settings-panel-wecom').style.display = settingsActiveTab === 'wecom' ? '' : 'none';
+    document.getElementById('settings-panel-workdirs').style.display = settingsActiveTab === 'workdirs' ? '' : 'none';
+    document.getElementById('settings-tab-model').classList.toggle('btn-primary', settingsActiveTab === 'model');
+    document.getElementById('settings-tab-wecom').classList.toggle('btn-primary', settingsActiveTab === 'wecom');
+    document.getElementById('settings-tab-workdirs').classList.toggle('btn-primary', settingsActiveTab === 'workdirs');
+}
+
+function openClawSettingsModal(clawId) {
+    settingsClawId = clawId;
+    const c = _settingsClaw();
+    if (!c) return;
+    if (!c.has_hermes_agent) {
+        showToast('只有通过 Hub 创建并部署成功的 Hermes Agent 才支持大模型设置', 'warning');
+        settingsClawId = null;
+        return;
+    }
+    document.getElementById('claw-settings-subtitle').textContent =
+        `${c.name} · 修改后会保存到 OpenClaw，并同步给 sidecar 配置中心。`;
+    const select = document.getElementById('settings-llm-model-select');
+    const value = c.llm_model || 'venus';
+    select.innerHTML = HERMES_LLM_MODELS.map(m =>
+        `<option value="${m.value}"${m.value === value ? ' selected' : ''}>${m.label}</option>`
+    ).join('');
+
+    const wecomTab = document.getElementById('settings-tab-wecom');
+    wecomTab.style.display = c.has_hermes_agent ? '' : 'none';
+    document.getElementById('settings-tab-workdirs').style.display = c.has_hermes_agent ? '' : 'none';
+    document.getElementById('settings-wecom-bot-id').value = c.wecom_bot_id || '';
+    document.getElementById('settings-wecom-secret').value = '';
+    document.getElementById('settings-wecom-secret-hint').textContent =
+        c.has_wecom_bot_secret ? '已保存 Secret；如需更换请重新填写。' : '尚未保存 Secret。';
+    document.getElementById('settings-work-dirs').value = (c.work_dirs || []).join('\n');
+    switchClawSettingsTab('model');
+    document.getElementById('claw-settings-modal').classList.add('active');
+}
+
+function closeClawSettingsModal() {
+    document.getElementById('claw-settings-modal').classList.remove('active');
+    settingsClawId = null;
+    settingsActiveTab = 'model';
+}
+
+async function confirmClawSettings() {
+    if (!settingsClawId) return;
+    const c = _settingsClaw();
+    if (!c) return;
+    if (!c.has_hermes_agent) {
+        showToast('只有通过 Hub 创建并部署成功的 Hermes Agent 才支持大模型设置', 'warning');
+        return;
+    }
+    const value = document.getElementById('settings-llm-model-select').value || 'venus';
+    const payload = {
+        llm_provider: 'venus',
+        llm_model: value,
+    };
+    if (c.has_hermes_agent) {
+        payload.wecom_bot_id = document.getElementById('settings-wecom-bot-id').value.trim();
+        const secret = document.getElementById('settings-wecom-secret').value.trim();
+        if (secret) payload.wecom_bot_secret = secret;
+        payload.work_dirs = document.getElementById('settings-work-dirs').value
+            .split('\n')
+            .map(s => s.trim())
+            .filter(Boolean);
+    }
+    try {
+        const updated = await API.updateClaw(settingsClawId, payload);
+        const restartClawId = settingsClawId;
+        allClaws = allClaws.map(c => c.id === updated.id ? { ...c, ...updated } : c);
+        applyFilters();
+        closeClawSettingsModal();
+        try {
+            await restartHermesAgentService(restartClawId, { confirm: false, quiet: true });
+            showToast('OpenClaw 设置已保存，Hermes Agent 已重启', 'success');
+        } catch (restartErr) {
+            showToast('设置已保存，但 Hermes Agent 重启失败: ' + restartErr.message, 'error');
+        }
+    } catch (err) {
+        showToast('更新失败: ' + err.message, 'error');
+    }
+}
+
+async function restartCurrentHermesAgent() {
+    if (!settingsClawId) return;
+    try {
+        await restartHermesAgentService(settingsClawId, { confirm: true });
+    } catch (err) {
+        showToast('Hermes Agent 重启失败: ' + err.message, 'error');
+    }
+}
+
+async function restartHermesAgentService(clawId, options = {}) {
+    const opts = options || {};
+    const c = allClaws.find(item => item.id === clawId);
+    if (!c || !c.has_hermes_agent) {
+        throw new Error('只有通过 Hub 创建并部署成功的 Hermes Agent 才支持重启');
+    }
+    if (opts.confirm !== false) {
+        const confirmed = await customConfirm({
+            title: '重启 Hermes Agent',
+            msg: '确认重启该 Hermes Agent？重启期间可能会短暂不可用。',
+            type: 'warning',
+            okText: '重启',
+        });
+        if (!confirmed) return null;
+    }
+    const result = await API.post(`/openclaws/${clawId}/agent/restart`, {});
+    if (!opts.quiet) {
+        showToast(result.message || 'Hermes Agent 已重启', 'success');
+    }
+    await loadClaws();
+    return result;
 }
 
 async function loadProjectsForSelect() {
@@ -997,28 +1276,44 @@ async function loadProjectsForSelect() {
     }
 }
 
-function onProjectChange(sel) {
-    const datalist = document.getElementById('module-options');
+async function onProjectChange(sel) {
+    await loadModuleCategoryOptions();
+}
+
+async function loadModuleCategoryOptions() {
     const input = document.getElementById('module-input');
-    const projectId = parseInt(sel.value);
+    if (!input) return;
     input.value = '';
-    if (!projectId) {
-        datalist.innerHTML = '';
-        return;
-    }
-    const project = allProjects.find(p => p.id === projectId);
-    if (project && project.modules && project.modules.length > 0) {
-        datalist.innerHTML = project.modules.map(m => `<option value="${m.name}">`).join('');
-    } else {
-        datalist.innerHTML = '';
+    input.innerHTML = '<option value="">加载中...</option>';
+    const fallbackCategories = ['外围系统', '核心单局', '商业化', '客户端性能', '服务器专项', '其他专项'];
+    const renderCategories = (categories) => {
+        const esc = v => String(v || '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        }[ch]));
+        const options = (categories || fallbackCategories)
+            .map(name => String(name || '').trim())
+            .filter(Boolean)
+            .map(name => `<option value="${esc(name)}">${esc(name)}</option>`)
+            .join('');
+        input.innerHTML = '<option value="">-- 选择模块 --</option>' + options;
+    };
+    try {
+        const categories = await API.getModuleCategories();
+        renderCategories(Object.values(categories || {}));
+    } catch (err) {
+        console.error('加载一级模块失败:', err);
+        renderCategories(fallbackCategories);
     }
 }
 
 // === 头像系统 ===
 const ROBOT_AVATARS = [
-    '🤖','🦾','🦿','🧠','👁️','🔌','⚙️','🛡️',
-    '🔮','💎','🌟','⭐','🧲','🌀','🎯','🧩',
-    '🔬','📡','🔋','💡','🧪','🧬','🧯','🩺'
+    '🐱','🐶','🐰','🐼','🐨','🦊','🐻','🐯',
+    '🦁','🐵','🐸','🐧','🐥','🦉','🦄','🐳',
+    '🦦','🦔','🐿️','🦝','🐹','🐭','🐺','🐙',
+    '👧','👦','🧒','👩','👨','🧑','👩‍💻','👨‍💻',
+    '👩‍🔬','👨‍🔬','🧙','🧚','🧜','🧝','🧑‍🚀','🦸',
+    '🤖','🧠','🔮','🌟','⭐','💎','🎯','🧩'
 ];
 const AVATAR_COLORS = [
     '#6366f1','#8b5cf6','#3b82f6','#06b6d4','#10b981','#f59e0b','#ef4444','#ec4899'
@@ -1027,8 +1322,8 @@ const AVATAR_COLORS = [
 function initAvatarPicker() {
     const picker = document.getElementById('avatar-picker');
     if (!picker) return;
-    picker.innerHTML = ROBOT_AVATARS.slice(0, 12).map(a =>
-        `<span class="avatar-option${a === '🤖' ? ' selected' : ''}" onclick="selectAvatar(this)">${a}</span>`
+    picker.innerHTML = ROBOT_AVATARS.slice(0, 24).map(a =>
+        `<span class="avatar-option${a === '🐱' ? ' selected' : ''}" onclick="selectAvatar(this)">${a}</span>`
     ).join('');
 }
 
@@ -1055,11 +1350,11 @@ function randomAvatar() {
 
 // 头像编辑弹窗（列表中点击头像触发）
 let avatarEditClawId = null;
-let avatarEditSelected = '🤖';
+let avatarEditSelected = '🐱';
 
 function openAvatarModal(clawId, currentAvatar) {
     avatarEditClawId = clawId;
-    avatarEditSelected = currentAvatar || '🤖';
+    avatarEditSelected = currentAvatar || '🐱';
     const grid = document.getElementById('avatar-edit-grid');
     grid.innerHTML = ROBOT_AVATARS.map(a =>
         `<span class="avatar-edit-option${a === avatarEditSelected ? ' selected' : ''}" onclick="selectEditAvatar(this)">${a}</span>`
@@ -1104,6 +1399,9 @@ function closeAvatarModal() {
 document.getElementById('avatar-modal').addEventListener('click', e => {
     if (e.target === document.getElementById('avatar-modal')) closeAvatarModal();
 });
+document.getElementById('claw-settings-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('claw-settings-modal')) closeClawSettingsModal();
+});
 
 function openCreateModal() {
     loadProjectsForSelect();
@@ -1112,9 +1410,10 @@ function openCreateModal() {
     renderRoleOptions();
     document.getElementById('role-hint').textContent = '';
     // 重置头像选择
-    document.getElementById('avatar-input').value = '🤖';
-    document.getElementById('avatar-preview').textContent = '🤖';
+    document.getElementById('avatar-input').value = '🐱';
+    document.getElementById('avatar-preview').textContent = '🐱';
     initAvatarPicker();
+    loadModuleCategoryOptions();
     document.getElementById('create-modal').classList.add('active');
 }
 
@@ -1123,13 +1422,20 @@ async function loadUsersForSelect() {
     const sel = document.getElementById('owner-select');
     if (!sel) return;
     try {
-        const users = await API.request('GET', '/api/v1/users');
+        const users = await API.request('GET', '/users');
         let html = '<option value="">-- 选择用户 --</option>';
+        const escapeOption = v => String(v || '').replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+        }[ch]));
         users.forEach(u => {
-            const display = u.display_name || u.username || u.email || '未知';
+            const username = u.username || '';
+            const displayName = u.display_name || username || u.email || '未知';
+            const label = username && displayName !== username
+                ? `${displayName}(${username})`
+                : displayName;
             const selected = currentUser && (u.id === currentUser.id || u.username === currentUser.username) ? ' selected' : '';
             // owner 字段必须存 username，不能存 display_name
-            html += `<option value="${u.username}"${selected}>${display}</option>`;
+            html += `<option value="${escapeOption(username)}"${selected}>${escapeOption(label)}</option>`;
         });
         sel.innerHTML = html;
     } catch (err) {
@@ -1177,13 +1483,48 @@ function closeTokenModal() {
 
 function buildBootstrapCommand(clawId, token) {
     if (!clawId || !token) return '';
-    const url = `${location.origin}/api/v1/openclaws/${clawId}/bootstrap.sh?token=${encodeURIComponent(token)}`;
+    // 必须用 HUB_PUBLIC_URL，不能用 location.origin —— 浏览器可能从 https://clawteam.woa.com 进来，
+    // 撞 testserver 本机 lampp Apache 必 404。见 MEMORY #127。
+    const base = (window.HUB_PUBLIC_URL || 'https://clawteam.woa.com:18800').replace(/\/$/, '');
+    const url = `${base}/api/v1/openclaws/${clawId}/bootstrap.sh?token=${encodeURIComponent(token)}`;
     return `bash <(curl -fsSL "${url}")`;
 }
 
 function copyBootstrapCommandFromToken() {
     const cmd = document.getElementById('bootstrap-command-in-token').textContent;
     _doCopy(cmd, '一键部署命令已复制');
+}
+
+async function downloadOfflineBundle() {
+    // 浏览器走 NGN 已认证，直接 fetch 后端打包好的 self-contained 脚本。
+    // 后端把 bootstrap.sh + install_v2.sh + sidecar_v2.py + cleanup_v1.sh 四件套
+    // base64 内联，目标机器 scp 一个文件即可装好。
+    const cmd = document.getElementById('bootstrap-command-in-token').textContent || '';
+    const m = cmd.match(/openclaws\/(\d+)\/bootstrap\.sh\?token=([^"\s]+)/);
+    if (!m) { showToast('解析 bootstrap 链接失败，请重新生成 Token', 'error'); return; }
+    const clawId = m[1];
+    const token = decodeURIComponent(m[2]);
+    showToast('正在生成离线安装包...', 'info');
+    try {
+        // fetch 用相对 URL（同源），不能用 ${HUB_PUBLIC_URL}/api/...（混合内容会被浏览器 block）
+        const url = `/api/v1/openclaws/${clawId}/offline-install-bundle.sh?token=${encodeURIComponent(token)}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        const blob = new Blob([text], { type: 'application/x-shellscript' });
+        const objUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = objUrl;
+        a.download = `openclaw-${clawId}-offline-install.sh`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+        showToast(`离线安装包已下载 (~${Math.round(text.length/1024)}KB)，scp 到目标机器 bash 即可`, 'success');
+    } catch (err) {
+        console.error(err);
+        showToast(`离线打包失败: ${err.message}`, 'error');
+    }
 }
 
 function copyToken() {
@@ -1219,6 +1560,44 @@ function copyRegSkillUrlFromToken2() {
     }
 }
 
+// 浏览器在当前页面已通过认证 → 直接 fetch markdown → 触发下载到本地。
+// 注意：用相对 URL（同源），不能用 ${HUB_PUBLIC_URL}/api/...
+// 因为如果浏览器是 https://clawteam.woa.com 进来的，fetch http://clawteam.woa.com:18800/...
+// 会被浏览器以 mixed content 直接 block。Markdown 内容里发给 claw 的链接才用 :18800
+// （后端已经统一用 HUB_PUBLIC_URL 拼好放在 markdown 里）。详见 MEMORY #127。
+async function _downloadRegistrationSkillByClawId(clawId) {
+    if (!clawId) { showToast('缺少 clawId', 'error'); return; }
+    showToast('正在拉取 registration markdown...', 'info');
+    try {
+        const res = await fetch(`/api/v1/openclaws/${clawId}/registration-skill?format=markdown`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+        const objUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = objUrl;
+        a.download = `openclaw-${clawId}-registration-skill.md`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(objUrl), 2000);
+        showToast(`SKILL.md 已下载 (~${Math.round(text.length/1024)}KB)，发给 Agent 直接读这个文件即可`, 'success');
+    } catch (err) {
+        console.error(err);
+        showToast(`下载失败: ${err.message}`, 'error');
+    }
+}
+function downloadRegistrationSkillFromToken() {
+    const url = document.getElementById('reg-skill-url-in-token').textContent;
+    const m = url.match(/openclaws\/(\d+)\/registration-skill/);
+    _downloadRegistrationSkillByClawId(m ? m[1] : null);
+}
+function downloadRegistrationSkillFromTokenNokey() {
+    const url = document.getElementById('reg-skill-url-in-token-nokey').textContent;
+    const m = url.match(/openclaws\/(\d+)\/registration-skill/);
+    _downloadRegistrationSkillByClawId(m ? m[1] : null);
+}
+
 function fallbackCopy(token) {
     const el = document.createElement('textarea');
     el.value = token;
@@ -1238,7 +1617,8 @@ async function viewToken(clawId, clawName) {
         return;
     }
     currentClawId = clawId;
-    const skillUrl = `${location.origin}/api/v1/openclaws/${clawId}/registration-skill`;
+    const _hubBase = (window.HUB_PUBLIC_URL || 'https://clawteam.woa.com:18800').replace(/\/$/, '');
+    const skillUrl = `${_hubBase}/api/v1/openclaws/${clawId}/registration-skill`;
     try {
         const result = await API.getClawToken(clawId);
         document.getElementById('token-modal-title').textContent = `🔑 ${clawName} 的 API Token`;
@@ -1378,24 +1758,21 @@ function onCreateAgentToggle() {
 }
 
 function onHermesLayoutChange() {
-    const layout = document.getElementById('hermes-layout');
-    if (!layout) return;
-    const v = layout.value;
     const splitEl = document.getElementById('hermes-split-fields');
-    const legEl = document.getElementById('hermes-legacy-fields');
-    const start = document.getElementById('deploy-hermes-start-mode');
-    if (splitEl) splitEl.style.display = v === 'split' ? '' : 'none';
-    if (legEl) legEl.style.display = v === 'legacy' ? '' : 'none';
-    if (start) {
-        start.value = v === 'legacy' ? 'module' : 'gateway';
-    }
+    if (splitEl) splitEl.style.display = '';
 }
 
-function _renderDeployStatus(dep) {
-    if (!dep) return;
-    const pill = document.getElementById('reg-deploy-status-pill');
-    const meta = document.getElementById('reg-deploy-meta');
-    const log = document.getElementById('reg-deploy-log');
+function _escapeDeployHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+    })[ch]);
+}
+
+function _deployStatusInfo(status) {
     const map = {
         pending:     { txt: '⏳ 等待执行', color: '#eab308', bg: 'rgba(234,179,8,0.15)' },
         in_progress: { txt: '🚀 部署中...', color: '#3b82f6', bg: 'rgba(59,130,246,0.15)' },
@@ -1403,30 +1780,108 @@ function _renderDeployStatus(dep) {
         failed:      { txt: '❌ 部署失败', color: '#ef4444', bg: 'rgba(239,68,68,0.15)' },
         cancelled:   { txt: '⚪ 已取消',   color: '#9ca3af', bg: 'rgba(156,163,175,0.15)' },
     };
-    const info = map[dep.status] || { txt: dep.status, color: '#9ca3af', bg: 'rgba(156,163,175,0.15)' };
-    pill.textContent = info.txt;
-    pill.style.color = info.color;
-    pill.style.background = info.bg;
+    return map[status] || { txt: status || '未知状态', color: '#9ca3af', bg: 'rgba(156,163,175,0.15)' };
+}
 
+function _deploymentMetaHtml(dep) {
     const lines = [];
-    const method = dep.deploy_method || 'docker';
-    lines.push(`方式：<code>${method}</code>`);
-    if (dep.host) lines.push(`目标机：${dep.ssh_user || ''}@${dep.host}`);
+    const method = dep.deploy_method || 'systemd';
+    lines.push(`方式：<code>${_escapeDeployHtml(method)}</code>`);
+    if (dep.host) lines.push(`目标机：${_escapeDeployHtml(dep.ssh_user || '')}@${_escapeDeployHtml(dep.host)}`);
     if (dep.remote_base_dir) {
         const dirLabel = method === 'systemd' ? '数据 / 安装' : '目录';
-        lines.push(`${dirLabel}：<code>${dep.remote_base_dir}</code>`);
+        lines.push(`${dirLabel}：<code>${_escapeDeployHtml(dep.remote_base_dir)}</code>`);
     }
     if (dep.container_name) {
         const cLabel = method === 'systemd' ? 'Systemd unit' : '容器';
-        lines.push(`${cLabel}：<code>${dep.container_name}</code>`);
+        lines.push(`${cLabel}：<code>${_escapeDeployHtml(dep.container_name)}</code>`);
     }
-    if (dep.image) lines.push(`镜像：<code>${dep.image}</code>`);
-    if (dep.error_message) lines.push(`<span style="color:#ef4444">错误：${dep.error_message}</span>`);
-    meta.innerHTML = lines.join('<br>');
+    if (dep.image) lines.push(`镜像：<code>${_escapeDeployHtml(dep.image)}</code>`);
+    if (dep.error_message) lines.push(`<span style="color:#ef4444">错误：${_escapeDeployHtml(dep.error_message)}</span>`);
+    return lines.join('<br>') || '暂无部署详情';
+}
+
+function _renderDeployStatusTo(prefix, dep) {
+    if (!dep) return;
+    const pill = document.getElementById(`${prefix}-deploy-status-pill`);
+    const meta = document.getElementById(`${prefix}-deploy-meta`);
+    const log = document.getElementById(`${prefix}-deploy-log`);
+    if (!pill || !meta || !log) return;
+    const info = _deployStatusInfo(dep.status);
+    pill.textContent = info.txt;
+    pill.style.color = info.color;
+    pill.style.background = info.bg;
+    meta.innerHTML = _deploymentMetaHtml(dep);
     log.textContent = dep.log_tail || '';
 }
 
+function _renderDeployStatus(dep) {
+    _renderDeployStatusTo('reg', dep);
+}
+
+let _progressDeploymentClawId = null;
+
+async function viewDeploymentProgress(clawId) {
+    _progressDeploymentClawId = clawId;
+    document.getElementById('deploy-progress-modal').classList.add('active');
+    await refreshDeploymentProgressModal();
+}
+
+function closeDeploymentProgressModal() {
+    document.getElementById('deploy-progress-modal').classList.remove('active');
+}
+
+async function refreshDeploymentProgressModal() {
+    if (!_progressDeploymentClawId) return;
+    try {
+        const resp = await fetch(`/api/v1/openclaws/${_progressDeploymentClawId}/agent-deployments/latest`);
+        const json = await resp.json();
+        const dep = json.deployment;
+        if (!resp.ok || !dep) {
+            closeDeploymentProgressModal();
+            showToast((json && json.error) || '暂无部署记录', 'error');
+            return;
+        }
+        _renderDeployStatusTo('progress', dep);
+    } catch (err) {
+        showToast('读取部署进度失败: ' + err.message, 'error');
+    }
+}
+
+async function redeployHermesAgent(clawId) {
+    const confirmed = await customConfirm({
+        title: '确认重新部署',
+        msg: '确认重新部署 Hermes Agent？部署期间该 OpenClaw 仍会保持锁定。',
+        type: 'warning',
+        okText: '重新部署',
+    });
+    if (!confirmed) return;
+    try {
+        const resp = await fetch(`/api/v1/openclaws/${clawId}/agent-deployments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                hub_url: window.HUB_PUBLIC_URL || 'https://clawteam.woa.com:18800',
+                deploy: {
+                    deploy_method: 'systemd',
+                    llm_provider: 'venus',
+                    llm_model: 'venus',
+                    hermes_start_mode: 'gateway',
+                }
+            })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || '重新部署失败');
+        showToast('重新部署任务已下发', 'success');
+        await loadClaws();
+        _startDeployListPolling(clawId);
+    } catch (err) {
+        showToast('重新部署失败: ' + err.message, 'error');
+    }
+}
+
 let _deployPollTimer = null;
+let _deployListPollTimer = null;
 function _startDeployPolling(clawId) {
     if (_deployPollTimer) clearInterval(_deployPollTimer);
     let elapsed = 0;
@@ -1453,6 +1908,36 @@ function _startDeployPolling(clawId) {
     _deployPollTimer = setInterval(tick, 4000);
 }
 
+function _startDeployListPolling(clawId) {
+    if (_deployListPollTimer) clearInterval(_deployListPollTimer);
+    let elapsed = 0;
+    const tick = async () => {
+        try {
+            const resp = await fetch(`/api/v1/openclaws/${clawId}/agent-deployments/latest`);
+            if (resp.ok) {
+                const json = await resp.json();
+                const dep = json.deployment;
+                await loadClaws();
+                if (dep && ['success', 'failed', 'cancelled'].includes(dep.status)) {
+                    clearInterval(_deployListPollTimer);
+                    _deployListPollTimer = null;
+                    showToast(dep.status === 'success'
+                        ? 'Hermes Agent 部署完成，已通知龙虾王发送企微'
+                        : 'Hermes Agent 部署结束，请查看卡片状态', dep.status === 'success' ? 'success' : 'error');
+                    return;
+                }
+            }
+        } catch (e) { /* 静默重试 */ }
+        elapsed += 5;
+        if (elapsed > 600) {
+            clearInterval(_deployListPollTimer);
+            _deployListPollTimer = null;
+        }
+    };
+    tick();
+    _deployListPollTimer = setInterval(tick, 5000);
+}
+
 document.getElementById('create-form').addEventListener('submit', async e => {
     e.preventDefault();
     const form = new FormData(e.target);
@@ -1464,50 +1949,15 @@ document.getElementById('create-form').addEventListener('submit', async e => {
     const createAgent = isSuperAdmin && document.getElementById('create-agent-toggle').checked;
     let deployOpts = null;
     if (createAgent) {
-        if (!data.deploy_venus_api_key) {
-            showToast('请填写 Venus API Key', 'error');
-            return;
-        }
-        const layout = data.hermes_layout || 'split';
-        if (layout === 'split') {
-            if (!data.deploy_hermes_install_dir || !data.deploy_hermes_data_dir) {
-                showToast('请填写安装目录与数据目录（或切换为单目录兼容）', 'error');
-                return;
-            }
-            if (!data.deploy_hermes_install_dir.startsWith('/') ||
-                !data.deploy_hermes_data_dir.startsWith('/')) {
-                showToast('安装目录与数据目录须为绝对路径', 'error');
-                return;
-            }
-        } else {
-            if (!data.deploy_hermes_home) {
-                showToast('单目录模式请填写 Hermes 根目录', 'error');
-                return;
-            }
-            if (!data.deploy_hermes_home.startsWith('/')) {
-                showToast('根目录须为绝对路径', 'error');
-                return;
-            }
-        }
         deployOpts = {
             deploy_method: 'systemd',
-            venus_api_key: data.deploy_venus_api_key,
+            llm_provider: 'venus',
+            llm_model: data.llm_model || 'venus',
+            hermes_start_mode: 'gateway',
         };
-        if (layout === 'split') {
-            deployOpts.hermes_install_dir = data.deploy_hermes_install_dir.replace(/\/+$/, '');
-            deployOpts.hermes_data_dir = data.deploy_hermes_data_dir.replace(/\/+$/, '');
-        } else {
-            deployOpts.hermes_home = data.deploy_hermes_home.replace(/\/+$/, '');
-        }
-        if (data.deploy_hermes_python) deployOpts.hermes_python = data.deploy_hermes_python;
-        if (data.deploy_hermes_module) deployOpts.hermes_module = data.deploy_hermes_module;
-        if (data.deploy_systemd_user) deployOpts.systemd_user = data.deploy_systemd_user;
-        if (data.deploy_hermes_start_mode) {
-            deployOpts.hermes_start_mode = data.deploy_hermes_start_mode;
-        }
         data.create_agent = true;
         data.deploy = deployOpts;
-        data.hub_url = location.origin;
+        data.hub_url = window.HUB_PUBLIC_URL || 'https://clawteam.woa.com:18800';
     }
     // 清掉前端单独收集的 deploy_* / hermes_layout，避免后端误收未知字段
     delete data.hermes_layout;
@@ -1519,10 +1969,21 @@ document.getElementById('create-form').addEventListener('submit', async e => {
         e.target.reset();
         document.getElementById('create-agent-toggle').checked = false;
         document.getElementById('create-agent-fields').style.display = 'none';
-        loadClaws();
+        await loadClaws();
 
         const clawId = result.id;
-        const skillUrl = `${location.origin}/api/v1/openclaws/${clawId}/registration-skill`;
+        if (result.agent_deployment) {
+            const depStatus = result.agent_deployment.status;
+            if (['pending', 'in_progress'].includes(depStatus)) {
+                showToast('OpenClaw 已创建，后台部署 Hermes Agent 中；部署完成后会通知龙虾王发送企微', 'success');
+                _startDeployListPolling(clawId);
+            } else {
+                showToast(result.agent_deployment.error_message || 'OpenClaw 已创建，但 Hermes Agent 部署任务未启动', 'error');
+            }
+            return;
+        }
+        const _hubBase2 = (window.HUB_PUBLIC_URL || 'https://clawteam.woa.com:18800').replace(/\/$/, '');
+        const skillUrl = `${_hubBase2}/api/v1/openclaws/${clawId}/registration-skill`;
         document.getElementById('reg-claw-name').textContent = data.name;
         document.getElementById('reg-skill-url').textContent = skillUrl;
         document.getElementById('reg-api-token').textContent =

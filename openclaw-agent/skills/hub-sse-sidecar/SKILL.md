@@ -28,10 +28,17 @@ trigger_words:
 
 **新部署直接看这一节，跳过 §3 以下的 v1 历史包袋。**
 
+### 0.0 先装通信模块文档（Skill #118，manager-hub）
+
+**#143 管运行时，#118 管「通信中心」协议全文。** 装完 sidecar 后，建议让本实例 **同时持有** `manager-hub`（**Skill ID 118**）：Agent 才能稳定读到 SSE / `messages` / `report` / `heartbeat` 等路径说明。#118 已在 **Hub 技能市场**作为 **通信中心模块**展示，可自助安装或由 `standard_skill_ids` 批量分配。
+
+- **只读文档**（不写入 `~/.qclaw/skills/`）：`$HUB_URL/static/skills/manager-hub/SKILL.md`（把 `$HUB_URL` 换成你的 Hub 根地址，与下文 `install_v2.sh` 所用一致）。
+- **装入工作区**（推荐）：在技能市场安装 #118，或按站内技能同步流程拉取到 `~/.qclaw/skills/manager-hub/SKILL.md`，与 #143 的 `hub-sse-sidecar` 目录并列。
+
 ### 0.1 一行命令安装
 
 ```bash
-HUB_URL=http://your-hub-host:8088 \
+HUB_URL=http://clawteam.woa.com:18800 \
 CLAW_ID=<你的 claw id> \
 CLAW_TOKEN=<注册 claw 时 Hub 返回的明文 token> \
 bash install_v2.sh
@@ -129,13 +136,13 @@ mysql> SELECT COUNT(*) FROM claw_messages WHERE claw_id=<id> AND direction='to_c
 
 ```bash
 # 1. 先 dry-run（看会清什么，不动手）
-curl -fsSL http://your-hub-host:8088/static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1.sh | bash
+curl -fsSL http://clawteam.woa.com:18800/static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1.sh | bash
 
 # 2. 真清理（杀进程 + 删 systemd unit + 备份 config.env）
-curl -fsSL http://your-hub-host:8088/static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1.sh | bash -s -- --apply
+curl -fsSL http://clawteam.woa.com:18800/static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1.sh | bash -s -- --apply
 
 # 3. 终极清理（连 ~/.openclaw-sidecar 整个目录都 rm -rf，不留备份）
-curl -fsSL http://your-hub-host:8088/static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1.sh | bash -s -- --apply --purge
+curl -fsSL http://clawteam.woa.com:18800/static/skills/hub-sse-sidecar-v2/scripts/cleanup_v1.sh | bash -s -- --apply --purge
 ```
 
 #### 0.5.2 已装本 skill 的 claw（本地已有脚本副本）
@@ -149,10 +156,10 @@ bash ~/.qclaw/skills/hub-sse-sidecar/scripts/cleanup_v1.sh --apply --purge     #
 #### 0.5.3 一键升级到 v2（清 v1 + 装 v2 + 起 systemd 一气呵成）
 
 ```bash
-HUB_URL=http://your-hub-host:8088 \
+HUB_URL=http://clawteam.woa.com:18800 \
 CLAW_ID=<你的 claw id> \
 CLAW_TOKEN=<明文 token> \
-bash <(curl -fsSL http://your-hub-host:8088/static/skills/hub-sse-sidecar-v2/install_v2.sh)
+bash <(curl -fsSL http://clawteam.woa.com:18800/static/skills/hub-sse-sidecar-v2/install_v2.sh)
 ```
 
 > ⚠️ 注意：`bash <(...)` 进程替换语法需要 Bash 4+；老的 sh / dash 不支持，改用：
@@ -474,7 +481,7 @@ mkdir -p ~/.openclaw-sidecar/logs
 ### Step 2：拉取脚本
 
 ```bash
-SKILL_BASE="http://your-hub-host:8088/static/skills/hub-sse-sidecar"
+SKILL_BASE="http://clawteam.woa.com:18800/static/skills/hub-sse-sidecar"
 curl -fsSL -o ~/.openclaw-sidecar/scripts/sse_client.py "$SKILL_BASE/scripts/sse_client.py"
 curl -fsSL -o ~/.openclaw-sidecar/scripts/hub_worker.py "$SKILL_BASE/scripts/hub_worker.py"
 chmod +x ~/.openclaw-sidecar/scripts/*.py
@@ -484,7 +491,7 @@ chmod +x ~/.openclaw-sidecar/scripts/*.py
 
 ```bash
 cat > ~/.openclaw-sidecar/config.env <<EOF
-HUB_URL=http://your-hub-host:8088
+HUB_URL=http://clawteam.woa.com:18800
 CLAW_ID=<你的 claw id，比如 6>
 API_TOKEN=<你的 Hub API token，从 /registration-skill 拿>
 
@@ -649,5 +656,5 @@ systemctl daemon-reload && systemctl enable --now openclaw-sidecar
 
 ## 9. 致谢
 
-骨架抄自 Hermes Agent 小赫的 [Skill 134 hub-sse-message-driven](http://your-hub-host:8088/skills/134)。
+骨架抄自 Hermes Agent 小赫的 [Skill 134 hub-sse-message-driven](http://clawteam.woa.com:18800/skills/134)。
 本 skill 在他的 v1.2 基础上做了 §3 列出的 3 处升级，并吸收了龙虾王实战中的企微通知规范。

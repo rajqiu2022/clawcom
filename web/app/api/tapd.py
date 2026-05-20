@@ -4,12 +4,15 @@ TAPD 集成 API
 支持需求、缺陷、迭代的拉取与同步
 """
 import requests
+import os
 from datetime import datetime
 from flask import request, jsonify
 from sqlalchemy import text
 from app import db
 from app.models import Project
 from app.api import api_bp
+
+TAPD_API_BASE_URL = os.getenv('TAPD_API_BASE_URL', 'http://apiv2.tapd.woa.com').rstrip('/')
 
 
 def _get_tapd_credentials():
@@ -32,14 +35,27 @@ def _tapd_request(method, url, params=None, api_user='', api_password=''):
     if not api_user or not api_password:
         raise ValueError('TAPD API 凭证未配置，请在系统设置中配置 tapd_api_user 和 tapd_api_password')
 
-    resp = requests.request(
-        method,
-        url,
-        params=params,
-        auth=(api_user, api_password),
-        timeout=30,
-    )
-    resp.raise_for_status()
+    try:
+        resp = requests.request(
+            method,
+            url,
+            params=params,
+            auth=(api_user, api_password),
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        code = e.response.status_code if e.response is not None else 0
+        if code in (401, 403):
+            raise ValueError(
+                'TAPD 拒绝鉴权（HTTP %s）：Hub 当前请求 %s。请核对「系统设置」里保存的是'
+                'apiv2.tapd.woa.com 可用的 Basic 认证账号/口令，并确认账号有对应项目权限。'
+                % (code, url)
+            ) from e
+        raise ValueError('TAPD HTTP 调用失败（HTTP %s）: %s' % (code, e)) from e
+    except requests.exceptions.RequestException as e:
+        raise ValueError('TAPD 网络请求失败: %s' % e) from e
+
     data = resp.json()
 
     if data.get('status') != 1:
@@ -79,7 +95,7 @@ def get_tapd_story_title():
             params['workspace_id'] = workspace_id
             params['limit'] = 1
 
-        data = _tapd_request('GET', 'https://api.tapd.cn/stories', params)
+        data = _tapd_request('GET', f'{TAPD_API_BASE_URL}/stories', params)
 
         for item in data:
             story = item.get('Story', {})
@@ -103,9 +119,20 @@ def get_tapd_story_title():
 def get_tapd_config():
     """获取 TAPD 配置"""
     api_user, api_password = _get_tapd_credentials()
+    updated_at = None
+    try:
+        row = db.session.execute(text("""
+            SELECT MAX(updated_at) FROM system_config
+            WHERE config_key IN ('tapd_api_user', 'tapd_api_password')
+        """)).fetchone()
+        updated_at = str(row[0]) if row and row[0] else None
+    except Exception:
+        updated_at = None
     return jsonify({
         'configured': bool(api_user and api_password),
         'api_user': api_user[:8] + '***' if api_user else '',
+        'password_configured': bool(api_password),
+        'updated_at': updated_at,
     })
 
 
@@ -147,6 +174,8 @@ def list_tapd_stories():
         limit = request.args.get('limit', 50, type=int)
         page = request.args.get('page', 1, type=int)
         status = request.args.get('status', '')
+        iteration_id = (request.args.get('iteration_id') or '').strip()
+        name = (request.args.get('name') or request.args.get('keyword') or '').strip()
 
         params = {
             'workspace_id': workspace_id,
@@ -156,10 +185,16 @@ def list_tapd_stories():
         }
         if status:
             params['status'] = status
+        if iteration_id:
+            params['iteration_id'] = iteration_id
+        if name:
+            params['name'] = name
 
-        data = _tapd_request('GET', 'https://api.tapd.cn/stories', params)
+        data = _tapd_request('GET', f'{TAPD_API_BASE_URL}/stories', params)
 
         stories = []
+        if not isinstance(data, list):
+            data = []
         for item in data:
             story = item.get('Story', {})
             stories.append({
@@ -196,6 +231,8 @@ def list_tapd_bugs():
         page = request.args.get('page', 1, type=int)
         status = request.args.get('status', '')
         severity = request.args.get('severity', '')
+        iteration_id = (request.args.get('iteration_id') or '').strip()
+        title = (request.args.get('title') or request.args.get('keyword') or '').strip()
 
         params = {
             'workspace_id': workspace_id,
@@ -207,10 +244,16 @@ def list_tapd_bugs():
             params['status'] = status
         if severity:
             params['severity'] = severity
+        if iteration_id:
+            params['iteration_id'] = iteration_id
+        if title:
+            params['title'] = title
 
-        data = _tapd_request('GET', 'https://api.tapd.cn/bugs', params)
+        data = _tapd_request('GET', f'{TAPD_API_BASE_URL}/bugs', params)
 
         bugs = []
+        if not isinstance(data, list):
+            data = []
         for item in data:
             bug = item.get('Bug', {})
             bugs.append({
@@ -300,13 +343,13 @@ def tapd_dashboard():
         try:
             # 拉取需求统计
             stories_data = _tapd_request(
-                'GET', 'https://api.tapd.cn/stories/count',
+                'GET', f'{TAPD_API_BASE_URL}/stories/count',
                 {'workspace_id': p.tapd_workspace_id},
                 api_user, api_password
             )
             # 拉取缺陷统计
             bugs_data = _tapd_request(
-                'GET', 'https://api.tapd.cn/bugs/count',
+                'GET', f'{TAPD_API_BASE_URL}/bugs/count',
                 {'workspace_id': p.tapd_workspace_id},
                 api_user, api_password
             )

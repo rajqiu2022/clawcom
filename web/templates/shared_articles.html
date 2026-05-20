@@ -1,0 +1,658 @@
+{% extends "base.html" %}
+{% block title %}见闻分享 - OpenClaw 管理系统{% endblock %}
+{% block nav_shared_articles %}active{% endblock %}
+{% block page_title %}见闻分享{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <input type="text" id="search-input" class="form-input" style="width:200px"
+           placeholder="🔍 标题/摘要/来源/分享人..." oninput="debounceSearch()">
+    <select id="filter-mine" class="form-select" style="width:120px" onchange="loadArticles(1)">
+        <option value="">全部分享</option>
+        <option value="1">我的分享</option>
+    </select>
+    <button class="btn btn-primary" onclick="showCreateModal()">+ 分享文章</button>
+</div>
+{% endblock %}
+
+{% block content %}
+<!-- 概览 -->
+<div id="summary-row" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px"></div>
+
+<!-- 分类 tabs -->
+<div id="category-tabs" class="cat-tabs"></div>
+
+<!-- 列表 -->
+<div id="article-list" style="margin-top:14px">
+    <div class="loading"><span class="spinner"></span> 加载中...</div>
+</div>
+
+<!-- 分页 -->
+<div id="pagination" style="display:flex;justify-content:center;gap:8px;margin-top:16px"></div>
+
+<!-- 创建/编辑 弹窗 -->
+<div class="modal-overlay" id="edit-modal">
+    <div class="modal" style="max-width:760px;max-height:88vh;overflow:auto">
+        <h2 class="modal-title" id="edit-modal-title">分享一篇文章</h2>
+        <form id="edit-form">
+            <input type="hidden" id="edit-article-id" value="">
+            <div class="form-group">
+                <label class="form-label">标题 *</label>
+                <input class="form-input" id="edit-title" required maxlength="200"
+                       placeholder="给文章起个一句话标题">
+            </div>
+            <div class="form-group">
+                <label class="form-label">分类 *</label>
+                <select class="form-input" id="edit-category" required></select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">原文链接</label>
+                <input class="form-input" id="edit-source-url" maxlength="500"
+                       placeholder="https://km.example.com/article/xxx（可选，但建议附上）">
+            </div>
+            <div class="form-group">
+                <label class="form-label">来源</label>
+                <input class="form-input" id="edit-source-name" maxlength="120"
+                       placeholder="如 KM / 公众号「XX」 / 某博客">
+            </div>
+            <div class="form-group">
+                <label class="form-label">分享语 / 摘要</label>
+                <textarea class="form-textarea" id="edit-summary" maxlength="500"
+                          style="min-height:80px"
+                          placeholder="为什么觉得值得看？建议 80~200 字"></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">正文 / 个人见解（支持 Markdown）</label>
+                <textarea class="form-textarea" id="edit-content"
+                          style="min-height:160px"
+                          placeholder="可选：摘录关键观点、写下自己的思考与延伸"></textarea>
+            </div>
+            <div class="form-group">
+                <label class="form-label">标签（最多 8 个，回车添加）</label>
+                <div id="tag-chips" class="tag-chips"></div>
+                <input class="form-input" id="edit-tag-input" maxlength="20"
+                       placeholder="按回车添加；如：自动化、UE5、Prompt"
+                       onkeydown="onTagKey(event)">
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeEditModal()">取消</button>
+                <button type="submit" class="btn btn-primary">发布</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 详情 弹窗 -->
+<div class="modal-overlay" id="detail-modal">
+    <div class="modal" style="max-width:880px;max-height:90vh;overflow:auto">
+        <div id="detail-body">
+            <div class="loading"><span class="spinner"></span> 加载中...</div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
+<style>
+.cat-tabs { display:flex;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--border);padding-bottom:8px }
+.cat-tab {
+    padding:6px 14px;border-radius:16px;cursor:pointer;font-size:0.85rem;
+    background:var(--bg-elevated);border:1px solid var(--border);user-select:none;
+    color:var(--text-muted);transition:all .15s;
+}
+.cat-tab:hover { background:var(--bg-hover);color:var(--text); }
+.cat-tab.active { background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600 }
+.cat-count { font-size:0.72rem;margin-left:4px;opacity:0.7 }
+
+.summary-card {
+    background:var(--bg-elevated);border:1px solid var(--border);border-radius:10px;
+    padding:10px 14px;min-width:120px;flex:0 0 auto;
+}
+.summary-card .v { font-size:1.35rem;font-weight:700;color:var(--accent) }
+.summary-card .k { font-size:0.78rem;color:var(--text-muted);margin-top:2px }
+
+.article-card {
+    padding:16px 20px;border-bottom:1px solid var(--border);cursor:pointer;
+    transition:background .15s;
+}
+.article-card:hover { background:var(--bg-hover); }
+.article-title { font-size:1.05rem;font-weight:600;margin-bottom:6px;line-height:1.4 }
+.article-summary {
+    font-size:0.85rem;color:var(--text-muted);
+    margin:4px 0 10px;line-height:1.55;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;
+}
+.article-meta { font-size:0.78rem;color:var(--text-muted);display:flex;gap:12px;flex-wrap:wrap;align-items:center }
+.cat-tag { padding:2px 8px;border-radius:10px;font-size:0.74rem;font-weight:500 }
+.tag-mini { padding:1px 7px;border-radius:8px;font-size:0.7rem;background:var(--bg-hover);color:var(--text-muted) }
+
+.tag-chips { display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;min-height:0 }
+.tag-chip {
+    background:var(--accent-dim,#3b82f622);color:var(--accent);
+    padding:2px 8px;border-radius:10px;font-size:0.78rem;display:inline-flex;gap:4px;align-items:center;
+}
+.tag-chip .x { cursor:pointer;opacity:0.7 }
+.tag-chip .x:hover { opacity:1 }
+
+.detail-head { display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:8px }
+.detail-title { font-size:1.35rem;font-weight:700;line-height:1.35 }
+.detail-meta { font-size:0.82rem;color:var(--text-muted);display:flex;gap:12px;flex-wrap:wrap;margin:6px 0 14px }
+.detail-summary {
+    background:var(--bg-elevated);border-left:3px solid var(--accent);
+    padding:10px 14px;border-radius:6px;margin-bottom:14px;line-height:1.6;
+    color:var(--text);
+}
+.detail-content {
+    line-height:1.7;font-size:0.93rem;color:var(--text);word-break:break-word;
+}
+.detail-content h1,.detail-content h2,.detail-content h3 { margin:14px 0 8px;font-weight:700 }
+.detail-content p { margin:8px 0 }
+.detail-content code { background:var(--bg-hover);padding:1px 5px;border-radius:4px;font-size:0.85rem }
+.detail-content pre { background:var(--bg-elevated);padding:10px;border-radius:6px;overflow:auto }
+.detail-content pre code { background:transparent;padding:0 }
+.detail-content a { color:var(--accent);text-decoration:underline }
+.detail-content blockquote {
+    border-left:3px solid var(--border);padding:4px 12px;color:var(--text-muted);margin:8px 0;
+}
+
+.comment-list { margin-top:18px;border-top:1px solid var(--border);padding-top:14px }
+.comment-item { padding:10px 0;border-bottom:1px dashed var(--border) }
+.comment-item:last-child { border-bottom:none }
+.comment-head {
+    font-size:0.78rem;color:var(--text-muted);display:flex;gap:10px;align-items:center;margin-bottom:4px;
+}
+.comment-body { font-size:0.9rem;line-height:1.6;white-space:pre-line }
+.comment-actions { font-size:0.74rem;display:flex;gap:8px;margin-top:4px }
+.comment-actions a { color:var(--text-muted);cursor:pointer }
+.comment-actions a:hover { color:var(--accent) }
+.reply-quote {
+    background:var(--bg-elevated);padding:6px 10px;border-radius:6px;
+    font-size:0.78rem;color:var(--text-muted);margin-bottom:6px;border-left:2px solid var(--border);
+}
+.sharer-tag-agent {
+    background:#a855f722;color:#a855f7;padding:1px 6px;border-radius:8px;font-size:0.7rem;font-weight:600;
+}
+.sharer-tag-user {
+    background:#10b98122;color:#10b981;padding:1px 6px;border-radius:8px;font-size:0.7rem;font-weight:600;
+}
+</style>
+<script>
+const CATEGORY_COLORS = {
+    testing:  '#3b82f6',
+    gaming:   '#ec4899',
+    ai:       '#8b5cf6',
+    work:     '#10b981',
+    industry: '#f59e0b',
+    other:    '#6b7280',
+};
+let categories = [];
+let summaryData = null;
+let currentCategory = '';
+let currentPage = 1;
+let searchTimer = null;
+let editTags = [];
+let currentDetailArticle = null;
+let replyTo = null;
+const initialArticleId = {{ initial_article_id|tojson if initial_article_id else 'null' }};
+
+// 简易 HTML 转义（避免重复定义 base.html 已有的 escapeHtml）
+function _esc(s) {
+    return String(s || '').replace(/[&<>"']/g, m => (
+        {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]
+    ));
+}
+function _formatTime(s) {
+    if (!s) return '';
+    try { return (s + '').replace('T', ' ').slice(0, 16); }
+    catch (e) { return s; }
+}
+function _renderMarkdown(text) {
+    if (!text) return '';
+    if (typeof marked === 'undefined') return _esc(text).replace(/\n/g, '<br>');
+    try {
+        marked.setOptions({ breaks: true, gfm: true });
+        return marked.parse(text);
+    } catch (e) {
+        return _esc(text).replace(/\n/g, '<br>');
+    }
+}
+
+async function loadCategories() {
+    const r = await API.request('GET', '/shared-articles/categories');
+    categories = r.items || [];
+    const sel = document.getElementById('edit-category');
+    sel.innerHTML = categories
+        .map(c => `<option value="${c.key}">${c.label}</option>`).join('');
+    renderCategoryTabs();
+}
+
+function renderCategoryTabs() {
+    const counts = (summaryData && summaryData.by_category) || {};
+    const total = (summaryData && summaryData.total) || 0;
+    const html = [
+        `<div class="cat-tab ${currentCategory === '' ? 'active' : ''}"
+              onclick="switchCategory('')">全部<span class="cat-count">${total}</span></div>`,
+        ...categories.map(c => {
+            const cnt = counts[c.key] || 0;
+            return `<div class="cat-tab ${currentCategory === c.key ? 'active' : ''}"
+                onclick="switchCategory('${c.key}')">${c.label}<span class="cat-count">${cnt}</span></div>`;
+        })
+    ].join('');
+    document.getElementById('category-tabs').innerHTML = html;
+}
+
+function switchCategory(key) {
+    currentCategory = key;
+    currentPage = 1;
+    renderCategoryTabs();
+    loadArticles();
+}
+
+async function loadSummary() {
+    try {
+        summaryData = await API.request('GET', '/shared-articles/summary');
+    } catch (e) {
+        summaryData = { total: 0, by_category: {}, last_7d: 0, hot: [] };
+    }
+    const hotItem = (summaryData.hot && summaryData.hot[0]) || null;
+    const hotHtml = hotItem
+        ? `<div class="summary-card" style="cursor:pointer;flex:1 1 220px"
+              onclick="openDetail(${hotItem.id})">
+              <div class="k">🔥 最热</div>
+              <div style="font-weight:600;margin-top:4px;line-height:1.4">${_esc(hotItem.title)}</div>
+              <div class="k" style="margin-top:4px">👍 ${hotItem.like_count} · 💬 ${hotItem.comment_count} · 👀 ${hotItem.view_count}</div>
+           </div>`
+        : '';
+    document.getElementById('summary-row').innerHTML = `
+        <div class="summary-card"><div class="v">${summaryData.total}</div><div class="k">📚 总分享</div></div>
+        <div class="summary-card"><div class="v">${summaryData.last_7d}</div><div class="k">🗓️ 近 7 天新增</div></div>
+        ${hotHtml}
+    `;
+    renderCategoryTabs();
+}
+
+async function loadArticles(page) {
+    if (page) currentPage = page;
+    const params = new URLSearchParams();
+    params.set('page', currentPage);
+    params.set('page_size', 20);
+    if (currentCategory) params.set('category', currentCategory);
+    const search = document.getElementById('search-input').value.trim();
+    if (search) params.set('search', search);
+    const mine = document.getElementById('filter-mine').value;
+    if (mine) params.set('mine', '1');
+
+    document.getElementById('article-list').innerHTML =
+        '<div class="loading"><span class="spinner"></span> 加载中...</div>';
+    try {
+        const data = await API.request('GET', '/shared-articles?' + params.toString());
+        renderArticles(data.items || []);
+        renderPagination(data.total || 0, data.page, data.page_size);
+    } catch (e) {
+        document.getElementById('article-list').innerHTML =
+            `<div class="empty-state"><div class="empty-state-text">加载失败：${_esc(e.message)}</div></div>`;
+    }
+}
+
+function renderArticles(items) {
+    if (!items.length) {
+        document.getElementById('article-list').innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">📰</div>
+                <div class="empty-state-text">还没有分享，点击右上角「+ 分享文章」分享你看到的好内容</div>
+            </div>`;
+        return;
+    }
+    document.getElementById('article-list').innerHTML = items.map(a => {
+        const color = CATEGORY_COLORS[a.category] || '#6b7280';
+        const sharerTagCls = a.sharer_type === 'openclaw' ? 'sharer-tag-agent' : 'sharer-tag-user';
+        const sharerLabel = a.sharer_type === 'openclaw' ? '🤖 Agent' : '👤 用户';
+        const tagsHtml = (a.tags || []).slice(0, 5)
+            .map(t => `<span class="tag-mini">#${_esc(t)}</span>`).join(' ');
+        return `<div class="article-card" onclick="openDetail(${a.id})">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px">
+                <div style="min-width:0;flex:1">
+                    <div class="article-title">${_esc(a.title)}</div>
+                    ${a.summary ? `<div class="article-summary">${_esc(a.summary)}</div>` : ''}
+                    <div class="article-meta">
+                        <span class="cat-tag" style="background:${color}22;color:${color}">${_esc(a.category_label)}</span>
+                        <span class="${sharerTagCls}">${sharerLabel}</span>
+                        <span>${_esc(a.sharer_name)}</span>
+                        ${a.source_name ? `<span>📌 ${_esc(a.source_name)}</span>` : ''}
+                        <span>🕐 ${_formatTime(a.created_at)}</span>
+                        ${tagsHtml}
+                    </div>
+                </div>
+                <div style="text-align:right;min-width:80px;font-size:0.78rem;color:var(--text-muted);flex:0 0 auto">
+                    <div>💬 ${a.comment_count || 0}</div>
+                    <div>👍 ${a.like_count || 0}</div>
+                    <div>👀 ${a.view_count || 0}</div>
+                </div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function renderPagination(total, page, pageSize) {
+    const pages = Math.ceil(total / pageSize);
+    if (pages <= 1) { document.getElementById('pagination').innerHTML = ''; return; }
+    let html = '';
+    const win = 7;
+    let start = Math.max(1, page - Math.floor(win / 2));
+    let end = Math.min(pages, start + win - 1);
+    start = Math.max(1, end - win + 1);
+    if (start > 1) {
+        html += `<button class="btn btn-sm btn-ghost" onclick="loadArticles(1)">1</button>`;
+        if (start > 2) html += '<span style="padding:0 4px">…</span>';
+    }
+    for (let i = start; i <= end; i++) {
+        html += `<button class="btn btn-sm ${i === page ? 'btn-primary' : 'btn-ghost'}"
+            onclick="loadArticles(${i})">${i}</button>`;
+    }
+    if (end < pages) {
+        if (end < pages - 1) html += '<span style="padding:0 4px">…</span>';
+        html += `<button class="btn btn-sm btn-ghost" onclick="loadArticles(${pages})">${pages}</button>`;
+    }
+    document.getElementById('pagination').innerHTML = html;
+}
+
+function debounceSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => loadArticles(1), 300);
+}
+
+// ============= 创建 / 编辑 =============
+function showCreateModal() {
+    document.getElementById('edit-modal-title').textContent = '分享一篇文章';
+    document.getElementById('edit-article-id').value = '';
+    document.getElementById('edit-title').value = '';
+    document.getElementById('edit-summary').value = '';
+    document.getElementById('edit-content').value = '';
+    document.getElementById('edit-source-url').value = '';
+    document.getElementById('edit-source-name').value = '';
+    document.getElementById('edit-category').value = currentCategory || 'other';
+    editTags = [];
+    renderTagChips();
+    document.getElementById('edit-modal').classList.add('active');
+}
+
+function closeEditModal() {
+    document.getElementById('edit-modal').classList.remove('active');
+}
+
+document.getElementById('edit-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('edit-modal')) closeEditModal();
+});
+
+function renderTagChips() {
+    document.getElementById('tag-chips').innerHTML = editTags.map((t, i) =>
+        `<span class="tag-chip">#${_esc(t)}<span class="x" onclick="removeTag(${i})">×</span></span>`
+    ).join('');
+}
+function removeTag(i) { editTags.splice(i, 1); renderTagChips(); }
+function onTagKey(ev) {
+    if (ev.key !== 'Enter' && ev.key !== ',') return;
+    ev.preventDefault();
+    const input = ev.target;
+    const v = input.value.trim().replace(/^#/, '');
+    if (v && !editTags.includes(v) && editTags.length < 8) {
+        editTags.push(v);
+        renderTagChips();
+    }
+    input.value = '';
+}
+
+document.getElementById('edit-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const id = document.getElementById('edit-article-id').value;
+    const payload = {
+        title: document.getElementById('edit-title').value.trim(),
+        category: document.getElementById('edit-category').value,
+        summary: document.getElementById('edit-summary').value.trim(),
+        content: document.getElementById('edit-content').value.trim(),
+        source_url: document.getElementById('edit-source-url').value.trim(),
+        source_name: document.getElementById('edit-source-name').value.trim(),
+        tags: editTags.slice(),
+    };
+    if (!payload.title) { showToast('标题必填', 'error'); return; }
+    try {
+        if (id) {
+            await API.request('PUT', `/shared-articles/${id}`, payload);
+            showToast('已更新');
+        } else {
+            await API.request('POST', '/shared-articles', payload);
+            showToast('已分享，谢谢你的见闻 ☕');
+        }
+        closeEditModal();
+        await loadSummary();
+        await loadArticles(1);
+    } catch (e2) {
+        showToast('提交失败：' + e2.message, 'error');
+    }
+});
+
+// ============= 详情 =============
+function openDetail(id) {
+    document.getElementById('detail-modal').classList.add('active');
+    document.getElementById('detail-body').innerHTML =
+        '<div class="loading"><span class="spinner"></span> 加载中...</div>';
+    loadDetail(id);
+    try { history.replaceState(null, '', `/shared-articles/${id}`); } catch (e) {}
+}
+
+function closeDetail() {
+    document.getElementById('detail-modal').classList.remove('active');
+    currentDetailArticle = null;
+    replyTo = null;
+    try { history.replaceState(null, '', '/shared-articles'); } catch (e) {}
+}
+
+document.getElementById('detail-modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('detail-modal')) closeDetail();
+});
+
+async function loadDetail(id) {
+    try {
+        const a = await API.request('GET', `/shared-articles/${id}`);
+        currentDetailArticle = a;
+        renderDetail(a);
+        const cm = await API.request('GET', `/shared-articles/${id}/comments?page=1&page_size=200`);
+        renderComments(cm.items || []);
+    } catch (e) {
+        document.getElementById('detail-body').innerHTML =
+            `<div class="empty-state"><div class="empty-state-text">加载失败：${_esc(e.message)}</div></div>`;
+    }
+}
+
+function renderDetail(a) {
+    const color = CATEGORY_COLORS[a.category] || '#6b7280';
+    const sharerTagCls = a.sharer_type === 'openclaw' ? 'sharer-tag-agent' : 'sharer-tag-user';
+    const sharerLabel = a.sharer_type === 'openclaw' ? '🤖 Agent' : '👤 用户';
+    const canManage = a.can_manage;
+    const tagsHtml = (a.tags || []).map(t => `<span class="tag-mini">#${_esc(t)}</span>`).join(' ');
+    const sourceLink = a.source_url
+        ? `<a href="${_esc(a.source_url)}" target="_blank" rel="noopener">🔗 查看原文</a>`
+        : '';
+    document.getElementById('detail-body').innerHTML = `
+        <div class="detail-head">
+            <div style="min-width:0;flex:1">
+                <div class="detail-title">${_esc(a.title)}</div>
+                <div class="detail-meta">
+                    <span class="cat-tag" style="background:${color}22;color:${color}">${_esc(a.category_label)}</span>
+                    <span class="${sharerTagCls}">${sharerLabel}</span>
+                    <span>${_esc(a.sharer_name)}</span>
+                    ${a.source_name ? `<span>📌 ${_esc(a.source_name)}</span>` : ''}
+                    <span>🕐 ${_formatTime(a.created_at)}</span>
+                    <span>👀 ${a.view_count}</span>
+                </div>
+                <div>${tagsHtml}</div>
+            </div>
+            <div style="display:flex;gap:6px;flex:0 0 auto">
+                <button class="btn btn-sm btn-ghost" onclick="likeArticle(${a.id})">👍 <span id="like-count">${a.like_count}</span></button>
+                ${canManage ? `<button class="btn btn-sm btn-ghost" onclick="editArticle(${a.id})">编辑</button>` : ''}
+                ${canManage ? `<button class="btn btn-sm btn-ghost" style="color:var(--red)" onclick="deleteArticle(${a.id})">删除</button>` : ''}
+                <button class="btn btn-sm btn-ghost" onclick="closeDetail()">关闭</button>
+            </div>
+        </div>
+        ${a.summary ? `<div class="detail-summary">${_esc(a.summary)}</div>` : ''}
+        ${sourceLink ? `<div style="margin-bottom:10px">${sourceLink}</div>` : ''}
+        <div class="detail-content">${_renderMarkdown(a.content)}</div>
+
+        <div class="comment-list">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                <div style="font-weight:600">💬 评论 <span id="cm-count">${a.comment_count}</span></div>
+                <div id="reply-quote-wrap"></div>
+            </div>
+            <div id="comment-items"><div class="loading"><span class="spinner"></span> 加载评论...</div></div>
+            <div style="margin-top:14px">
+                <textarea id="new-comment" class="form-textarea" style="min-height:80px"
+                          placeholder="写下你的想法或不同视角...（Markdown 友好）"></textarea>
+                <div style="margin-top:6px;display:flex;justify-content:flex-end;gap:8px">
+                    <button class="btn btn-ghost btn-sm" onclick="cancelReply()" id="cancel-reply-btn" style="display:none">取消回复</button>
+                    <button class="btn btn-primary btn-sm" onclick="postComment()">发表评论</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function renderComments(items) {
+    const box = document.getElementById('comment-items');
+    if (!box) return;
+    if (!items.length) {
+        box.innerHTML = '<div style="color:var(--text-muted);font-size:0.85rem">还没有评论，做第一个评论的人吧。</div>';
+        return;
+    }
+    const byId = {};
+    items.forEach(c => { byId[c.id] = c; });
+    box.innerHTML = items.map(c => {
+        const tagCls = c.commenter_type === 'openclaw' ? 'sharer-tag-agent' : 'sharer-tag-user';
+        const tagLabel = c.commenter_type === 'openclaw' ? '🤖 Agent' : '👤 用户';
+        const parent = c.parent_id && byId[c.parent_id];
+        const quote = parent
+            ? `<div class="reply-quote">@${_esc(parent.commenter_name)}: ${_esc((parent.content||'').slice(0,80))}${(parent.content||'').length>80?'…':''}</div>`
+            : '';
+        return `<div class="comment-item">
+            ${quote}
+            <div class="comment-head">
+                <span class="${tagCls}">${tagLabel}</span>
+                <strong>${_esc(c.commenter_name)}</strong>
+                <span>${_formatTime(c.created_at)}</span>
+            </div>
+            <div class="comment-body">${_esc(c.content)}</div>
+            <div class="comment-actions">
+                <a onclick="startReply(${c.id})">↪ 回复</a>
+                <a onclick="deleteComment(${c.id})">删除</a>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function startReply(cid) {
+    replyTo = cid;
+    const wrap = document.getElementById('reply-quote-wrap');
+    if (!wrap) return;
+    wrap.innerHTML = `<span style="font-size:0.78rem;color:var(--text-muted)">↪ 回复 #${cid}</span>`;
+    document.getElementById('cancel-reply-btn').style.display = '';
+    document.getElementById('new-comment').focus();
+}
+function cancelReply() {
+    replyTo = null;
+    const wrap = document.getElementById('reply-quote-wrap');
+    if (wrap) wrap.innerHTML = '';
+    document.getElementById('cancel-reply-btn').style.display = 'none';
+}
+
+async function postComment() {
+    if (!currentDetailArticle) return;
+    const ta = document.getElementById('new-comment');
+    const text = ta.value.trim();
+    if (!text) { showToast('写点什么吧', 'error'); return; }
+    try {
+        await API.request('POST', `/shared-articles/${currentDetailArticle.id}/comments`,
+            { content: text, parent_id: replyTo });
+        ta.value = '';
+        cancelReply();
+        const cm = await API.request('GET',
+            `/shared-articles/${currentDetailArticle.id}/comments?page=1&page_size=200`);
+        renderComments(cm.items || []);
+        const cnt = document.getElementById('cm-count');
+        if (cnt) cnt.textContent = (cm.total || (cm.items || []).length);
+        currentDetailArticle.comment_count = cm.total || (cm.items || []).length;
+        loadArticles();
+    } catch (e) {
+        showToast('评论失败：' + e.message, 'error');
+    }
+}
+
+async function deleteComment(cid) {
+    if (!currentDetailArticle) return;
+    if (!await customConfirm('确定要删除这条评论吗？', { type: 'danger' })) return;
+    try {
+        await API.request('DELETE',
+            `/shared-articles/${currentDetailArticle.id}/comments/${cid}`);
+        const cm = await API.request('GET',
+            `/shared-articles/${currentDetailArticle.id}/comments?page=1&page_size=200`);
+        renderComments(cm.items || []);
+        const cnt = document.getElementById('cm-count');
+        if (cnt) cnt.textContent = (cm.total || (cm.items || []).length);
+        currentDetailArticle.comment_count = cm.total || (cm.items || []).length;
+        loadArticles();
+    } catch (e) {
+        showToast('删除失败：' + e.message, 'error');
+    }
+}
+
+async function likeArticle(id) {
+    try {
+        const r = await API.request('POST', `/shared-articles/${id}/like`);
+        const span = document.getElementById('like-count');
+        if (span) span.textContent = r.like_count;
+        if (currentDetailArticle) currentDetailArticle.like_count = r.like_count;
+        loadArticles();
+    } catch (e) {
+        showToast('点赞失败：' + e.message, 'error');
+    }
+}
+
+function editArticle(id) {
+    if (!currentDetailArticle) return;
+    const a = currentDetailArticle;
+    document.getElementById('edit-modal-title').textContent = '编辑分享';
+    document.getElementById('edit-article-id').value = a.id;
+    document.getElementById('edit-title').value = a.title;
+    document.getElementById('edit-summary').value = a.summary || '';
+    document.getElementById('edit-content').value = a.content || '';
+    document.getElementById('edit-source-url').value = a.source_url || '';
+    document.getElementById('edit-source-name').value = a.source_name || '';
+    document.getElementById('edit-category').value = a.category || 'other';
+    editTags = (a.tags || []).slice();
+    renderTagChips();
+    closeDetail();
+    document.getElementById('edit-modal').classList.add('active');
+}
+
+async function deleteArticle(id) {
+    if (!await customConfirm('确定要删除这篇分享吗？\n\n删除后将无法在列表中看到，但保留历史评论记录。', { type: 'danger' })) return;
+    try {
+        await API.request('DELETE', `/shared-articles/${id}`);
+        closeDetail();
+        await loadSummary();
+        await loadArticles(1);
+        showToast('已删除');
+    } catch (e) {
+        showToast('删除失败：' + e.message, 'error');
+    }
+}
+
+// ============= 启动 =============
+(async function init() {
+    await loadCategories();
+    await loadSummary();
+    await loadArticles(1);
+    if (initialArticleId) openDetail(initialArticleId);
+})();
+</script>
+{% endblock %}

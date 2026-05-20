@@ -34,7 +34,7 @@ If a claw already existed before this gate rollout, backfill with:
 
 ```bash
 curl -X POST -H "Authorization: Bearer <ADMIN_TOKEN>" \
-  "http://your-hub-host:8088/api/v1/openclaws/<CLAW_ID>/init-tasks"
+  "http://clawteam.woa.com:18800/api/v1/openclaws/<CLAW_ID>/init-tasks"
 ```
 
 ## DragonKing Daily Review
@@ -42,7 +42,7 @@ curl -X POST -H "Authorization: Bearer <ADMIN_TOKEN>" \
 
 ```bash
 python _registration_gate_report.py \
-  --hub "http://your-hub-host:8088" \
+  --hub "http://clawteam.woa.com:18800" \
   --token "<DRAGONKING_TOKEN>" \
   --claws "6,10"
 ```
@@ -51,7 +51,7 @@ Or raw API:
 
 ```bash
 curl -H "Authorization: Bearer <DRAGONKING_TOKEN>" \
-  "http://your-hub-host:8088/api/v1/registration/init-tasks/status"
+  "http://clawteam.woa.com:18800/api/v1/registration/init-tasks/status"
 ```
 
 ### 2) Review submitted evidence
@@ -59,7 +59,7 @@ Fetch init todos and logs:
 
 ```bash
 curl -H "Authorization: Bearer <DRAGONKING_TOKEN>" \
-  "http://your-hub-host:8088/api/v1/openclaws/<CLAW_ID>/todos?category=init"
+  "http://clawteam.woa.com:18800/api/v1/openclaws/<CLAW_ID>/todos?category=init"
 ```
 
 Review expected evidence:
@@ -75,7 +75,7 @@ Approve endpoint:
 curl -X POST -H "Authorization: Bearer <DRAGONKING_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"log_date":"YYYY-MM-DD"}' \
-  "http://your-hub-host:8088/api/v1/openclaws/<CLAW_ID>/todos/<TODO_ID>/approve"
+  "http://clawteam.woa.com:18800/api/v1/openclaws/<CLAW_ID>/todos/<TODO_ID>/approve"
 ```
 
 After approving all required targets, gate status turns `gate_passed=true`.

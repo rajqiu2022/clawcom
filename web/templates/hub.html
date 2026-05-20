@@ -127,28 +127,26 @@
         <div class="view-content" id="view-records" style="display:none">
             <div class="panel records-panel">
                 <div class="panel-header">
-                    <h3>📋 消息记录</h3>
+                    <h3>📋 会话记录</h3>
                     <div class="records-filters">
-                        <select class="form-select" id="filter-claw" onchange="loadMessageRecords()">
-                            <option value="">全部 OpenClaw</option>
-                        </select>
-                        <select class="form-select" id="filter-status" onchange="loadMessageRecords()">
-                            <option value="">全部状态</option>
-                            <option value="pending">⏳ 发送中</option>
-                            <option value="delivered">📨 已送达</option>
-                            <option value="read">✅ 已读</option>
-                        </select>
-                        <select class="form-select" id="filter-type" onchange="loadMessageRecords()">
-                            <option value="">全部类型</option>
-                            <option value="text">💬 文本</option>
-                            <option value="task_delegate">📋 任务</option>
-                            <option value="knowledge_share">📚 知识</option>
-                            <option value="request_help">🆘 帮助</option>
-                        </select>
+                        <button class="btn btn-sm btn-ghost" onclick="loadMessageRecords()">刷新</button>
                     </div>
                 </div>
-                <div class="records-list" id="recordsList">
-                    <div class="loading"><span class="spinner"></span></div>
+                <div class="records-tabs">
+                    <button class="records-tab active" id="record-tab-admin" onclick="switchRecordTab('admin')">
+                        Web/Admin ↔ OpenClaw <span id="record-tab-admin-count">0</span>
+                    </button>
+                    <button class="records-tab" id="record-tab-claw" onclick="switchRecordTab('claw_pair')">
+                        OpenClaw ↔ OpenClaw <span id="record-tab-claw-count">0</span>
+                    </button>
+                </div>
+                <div class="records-layout">
+                    <div class="records-list" id="recordsList">
+                        <div class="loading"><span class="spinner"></span></div>
+                    </div>
+                    <div class="records-chat-panel" id="recordsChatPanel">
+                        <div class="empty-state" style="padding:40px;text-align:center">选择左侧会话查看聊天记录</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -357,6 +355,14 @@
     flex-direction: column;
     gap: 16px;
     overflow: hidden;
+}
+
+.records-mode .command-center {
+    grid-template-columns: 1fr 300px;
+}
+
+.records-mode .cc-sidebar {
+    display: none;
 }
 
 /* Stat Cards */
@@ -740,8 +746,52 @@
     font-size: 0.82rem;
 }
 
-.records-list {
+.records-tabs {
+    display: inline-flex;
+    gap: 6px;
+    padding: 4px;
+    margin-bottom: 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.records-tab {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    padding: 7px 12px;
+    border-radius: 7px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    transition: all 0.2s;
+}
+
+.records-tab:hover {
+    color: var(--text-primary);
+}
+
+.records-tab.active {
+    background: var(--accent);
+    color: #000;
+    font-weight: 700;
+}
+
+.records-tab span {
+    margin-left: 4px;
+    opacity: 0.75;
+}
+
+.records-layout {
     flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(260px, 360px) 1fr;
+    gap: 12px;
+    overflow: hidden;
+}
+
+.records-list {
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -754,10 +804,24 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     transition: all 0.2s;
+    cursor: pointer;
 }
 
 .record-item:hover {
     border-color: var(--accent);
+}
+
+.record-item.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.18);
+}
+
+.records-section-title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+    padding: 4px 2px;
+    margin-top: 4px;
 }
 
 .record-header {
@@ -829,6 +893,61 @@
 .record-target {
     font-size: 0.72rem;
     color: var(--text-muted);
+}
+
+.records-chat-panel {
+    min-width: 0;
+    overflow-y: auto;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+}
+
+.records-chat-title {
+    font-weight: 700;
+    margin-bottom: 12px;
+    color: var(--text-primary);
+}
+
+.record-chat-row {
+    display: flex;
+    margin-bottom: 10px;
+}
+
+.record-chat-row.to-claw {
+    justify-content: flex-end;
+}
+
+.record-chat-row.to-claw .record-chat-meta {
+    text-align: right;
+}
+
+.record-chat-bubble {
+    max-width: min(72%, 680px);
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    border-radius: 12px;
+    padding: 10px 12px;
+}
+
+.record-chat-row.to-claw .record-chat-bubble {
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.28);
+}
+
+.record-chat-meta {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+
+.record-chat-content {
+    white-space: pre-wrap;
+    color: var(--text-primary);
+    line-height: 1.5;
+    font-size: 0.88rem;
 }
 
 /* Monitor View */
@@ -1137,6 +1256,8 @@ let selectedClaws = new Set();
 
 // 视图切换
 let currentView = 'command';
+let currentRecordTab = 'admin';
+let cachedRecordConversations = { admin: [], claw_pair: [] };
 
 document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1152,10 +1273,11 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
         if (view === 'records') loadMessageRecords();
         if (view === 'monitor') loadMonitorView();
 
-        // 聊天模式：隐藏右侧面板，左侧去掉勾选
+        // 聊天模式隐藏右侧；记录模式隐藏左侧 OpenClaw 选择栏
         const inbox = document.querySelector('.cc-inbox');
         if (inbox) inbox.style.display = (view === 'chat') ? 'none' : '';
         document.body.classList.toggle('chat-mode', view === 'chat');
+        document.body.classList.toggle('records-mode', view === 'records');
 
         // 离开聊天 tab 时停止自动刷新
         if (view !== 'chat' && chatRefreshTimer) {
@@ -1308,8 +1430,10 @@ function updateSelectAllState() {
 
 function updateFilterOptions() {
     const filterClaw = document.getElementById('filter-claw');
-    filterClaw.innerHTML = '<option value="">全部 OpenClaw</option>' +
-        allClaws.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+    if (filterClaw) {
+        filterClaw.innerHTML = '<option value="">全部 OpenClaw</option>' +
+            allClaws.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+    }
 }
 
 function toggleClawSelection(clawId) {
@@ -1496,58 +1620,138 @@ async function loadRecentActivity() {
 // 消息记录视图
 async function loadMessageRecords() {
     try {
-        const clawId = document.getElementById('filter-claw').value;
-        const status = document.getElementById('filter-status').value;
-        const msgType = document.getElementById('filter-type').value;
-
-        let url = `${HUB_API}/claw-messages?limit=100`;
-        if (clawId) url += `&claw_id=${clawId}`;
-        if (status) url += `&status=${status}`;
-        if (msgType) url += `&msg_type=${msgType}`;
-
-        const res = await fetch(url);
+        const res = await fetch(`${HUB_API}/claw-conversations`);
         const data = await res.json();
-        const messages = data.messages || [];
+        const adminConvs = data.admin_conversations || [];
+        const clawConvs = data.claw_conversations || [];
+        cachedRecordConversations = { admin: adminConvs, claw_pair: clawConvs };
+        document.getElementById('record-tab-admin-count').textContent = adminConvs.length;
+        document.getElementById('record-tab-claw-count').textContent = clawConvs.length;
 
         const list = document.getElementById('recordsList');
-        if (messages.length === 0) {
-            list.innerHTML = '<div class="empty-state" style="padding:40px;text-align:center">暂无消息记录</div>';
+        const detail = document.getElementById('recordsChatPanel');
+        if (adminConvs.length === 0 && clawConvs.length === 0) {
+            list.innerHTML = '<div class="empty-state" style="padding:40px;text-align:center">暂无会话记录</div>';
+            detail.innerHTML = '<div class="empty-state" style="padding:40px;text-align:center">没有可查看的聊天记录</div>';
             return;
         }
-
-        const msgTypeLabels = {
-            text: '💬 文本',
-            task_delegate: '📋 任务',
-            knowledge_share: '📚 知识',
-            request_help: '🆘 帮助',
-            broadcast: '📢 广播'
-        };
-
-        const statusLabels = {
-            pending: '⏳ 待送达',
-            delivered: '📨 已送达',
-            read: '✅ 已读'
-        };
-
-        list.innerHTML = messages.map(m => `
-            <div class="record-item">
-                <div class="record-header">
-                    <span class="record-sender">📤 ${m.sender_name} → ${m.claw_name}</span>
-                    <div class="record-meta">
-                        <span class="record-type">${msgTypeLabels[m.msg_type] || m.msg_type}</span>
-                        <span class="record-status ${m.status}">${statusLabels[m.status] || m.status}</span>
-                    </div>
-                </div>
-                <div class="record-content">${escapeHtml(m.content)}</div>
-                <div class="record-footer">
-                    <span class="record-time">${formatTime(m.created_at)}</span>
-                    <span class="record-target">${_isOnline(m.claw_status) ? '🟢' : '⚫'} ${m.claw_status}</span>
-                </div>
-            </div>
-        `).join('');
+        renderRecordConversations();
     } catch (e) {
         console.error('加载记录失败:', e);
         document.getElementById('recordsList').innerHTML = '<div class="empty-state">加载失败</div>';
+    }
+}
+
+function switchRecordTab(tab) {
+    currentRecordTab = tab;
+    document.querySelectorAll('.records-tab').forEach(btn => btn.classList.remove('active'));
+    const active = document.getElementById(tab === 'admin' ? 'record-tab-admin' : 'record-tab-claw');
+    if (active) active.classList.add('active');
+    renderRecordConversations();
+}
+
+function renderRecordConversations() {
+    const list = document.getElementById('recordsList');
+    const detail = document.getElementById('recordsChatPanel');
+    const conversations = cachedRecordConversations[currentRecordTab] || [];
+    if (conversations.length === 0) {
+        const label = currentRecordTab === 'admin' ? 'Web/Admin 与 OpenClaw' : 'OpenClaw 之间';
+        list.innerHTML = `<div class="empty-state" style="padding:40px;text-align:center">暂无${label}会话</div>`;
+        detail.innerHTML = '<div class="empty-state" style="padding:40px;text-align:center">选择左侧会话查看聊天记录</div>';
+        return;
+    }
+
+    const msgTypeLabels = {
+        text: '💬 文本',
+        chat: '💬 聊天',
+        task_delegate: '📋 任务',
+        knowledge_share: '📚 知识',
+        request_help: '🆘 帮助',
+        broadcast: '📢 广播'
+    };
+
+    list.innerHTML = conversations.map(c => {
+        const lm = c.last_message || {};
+        const title = c.type === 'admin'
+            ? `Web/Admin ↔ ${c.claw_name}`
+            : `${c.claw_a_name} ↔ ${c.claw_b_name}`;
+        const content = (lm.content || '').replace(/\n?#topic_id=\d+/, '').trim();
+        const sender = lm.from_claw_name || lm.sender_name || (lm.direction === 'to_claw' ? 'Web Admin' : 'OpenClaw');
+        const dataset = c.type === 'admin'
+            ? `data-type="admin" data-claw-id="${c.claw_id}"`
+            : `data-type="claw_pair" data-claw-a-id="${c.claw_a_id}" data-claw-b-id="${c.claw_b_id}"`;
+        return `
+        <div class="record-item" ${dataset} onclick="openConversationRecord(this)">
+            <div class="record-header">
+                <span class="record-sender">${escapeHtml(title)}</span>
+                <div class="record-meta">
+                    <span class="record-type">${c.message_count} 条</span>
+                </div>
+            </div>
+            <div class="record-content">${escapeHtml(content.substring(0, 90))}${content.length > 90 ? '...' : ''}</div>
+            <div class="record-footer">
+                <span class="record-time">${escapeHtml(sender)} · ${formatTime(lm.created_at)}</span>
+                <span class="record-target">${msgTypeLabels[lm.msg_type] || lm.msg_type || ''}</span>
+            </div>
+        </div>`;
+    }).join('');
+
+    const first = list.querySelector('.record-item');
+    if (first) openConversationRecord(first);
+}
+
+async function openConversationRecord(el) {
+    document.querySelectorAll('#recordsList .record-item').forEach(item => item.classList.remove('active'));
+    el.classList.add('active');
+
+    const params = new URLSearchParams({ type: el.dataset.type, limit: '200' });
+    let title;
+    if (el.dataset.type === 'admin') {
+        params.set('claw_id', el.dataset.clawId);
+        title = el.querySelector('.record-sender')?.textContent || 'Web/Admin 会话';
+    } else {
+        params.set('claw_a_id', el.dataset.clawAId);
+        params.set('claw_b_id', el.dataset.clawBId);
+        title = el.querySelector('.record-sender')?.textContent || 'OpenClaw 会话';
+    }
+
+    const panel = document.getElementById('recordsChatPanel');
+    panel.innerHTML = '<div class="loading"><span class="spinner"></span></div>';
+    try {
+        const res = await fetch(`${HUB_API}/claw-conversation-messages?${params.toString()}`);
+        const data = await res.json();
+        const messages = data.messages || [];
+        if (messages.length === 0) {
+            panel.innerHTML = '<div class="empty-state" style="padding:40px;text-align:center">暂无消息明细</div>';
+            return;
+        }
+        const isClawPair = el.dataset.type === 'claw_pair';
+        const rightClawId = parseInt(el.dataset.clawBId || '0', 10);
+        panel.innerHTML = `<div class="records-chat-title">${escapeHtml(title)}</div>` + messages.map(m => {
+            const senderId = parseInt(m.display_from_claw_id || m.from_claw_id || 0, 10);
+            const toClaw = isClawPair ? senderId === rightClawId : m.direction === 'to_claw';
+            const sender = isClawPair
+                ? (m.from_claw_name || m.sender_name || 'OpenClaw')
+                : (toClaw
+                    ? (m.from_claw_name || m.sender_name || 'Web Admin')
+                    : (m.from_claw_name || m.sender_name || m.claw_name || 'OpenClaw'));
+            const receiver = m.claw_name || 'OpenClaw';
+            const content = (m.content || '').replace(/\n?#topic_id=\d+/, '').trim();
+            const meta = isClawPair
+                ? `${sender} · ${formatTime(m.created_at)}`
+                : `${sender} → ${receiver} · ${formatTime(m.created_at)}`;
+            return `
+                <div class="record-chat-row ${toClaw ? 'to-claw' : 'from-claw'}">
+                    <div class="record-chat-bubble">
+                        <div class="record-chat-meta">${escapeHtml(meta)}</div>
+                        <div class="record-chat-content">${escapeHtml(content)}</div>
+                    </div>
+                </div>`;
+        }).join('');
+        panel.scrollTop = panel.scrollHeight;
+    } catch (e) {
+        console.error('加载会话明细失败:', e);
+        panel.innerHTML = '<div class="empty-state">加载失败</div>';
     }
 }
 
@@ -1776,6 +1980,7 @@ function openChat(clawId, clawName, clawStatus) {
     const inbox = document.querySelector('.cc-inbox');
     if (inbox) inbox.style.display = 'none';
     document.body.classList.add('chat-mode');
+    document.body.classList.remove('records-mode');
 
     // 高亮当前聊天对象
     document.querySelectorAll('.agent-item').forEach(el => el.classList.remove('chat-active'));
@@ -1948,3 +2153,6 @@ setInterval(() => {
 }, 15000);
 </script>
 {% endblock %}
+{% endblock %}
+
+

@@ -19,7 +19,7 @@ vs v1（hub_worker.py）
 
 运行
     必需环境变量：
-        HUB_URL=http://your-hub-host:8088
+        HUB_URL=http://clawteam.woa.com:18800
         CLAW_ID=5
         CLAW_TOKEN=xxxxx
     可选：
@@ -150,6 +150,21 @@ def call_llm(prompt):
     agent_name = get_cfg('agent_name', 'main')
     timeout = int(get_cfg('agent_timeout', 300))
     wecom_enabled = bool(get_cfg('wecom_enabled', False))
+    env = os.environ.copy()
+    if wecom_enabled:
+        wecom_key = get_cfg('wecom_bot_id', '')
+        wecom_secret = get_cfg('wecom_bot_secret', '')
+        if wecom_key:
+            env['WECOM_KEY'] = wecom_key
+            env['WECOM_BOT_ID'] = wecom_key
+        if wecom_secret:
+            env['WECOM_SECRET'] = wecom_secret
+        env['WECOM_ALLOW_ALL_USERS'] = 'true'
+        env['WECOM_DM_POLICY'] = 'open'
+        owner_wecom = get_cfg('owner_wecom_userid', '')
+        if owner_wecom:
+            env['WECOM_HOME_CHANNEL'] = owner_wecom
+            env['WECOM_HOME_CHANNEL_NAME'] = owner_wecom
 
     if agent_type == 'openclaw':
         cmd = [bin_path, 'agent', '--message', prompt,
@@ -168,6 +183,7 @@ def call_llm(prompt):
             cmd, capture_output=True,
             timeout=timeout + 30, text=True,
             encoding='utf-8', errors='replace',
+            env=env,
         )
         if proc.returncode != 0:
             return False, '', (
@@ -211,18 +227,49 @@ def handle_message(msg):
         # 2. 拼 prompt
         owner_wecom = get_cfg('owner_wecom_userid', '')
         claw_name = get_cfg('claw_name', '')
+        from_claw_id = msg.get('from_claw_id')
+
         prompt_lines = [
+            f"[Hub聊天处理任务]",
             f"你（{claw_name or 'OpenClaw'}）收到了一条来自 {sender} 的 {msg_type} 消息：",
             "",
-            content,
+            f"- 发件人: {sender}",
+            f"- 消息类型: {msg_type}",
+            f"- 当前消息 id: {msg_id}",
+            f"- 内容: {content}",
             "",
-            "请按你的 SOUL 流程处理。",
+            f"必须完成：",
+            f"1) 认真阅读消息内容，生成有价值的自然回复（禁止发送协议说明/状态模板）。",
+            f"2) 把回复写回当前消息的闭环接口：",
+            f"   PUT {HUB_URL}/api/openclaws/{CLAW_ID}/messages/{msg_id}/read",
+            f"   Headers: Authorization: Bearer {CLAW_TOKEN}",
+            f"   Body: {{\"reply\": \"<你的回复>\"}}",
         ]
-        if msg_type in ('task_delegate', 'request_help') and owner_wecom:
-            prompt_lines.append(
-                f"完成后请用 message(channel='wecom', to='{owner_wecom}', "
-                f"message='...') 通知我。"
-            )
+
+        # claw→claw 消息：额外要求回复发送方
+        if from_claw_id:
+            prompt_lines.extend([
+                f"3) 使用 send-to-claw 工具回复发送方（target_claw_ids=[{from_claw_id}]），"
+                f"   把你的回复也发送给对方，让对方能在聊天记录中看到你的回复。",
+            ])
+
+        # 通知 owner（企微）
+        if owner_wecom:
+            prompt_lines.extend([
+                f"",
+                f"另外，请通过企微通知我的 owner 有新消息到达：",
+                f"  调用 send_message(action='send', target='wecom', "
+                f"message='收到来自{sender}的消息，已回复。') "
+                f"发企微通知；wecom home channel 已配置为 {owner_wecom}。",
+            ])
+
+        prompt_lines.extend([
+            "",
+            "禁止事项：",
+            "- 禁止调用 send-to-claw 给自己发消息",
+            "- 禁止发送'重复消息处理/系统状态播报'模板",
+            "- 禁止发送协议说明（如'我已收到消息''根据通信协议'）",
+        ])
 
         ok, resp, err = call_llm('\n'.join(prompt_lines))
 
@@ -296,7 +343,7 @@ def todo_worker_loop():
 
 def _post_complete(todo_id, result_summary=''):
     """sidecar 直接回调 Hub 标记 todo 完成。"""
-    url = f"{HUB_URL}/api/openclaws/{CLAW_ID}/todos/{todo_id}/complete"
+    url = f"{HUB_URL}/api/v1/openclaws/{CLAW_ID}/todos/{todo_id}/complete"
     data = json.dumps({
         'notified': True,
         'result_summary': result_summary or '已处理',
@@ -367,8 +414,8 @@ def handle_todo(todo):
     ]
     if owner_wecom:
         prompt_lines.append(
-            f"完成后用 message(channel='wecom', to='{owner_wecom}', message='...') "
-            "发企微通知 owner。"
+            f"完成后请调用 send_message(action='send', target='wecom', "
+            f"message='...') 发企微通知 owner；wecom home channel 已配置为 {owner_wecom}。"
         )
     log(f'[todo] 派发给 LLM id={todo_id} title={title!r}')
     ok, resp, err = call_llm('\n'.join(prompt_lines))

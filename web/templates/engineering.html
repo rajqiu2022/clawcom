@@ -1452,7 +1452,7 @@ function _resourceWebUrl(resourceType, id) {
 }
 
 async function copyResourceLink(resourceType, id) {
-    const url = `${location.origin}${_resourceWebUrl(resourceType, id)}`;
+    const url = `${(window.HUB_PUBLIC_URL || location.origin).replace(/\/+$/, '')}${_resourceWebUrl(resourceType, id)}`;
     try {
         await navigator.clipboard.writeText(url);
         showToast(`已复制${RESOURCE_LABEL[resourceType]||''}链接：${url}`, 'success');

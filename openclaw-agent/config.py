@@ -60,7 +60,7 @@ _agent_md = _load_agent_md_config(_openclaw_dir)
 @dataclass
 class AgentConfig:
     """子agent配置"""
-    manager_url: str = _agent_md.get("hub_url") or os.getenv("MANAGER_URL", "http://your-hub-host:8088")
+    manager_url: str = _agent_md.get("hub_url") or os.getenv("MANAGER_URL", "http://clawteam.woa.com:18800")
     claw_id: int = _agent_md.get("claw_id") or int(os.getenv("CLAW_ID", "0"))
     api_token: str = _agent_md.get("api_token") or os.getenv("API_TOKEN", "")
     openclaw_dir: str = _openclaw_dir

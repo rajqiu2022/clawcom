@@ -456,7 +456,7 @@ stateDiagram-v2
 ```python
 import os, requests
 
-HUB = "http://your-hub-host:8088"
+HUB = "http://clawteam.woa.com:18800"
 H = {"Authorization": f"Bearer {os.environ['HUB_API_TOKEN']}",
      "Content-Type": "application/json"}
 

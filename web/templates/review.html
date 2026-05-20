@@ -55,6 +55,33 @@
         </div>
     </div>
 </div>
+
+<!-- 评审卡片"详情预览" modal：展示完整 markdown 内容 + 评审时间线 -->
+<div id="review-preview-modal" class="modal-overlay" style="display:none;align-items:flex-start;padding-top:48px"
+     onclick="if(event.target===this)closeReviewPreview()">
+    <div class="modal" style="max-width:900px;max-height:85vh;overflow:auto">
+        <div class="modal-header" style="position:sticky;top:0;background:var(--bg-card);z-index:2">
+            <h3 id="review-preview-title">详情</h3>
+            <button class="btn-close" onclick="closeReviewPreview()">&times;</button>
+        </div>
+        <div class="modal-body" style="padding-bottom:24px">
+            <div id="review-preview-meta" style="margin-bottom:12px;font-size:0.85rem;color:var(--text-muted)"></div>
+            <div id="review-preview-tags" style="margin-bottom:12px;display:flex;gap:6px;flex-wrap:wrap"></div>
+
+            <div style="margin:14px 0 6px;font-weight:600;color:var(--text-primary)">📄 内容</div>
+            <div id="review-preview-content"
+                 style="padding:12px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;font-size:0.88rem;white-space:pre-wrap;word-break:break-word;max-height:50vh;overflow:auto"></div>
+
+            <div style="margin:18px 0 6px;font-weight:600;color:var(--text-primary)">🕒 评审记录时间线</div>
+            <div id="review-preview-timeline"
+                 style="padding:8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px"></div>
+        </div>
+        <div class="modal-footer" style="display:flex;gap:8px;justify-content:flex-end;position:sticky;bottom:0;background:var(--bg-card);padding:10px 16px">
+            <div id="review-preview-actions" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+            <button class="btn btn-ghost btn-sm" onclick="closeReviewPreview()">关闭</button>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -138,6 +165,111 @@ function reviewAction(type, id, status, name) {
     openReviewModal(type, id, status, name);
 }
 
+// ===== 卡片"详情预览" modal =====
+// 拉资源完整内容 + 评审时间线，弹 modal 展示。点击卡片任意位置触发。
+async function openReviewPreview(type, id, name) {
+    const modal = document.getElementById('review-preview-modal');
+    document.getElementById('review-preview-title').textContent = `${type === '知识' ? '知识' : type} 详情：${name || ''}`;
+    document.getElementById('review-preview-meta').textContent = '加载中...';
+    document.getElementById('review-preview-tags').innerHTML = '';
+    document.getElementById('review-preview-content').textContent = '';
+    document.getElementById('review-preview-timeline').innerHTML = '<div style="padding:6px;color:var(--text-muted)">加载中...</div>';
+    document.getElementById('review-preview-actions').innerHTML = '';
+    modal.style.display = 'flex';
+
+    const rtype = _resourceTypeOf(type);
+    // 资源详情接口路径（按资源类型映射）
+    const detailUrl = {
+        skill: `/skills/${id}`,
+        rule:  `/rules/${id}`,
+        knowledge: `/knowledge/${id}`,
+    }[rtype];
+
+    try {
+        const [item, timelineRows] = await Promise.all([
+            detailUrl ? API.request('GET', detailUrl).catch(() => null) : Promise.resolve(null),
+            API.request('GET', `/review-comments?resource_type=${rtype}&resource_id=${id}`)
+                .catch(() => []),
+        ]);
+
+        if (item) {
+            const meta = [];
+            if (item.created_by || item.source_openclaw_name) {
+                meta.push(`提交人: ${item.created_by || item.source_openclaw_name}`);
+            }
+            if (item.review_status) meta.push(`状态: ${item.review_status}`);
+            else if (item.status) meta.push(`状态: ${item.status}`);
+            if (item.category) meta.push(`分类: ${item.category}`);
+            if (item.scope) meta.push(`范围: ${item.scope}`);
+            if (item.updated_at) meta.push(`最近修改: ${item.updated_at}`);
+            document.getElementById('review-preview-meta').textContent = meta.join(' · ') || '';
+
+            // 内容字段（不同资源类型字段名不一样）
+            const content = item.template_content
+                || item.content_template
+                || item.content
+                || item.description
+                || '(无正文内容)';
+            document.getElementById('review-preview-content').textContent = content;
+
+            // 把"打回原因"在最显眼位置 echo（修复 #131 的副作用：终于能看到 review_comment 了）
+            const reviewComment = item.review_comment || item.reviewer_notes || '';
+            if (reviewComment) {
+                const cm = document.createElement('div');
+                cm.style.cssText = 'margin:8px 0;padding:8px 12px;background:rgba(245,158,11,.12);border-left:3px solid #f59e0b;border-radius:4px;font-size:0.86rem';
+                cm.innerHTML = `<b>📝 最近一次审核意见：</b><br>${(reviewComment || '').replace(/\n/g, '<br>')}`;
+                document.getElementById('review-preview-content').before(cm);
+            }
+        } else {
+            document.getElementById('review-preview-meta').textContent = '(无法加载资源详情)';
+            document.getElementById('review-preview-content').textContent = '';
+        }
+
+        // 渲染评审时间线
+        const tlBox = document.getElementById('review-preview-timeline');
+        if (!timelineRows || timelineRows.length === 0) {
+            tlBox.innerHTML = '<div style="padding:6px;color:var(--text-muted);font-size:0.84rem">暂无评审记录（新接口生效后，所有审核动作都会在这里留痕）</div>';
+        } else {
+            tlBox.innerHTML = timelineRows.map(r => {
+                const ACTION_ICON = { submit: '📤', approve: '✅', revise: '↩️', reject: '❌', withdraw: '↺', comment: '💬' };
+                const ACTION_LABEL = { submit: '提交/重新提交', approve: '通过', revise: '打回整改', reject: '废弃', withdraw: '撤回', comment: '评论' };
+                const icon = ACTION_ICON[r.action] || '·';
+                const lbl  = ACTION_LABEL[r.action] || r.action;
+                const flow = (r.from_status || r.to_status)
+                    ? `<span style="color:var(--text-muted);font-size:0.78rem"> · ${r.from_status || '∅'} → ${r.to_status || '∅'}</span>`
+                    : '';
+                return `<div style="padding:8px 6px;border-bottom:1px dashed var(--border);font-size:0.86rem">
+                    <div><b>${icon} ${lbl}</b> <span style="color:var(--text-muted)">· ${r.author || 'system'} (${r.author_type || ''}) · ${r.created_at || ''}</span>${flow}</div>
+                    ${r.content ? `<div style="margin-top:4px;color:var(--text-secondary);white-space:pre-wrap">${r.content}</div>` : ''}
+                </div>`;
+            }).join('');
+        }
+
+        // 审核操作按钮（pending/revise 状态 + canReviewOperate 才显示）
+        if (canReviewOperate && item) {
+            const cur = item.review_status || item.status;
+            const safe = (name || '').replace(/'/g, "\\'");
+            const btns = [];
+            if (cur === 'pending' || cur === 'pending_review') {
+                btns.push(`<button class="btn btn-primary btn-sm" onclick="closeReviewPreview();openReviewModal('${type}', ${id}, 'approved', '${safe}')">✅ 通过</button>`);
+                btns.push(`<button class="btn btn-ghost btn-sm" style="color:var(--orange,#f59e0b)" onclick="closeReviewPreview();openReviewModal('${type}', ${id}, 'revise', '${safe}')">↩️ 打回</button>`);
+                btns.push(`<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="closeReviewPreview();openReviewModal('${type}', ${id}, 'rejected', '${safe}')">❌ 废弃</button>`);
+            } else if (cur === 'revise') {
+                btns.push(`<button class="btn btn-primary btn-sm" onclick="closeReviewPreview();openReviewModal('${type}', ${id}, 'approved', '${safe}')">✅ 通过</button>`);
+                btns.push(`<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="closeReviewPreview();openReviewModal('${type}', ${id}, 'rejected', '${safe}')">❌ 废弃</button>`);
+            }
+            document.getElementById('review-preview-actions').innerHTML = btns.join('');
+        }
+    } catch (err) {
+        console.error(err);
+        document.getElementById('review-preview-meta').textContent = '加载失败：' + err.message;
+    }
+}
+
+function closeReviewPreview() {
+    document.getElementById('review-preview-modal').style.display = 'none';
+}
+
 // ===== 卡片渲染 =====
 function _resourceTypeOf(type) {
     if (type === 'Skill') return 'skill';
@@ -149,20 +281,22 @@ function _resourceTypeOf(type) {
 function renderReviewCard(item, type) {
     const name = item.display_name || item.title || item.name || '';
     const safeName = (name || '').replace(/'/g, "\\'");
+    const rtype = _resourceTypeOf(type);
     const actionBtns = canReviewOperate ? `
-        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn btn-primary btn-sm" onclick="openReviewModal('${type}', ${item.id}, 'approved', '${safeName}')">✅ 通过</button>
-            <button class="btn btn-ghost btn-sm" style="color:var(--orange,#f59e0b)" onclick="openReviewModal('${type}', ${item.id}, 'revise', '${safeName}')">↩️ 打回整改</button>
-            <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="openReviewModal('${type}', ${item.id}, 'rejected', '${safeName}')">❌ 废弃</button>
-            <button class="btn btn-ghost btn-sm" onclick="toggleTimeline('${_resourceTypeOf(type)}', ${item.id}, this)">🕒 评审记录</button>
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap" onclick="event.stopPropagation()">
+            <button class="btn btn-primary btn-sm" onclick="event.stopPropagation();openReviewModal('${type}', ${item.id}, 'approved', '${safeName}')">✅ 通过</button>
+            <button class="btn btn-ghost btn-sm" style="color:var(--orange,#f59e0b)" onclick="event.stopPropagation();openReviewModal('${type}', ${item.id}, 'revise', '${safeName}')">↩️ 打回整改</button>
+            <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="event.stopPropagation();openReviewModal('${type}', ${item.id}, 'rejected', '${safeName}')">❌ 废弃</button>
+            <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();toggleTimeline('${rtype}', ${item.id}, this)">🕒 评审记录</button>
         </div>` : `
-        <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
-            <button class="btn btn-ghost btn-sm" onclick="toggleTimeline('${_resourceTypeOf(type)}', ${item.id}, this)">🕒 评审记录</button>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center" onclick="event.stopPropagation()">
+            <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();toggleTimeline('${rtype}', ${item.id}, this)">🕒 评审记录</button>
             <span style="font-size:0.82rem;color:var(--text-muted)">仅超级管理员可执行审核操作</span>
         </div>`;
     return `
-    <div class="skill-card" style="margin-bottom:12px" data-resource-card="${_resourceTypeOf(type)}-${item.id}">
-        <div class="skill-card-header">
+    <div class="skill-card" style="margin-bottom:12px;cursor:pointer" data-resource-card="${rtype}-${item.id}"
+         onclick="openReviewPreview('${type}', ${item.id}, '${safeName}')" title="点击查看详情">
+        <div class="skill-card-header" style="justify-content:flex-start;gap:8px;flex-wrap:wrap">
             <span class="skill-name">${name}</span>
             <span class="tag tag-yellow">待评审</span>
             <span class="tag tag-accent">${type}</span>
@@ -173,7 +307,7 @@ function renderReviewCard(item, type) {
             提交人: ${item.created_by || item.source_openclaw_name || 'system'} · 最近修改 ${item.updated_at ? timeAgo(item.updated_at) : '-'}
         </div>
         ${actionBtns}
-        <div class="review-timeline-box" style="display:none;margin-top:10px"></div>
+        <div class="review-timeline-box" style="display:none;margin-top:10px" onclick="event.stopPropagation()"></div>
     </div>`;
 }
 
@@ -189,11 +323,14 @@ function renderStatusCard(item, type, status) {
     const commentHtml = lastNote
         ? `<div style="margin-top:6px;font-size:0.82rem;color:var(--text-muted);padding:6px 8px;background:var(--bg-secondary);border-radius:6px">最近审核意见: ${lastNote}</div>`
         : '';
+    const safeName = (name || '').replace(/'/g, "\\'");
+    const rtype = _resourceTypeOf(type);
     const reviseBtn = (status === 'revise' && canReviewOperate)
-        ? `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="openReviewModal('${type}', ${item.id}, 'rejected', '${(name||'').replace(/'/g,"\\'")}')">❌ 废弃</button>` : '';
+        ? `<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="event.stopPropagation();openReviewModal('${type}', ${item.id}, 'rejected', '${safeName}')">❌ 废弃</button>` : '';
     return `
-    <div class="skill-card" style="margin-bottom:12px" data-resource-card="${_resourceTypeOf(type)}-${item.id}">
-        <div class="skill-card-header">
+    <div class="skill-card" style="margin-bottom:12px;cursor:pointer" data-resource-card="${rtype}-${item.id}"
+         onclick="openReviewPreview('${type}', ${item.id}, '${safeName}')" title="点击查看详情">
+        <div class="skill-card-header" style="justify-content:flex-start;gap:8px;flex-wrap:wrap">
             <span class="skill-name">${name}</span>
             ${statusTag}
             <span class="tag tag-accent">${type}</span>
@@ -204,11 +341,11 @@ function renderStatusCard(item, type, status) {
             提交人: ${item.created_by || item.source_openclaw_name || 'system'} · 最近修改 ${item.updated_at ? timeAgo(item.updated_at) : '-'}
         </div>
         ${commentHtml}
-        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn btn-ghost btn-sm" onclick="toggleTimeline('${_resourceTypeOf(type)}', ${item.id}, this)">🕒 评审记录</button>
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap" onclick="event.stopPropagation()">
+            <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();toggleTimeline('${rtype}', ${item.id}, this)">🕒 评审记录</button>
             ${reviseBtn}
         </div>
-        <div class="review-timeline-box" style="display:none;margin-top:10px"></div>
+        <div class="review-timeline-box" style="display:none;margin-top:10px" onclick="event.stopPropagation()"></div>
     </div>`;
 }
 

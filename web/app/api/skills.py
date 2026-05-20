@@ -1,4 +1,4 @@
-from flask import request, jsonify, session
+from flask import request, jsonify, session, current_app
 from datetime import datetime
 from app import db
 from app.models import Skill, OpenClawSkill, OpenClawInstance, Rule, User, _now
@@ -25,30 +25,8 @@ def _skill_market_status(skill):
 
 def _get_current_user():
     """获取当前用户（支持 Web session 和 OpenClaw Bearer Token）"""
-    uid = session.get('user_id')
-    if uid:
-        return User.query.get(uid)
-
-    auth = request.headers.get('Authorization', '')
-    if auth.startswith('Bearer '):
-        token = auth[7:]
-        for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
-            if claw.verify_token(token):
-                if claw.role == 'admin':
-                    is_global_claw = claw.project_id is None
-                    class _ClawAdminProxy:
-                        role = 'admin'
-                        username = claw.name
-                        managed_projects = [] if is_global_claw else ([claw.project_id] if claw.project_id else [])
-                        bound_claw_id = claw.id
-                        is_global = is_global_claw
-                    return _ClawAdminProxy()
-                # 非 admin 角色：返回 owner 用户（继承其权限），附带 claw_name 供 _can_edit 使用
-                owner = User.query.filter_by(username=claw.owner).first()
-                if owner:
-                    owner._claw_name = claw.name
-                    return owner
-    return None
+    from app.api.auth_utils import get_current_user
+    return get_current_user()
 
 
 def _user_project_ids(user):
@@ -79,14 +57,30 @@ def _skill_project_ids(skill):
 
 
 def _can_edit(user, resource):
-    """检查用户是否有权编辑资源（skill/rule）
-    super_admin 和 admin: 可以编辑一切（同等权限）
-    user: 只能编辑自己创建的（或通过 Token 认证的 OpenClaw 自己创建的）
+    """检查用户是否有权编辑资源（skill）
+
+    权限模型（修复 MEMORY #132）：
+      - super_admin / admin: 全权编辑（admin claw 如龙虾王作为审核人也属此列）
+      - 普通 user/test_manager 等: 只能编辑自己（或自己绑定 claw）创建的
+        + 项目 admin 可编辑其 managed_projects 范围内的资源
     """
     if not user:
         return False
-    if user.role == 'super_admin':
-        return True
+    # admin / super_admin 全权（文档承诺的"同等权限"）
+    if user.role in ('super_admin', 'admin'):
+        if user.role == 'super_admin':
+            return True
+        managed_projects = _user_project_ids(user)
+        # 全局 admin（managed_projects 为空集）→ 视同 super_admin
+        if not managed_projects:
+            return True
+        res_projects = _skill_project_ids(resource)
+        if res_projects and (managed_projects & res_projects):
+            return True
+        # 资源没有项目归属（global skill）→ 项目 admin 也可改
+        if not res_projects:
+            return True
+        # 否则继续走 created_by 兜底
     created_by = getattr(resource, 'created_by', None) or ''
     if created_by == user.username:
         return True
@@ -94,11 +88,6 @@ def _can_edit(user, resource):
     claw_name = getattr(user, '_claw_name', None)
     if claw_name and created_by == claw_name:
         return True
-    if user.role == 'admin':
-        managed_projects = _user_project_ids(user)
-        res_projects = _skill_project_ids(resource)
-        if managed_projects and res_projects and (managed_projects & res_projects):
-            return True
     return False
 from app.api import api_bp
 
@@ -444,13 +433,14 @@ def batch_import_evolved():
 @api_bp.route('/skills/<int:skill_id>/review', methods=['POST'])
 def review_skill(skill_id):
     """审核 Skill（通过/打回待修改/废弃）— admin/super_admin 可审核
-    
-    请求体：
+
+    请求体（v2 统一字段约定，详见 review_comments.parse_review_action）：
     {
-        "review_status": "approved" | "revise" | "rejected",
-        "review_comment": "审核意见（打回/废弃时填写）"
+        "action":  "approve" | "revise" | "reject",     // 推荐
+        "comment": "审核意见（revise/reject 时必填）"
     }
-    
+    兼容旧字段：review_status (approved/revise/rejected) + review_comment
+
     状态流转：
     - pending → approved（通过，可供搜索使用）
     - pending → revise（打回待修改，提交人需修改后重新提交）
@@ -458,17 +448,22 @@ def review_skill(skill_id):
     - revise → approved（待修改后重新提交，通过审核）
     - revise → rejected（废弃）
     """
+    from app.api.review_comments import (
+        add_review_comment, parse_review_action, STATUS_FROM_ACTION,
+    )
+
     user = _get_current_user()
     if not user or user.role not in ('super_admin', 'admin'):
         return jsonify({'error': '仅管理员可审核 Skill'}), 403
 
     skill = Skill.query.get_or_404(skill_id)
     data = request.get_json()
-    status = (data or {}).get('review_status', '')
-    comment = (data or {}).get('review_comment', '')
-    
-    if status not in ('approved', 'revise', 'rejected'):
-        return jsonify({'error': 'review_status 必须为 approved、revise 或 rejected'}), 400
+    action, comment, err = parse_review_action(data)
+    if err:
+        return jsonify({'error': err}), 400
+    status = STATUS_FROM_ACTION[action]
+    if action in ('revise', 'reject') and not comment:
+        return jsonify({'error': f'{action} 操作必须填写 comment（审核意见）'}), 400
 
     # 校验状态流转合法性
     if skill.review_status == 'approved' and status != 'approved':
@@ -478,10 +473,7 @@ def review_skill(skill_id):
 
     old_status = skill.review_status
     skill.review_status = status
-    if comment:
-        skill.review_comment = comment
-    elif status in ('revise', 'rejected'):
-        skill.review_comment = comment  # 可以为空但记录
+    skill.review_comment = comment  # 一律覆盖（comment 已通过 strip + 必填校验）
 
     # 审核通过时：将镜像内容应用到原内容
     if status == 'approved' and skill.mirror_content:
@@ -535,7 +527,7 @@ def review_skill(skill_id):
         skill.mirror_updated_at = None
     
     status_labels = {'approved': '通过', 'revise': '打回待修改', 'rejected': '废弃'}
-    action = status_labels.get(status, status)
+    action_label = status_labels.get(status, status)
 
     # 审核完成后，自动关闭龙虾王的相关审核待办
     from app.models import ClawTodo, ClawTodoLog
@@ -553,25 +545,45 @@ def review_skill(skill_id):
         ).first()
         if log and log.status == 'pending':
             log.status = 'approved' if status == 'approved' else 'rejected'
-            log.result_summary = f'Skill「{skill.display_name}」已{action}'
+            log.result_summary = f'Skill「{skill.display_name}」已{action_label}'
             from app.models import _now as _model_now
             log.completed_at = _model_now()
 
+    # 写一条评审时间线记录（修复 #131：之前从未写过，评审中心 timeline 永远空）
+    add_review_comment(
+        resource_type='skill',
+        resource_id=skill.id,
+        action=action,  # 'approve' / 'revise' / 'reject'
+        from_status=old_status or '',
+        to_status=status,
+        content=comment,
+        author=getattr(user, 'username', '') or 'system',
+        author_type='openclaw' if getattr(user, 'role', '') == 'admin' and hasattr(user, 'bound_claw_id') else 'user',
+        commit=False,
+    )
+
     db.session.commit()
 
-    notified_ids = _notify_admin_claws('Skill', f'审核{action}', skill.display_name,
+    notified_ids = _notify_admin_claws('Skill', f'审核{action_label}', skill.display_name,
                         f'{old_status} → {status}, 操作人: {user.username}' + (f'\n审核意见: {comment}' if comment else ''))
-    
+
     # 如果打回待修改，通知提交人
     if status == 'revise':
-        _notify_submitter_review_result(skill.created_by, 'Skill', skill.display_name, action, comment)
-    
+        _notify_submitter_review_result(skill.created_by, 'Skill', skill.display_name, action_label, comment)
+
     db.session.commit()
     from app.api.agent_client import notify_claw
     for cid in notified_ids:
         notify_claw(cid)
 
-    return jsonify({'message': f'Skill 已{action}', 'review_status': status, 'review_comment': comment})
+    return jsonify({
+        'message': f'Skill 已{action_label}',
+        'action': action,
+        'review_status': status,
+        'review_comment': comment,
+        # 兼容字段
+        'comment': comment,
+    })
 
 
 @api_bp.route('/skills/<int:skill_id>/history', methods=['GET'])
@@ -681,7 +693,34 @@ def update_skill(skill_id):
     if not isinstance(data, dict):
         return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     old_review_status = skill.review_status
-    is_super_admin = user and user.role == 'super_admin'
+    # admin role（含 admin claw）等同 super_admin：直接覆盖 + 跳过镜像
+    # 修复 MEMORY #132：admin 是审核人，自己改自己写镜像就死锁
+    # 修复 MEMORY #154：非 admin claw（如 module_owner）token 调用时，
+    #   _get_current_user 返回的是 owner user，owner.role 恰为 admin 时
+    #   会被误判成 super_admin，于是跳过镜像/审核流程，永远卡 revise。
+    #   判别：bound_claw_id 仅在 _ClawAdminProxy 上设置；通过非 admin claw
+    #   token 借用 owner 身份时，user 有 _claw_name 但没有 bound_claw_id。
+    _is_non_admin_claw = (
+        getattr(user, '_claw_name', None) is not None
+        and getattr(user, 'bound_claw_id', None) is None
+    )
+    is_super_admin = (
+        user and user.role in ('super_admin', 'admin')
+        and not _is_non_admin_claw
+    )
+
+    # review_status 不允许通过 PUT 修改（必须用 POST /review）。
+    # 但兼容"PUT 整对象"的常见场景（前端 GET 一份再 PUT 回去，自然携带 review_status）：
+    #   - 值与当前一致 → 静默 pop（视为无意附带）
+    #   - 值与当前不一致 → 真"偷改"，403 报错
+    # 修复 MEMORY #133。
+    if 'review_status' in data:
+        if data.get('review_status') != skill.review_status:
+            return jsonify({
+                'error': ('状态切换请改用 POST /skills/<id>/review；'
+                          '如仅想修改其他字段，请从 body 中移除 review_status'),
+            }), 403
+        data.pop('review_status', None)
 
     # 内容类字段（修改需要审核的）
     content_fields = ['display_name', 'description', 'trigger_phrase',
@@ -735,9 +774,6 @@ def update_skill(skill_id):
                             f'类型: {skill.category}, 作用域: {skill.scope}, 提交人: {modifier}\n请审核后通过或拒绝。')
         _create_review_todo_for_admin_claws('Skill', skill.display_name, modifier, skill.category, skill.scope)
 
-    # review_status 只能通过专用审核接口修改
-    if 'review_status' in data:
-        return jsonify({'error': '请使用 POST /skills/<id>/review 接口修改审核状态'}), 403
 
     # 记录最后修改人 + 来源（不论镜像/直改路径，只要有内容/元数据变更就写入）
     if data:
@@ -767,8 +803,7 @@ def delete_skill(skill_id):
     """软删除 Skill（隐藏，OpenClaw 搜索安装时不可见）
 
     权限规则：
-    - super_admin：可删除任何 Skill
-    - admin：只能删除自己项目创建的 Skill
+    - super_admin：admin 同级，均可删除任何 Skill
     - user：只能删除自己创建的 Skill
     """
     skill = Skill.query.get_or_404(skill_id)
@@ -783,12 +818,8 @@ def delete_skill(skill_id):
 
     # 权限检查
     can_delete = False
-    if user.role == 'super_admin':
+    if user.role in ('super_admin', 'admin'):
         can_delete = True
-    elif user.role == 'admin':
-        managed = _user_project_ids(user)
-        scoped = _skill_project_ids(skill)
-        can_delete = bool(managed and scoped and (managed & scoped))
     else:
         # 普通用户只能删除自己创建的
         created_by = skill.created_by or ''
@@ -923,6 +954,13 @@ def install_skill(claw_id):
     1. 写入 OpenClawSkill 关联记录
     2. 下发待办任务（interrupt 级别），OpenClaw 心跳时感知并拉取安装
     """
+    # 防止普通 Agent（Bearer）在处理 sync_config 时误调用本接口造成"自我重装"循环。
+    # Skill 分配/重分配是 Hub 管理动作，Web 登录管理员 或 admin 级别 Bearer Token 可发起。
+    if not session.get('user_id'):
+        user = _get_current_user()
+        if not user or getattr(user, 'role', '') not in ('super_admin', 'admin'):
+            return jsonify({'error': '仅支持 Hub 管理员（Web 登录或 admin 级 Bearer Token）分配 Skill'}), 403
+
     claw = OpenClawInstance.query.get_or_404(claw_id)
     data = request.get_json()
     skill_id = data.get('skill_id')
@@ -1007,12 +1045,13 @@ def install_skill(claw_id):
                     break
 
     # 拼描述：含 install.sh 的 skill 优先给一键命令
-    # 优先用环境变量 OPENCLAW_PUBLIC_URL；没配则用固定外网地址（不能用 request.host_url，
-    # 因为 curl 从内网 localhost 调时会拿到 localhost:8088，发给 claw 没法用）
+    # 历史教训 #126b：fallback 用 http://clawteam.woa.com:18800（claw 实际可达的真身入口，
+    # 不是 443 的 lampp/Apache 占位）。不能用 request.host_url（不可控）。
     import os as _os
     hub_url_hint = (
         _os.environ.get('OPENCLAW_PUBLIC_URL', '').rstrip('/')
-        or 'http://your-hub-host:8088'
+        or _os.environ.get('HUB_PUBLIC_URL', '').rstrip('/')
+        or 'https://clawteam.woa.com:18800'
     )
     action_label = '重新分配' if is_reinstall else '分配'
     desc_lines = [
@@ -1109,10 +1148,176 @@ def install_skill(claw_id):
     }), 201
 
 
+@api_bp.route('/skills/<int:skill_id>/assign', methods=['POST'])
+def batch_assign_skill(skill_id):
+    """批量分配 Skill 到多个 OpenClaw（一次性传 openclaw_ids 数组）
+
+    请求体：{ "openclaw_ids": [1, 2, 3] }
+    """
+    if not session.get('user_id'):
+        user = _get_current_user()
+        if not user or getattr(user, 'role', '') not in ('super_admin', 'admin'):
+            return jsonify({'error': '仅支持 Hub 管理员分配 Skill'}), 403
+
+    data = request.get_json() or {}
+    openclaw_ids = data.get('openclaw_ids', [])
+    if not openclaw_ids:
+        return jsonify({'error': 'openclaw_ids 为必填项'}), 400
+
+    skill = Skill.query.get_or_404(skill_id)
+    if skill.is_deleted:
+        return jsonify({'error': '此 Skill 已删除，无法安装'}), 403
+    if int(skill.id) in OFF_SHELF_SKILL_IDS:
+        return jsonify({'error': '此 Skill 已下架，无法安装'}), 403
+
+    user = _get_current_user()
+    if skill.review_status != 'approved':
+        if not user or user.role not in ('super_admin', 'admin'):
+            return jsonify({'error': '此 Skill 尚未通过审核，无法安装'}), 403
+
+    import os as _os
+    hub_url_hint = (
+        _os.environ.get('OPENCLAW_PUBLIC_URL', '').rstrip('/')
+        or _os.environ.get('HUB_PUBLIC_URL', '').rstrip('/')
+        or 'https://clawteam.woa.com:18800'
+    )
+
+    # 检测 install.sh
+    has_install_sh = False
+    install_sh_name = None
+    if skill.files:
+        for f in skill.files:
+            if isinstance(f, dict):
+                fname = f.get('name', '')
+                if fname.endswith('install.sh') or fname.endswith('setup.sh'):
+                    has_install_sh = True
+                    install_sh_name = fname
+                    break
+
+    from app.models import ClawTodo
+    from app.api.agent_client import notify_claw_todo
+    results = []
+    for claw_id in openclaw_ids:
+        try:
+            claw = OpenClawInstance.query.get(claw_id)
+            if not claw:
+                results.append({'claw_id': claw_id, 'success': False, 'message': f'OpenClaw #{claw_id} 不存在'})
+                continue
+
+            existing = OpenClawSkill.query.filter_by(
+                openclaw_id=claw_id, skill_id=skill_id
+            ).first()
+
+            is_reinstall = False
+            reinstall_reason = ''
+            if existing:
+                existing.enabled = True
+                is_reinstall = True
+                if (existing.installed_at and skill.updated_at
+                        and existing.installed_at < skill.updated_at):
+                    reinstall_reason = 'content_updated'
+                else:
+                    reinstall_reason = 'forced'
+                existing.installed_at = _now()
+                # 清除残留卸载待办
+                zombie_todos = (ClawTodo.query
+                                .filter(ClawTodo.openclaw_id == claw_id,
+                                        ClawTodo.verification_target == f'uninstall-skill:{skill.name}',
+                                        ClawTodo.enabled == True)
+                                .all())
+                for zt in zombie_todos:
+                    zt.enabled = False
+            else:
+                existing = OpenClawSkill(
+                    openclaw_id=claw_id, skill_id=skill_id,
+                    enabled=True, installed_at=_now()
+                )
+                db.session.add(existing)
+
+            action_label = '重新分配' if is_reinstall else '分配'
+            desc_lines = [
+                f'Hub 已{action_label} Skill「{skill.display_name}」(id={skill.id})，请{"重新拉取并覆盖" if is_reinstall else "拉取并安装"}到本地。',
+                '',
+            ]
+            if is_reinstall and reinstall_reason == 'content_updated':
+                desc_lines.extend([
+                    f'⚠️ 这是 **重新分配（内容已更新）**：本 Skill 在 Hub 端已修改，请全量覆盖。',
+                    '',
+                ])
+            elif is_reinstall:
+                desc_lines.extend([
+                    f'🔁 这是 **强制重新分配**：请重新拉取并全量覆盖。',
+                    '',
+                ])
+            if has_install_sh:
+                desc_lines.extend([
+                    f'⚡ 本 skill 含一键安装脚本 `{install_sh_name}`：',
+                    '```bash',
+                    f'curl -fsSL {hub_url_hint}/static/skills/{skill.name}/{install_sh_name} \\',
+                    f'  | CLAW_ID={claw_id} API_TOKEN=<你的 Hub API token> bash',
+                    '```',
+                    '',
+                ])
+            desc_lines.extend([
+                f'1. GET /api/v1/openclaws/{claw_id}/assigned-skills 获取最新 Skills 列表',
+                f'2. 找到 name="{skill.name}" 的 Skill',
+                f'3. GET /api/v1/skills/{skill.id}/files 获取文档包文件清单',
+                f'4. 逐个拉取文件写入 ~/.qclaw/skills/{skill.name}/',
+                f'5. 完成后上报 POST /todos/{{todo_id}}/complete',
+            ])
+
+            todo = ClawTodo(
+                openclaw_id=claw_id,
+                title=f'{"重新安装" if is_reinstall else "安装"} Skill：{skill.display_name}',
+                description='\n'.join(desc_lines),
+                schedule_type='once',
+                urgency_level='interrupt',
+                priority='P0',
+                task_category='routine',
+                verification_target=f'{"reinstall" if is_reinstall else "install"}-skill:{skill.name}',
+                enabled=True,
+                created_by='hub',
+            )
+            db.session.add(todo)
+            _notify_claw_sync(claw_id, action_label + ' Skill', skill.display_name)
+
+            results.append({
+                'claw_id': claw_id, 'success': True,
+                'message': f'已为 {claw.name} {action_label} {skill.display_name}',
+                'is_reinstall': is_reinstall,
+            })
+        except Exception as e:
+            results.append({'claw_id': claw_id, 'success': False, 'message': str(e)})
+
+    db.session.commit()
+
+    # 批量通知
+    for r in results:
+        if r['success']:
+            try:
+                notify_claw_todo(r['claw_id'])
+            except Exception:
+                pass
+
+    success_count = sum(1 for r in results if r['success'])
+    fail_count = len(results) - success_count
+    return jsonify({
+        'message': f'批量分配完成：{success_count} 个成功{f"，{fail_count} 个失败" if fail_count else ""}',
+        'results': results,
+        'success_count': success_count,
+        'fail_count': fail_count,
+    }), 200
+
+
 @api_bp.route('/openclaws/<int:claw_id>/skills/<int:skill_id>',
               methods=['DELETE'])
 def uninstall_skill(claw_id, skill_id):
     """移除 Skill"""
+    if not session.get('user_id'):
+        user = _get_current_user()
+        if not user or getattr(user, 'role', '') not in ('super_admin', 'admin'):
+            return jsonify({'error': '仅支持 Hub 管理员（Web 登录或 admin 级 Bearer Token）卸载 Skill'}), 403
+
     link = OpenClawSkill.query.filter_by(
         openclaw_id=claw_id, skill_id=skill_id
     ).first_or_404()
@@ -1298,7 +1503,7 @@ from flask import Response
 def get_skill_raw(skill_id):
     """获取 Skill 原始内容（Markdown），可通过链接直接拉取
 
-    用法：curl http://hub:8088/api/v1/skills/3/raw
+    用法：curl http://hub:18800/api/v1/skills/3/raw
     不需要登录，公开访问（方便 OpenClaw 拉取）
     """
     skill = Skill.query.get_or_404(skill_id)
@@ -1415,12 +1620,75 @@ def save_skill_file(skill_id, filename):
     db.session.flush()
     all_files = SkillFile.query.filter_by(skill_id=skill_id).all()
     skill.files = [{'name': f.filename, 'size': len(f.content or '')} for f in all_files]
+
+    # ---- 修复：非 admin 修改文件后，重新进入待审核 ----
+    # 之前 bug：claw 通过 PUT /skills/<id>/files/SKILL.md 改内容时，
+    # 这个接口完全没有 review_status 切换，于是 status 永远卡在 revise，
+    # 评审中心永远收不到"重新提交"。
+    # 现在与 update_skill 保持一致：非 admin 修改 → 自动切到 pending + 通知龙虾王。
+    # 同时修复 MEMORY #154：非 admin claw 借用 owner 身份时不能被误判成 admin
+    # （见 update_skill 处的同名判断）。
+    _is_non_admin_claw = (
+        getattr(user, '_claw_name', None) is not None
+        and getattr(user, 'bound_claw_id', None) is None
+    )
+    is_super_admin = (
+        user
+        and getattr(user, 'role', None) in ('super_admin', 'admin')
+        and not _is_non_admin_claw
+    )
+    old_status = skill.review_status
+    notified_ids = []
+    submitter = ''
+    if (not is_super_admin) and old_status != 'pending':
+        skill.review_status = 'pending'
+        skill.review_comment = None
+        skill.last_modified_at = _now()
+        submitter = (
+            getattr(user, '_claw_name', '')
+            or getattr(user, 'bound_claw_name', '')
+            or getattr(user, 'display_name', '')
+            or getattr(user, 'username', '')
+            or 'unknown'
+        )
+        skill.last_modified_by = submitter
+        skill.last_modified_source = 'openclaw' if getattr(user, '_claw_name', '') else 'web'
+
     db.session.commit()
+
+    # 切回 pending 才推送提醒——避免无变更场景反复打扰龙虾王
+    if (not is_super_admin) and old_status != 'pending':
+        try:
+            notified_ids = _notify_admin_claws(
+                'Skill', '待审核（修改后重新提交）', skill.display_name,
+                f'类型: {skill.category}, 作用域: {skill.scope}, '
+                f'提交人: {submitter}, 修改文件: {filename}\n请审核后通过或拒绝。')
+            _create_review_todo_for_admin_claws(
+                'Skill', skill.display_name, submitter,
+                skill.category, skill.scope)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            current_app.logger.warning(
+                f'通知龙虾王失败（skill {skill_id} {filename}）: {e}')
 
     # 同步磁盘缓存
     _sync_to_disk(skill, filename, content)
 
-    return jsonify({'message': f'{filename} 已保存', 'file': sf.to_dict()})
+    if notified_ids:
+        try:
+            from app.api.agent_client import notify_claw
+            for cid in notified_ids:
+                notify_claw(cid)
+        except Exception:
+            pass
+
+    resp = {'message': f'{filename} 已保存', 'file': sf.to_dict()}
+    if (not is_super_admin) and old_status != 'pending':
+        resp['review_status'] = 'pending'
+        resp['review_status_changed_from'] = old_status
+        resp['notice'] = '修改已提交，已重新进入待审核状态'
+    return jsonify(resp)
 
 
 @api_bp.route('/skills/<int:skill_id>/files/<path:filename>', methods=['DELETE'])

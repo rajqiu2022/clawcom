@@ -4,12 +4,16 @@
 支持 OpenClaw Token 认证操作
 """
 import json
+import re
 from datetime import datetime, date
 from flask import request, jsonify, session
 from sqlalchemy import func
 from app import db
-from app.models import (TestPlan, TestTask, TestTaskCase, TestIteration,
-                        Project, OpenClawInstance, TestCaseLibrary, TestCase)
+from app.models import (TestPlan, TestPlanReport, TestTask, TestTaskCase, TestIteration,
+                        TestTaskChain, TestTaskChainStep,
+                        TestTaskReport, TestTaskBugReport,
+                        Project, OpenClawInstance, TestCaseLibrary, TestCase, User,
+                        ClawTodo)
 from app.api import api_bp
 
 
@@ -26,6 +30,92 @@ def _can_edit_plan(user, plan):
     if user.role in ('super_admin', 'admin'):
         return True
     return plan.created_by == user.username
+
+
+def _resolve_assignee_claw_id(data):
+    """支持按 Claw ID 或 Claw 对应用户指派测试任务。
+    返回 claw_id 或 None（直接分配给人时由 assignee_username 处理）。
+    """
+    # 前端传 claw:ID 格式时，值已经是整数
+    claw_id = data.get('assignee_claw_id')
+    if claw_id is not None and claw_id != '' and claw_id != 0:
+        return int(claw_id)
+
+    # 如果明确指定了 assignee_username，说明直接分给人，不查 claw
+    if data.get('assignee_username'):
+        return None
+
+    owner = (data.get('assignee_owner') or '').strip()
+    if not owner:
+        return None
+
+    user = (User.query.filter_by(username=owner).first()
+            or User.query.filter_by(display_name=owner).first())
+    if user and user.bound_claw_id:
+        return user.bound_claw_id
+
+    claw = (OpenClawInstance.query
+            .filter(OpenClawInstance.status != 'deleted',
+                    OpenClawInstance.owner == owner)
+            .order_by(OpenClawInstance.id.asc())
+            .first())
+    return claw.id if claw else None
+
+
+def _resolve_assignee_username(data):
+    """解析直接分配给真人的用户名。"""
+    if data.get('assignee_username'):
+        return data['assignee_username'].strip()
+    # 如果没有指定 claw 也没有指定 username，但有 assignee_owner，
+    # 且找不到对应 claw，则视为直接分配给人
+    if not data.get('assignee_claw_id'):
+        owner = (data.get('assignee_owner') or '').strip()
+        if owner:
+            user = (User.query.filter_by(username=owner).first()
+                    or User.query.filter_by(display_name=owner).first())
+            if user and not user.bound_claw_id:
+                claw = (OpenClawInstance.query
+                        .filter(OpenClawInstance.status != 'deleted',
+                                OpenClawInstance.owner == owner)
+                        .first())
+                if not claw:
+                    return user.username
+    return ''
+
+
+def _create_test_task_notification(task, plan, action='assigned', message=''):
+    """Create a one-time notification todo for the agent when test task status changes.
+
+    This is the "event notification layer" of Plan B:
+    - Each status change creates a once/flexible todo as a notification
+    - Agent processes (acknowledges) it and marks complete
+    - Long-term visibility is handled by the test-tasks API, not todos
+    """
+    if not task.assignee_claw_id:
+        return
+
+    plan_name = plan.name if plan else '未知计划'
+    title = f'[测试任务] {task.name} - {action}'
+
+    desc = (f'{message}\n\n'
+            f'📋 所属计划：{plan_name}\n'
+            f'📌 任务优先级：{task.priority}\n'
+            f'📅 排期：{task.start_date or "未设置"} ~ {task.end_date or "未设置"}\n'
+            f'🔗 查看详情：GET /api/v1/test-plans/{task.plan_id}/tasks/{task.id}')
+
+    todo = ClawTodo(
+        openclaw_id=task.assignee_claw_id,
+        title=title,
+        description=desc,
+        schedule_type='once',
+        urgency_level='flexible',
+        priority=task.priority or 'P1',
+        task_category='test_task',
+        ref_task_id=task.id,
+        enabled=True,
+        created_by='system:testplan',
+    )
+    db.session.add(todo)
 
 
 # ==================== 测试迭代 CRUD ====================
@@ -359,6 +449,334 @@ def get_test_plan_stats(plan_id):
     })
 
 
+def _extract_report_title(content, plan_name=''):
+    """从报告内容提取标题（优先 markdown 一级标题）"""
+    text = (content or '').strip()
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith('# '):
+            return line[2:][:200]
+    if text:
+        return text[:40]
+    return f'{plan_name} 测试报告'.strip()
+
+
+@api_bp.route('/test-plans/<int:plan_id>/report', methods=['GET'])
+def get_test_plan_report(plan_id):
+    """获取测试计划报告（兼容旧接口，优先返回最新一份）"""
+    plan = TestPlan.query.get_or_404(plan_id)
+    latest = TestPlanReport.query.filter_by(plan_id=plan_id).order_by(
+        TestPlanReport.created_at.desc()
+    ).first()
+    if latest:
+        d = latest.to_dict()
+        return jsonify({
+            'plan_id': plan.id,
+            'plan_name': plan.name,
+            'content': d.get('content', ''),
+            'format': d.get('format', 'markdown'),
+            'updated_by': d.get('created_by', ''),
+            'updated_at': d.get('created_at'),
+            'has_report': True,
+        })
+    return jsonify({
+        'plan_id': plan.id,
+        'plan_name': plan.name,
+        'content': plan.report_content or '',
+        'format': plan.report_format or 'markdown',
+        'updated_by': plan.report_updated_by or '',
+        'updated_at': str(plan.report_updated_at) if plan.report_updated_at else None,
+        'has_report': bool(plan.report_content),
+    })
+
+
+@api_bp.route('/test-plans/<int:plan_id>/report', methods=['POST', 'PUT'])
+def save_test_plan_report(plan_id):
+    """保存测试计划报告。报告由 Agent/API 写入，Web 页面只查看。"""
+    plan = TestPlan.query.get_or_404(plan_id)
+    user = _get_current_user()
+    if not _can_edit_plan(user, plan):
+        return jsonify({'error': '无权更新该测试计划报告'}), 403
+
+    data = request.get_json()
+    if not data or not isinstance(data.get('content'), str):
+        return jsonify({'error': 'content 为必填字符串'}), 400
+
+    report_format = (data.get('format') or 'markdown').lower()
+    if report_format not in ('markdown', 'html'):
+        return jsonify({'error': 'format 仅支持 markdown/html'}), 400
+
+    author = (
+        getattr(user, 'username', '') or
+        getattr(user, 'name', '') or
+        getattr(user, '_claw_name', '') or
+        'agent'
+    )
+
+    plan.report_content = data['content']
+    plan.report_format = report_format
+    plan.report_updated_at = datetime.now()
+    plan.report_updated_by = author
+
+    # 同步写入多份报告表（保留历史）
+    report = TestPlanReport(
+        plan_id=plan.id,
+        title=(data.get('title') or _extract_report_title(data['content'], plan.name)),
+        content=data['content'],
+        format=report_format,
+        created_by=author,
+    )
+    db.session.add(report)
+    db.session.commit()
+    return jsonify({
+        'plan_id': plan.id,
+        'plan_name': plan.name,
+        'format': plan.report_format,
+        'updated_by': plan.report_updated_by,
+        'updated_at': str(plan.report_updated_at) if plan.report_updated_at else None,
+        'has_report': bool(plan.report_content),
+    })
+
+
+# ==================== 测试计划报告（多份）====================
+
+@api_bp.route('/test-plans/<int:plan_id>/reports', methods=['GET'])
+def list_test_plan_reports(plan_id):
+    """获取测试计划下的报告列表（兼容旧 report_content）"""
+    plan = TestPlan.query.get_or_404(plan_id)
+    reports = TestPlanReport.query.filter_by(plan_id=plan_id).order_by(
+        TestPlanReport.created_at.desc()
+    ).all()
+    
+    # 兼容旧数据：如果 TestPlanReport 表为空但有 report_content，自动迁移
+    if not reports and plan.report_content and plan.report_content.strip():
+        # 尝试从内容中提取标题（取第一行非空内容）
+        text = re.sub(r'#+\s+', '', plan.report_content)[:200]
+        text = text.strip().split('\n')[0] if text.strip() else ''
+        if not text or len(text) > 40:
+            text = f'{plan.name} 测试报告'
+        title = text[:40]
+        
+        migrated = TestPlanReport(
+            plan_id=plan.id,
+            title=title,
+            content=plan.report_content,
+            format=plan.report_format or 'markdown',
+            created_by=plan.report_updated_by or 'unknown',
+            created_at=plan.report_updated_at or datetime.now(),
+            updated_at=plan.report_updated_at or datetime.now(),
+        )
+        db.session.add(migrated)
+        db.session.commit()
+        reports = [migrated]
+    
+    return jsonify({
+        'items': [r.to_dict() for r in reports],
+        'total': len(reports),
+    })
+
+
+@api_bp.route('/test-plans/<int:plan_id>/reports', methods=['POST'])
+def create_test_plan_report(plan_id):
+    """创建测试计划报告"""
+    plan = TestPlan.query.get_or_404(plan_id)
+    user = _get_current_user()
+    if not _can_edit_plan(user, plan):
+        return jsonify({'error': '无权操作该测试计划'}), 403
+
+    data = request.get_json()
+    if not data or not data.get('title') or not isinstance(data.get('content'), str):
+        return jsonify({'error': 'title 和 content 为必填项'}), 400
+
+    report_format = (data.get('format') or 'markdown').lower()
+    if report_format not in ('markdown', 'html'):
+        return jsonify({'error': 'format 仅支持 markdown/html'}), 400
+
+    user_name = ''
+    if user:
+        user_name = getattr(user, 'username', '') or getattr(user, 'name', '') or ''
+
+    report = TestPlanReport(
+        plan_id=plan_id,
+        title=data['title'],
+        content=data['content'],
+        format=report_format,
+        created_by=user_name,
+    )
+    db.session.add(report)
+    db.session.commit()
+    return jsonify(report.to_dict()), 201
+
+
+@api_bp.route('/test-plans/<int:plan_id>/reports/<int:report_id>', methods=['GET'])
+def get_test_plan_report_detail(plan_id, report_id):
+    """获取单份报告详情"""
+    report = TestPlanReport.query.filter_by(id=report_id, plan_id=plan_id).first_or_404()
+    return jsonify(report.to_dict())
+
+
+@api_bp.route('/test-plans/<int:plan_id>/reports/<int:report_id>', methods=['DELETE'])
+def delete_test_plan_report(plan_id, report_id):
+    """删除测试计划报告"""
+    plan = TestPlan.query.get_or_404(plan_id)
+    user = _get_current_user()
+    if not _can_edit_plan(user, plan):
+        return jsonify({'error': '无权操作该测试计划'}), 403
+
+    report = TestPlanReport.query.filter_by(id=report_id, plan_id=plan_id).first()
+    if not report:
+        return jsonify({'error': '报告不存在'}), 404
+    db.session.delete(report)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+# ==================== 测试任务报告 ====================
+
+@api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/reports', methods=['GET'])
+def list_task_reports(plan_id, task_id):
+    """获取测试任务的报告列表"""
+    task = TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
+    reports = TestTaskReport.query.filter_by(task_id=task_id).order_by(
+        TestTaskReport.created_at.desc()
+    ).all()
+    return jsonify({'items': [r.to_dict() for r in reports], 'total': len(reports)})
+
+
+@api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/reports', methods=['POST'])
+def create_task_report(plan_id, task_id):
+    """创建测试任务报告"""
+    task = TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
+    plan = TestPlan.query.get_or_404(plan_id)
+    user = _get_current_user()
+    if not _can_edit_plan(user, plan):
+        return jsonify({'error': '无权操作该测试任务'}), 403
+
+    data = request.get_json()
+    if not data or not data.get('title') or not isinstance(data.get('content'), str):
+        return jsonify({'error': 'title 和 content 为必填项'}), 400
+
+    report_format = (data.get('format') or 'markdown').lower()
+    if report_format not in ('markdown', 'html'):
+        return jsonify({'error': 'format 仅支持 markdown/html'}), 400
+
+    user_name = ''
+    if user:
+        user_name = getattr(user, 'username', '') or getattr(user, 'name', '') or getattr(user, '_claw_name', '') or ''
+
+    report = TestTaskReport(
+        task_id=task_id,
+        title=data['title'],
+        content=data['content'],
+        format=report_format,
+        created_by=user_name,
+    )
+    db.session.add(report)
+    db.session.commit()
+    return jsonify(report.to_dict()), 201
+
+
+@api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/reports/<int:report_id>', methods=['GET'])
+def get_task_report_detail(plan_id, task_id, report_id):
+    """获取测试任务单份报告详情"""
+    report = TestTaskReport.query.filter_by(id=report_id, task_id=task_id).first_or_404()
+    return jsonify(report.to_dict())
+
+
+@api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/reports/<int:report_id>', methods=['DELETE'])
+def delete_task_report(plan_id, task_id, report_id):
+    """删除测试任务报告"""
+    plan = TestPlan.query.get_or_404(plan_id)
+    user = _get_current_user()
+    if not _can_edit_plan(user, plan):
+        return jsonify({'error': '无权操作'}), 403
+
+    report = TestTaskReport.query.filter_by(id=report_id, task_id=task_id).first()
+    if not report:
+        return jsonify({'error': '报告不存在'}), 404
+    db.session.delete(report)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+# ==================== 测试任务 Bug 上报 ====================
+
+@api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/bug-reports', methods=['GET'])
+def list_task_bug_reports(plan_id, task_id):
+    """获取测试任务的 Bug 上报列表"""
+    task = TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
+    reports = TestTaskBugReport.query.filter_by(task_id=task_id).order_by(
+        TestTaskBugReport.created_at.desc()
+    ).all()
+    # 计算汇总
+    total = sum(r.total_bugs for r in reports)
+    return jsonify({'items': [r.to_dict() for r in reports], 'total': len(reports), 'total_bugs': total})
+
+
+@api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/bug-reports', methods=['POST'])
+def create_task_bug_report(plan_id, task_id):
+    """上报测试任务 Bug 列表
+
+    请求体：
+    {
+        "total_bugs": 5,
+        "content": "## Bug列表\n1. xxx\n2. yyy",
+        "format": "markdown"
+    }
+    """
+    task = TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
+    plan = TestPlan.query.get_or_404(plan_id)
+    user = _get_current_user()
+    if not _can_edit_plan(user, plan):
+        return jsonify({'error': '无权操作该测试任务'}), 403
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': '请求体为空'}), 400
+
+    total_bugs = data.get('total_bugs', 0)
+    content = data.get('content', '')
+    report_format = (data.get('format') or 'markdown').lower()
+    if report_format not in ('markdown', 'html'):
+        return jsonify({'error': 'format 仅支持 markdown/html'}), 400
+
+    user_name = ''
+    if user:
+        user_name = getattr(user, 'username', '') or getattr(user, 'name', '') or getattr(user, '_claw_name', '') or ''
+
+    bug_report = TestTaskBugReport(
+        task_id=task_id,
+        total_bugs=total_bugs,
+        content=content,
+        format=report_format,
+        created_by=user_name,
+    )
+    db.session.add(bug_report)
+
+    # 同步更新 task.bug_count 为最新上报的 total_bugs
+    task.bug_count = total_bugs
+    _recalc_plan_stats(plan)
+
+    db.session.commit()
+    return jsonify(bug_report.to_dict()), 201
+
+
+@api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/bug-reports/<int:report_id>', methods=['DELETE'])
+def delete_task_bug_report(plan_id, task_id, report_id):
+    """删除 Bug 上报记录"""
+    plan = TestPlan.query.get_or_404(plan_id)
+    user = _get_current_user()
+    if not _can_edit_plan(user, plan):
+        return jsonify({'error': '无权操作'}), 403
+
+    report = TestTaskBugReport.query.filter_by(id=report_id, task_id=task_id).first()
+    if not report:
+        return jsonify({'error': '记录不存在'}), 404
+    db.session.delete(report)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
 def _recalc_plan_stats(plan):
     """重新计算计划的统计数字"""
     tasks = TestTask.query.filter_by(plan_id=plan.id).all()
@@ -380,6 +798,7 @@ def list_test_tasks(plan_id):
     task_type = request.args.get('task_type')
     status = request.args.get('status')
     assignee_claw_id = request.args.get('assignee_claw_id', type=int)
+    assignee_owner = request.args.get('assignee_owner') or request.args.get('assignee_username')
 
     if task_type:
         query = query.filter_by(task_type=task_type)
@@ -387,6 +806,17 @@ def list_test_tasks(plan_id):
         query = query.filter_by(status=status)
     if assignee_claw_id:
         query = query.filter_by(assignee_claw_id=assignee_claw_id)
+    elif assignee_owner:
+        claw_ids = [c.id for c in OpenClawInstance.query.filter(
+            OpenClawInstance.status != 'deleted',
+            OpenClawInstance.owner == assignee_owner
+        ).all()]
+        if not claw_ids:
+            user = (User.query.filter_by(username=assignee_owner).first()
+                    or User.query.filter_by(display_name=assignee_owner).first())
+            if user and user.bound_claw_id:
+                claw_ids = [user.bound_claw_id]
+        query = query.filter(TestTask.assignee_claw_id.in_(claw_ids or [-1]))
 
     tasks = query.order_by(TestTask.priority, TestTask.created_at).all()
     return jsonify([t.to_dict() for t in tasks])
@@ -425,17 +855,25 @@ def create_test_task(plan_id):
         name=data['name'],
         description=data.get('description', ''),
         task_type=data.get('task_type', 'functional'),
-        assignee_claw_id=data.get('assignee_claw_id'),
+        assignee_claw_id=_resolve_assignee_claw_id(data),
+        assignee_username=_resolve_assignee_username(data),
         start_date=start_date,
         end_date=end_date,
         priority=data.get('priority', 'P2'),
         library_id=data.get('library_id'),
         case_filter=data.get('case_filter'),
-        status=data.get('status', 'pending'),
+        status=data.get('status', 'assigned'),
         created_by=created_by,
     )
     db.session.add(task)
     db.session.flush()
+
+    # Create notification todo for the assigned agent
+    if task.assignee_claw_id:
+        _create_test_task_notification(
+            task, plan, action='assigned',
+            message=f'你被分配了新的测试任务「{task.name}」，当前状态为【新分配】，请等待环境就绪后开始执行。'
+        )
 
     # 如果关联了用例库，根据 case_filter 筛选用例导入到 task_cases
     if task.library_id:
@@ -495,12 +933,32 @@ def update_test_task(plan_id, task_id):
     task = TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
     data = request.get_json()
 
-    updatable_fields = ['name', 'description', 'task_type', 'assignee_claw_id',
+    updatable_fields = ['name', 'description', 'task_type',
                         'priority', 'library_id', 'status', 'progress',
                         'result_summary', 'bug_count']
+    old_status = task.status
     for field in updatable_fields:
         if field in data:
             setattr(task, field, data[field])
+    if any(k in data for k in ('assignee_claw_id', 'assignee_owner', 'assignee_username')):
+        task.assignee_claw_id = _resolve_assignee_claw_id(data)
+        task.assignee_username = _resolve_assignee_username(data)
+
+    # Notify agent on status change
+    new_status = data.get('status')
+    if new_status and new_status != old_status and task.assignee_claw_id:
+        plan = TestPlan.query.get(plan_id)
+        status_labels = {
+            'assigned': '新分配', 'pending': '待开始',
+            'in_progress': '进行中', 'completed': '已完成',
+            'blocked': '阻塞', 'skipped': '跳过'
+        }
+        label = status_labels.get(new_status, new_status)
+        if new_status == 'pending':
+            message = f'测试任务「{task.name}」已变为【待开始】，测试环境已就绪，请开始执行测试。'
+        else:
+            message = f'测试任务「{task.name}」状态已变更为【{label}】，请及时关注。'
+        _create_test_task_notification(task, plan, action=new_status, message=message)
 
     # 日期字段
     from datetime import date as date_type
@@ -584,9 +1042,25 @@ def list_task_cases(plan_id, task_id):
     task = TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
 
     status = request.args.get('status')
+    page = request.args.get('page', type=int)
+    page_size = request.args.get('page_size', type=int)
     query = TestTaskCase.query.filter_by(task_id=task_id)
     if status:
         query = query.filter_by(status=status)
+
+    query = query.order_by(TestTaskCase.id.asc())
+    if page or page_size:
+        page = max(page or 1, 1)
+        page_size = min(max(page_size or 50, 1), 200)
+        total = query.count()
+        cases = query.offset((page - 1) * page_size).limit(page_size).all()
+        return jsonify({
+            'items': [tc.to_dict() for tc in cases],
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'pages': (total + page_size - 1) // page_size if page_size else 0,
+        })
 
     cases = query.all()
     return jsonify([tc.to_dict() for tc in cases])
@@ -985,3 +1459,296 @@ def get_library_cases_filtered(library_id):
 
     cases = query.order_by(TestCase.priority, TestCase.case_id).all()
     return jsonify([c.to_dict() for c in cases])
+
+
+# ==================== 任务链 CRUD ====================
+
+@api_bp.route('/test-plans/<int:plan_id>/task-chains', methods=['GET'])
+def list_task_chains(plan_id):
+    """获取测试计划下的所有任务链"""
+    plan = TestPlan.query.get_or_404(plan_id)
+    chains = TestTaskChain.query.filter_by(plan_id=plan_id).order_by(
+        TestTaskChain.created_at.desc()).all()
+    return jsonify([c.to_dict(with_steps=True) for c in chains])
+
+
+@api_bp.route('/test-plans/<int:plan_id>/task-chains', methods=['POST'])
+def create_task_chain(plan_id):
+    """创建任务链
+
+    请求体：
+    {
+        "name": "商业化活动模块用例设计",
+        "description": "从代码分析到用例设计的完整流程",
+        "priority": "P1",
+        "steps": [
+            {
+                "name": "服务端代码分析",
+                "description": "分析商业化模块服务端代码",
+                "task_type": "other",
+                "assignee_claw_id": 3
+            },
+            {
+                "name": "客户端代码分析",
+                "description": "分析商业化模块客户端代码",
+                "task_type": "other",
+                "assignee_claw_id": 5
+            }
+        ]
+    }
+    """
+    plan = TestPlan.query.get_or_404(plan_id)
+    data = request.get_json()
+
+    if not data or not data.get('name'):
+        return jsonify({'error': 'name 为必填项'}), 400
+    if not data.get('steps') or len(data['steps']) < 2:
+        return jsonify({'error': '任务链至少需要 2 个步骤'}), 400
+
+    user = _get_current_user()
+    created_by = ''
+    if user:
+        created_by = getattr(user, 'username', '') or getattr(user, 'name', '')
+
+    chain = TestTaskChain(
+        plan_id=plan_id,
+        name=data['name'],
+        description=data.get('description', ''),
+        priority=data.get('priority', 'P1'),
+        total_steps=len(data['steps']),
+        status='draft',
+        created_by=created_by,
+    )
+    db.session.add(chain)
+    db.session.flush()
+
+    for idx, step_data in enumerate(data['steps'], 1):
+        step = TestTaskChainStep(
+            chain_id=chain.id,
+            step_order=idx,
+            name=step_data.get('name', f'步骤 {idx}'),
+            description=step_data.get('description', ''),
+            task_type=step_data.get('task_type', 'other'),
+            assignee_claw_id=_resolve_assignee_claw_id(step_data),
+            status='waiting',
+        )
+        db.session.add(step)
+
+    db.session.commit()
+    return jsonify(chain.to_dict(with_steps=True)), 201
+
+
+@api_bp.route('/test-plans/<int:plan_id>/task-chains/<int:chain_id>', methods=['GET'])
+def get_task_chain(plan_id, chain_id):
+    """获取任务链详情"""
+    chain = TestTaskChain.query.filter_by(plan_id=plan_id, id=chain_id).first_or_404()
+    return jsonify(chain.to_dict(with_steps=True))
+
+
+@api_bp.route('/test-plans/<int:plan_id>/task-chains/<int:chain_id>', methods=['PUT'])
+def update_task_chain(plan_id, chain_id):
+    """更新任务链基本信息"""
+    chain = TestTaskChain.query.filter_by(plan_id=plan_id, id=chain_id).first_or_404()
+    data = request.get_json()
+
+    for field in ('name', 'description', 'priority', 'status'):
+        if field in data:
+            setattr(chain, field, data[field])
+
+    db.session.commit()
+    return jsonify(chain.to_dict(with_steps=True))
+
+
+@api_bp.route('/test-plans/<int:plan_id>/task-chains/<int:chain_id>/conclusion', methods=['PUT', 'POST'])
+def save_task_chain_conclusion(plan_id, chain_id):
+    """保存任务链执行结论（支持 markdown/html 富文本）"""
+    chain = TestTaskChain.query.filter_by(plan_id=plan_id, id=chain_id).first_or_404()
+
+    user = _get_current_user()
+    can_edit = _can_edit_plan(user, chain.plan)
+    if not can_edit and user:
+        uname = getattr(user, 'username', '') or ''
+        claw_name = getattr(user, '_claw_name', '') or ''
+        assignees = TestTaskChainStep.query.filter_by(chain_id=chain_id).all()
+        can_edit = any(
+            ((s.assignee and s.assignee.owner == uname) or
+             (claw_name and s.assignee and s.assignee.name == claw_name))
+            for s in assignees
+        )
+    if not can_edit:
+        return jsonify({'error': '无权更新该任务链结论'}), 403
+
+    data = request.get_json() or {}
+    content = data.get('execution_conclusion')
+    if not isinstance(content, str):
+        return jsonify({'error': 'execution_conclusion 为必填字符串'}), 400
+
+    fmt = (data.get('conclusion_format') or 'markdown').lower()
+    if fmt not in ('markdown', 'html'):
+        return jsonify({'error': 'conclusion_format 仅支持 markdown/html'}), 400
+
+    chain.execution_conclusion = content
+    chain.conclusion_format = fmt
+    chain.conclusion_updated_at = datetime.now()
+    chain.conclusion_updated_by = (
+        getattr(user, 'username', '') or
+        getattr(user, 'name', '') or
+        getattr(user, '_claw_name', '') or
+        'agent'
+    )
+    db.session.commit()
+    return jsonify(chain.to_dict(with_steps=True))
+
+
+@api_bp.route('/test-plans/<int:plan_id>/task-chains/<int:chain_id>', methods=['DELETE'])
+def delete_task_chain(plan_id, chain_id):
+    """删除任务链"""
+    chain = TestTaskChain.query.filter_by(plan_id=plan_id, id=chain_id).first_or_404()
+    db.session.delete(chain)
+    db.session.commit()
+    return jsonify({'id': chain_id, 'deleted': True})
+
+
+@api_bp.route('/test-plans/<int:plan_id>/task-chains/<int:chain_id>/start', methods=['POST'])
+def start_task_chain(plan_id, chain_id):
+    """启动任务链：将状态改为 active，激活第一步"""
+    chain = TestTaskChain.query.filter_by(plan_id=plan_id, id=chain_id).first_or_404()
+
+    if chain.status not in ('draft', 'paused'):
+        return jsonify({'error': f'当前状态 {chain.status} 不允许启动'}), 400
+
+    first_step = TestTaskChainStep.query.filter_by(
+        chain_id=chain.id, step_order=1).first()
+    if not first_step:
+        return jsonify({'error': '任务链没有步骤'}), 400
+
+    chain.status = 'active'
+    chain.current_step = 1
+    first_step.status = 'pending'
+    first_step.started_at = datetime.now()
+
+    # Notify the first step's assignee
+    _notify_chain_step(chain, first_step, action='started')
+
+    db.session.commit()
+    return jsonify(chain.to_dict(with_steps=True))
+
+
+@api_bp.route('/test-plans/<int:plan_id>/task-chains/<int:chain_id>/steps/<int:step_id>/submit',
+              methods=['POST'])
+def submit_chain_step(plan_id, chain_id, step_id):
+    """提交步骤结果，自动推进到下一步
+
+    请求体：
+    {
+        "result_summary": "分析完成，发现3个关键模块...",
+        "output_data": {"key_modules": [...], "risk_points": [...]}
+    }
+    """
+    chain = TestTaskChain.query.filter_by(plan_id=plan_id, id=chain_id).first_or_404()
+    step = TestTaskChainStep.query.filter_by(id=step_id, chain_id=chain_id).first_or_404()
+
+    if step.status not in ('pending', 'in_progress'):
+        return jsonify({'error': f'步骤状态为 {step.status}，不允许提交'}), 400
+
+    data = request.get_json() or {}
+
+    # Mark current step as completed
+    step.status = 'completed'
+    step.result_summary = data.get('result_summary', '')
+    step.output_data = json.dumps(data['output_data'], ensure_ascii=False) if data.get('output_data') else None
+    step.completed_at = datetime.now()
+
+    # Auto-advance to next step
+    next_step = TestTaskChainStep.query.filter_by(
+        chain_id=chain_id, step_order=step.step_order + 1).first()
+
+    if next_step:
+        # Activate next step
+        next_step.status = 'pending'
+        next_step.started_at = datetime.now()
+        chain.current_step = next_step.step_order
+
+        # Notify next step's assignee with context from previous step
+        _notify_chain_step(chain, next_step, action='your_turn',
+                           prev_step=step)
+    else:
+        # All steps completed
+        chain.status = 'completed'
+        chain.completed_at = datetime.now()
+
+    db.session.commit()
+
+    return jsonify({
+        'chain': chain.to_dict(with_steps=True),
+        'completed_step': step.to_dict(),
+        'next_step': next_step.to_dict() if next_step else None,
+        'chain_completed': chain.status == 'completed',
+    })
+
+
+@api_bp.route('/test-plans/<int:plan_id>/task-chains/<int:chain_id>/steps/<int:step_id>',
+              methods=['PUT'])
+def update_chain_step(plan_id, chain_id, step_id):
+    """更新步骤状态（手动干预）"""
+    chain = TestTaskChain.query.filter_by(plan_id=plan_id, id=chain_id).first_or_404()
+    step = TestTaskChainStep.query.filter_by(id=step_id, chain_id=chain_id).first_or_404()
+    data = request.get_json() or {}
+
+    for field in ('name', 'description', 'task_type', 'status', 'result_summary'):
+        if field in data:
+            setattr(step, field, data[field])
+
+    if any(k in data for k in ('assignee_claw_id', 'assignee_owner', 'assignee_username')):
+        step.assignee_claw_id = _resolve_assignee_claw_id(data)
+
+    if data.get('status') == 'in_progress' and not step.started_at:
+        step.started_at = datetime.now()
+
+    db.session.commit()
+    return jsonify(step.to_dict())
+
+
+def _notify_chain_step(chain, step, action='your_turn', prev_step=None):
+    """Create a notification todo for the step's assignee"""
+    if not step.assignee_claw_id:
+        return
+
+    from app.api.agent_client import notify_claw_todo
+
+    if action == 'started':
+        title = f'[任务链] {chain.name} - 第{step.step_order}步开始'
+        message = (f'任务链「{chain.name}」已启动，你负责第 {step.step_order} 步：\n'
+                   f'📌 {step.name}\n\n'
+                   f'{step.description or "(无详细描述)"}\n\n'
+                   f'完成后请提交结果：POST /api/v1/test-plans/{chain.plan_id}'
+                   f'/task-chains/{chain.id}/steps/{step.id}/submit')
+    else:
+        prev_info = ''
+        if prev_step:
+            prev_owner = prev_step.assignee.owner if prev_step.assignee else '未知'
+            prev_info = (f'\n\n📋 上一步「{prev_step.name}」(by {prev_owner}) 已完成：\n'
+                         f'{prev_step.result_summary or "(无摘要)"}')
+        title = f'[任务链] {chain.name} - 轮到你了(第{step.step_order}/{chain.total_steps}步)'
+        message = (f'任务链「{chain.name}」前置步骤已完成，现在轮到你：\n'
+                   f'📌 第 {step.step_order} 步：{step.name}\n\n'
+                   f'{step.description or "(无详细描述)"}'
+                   f'{prev_info}\n\n'
+                   f'完成后请提交结果：POST /api/v1/test-plans/{chain.plan_id}'
+                   f'/task-chains/{chain.id}/steps/{step.id}/submit')
+
+    todo = ClawTodo(
+        openclaw_id=step.assignee_claw_id,
+        title=title,
+        description=message,
+        schedule_type='once',
+        urgency_level='flexible',
+        priority=chain.priority or 'P1',
+        task_category='test_task',
+        enabled=True,
+        created_by='system:task_chain',
+    )
+    db.session.add(todo)
+
+    # Notify SSE immediately
+    notify_claw_todo(step.assignee_claw_id)

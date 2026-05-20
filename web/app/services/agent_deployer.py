@@ -586,6 +586,7 @@ def _sidecar_unit_name(req: DeployRequest) -> str:
 
 def _render_sidecar_wrapper(req: DeployRequest) -> str:
     data = req.systemd_data_dir()
+    home = f"{data}/home"
     py = req.hermes_python or f"{req.systemd_install_dir()}/venv/bin/python"
     config_path = f"{data}/config.yaml" if req.systemd_split_layout() else f"{data}/config/config.yaml"
     env_path = f"{data}/.env" if req.systemd_split_layout() else f"{data}/config/.env"
@@ -607,8 +608,10 @@ def _render_sidecar_wrapper(req: DeployRequest) -> str:
         "fi\n"
         f"cd {shlex.quote(data)}\n"
         f"export HERMES_HOME={shlex.quote(data)}\n"
+        f"export HOME={shlex.quote(home)}\n"
         f"export HERMES_CONFIG_PATH={shlex.quote(config_path)}\n"
         "export HERMES_CODEX_STREAMING=false\n"
+        "mkdir -p \"$HOME/.hermes\" \"$HOME/.hermes/data\" \"$HOME/.hermes/sessions\"\n"
         f"if [ -r {shlex.quote(env_path)} ]; then\n"
         "  set -a\n"
         f"  . {shlex.quote(env_path)}\n"
@@ -634,6 +637,7 @@ def _render_sidecar_env(req: DeployRequest) -> str:
 
 def _render_sidecar_unit(req: DeployRequest) -> str:
     data = req.systemd_data_dir()
+    home = f"{data}/home"
     user = req.systemd_service_user()
     env_path = f"{data}/scripts/sidecar.env"
     script_path = f"{data}/scripts/sidecar_v2.py"
@@ -653,6 +657,7 @@ def _render_sidecar_unit(req: DeployRequest) -> str:
         f"User={user}\n"
         f"Group={AGENT_SERVICE_GROUP}\n"
         f"WorkingDirectory={data}\n"
+        f"Environment=\"HOME={home}\"\n"
         f"EnvironmentFile={env_path}\n"
         f"ExecStart=/usr/bin/python3 -u {script_path}\n"
         "Restart=always\n"
@@ -1135,7 +1140,18 @@ def _deploy_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) 
 
     # 5) Hub SSE sidecar v2：Hermes Gateway 只负责消息平台/cron，
     # Hub 通信中心的消息/待办需要 sidecar 消费 SSE 并调用 Hermes CLI。
-    if req.hub_url and req.claw_token:
+    # 历史教训：曾经写成 `if req.hub_url and req.claw_token`，当
+    # `system_config.deploy_default_hub_url` 漏配 / token 拿不到时，会静默跳过
+    # sidecar 但部署仍标记 success，导致 agent online 却收不到消息。
+    # 现在改为硬校验：缺一即 failed，不再静默跳过。
+    if not (req.hub_url and req.claw_token):
+        _flush('failed',
+               'Hub 代建 Hermes Agent 必须提供 hub_url 与 claw_token 才能部署 SSE sidecar，'
+               '当前两者至少有一项缺失（system_config 的 deploy_default_hub_url 是否配置？'
+               'OpenClaw.api_token 是否生成？）')
+        return
+
+    if True:
         sidecar_unit = _sidecar_unit_name(req)
         sidecar_unit_path = f"/etc/systemd/system/{sidecar_unit}"
         sidecar_script = f"{data}/scripts/sidecar_v2.py"

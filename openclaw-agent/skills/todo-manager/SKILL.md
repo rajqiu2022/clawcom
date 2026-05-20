@@ -19,7 +19,7 @@
 ## Hub 地址
 
 ```
-Hub API: http://your-hub-host:8088/api/v1
+Hub API: http://clawteam.woa.com:18800/api/v1
 认证: Authorization: Bearer {HUB_API_TOKEN}
 ```
 
@@ -654,7 +654,7 @@ Shell 批量审核示例：
 
 ```bash
 TOKEN="你的HUB_API_TOKEN"
-HUB="http://your-hub-host:8088/api/v1"
+HUB="http://clawteam.woa.com:18800/api/v1"
 
 # 1. 获取待审核列表
 SUBMITTED=$(curl -s -H "Authorization: Bearer $TOKEN" "$HUB/dashboard/stats" | \
@@ -670,7 +670,7 @@ echo "$SUBMITTED" | while IFS='|' read -r claw_id todo_id title; do
   echo "✅ 审核通过: [$claw_id] $title (todo=$todo_id)"
   curl -s -X POST -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
-    "$HUB/openclaws/$claw_id/todos/$todo_id/approve" -d '{}'
+    "$HUB/api/v1/openclaws/$claw_id/todos/$todo_id/approve" -d '{}'
 done
 ```
 

@@ -127,7 +127,7 @@ OpenClaw 在创建/修改用例时**必须确保**：
 ## Hub 地址
 
 ```
-Hub 地址: http://your-hub-host:8088
+Hub 地址: http://clawteam.woa.com:18800
 API 前缀: /api/v1
 ```
 

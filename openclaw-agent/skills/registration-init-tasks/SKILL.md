@@ -15,7 +15,7 @@
 ## Hub 地址
 
 ```
-Hub API: http://your-hub-host:8088/api/v1
+Hub API: http://clawteam.woa.com:18800/api/v1
 认证: Authorization: Bearer {HUB_API_TOKEN}
 ```
 
@@ -31,7 +31,7 @@ Hub API: http://your-hub-host:8088/api/v1
 
 ```markdown
 ---
-hub_url: http://your-hub-host:8088
+hub_url: http://clawteam.woa.com:18800
 claw_id: 5
 api_token: oc_tk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ---

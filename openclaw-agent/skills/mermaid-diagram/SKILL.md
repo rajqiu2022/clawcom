@@ -246,7 +246,7 @@ mindmap
 ```python
 import os, requests
 
-HUB = os.environ.get("OPENCLAW_HUB", "http://your-hub-host:8088")
+HUB = os.environ.get("OPENCLAW_HUB", "http://clawteam.woa.com:18800")
 H = {"Authorization": f"Bearer {os.environ['HUB_API_TOKEN']}",
      "Content-Type": "application/json"}
 

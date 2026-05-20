@@ -5,6 +5,7 @@ from flask_cors import CORS
 from config import config
 import logging
 import json
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -17,13 +18,33 @@ socketio = None
 
 def create_app(config_name=None):
     if config_name is None:
-        import os
         config_name = os.getenv('FLASK_ENV', 'default')
 
     app = Flask(__name__,
                 static_folder='../static',
                 template_folder='../templates')
     app.config.from_object(config[config_name])
+
+    # 关闭严格尾斜杠（修复 MEMORY #155）
+    # 默认 Flask 对路由 `/openclaws` 严格匹配，访问 `/openclaws/` 直接 404。
+    # 龙虾王 / OpenClaw SDK 调用 `GET /api/v1/openclaws/` 就吃这个 404，
+    # 误以为"权限/路径不对"。改为 False 后 `/foo` 和 `/foo/` 都能匹配，
+    # 也不会触发 301 重定向丢 Bearer header（避免 POST/PUT 因重定向变 GET）。
+    app.url_map.strict_slashes = False
+
+    # 反向代理识别（nginx → gunicorn）
+    # 外网域名 https://clawteam.woa.com 反代到内部 http://...:18800。
+    # 必须信任 X-Forwarded-Proto，否则 Flask 把请求当 http：
+    #   1) session cookie 在带 Secure 标记的环境下不会回写
+    #   2) url_for(_external=True) 会生成 http:// 链接
+    #   3) WOA SSO 回调 URL 也会被算成 http
+    try:
+        from werkzeug.middleware.proxy_fix import ProxyFix
+        app.wsgi_app = ProxyFix(
+            app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1
+        )
+    except Exception as _pf_err:
+        logger.warning('ProxyFix 初始化失败（继续运行）: %s', _pf_err)
 
     # 初始化扩展
     db.init_app(app)
@@ -38,6 +59,20 @@ def create_app(config_name=None):
     from app.views import views_bp
     app.register_blueprint(views_bp)
 
+    # 全局注入 hub_public_url 给所有模板使用。
+    # 历史教训 #126b/#127：前端不能信 location.origin（浏览器可能从 https://clawteam.woa.com
+    # 进，撞 lampp Apache 必 404；唯一对 claw 可达的真身入口是 http://clawteam.woa.com:18800）。
+    # 模板里用 {{ hub_public_url }} 拼"发给 claw / Agent 用的"URL，再也不能用 location.origin 了。
+    import os as _os_ctx
+    @app.context_processor
+    def _inject_hub_public_url():
+        return {
+            'hub_public_url': (
+                _os_ctx.environ.get('HUB_PUBLIC_URL')
+                or 'https://clawteam.woa.com:18800'
+            ).rstrip('/'),
+        }
+
     # HTML 页面强制不缓存（避免 base.html / 子模板缓存导致 inline JS 与版本号不一致）。
     # 静态资源 (.js/.css/.png 等) 不受影响，仍走带 ?v=xxx 的强缓存。
     @app.after_request
@@ -51,6 +86,28 @@ def create_app(config_name=None):
         except Exception:
             pass
         return resp
+
+    # 兜底 session rollback：如果请求处理过程中 DB 操作异常导致 session 脏状态，
+    # 这里确保清理，避免脏 session 泄漏到下一个请求（修复 #3 裸 commit 问题）。
+    # 注意：不调用 db.session.remove()，因为 SSE 长连接场景中 teardown 触发时
+    # streaming response 可能仍在使用 session 对象，remove 会导致
+    # InvalidRequestError: Instance is not persistent within this Session。
+    # scoped_session 本身在请求结束后（非 SSE）由 POOL_RECYCLE 和连接归还机制管理。
+    @app.teardown_appcontext
+    def _shutdown_session(exception=None):
+        if exception:
+            try:
+                db.session.rollback()
+            except Exception:
+                pass
+
+    # 全局 500 错误处理器：捕获未处理的 SQLAlchemy 异常，确保 rollback + 友好响应
+    @app.errorhandler(500)
+    def _handle_500(e):
+        db.session.rollback()
+        logger.exception('Unhandled 500 error: %s', e)
+        from flask import jsonify as _jf
+        return _jf({'error': '服务器内部错误，请稍后重试'}), 500
 
     # 注册 MCP 蓝图
     from app.api.mcp_protocol import mcp_bp
@@ -217,6 +274,8 @@ def create_app(config_name=None):
                         ('review_library_id', 'INTEGER DEFAULT NULL'),
                         ('review_module_paths', 'LONGTEXT DEFAULT NULL'),
                         ('review_knowledge_id', 'INTEGER DEFAULT NULL'),
+                        ('review_case_ids', 'LONGTEXT DEFAULT NULL'),
+                        ('review_status', "VARCHAR(20) DEFAULT 'reviewing'"),
                     ]:
                         try:
                             conn.execute(text(f'ALTER TABLE topics ADD COLUMN {col} {coltype}'))
@@ -233,6 +292,91 @@ def create_app(config_name=None):
                         conn.execute(text('ALTER TABLE topics ADD CONSTRAINT fk_topics_review_knowledge FOREIGN KEY (review_knowledge_id) REFERENCES knowledge_entries(id)'))
                     except Exception:
                         pass
+
+                    # 创建用例评审轮次表
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS case_review_rounds (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                topic_id INTEGER NOT NULL,
+                                round_number INTEGER DEFAULT 1,
+                                description TEXT,
+                                case_content LONGTEXT,
+                                status VARCHAR(20) DEFAULT 'pending',
+                                submitted_by VARCHAR(100) DEFAULT '',
+                                submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                                FOREIGN KEY (topic_id) REFERENCES topics(id),
+                                INDEX ix_crr_topic (topic_id),
+                                INDEX ix_crr_topic_round (topic_id, round_number)
+                            )
+                        """))
+                        logger.info('case_review_rounds 表已创建')
+                    except Exception as e:
+                        logger.info(f'case_review_rounds 表创建跳过: {e}')
+
+                    # 创建用例评审意见表
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS case_review_comments (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                round_id INTEGER NOT NULL,
+                                author_name VARCHAR(100) NOT NULL,
+                                author_claw_id INTEGER DEFAULT NULL,
+                                author_user_id INTEGER DEFAULT NULL,
+                                content TEXT NOT NULL,
+                                verdict VARCHAR(20) DEFAULT 'comment',
+                                score INTEGER DEFAULT NULL,
+                                is_edited TINYINT(1) DEFAULT 0,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                FOREIGN KEY (round_id) REFERENCES case_review_rounds(id),
+                                INDEX ix_crc_round (round_id)
+                            )
+                        """))
+                        logger.info('case_review_comments 表已创建')
+                    except Exception as e:
+                        logger.info(f'case_review_comments 表创建跳过: {e}')
+
+                    # 增量迁移：case_review_comments 新增 score/is_edited 列
+                    for col_def in [
+                        ("score", "INTEGER DEFAULT NULL"),
+                        ("is_edited", "TINYINT(1) DEFAULT 0"),
+                    ]:
+                        try:
+                            conn.execute(text(
+                                f"ALTER TABLE case_review_comments ADD COLUMN {col_def[0]} {col_def[1]}"
+                            ))
+                            logger.info(f'case_review_comments 新增列 {col_def[0]}')
+                        except Exception:
+                            pass  # 已存在则跳过
+
+                    # 增量迁移：topics 新增 review_summary 相关列
+                    for col_def in [
+                        ("review_summary", "TEXT DEFAULT NULL"),
+                        ("review_summary_by", "VARCHAR(100) DEFAULT NULL"),
+                        ("review_summary_at", "DATETIME DEFAULT NULL"),
+                    ]:
+                        try:
+                            conn.execute(text(
+                                f"ALTER TABLE topics ADD COLUMN {col_def[0]} {col_def[1]}"
+                            ))
+                            logger.info(f'topics 新增列 {col_def[0]}')
+                        except Exception:
+                            pass  # 已存在则跳过
+
+                    # 增量迁移：case_review_rounds 新增 is_deleted/deleted_at 列
+                    for col_def in [
+                        ("is_deleted", "TINYINT(1) DEFAULT 0"),
+                        ("deleted_at", "DATETIME DEFAULT NULL"),
+                    ]:
+                        try:
+                            conn.execute(text(
+                                f"ALTER TABLE case_review_rounds ADD COLUMN {col_def[0]} {col_def[1]}"
+                            ))
+                            logger.info(f'case_review_rounds 新增列 {col_def[0]}')
+                        except Exception:
+                            pass  # 已存在则跳过
 
                     # 创建测试计划相关表（如果不存在）
                     try:
@@ -379,6 +523,15 @@ def create_app(config_name=None):
                     except Exception:
                         pass
 
+                    # test_tasks 表迁移：添加 assignee_username 列（直接分配给真人）
+                    try:
+                        conn.execute(text(
+                            "ALTER TABLE test_tasks ADD COLUMN assignee_username VARCHAR(100) DEFAULT ''"
+                        ))
+                        logger.info('已添加 test_tasks.assignee_username 列')
+                    except Exception:
+                        pass
+
                     # test_task_chains 表迁移：任务链执行结论字段（支持富文本）
                     for col, coltype in [
                         ('execution_conclusion', 'LONGTEXT DEFAULT NULL'),
@@ -391,6 +544,44 @@ def create_app(config_name=None):
                             logger.info(f'已添加 test_task_chains.{col} 列')
                         except Exception:
                             pass
+
+                    # 测试任务报告表（与测试计划报告类似，每个任务可有多份报告）
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS test_task_reports (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                task_id INTEGER NOT NULL,
+                                title VARCHAR(200) NOT NULL,
+                                content LONGTEXT,
+                                format VARCHAR(20) DEFAULT 'markdown',
+                                created_by VARCHAR(100) DEFAULT '',
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                                FOREIGN KEY (task_id) REFERENCES test_tasks(id)
+                            )
+                        """))
+                        logger.info('test_task_reports 表已创建')
+                    except Exception as e:
+                        logger.info(f'test_task_reports 表创建跳过: {e}')
+
+                    # 测试任务Bug上报表
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS test_task_bug_reports (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                task_id INTEGER NOT NULL,
+                                total_bugs INTEGER DEFAULT 0,
+                                content LONGTEXT,
+                                format VARCHAR(20) DEFAULT 'markdown',
+                                created_by VARCHAR(100) DEFAULT '',
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                                FOREIGN KEY (task_id) REFERENCES test_tasks(id)
+                            )
+                        """))
+                        logger.info('test_task_bug_reports 表已创建')
+                    except Exception as e:
+                        logger.info(f'test_task_bug_reports 表创建跳过: {e}')
 
                     # ===== 三级架构迁移：test_iterations 表 + test_plans.iteration_id =====
                     try:
@@ -1105,6 +1296,20 @@ def create_app(config_name=None):
                     except Exception as e:
                         logger.info(f'claw_sidecar_configs 表创建跳过: {e}')
 
+                    # 4b) 历史环境补齐 claw_sidecar_configs 新增列（safe_name / llm）
+                    for col, coltype in [
+                        ('safe_name', "VARCHAR(50) DEFAULT ''"),
+                        ('llm_provider', "VARCHAR(50) DEFAULT 'venus'"),
+                        ('llm_model', "VARCHAR(100) DEFAULT 'venus'"),
+                    ]:
+                        try:
+                            conn.execute(text(
+                                f'ALTER TABLE claw_sidecar_configs ADD COLUMN {col} {coltype}'
+                            ))
+                            logger.info(f'已添加 claw_sidecar_configs.{col} 列')
+                        except Exception:
+                            pass
+
                     # 5a) claw_todo_logs 加 notified_at / notified_strategy（B+ 5分钟兜底用）
                     for col, coltype in [
                         ('notified_at', 'DATETIME DEFAULT NULL'),
@@ -1192,7 +1397,7 @@ def create_app(config_name=None):
                                 sha256 VARCHAR(64) DEFAULT '',
                                 uploaded_by VARCHAR(100) DEFAULT 'system',
                                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                                UNIQUE KEY uq_artf_tpl_path (template_id, relative_path),
+                                UNIQUE KEY uq_artf_tpl_path (template_id, relative_path(191)),
                                 INDEX ix_artf_template (template_id)
                             )
                         """))
@@ -1244,6 +1449,248 @@ def create_app(config_name=None):
                         logger.info('wecom_send_logs 表已创建')
                     except Exception as e:
                         logger.info(f'wecom_send_logs 表创建跳过: {e}')
+
+                    # ===== 见闻分享（KM/文章/行业洞察的轻量分享 + 评论） =====
+                    # 区别于知识库（结构化沉淀）/ 课题讨论（聚焦议题）：
+                    # 这里是「转发 + 个人见解 + 全员评论」，不强制评审、不强结构。
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS shared_articles (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                title VARCHAR(200) NOT NULL,
+                                summary VARCHAR(500) DEFAULT '',
+                                content LONGTEXT,
+                                source_url VARCHAR(500) DEFAULT '',
+                                source_name VARCHAR(120) DEFAULT '',
+                                category VARCHAR(30) DEFAULT 'other',
+                                tags LONGTEXT,
+                                sharer_type VARCHAR(10) DEFAULT 'user',
+                                sharer_user_id INTEGER DEFAULT NULL,
+                                sharer_claw_id INTEGER DEFAULT NULL,
+                                sharer_name VARCHAR(80) NOT NULL,
+                                view_count INTEGER DEFAULT 0,
+                                comment_count INTEGER DEFAULT 0,
+                                like_count INTEGER DEFAULT 0,
+                                is_deleted BOOLEAN DEFAULT 0,
+                                deleted_at DATETIME DEFAULT NULL,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                                FOREIGN KEY (sharer_user_id) REFERENCES users(id),
+                                FOREIGN KEY (sharer_claw_id) REFERENCES openclaw_instances(id),
+                                INDEX ix_shared_articles_category (category),
+                                INDEX ix_shared_articles_created (created_at),
+                                INDEX ix_shared_articles_sharer (sharer_type, sharer_user_id, sharer_claw_id)
+                            )
+                        """))
+                        logger.info('shared_articles 表已创建')
+                    except Exception as e:
+                        logger.info(f'shared_articles 表创建跳过: {e}')
+
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS shared_article_comments (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                article_id INTEGER NOT NULL,
+                                parent_id INTEGER DEFAULT NULL,
+                                content TEXT NOT NULL,
+                                commenter_type VARCHAR(10) DEFAULT 'user',
+                                commenter_user_id INTEGER DEFAULT NULL,
+                                commenter_claw_id INTEGER DEFAULT NULL,
+                                commenter_name VARCHAR(80) NOT NULL,
+                                status VARCHAR(20) DEFAULT 'active',
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                FOREIGN KEY (article_id) REFERENCES shared_articles(id),
+                                FOREIGN KEY (parent_id) REFERENCES shared_article_comments(id),
+                                FOREIGN KEY (commenter_user_id) REFERENCES users(id),
+                                FOREIGN KEY (commenter_claw_id) REFERENCES openclaw_instances(id),
+                                INDEX ix_shared_article_comments_article (article_id),
+                                INDEX ix_shared_article_comments_created (created_at)
+                            )
+                        """))
+                        logger.info('shared_article_comments 表已创建')
+                    except Exception as e:
+                        logger.info(f'shared_article_comments 表创建跳过: {e}')
+
+                    # ---------------- 全局测试报告中心（MEMORY #134）----------------
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS test_reports (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                title VARCHAR(200) NOT NULL,
+                                report_type VARCHAR(40) NOT NULL DEFAULT 'other_specialized',
+                                remark VARCHAR(500) DEFAULT '',
+                                project_id INTEGER NOT NULL,
+                                iteration_id INTEGER DEFAULT NULL,
+                                version_name VARCHAR(100) DEFAULT '',
+                                content LONGTEXT,
+                                format VARCHAR(20) DEFAULT 'markdown',
+                                risk_level VARCHAR(20) DEFAULT 'tbd',
+                                source_ref_type VARCHAR(40) DEFAULT 'manual',
+                                source_ref_id INTEGER DEFAULT NULL,
+                                status VARCHAR(20) DEFAULT 'draft',
+                                submitter_type VARCHAR(20) DEFAULT 'user',
+                                submitter_user_id INTEGER DEFAULT NULL,
+                                submitter_claw_id INTEGER DEFAULT NULL,
+                                submitter_name VARCHAR(120) DEFAULT '',
+                                is_shared TINYINT(1) DEFAULT 0,
+                                share_token VARCHAR(64) DEFAULT NULL UNIQUE,
+                                shared_at DATETIME DEFAULT NULL,
+                                is_deleted TINYINT(1) DEFAULT 0,
+                                deleted_at DATETIME DEFAULT NULL,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                FOREIGN KEY (project_id) REFERENCES projects(id),
+                                FOREIGN KEY (iteration_id) REFERENCES test_iterations(id),
+                                FOREIGN KEY (submitter_user_id) REFERENCES users(id),
+                                FOREIGN KEY (submitter_claw_id) REFERENCES openclaw_instances(id),
+                                INDEX ix_test_reports_proj_type (project_id, report_type),
+                                INDEX ix_test_reports_proj_iter (project_id, iteration_id),
+                                INDEX ix_test_reports_source (source_ref_type, source_ref_id),
+                                INDEX ix_test_reports_deleted (is_deleted)
+                            )
+                        """))
+                        logger.info('test_reports 表已创建')
+                    except Exception as e:
+                        logger.info(f'test_reports 表创建跳过: {e}')
+
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS test_report_attachments (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                report_id INTEGER NOT NULL,
+                                filename VARCHAR(255) NOT NULL,
+                                stored_name VARCHAR(255) NOT NULL,
+                                size_bytes BIGINT DEFAULT 0,
+                                content_type VARCHAR(120) DEFAULT 'application/octet-stream',
+                                uploaded_by VARCHAR(120) DEFAULT '',
+                                uploaded_by_user_id INTEGER DEFAULT NULL,
+                                uploaded_by_claw_id INTEGER DEFAULT NULL,
+                                is_deleted TINYINT(1) DEFAULT 0,
+                                uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                FOREIGN KEY (report_id) REFERENCES test_reports(id),
+                                INDEX ix_test_report_attachments_report (report_id)
+                            )
+                        """))
+                        logger.info('test_report_attachments 表已创建')
+                    except Exception as e:
+                        logger.info(f'test_report_attachments 表创建跳过: {e}')
+
+                    # 给旧表加 linked_test_report_id（反向追溯）。重复 ALTER 会报错，吞掉。
+                    for legacy_tbl in ('test_plan_reports', 'test_task_reports'):
+                        try:
+                            conn.execute(text(
+                                f'ALTER TABLE {legacy_tbl} '
+                                'ADD COLUMN linked_test_report_id INTEGER DEFAULT NULL'
+                            ))
+                            logger.info(f'{legacy_tbl}.linked_test_report_id 已添加')
+                        except Exception:
+                            pass  # 列已存在
+
+                    # test_reports.status 字段补丁（MEMORY #134.C v2 新增）
+                    try:
+                        conn.execute(text(
+                            "ALTER TABLE test_reports "
+                            "ADD COLUMN status VARCHAR(20) DEFAULT 'draft'"
+                        ))
+                        # 已经存在的报告默认视为 published（向后兼容旧记录）
+                        conn.execute(text(
+                            "UPDATE test_reports SET status='published' "
+                            "WHERE status='draft' OR status IS NULL"
+                        ))
+                        # 同时把 risk_level='tbd' 的展示标签改了，但 key 保持 tbd（前端取 label）
+                        logger.info('test_reports.status 列已添加，存量记录默认 published')
+                    except Exception:
+                        pass  # 列已存在
+
+                    # test_reports.is_hidden 字段补丁（隐藏报告：Web 列表不显示，分享链接仍有效）
+                    try:
+                        conn.execute(text(
+                            "ALTER TABLE test_reports "
+                            "ADD COLUMN is_hidden TINYINT(1) DEFAULT 0"
+                        ))
+                        logger.info('test_reports.is_hidden 列已添加')
+                    except Exception:
+                        pass  # 列已存在
+
+                    # 一次性历史数据回迁（仅在 test_reports 为空时执行，避免重复）
+                    try:
+                        existing = conn.execute(
+                            text('SELECT COUNT(*) FROM test_reports')
+                        ).scalar() or 0
+                        if existing == 0:
+                            # TestPlanReport -> TestReport
+                            conn.execute(text("""
+                                INSERT INTO test_reports
+                                    (title, report_type, remark, project_id,
+                                     iteration_id, version_name, content, format,
+                                     risk_level, status, source_ref_type, source_ref_id,
+                                     submitter_type, submitter_name,
+                                     created_at, updated_at)
+                                SELECT
+                                    tpr.title, 'feature_test', '',
+                                    COALESCE(tp.project_id,
+                                             (SELECT project_id FROM test_iterations
+                                              WHERE id = tp.iteration_id)),
+                                    tp.iteration_id,
+                                    COALESCE(tp.version_name, ''),
+                                    tpr.content, tpr.format, 'tbd', 'published',
+                                    'test_plan', tpr.plan_id,
+                                    'user', COALESCE(tpr.created_by, ''),
+                                    tpr.created_at, tpr.updated_at
+                                FROM test_plan_reports tpr
+                                JOIN test_plans tp ON tp.id = tpr.plan_id
+                                WHERE COALESCE(tp.project_id,
+                                               (SELECT project_id FROM test_iterations
+                                                WHERE id = tp.iteration_id)) IS NOT NULL
+                            """))
+                            # TestTaskReport -> TestReport
+                            conn.execute(text("""
+                                INSERT INTO test_reports
+                                    (title, report_type, remark, project_id,
+                                     iteration_id, version_name, content, format,
+                                     risk_level, status, source_ref_type, source_ref_id,
+                                     submitter_type, submitter_name,
+                                     created_at, updated_at)
+                                SELECT
+                                    ttr.title, 'feature_test', '',
+                                    COALESCE(tp.project_id,
+                                             (SELECT project_id FROM test_iterations
+                                              WHERE id = tp.iteration_id)),
+                                    tp.iteration_id,
+                                    COALESCE(tp.version_name, ''),
+                                    ttr.content, ttr.format, 'tbd', 'published',
+                                    'test_task', ttr.task_id,
+                                    'user', COALESCE(ttr.created_by, ''),
+                                    ttr.created_at, ttr.updated_at
+                                FROM test_task_reports ttr
+                                JOIN test_tasks tt ON tt.id = ttr.task_id
+                                JOIN test_plans tp ON tp.id = tt.plan_id
+                                WHERE COALESCE(tp.project_id,
+                                               (SELECT project_id FROM test_iterations
+                                                WHERE id = tp.iteration_id)) IS NOT NULL
+                            """))
+                            # 反向 link
+                            conn.execute(text("""
+                                UPDATE test_plan_reports tpr
+                                JOIN test_reports tr
+                                  ON tr.source_ref_type = 'test_plan'
+                                 AND tr.source_ref_id = tpr.plan_id
+                                 AND tr.title = tpr.title
+                                 AND tr.created_at = tpr.created_at
+                                SET tpr.linked_test_report_id = tr.id
+                            """))
+                            conn.execute(text("""
+                                UPDATE test_task_reports ttr
+                                JOIN test_reports tr
+                                  ON tr.source_ref_type = 'test_task'
+                                 AND tr.source_ref_id = ttr.task_id
+                                 AND tr.title = ttr.title
+                                 AND tr.created_at = ttr.created_at
+                                SET ttr.linked_test_report_id = tr.id
+                            """))
+                            logger.info('test_reports 历史数据已回迁')
+                    except Exception as e:
+                        logger.info(f'test_reports 回迁跳过: {e}')
 
             except Exception as e:
                 logger.warning(f'自动迁移检查异常: {e}')

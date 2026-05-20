@@ -33,6 +33,7 @@
   - 用户走 Web session
   - Agent 走 Authorization: Bearer <OpenClawInstance.api_token_plain>
 """
+import json
 from datetime import datetime, date
 from flask import request, jsonify, session
 from sqlalchemy import desc, func
@@ -46,7 +47,10 @@ from app.models import (
     OpenClawInstance,
     Project,
     RequirementChangeLog,
+    RequirementDomainCluster,
+    RequirementConsistencyIssue,
     RequirementEngineeringLink,
+    RequirementFunctionLink,
     RequirementItem,
     RequirementTestcaseLink,
     TapdBaseline,
@@ -124,19 +128,29 @@ def _strip_html(html):
     return text.strip()
 
 
+def _normalize_test_suggestions(v):
+    """统一把测试建议存成 JSON 字符串（写入 requirement_items.test_suggestions）。"""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return json.dumps(json.loads(s), ensure_ascii=False)
+        except Exception:
+            return json.dumps({'text': s}, ensure_ascii=False)
+    if isinstance(v, (list, dict)):
+        return json.dumps(v, ensure_ascii=False)
+    return json.dumps({'value': v}, ensure_ascii=False)
+
+
+
 def _current_claw():
     """从 Authorization Bearer 解出 OpenClaw 实例（agent 推送场景使用）。
     没有也不报错，返回 None（用户 Web 调用就走这条路径）。"""
-    auth = request.headers.get('Authorization', '')
-    if not auth.startswith('Bearer '):
-        return None
-    token = auth[7:]
-    if not token:
-        return None
-    for c in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
-        if c.verify_token(token):
-            return c
-    return None
+    from app.api.auth_utils import get_current_claw
+    return get_current_claw()
 
 
 # ==================== 字段比对（生成变更日志） ====================
@@ -203,24 +217,78 @@ def _diff_and_log(old_item, new_values, today):
     return modified, status_changed
 
 
-def _auto_link_engineering_changes(item):
-    """对一条 RequirementItem，扫描 EngineeringChangeItem.tapd_story_ids 包含其
-    tapd_story_id 的，自动建 RequirementEngineeringLink。
-    使用 ORM 加载后 Python 侧匹配（规模小，足够 MVP）。
+def _to_int(v):
+    try:
+        if v is None or v == '':
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+
+def _extract_symbol_names(symbols):
+    """统一解析 EngineeringChangeItem.symbol_names 到符号列表。
+
+    返回格式：
+    [
+      {'name': 'CreateOrder', 'start_line': 128, 'end_line': 196},
+      ...
+    ]
     """
+    if symbols is None:
+        return []
+    if isinstance(symbols, str):
+        import json
+        try:
+            symbols = json.loads(symbols)
+        except Exception:
+            name = symbols.strip()
+            return [{'name': name, 'start_line': None, 'end_line': None}] if name else []
+    if not isinstance(symbols, list):
+        return []
+
+    items = []
+    for s in symbols:
+        if isinstance(s, str):
+            name = s.strip()
+            if not name:
+                continue
+            items.append({'name': name, 'start_line': None, 'end_line': None})
+            continue
+
+        if isinstance(s, dict):
+            name = (s.get('name') or s.get('symbol') or s.get('function') or '').strip()
+            if not name:
+                continue
+            start_line = _to_int(s.get('start_line') or s.get('start') or s.get('line_start'))
+            end_line = _to_int(s.get('end_line') or s.get('end') or s.get('line_end'))
+            items.append({'name': name, 'start_line': start_line, 'end_line': end_line})
+
+    # 去重保序（名称+行号）
+    seen = set()
+    uniq = []
+    for it in items:
+        key = (it['name'], it['start_line'], it['end_line'])
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(it)
+    return uniq
+
+
+def _auto_link_engineering_changes(item):
+    """对一条 RequirementItem，按 tapd_story_id 自动创建函数/方法级关联。"""
     sid = str(item.tapd_story_id)
     if not sid:
         return 0
     created = 0
-    # 简单全表扫不可行，限定到本迭代相关的 batch -> change_item
-    # MVP：扫描全部含 tapd_story_ids 的 change_item（一般规模可控）
+
     candidates = EngineeringChangeItem.query.filter(
         EngineeringChangeItem.tapd_story_ids.isnot(None)
     ).all()
     for ch in candidates:
         ids = ch.tapd_story_ids or []
         if isinstance(ids, str):
-            # MariaDB LONGTEXT 直接读出 JSON 反序列化失败时的兜底
             import json
             try:
                 ids = json.loads(ids)
@@ -230,19 +298,46 @@ def _auto_link_engineering_changes(item):
             continue
         if sid not in [str(x) for x in ids]:
             continue
-        exists = RequirementEngineeringLink.query.filter_by(
-            requirement_item_id=item.id,
-            change_item_id=ch.id,
-        ).first()
-        if exists:
+
+        symbols = _extract_symbol_names(ch.symbol_names)
+        if not symbols:
+            # 无符号信息时不落文件级关联，避免回退到粗粒度
             continue
-        db.session.add(RequirementEngineeringLink(
-            requirement_item_id=item.id,
-            change_item_id=ch.id,
-            link_source='auto_tapd_id',
-            confidence=95,
-        ))
-        created += 1
+
+        for sym in symbols:
+            sym_name = sym.get('name')
+            sym_start = sym.get('start_line')
+            sym_end = sym.get('end_line')
+
+            exists = RequirementFunctionLink.query.filter_by(
+                requirement_item_id=item.id,
+                change_item_id=ch.id,
+                symbol_name=sym_name,
+            ).first()
+            if exists:
+                # 兼容历史：若此前没有行号，这次 AST 给了行号则补齐
+                changed = False
+                if exists.start_line is None and sym_start is not None:
+                    exists.start_line = sym_start
+                    changed = True
+                if exists.end_line is None and sym_end is not None:
+                    exists.end_line = sym_end
+                    changed = True
+                if changed:
+                    exists.link_source = 'auto_symbol'
+                continue
+
+            db.session.add(RequirementFunctionLink(
+                requirement_item_id=item.id,
+                change_item_id=ch.id,
+                file_path=ch.file_path or '',
+                symbol_name=sym_name,
+                start_line=sym_start,
+                end_line=sym_end,
+                link_source='auto_symbol',
+                confidence=95,
+            ))
+            created += 1
     return created
 
 
@@ -311,6 +406,9 @@ def push_iteration_snapshot(iteration_id):
             'tapd_baseline_id': s.get('baseline_id'),
             'acceptance_criteria': s.get('custom_field_eight') or s.get('acceptance_criteria'),
             'test_focus': s.get('test_focus') or s.get('custom_field_three'),
+            'test_suggestions': _normalize_test_suggestions(s.get('test_suggestions')),
+            'completeness': s.get('completeness') or '',
+            'completeness_desc': s.get('completeness_desc') or '',
             'test_result': s.get('test_result') or s.get('custom_field_six'),
             'need_test': s.get('custom_field_18') or s.get('need_test'),
             'review_progress': s.get('custom_field_19') or s.get('review_progress'),
@@ -334,6 +432,14 @@ def push_iteration_snapshot(iteration_id):
         except (TypeError, ValueError):
             new_values['remain'] = 0
         new_values['tech_risk'] = (s.get('tech_risk') or '')[:200]
+
+        # 实现状态（Agent 代码分析结果，可选）
+        if s.get('impl_status'):
+            allowed = ('not_impl', 'in_progress', 'implemented', 'unknown')
+            if s['impl_status'] in allowed:
+                new_values['impl_status'] = s['impl_status']
+        if 'impl_remark' in s:
+            new_values['impl_remark'] = str(s['impl_remark'] or '')[:500]
 
         new_values['tapd_created_at'] = _parse_dt(s.get('created'))
         new_values['tapd_modified_at'] = _parse_dt(s.get('modified'))
@@ -624,7 +730,7 @@ def push_field_map_cache():
 @api_bp.route('/requirements/iterations/<int:iteration_id>/items',
               methods=['GET'])
 def list_iteration_items(iteration_id):
-    """列出某迭代下所有需求"""
+    """列出某迭代下需求（支持分页）"""
     TestIteration.query.get_or_404(iteration_id)
     query = RequirementItem.query.filter_by(iteration_id=iteration_id)
 
@@ -640,6 +746,9 @@ def list_iteration_items(iteration_id):
     risk = request.args.get('risk_level')
     if risk:
         query = query.filter(RequirementItem.risk_level == risk)
+    impl_st = request.args.get('impl_status')
+    if impl_st:
+        query = query.filter(RequirementItem.impl_status == impl_st)
     keyword = request.args.get('q')
     if keyword:
         like = f'%{keyword}%'
@@ -649,14 +758,29 @@ def list_iteration_items(iteration_id):
             RequirementItem.owner.like(like),
         ))
 
+    page = request.args.get('page', default=1, type=int) or 1
+    page_size = request.args.get('page_size', default=20, type=int) or 20
+    if page < 1:
+        page = 1
+    if page_size <= 0:
+        page_size = 20
+    if page_size > 100:
+        page_size = 100
+
+    total = query.count()
+    offset = (page - 1) * page_size
     items = query.order_by(
         desc(RequirementItem.priority_num),
         desc(RequirementItem.tapd_modified_at),
-    ).all()
+    ).offset(offset).limit(page_size).all()
+    pages = (total + page_size - 1) // page_size if total > 0 else 1
 
     return jsonify({
         'iteration_id': iteration_id,
-        'total': len(items),
+        'total': total,
+        'page': page,
+        'page_size': page_size,
+        'pages': pages,
         'items': [it.to_dict() for it in items],
     })
 
@@ -760,23 +884,139 @@ def get_requirement_item(item_id):
     data['testcase_links'] = [l.to_dict() for l in
                               item.testcase_links.all()]
     data['engineering_links'] = [l.to_dict() for l in
-                                 item.engineering_links.all()]
+                                 item.function_links.all()]
     return jsonify(data)
+
+
+@api_bp.route('/requirements/items/<int:item_id>', methods=['DELETE'])
+def delete_requirement_item(item_id):
+    """删除单条需求记录及其关联的变更日志、用例关联、工程关联"""
+    item = RequirementItem.query.get_or_404(item_id)
+    title = item.title or item.tapd_story_id
+    iteration_id = item.iteration_id
+
+    # 删除关联数据
+    deleted_logs = RequirementChangeLog.query.filter_by(
+        requirement_item_id=item_id).delete(synchronize_session=False)
+    deleted_links = RequirementTestcaseLink.query.filter_by(
+        requirement_item_id=item_id).delete(synchronize_session=False)
+    deleted_eng = RequirementEngineeringLink.query.filter_by(
+        requirement_item_id=item_id).delete(synchronize_session=False)
+    deleted_func = RequirementFunctionLink.query.filter_by(
+        requirement_item_id=item_id).delete(synchronize_session=False)
+
+
+    db.session.delete(item)
+    db.session.commit()
+
+    log_action('delete', 'requirement_item', item_id, title,
+               operator=_operator(),
+               detail=f'iteration={iteration_id} logs={deleted_logs} '
+                      f'links={deleted_links} eng={deleted_eng} func={deleted_func}')
+
+    return jsonify({
+        'id': item_id,
+        'deleted_logs': deleted_logs,
+        'deleted_links': deleted_links,
+        'deleted_eng_links': deleted_eng,
+        'deleted_function_links': deleted_func,
+    })
+
+
+@api_bp.route('/requirements/items/<int:item_id>/impl-status', methods=['PATCH'])
+def update_item_impl_status(item_id):
+    """Agent 更新需求实现状态（基于工程代码分析结果）
+
+    JSON body:
+        impl_status: "not_impl" | "in_progress" | "implemented"
+        impl_remark: str (可选，如 "服务端已完成，客户端还没完成")
+    """
+    item = RequirementItem.query.get_or_404(item_id)
+    data = request.get_json(force=True) or {}
+
+    allowed_statuses = ('not_impl', 'in_progress', 'implemented', 'unknown')
+    new_status = data.get('impl_status')
+    if new_status and new_status not in allowed_statuses:
+        return jsonify({'error': f'impl_status 不合法，允许值: {allowed_statuses}'}), 400
+
+    if new_status:
+        item.impl_status = new_status
+    if 'impl_remark' in data:
+        item.impl_remark = str(data['impl_remark'] or '')[:500]
+
+    db.session.commit()
+    return jsonify(item.to_dict())
+
+
+@api_bp.route('/requirements/iterations/<int:iteration_id>/impl-status-batch',
+              methods=['PATCH'])
+def batch_update_impl_status(iteration_id):
+    """Agent 批量更新某迭代下多条需求的实现状态
+
+    JSON body:
+        items: [
+            {"tapd_story_id": "xxx", "impl_status": "implemented", "impl_remark": "..."},
+            ...
+        ]
+    """
+    data = request.get_json(force=True) or {}
+    items_data = data.get('items', [])
+    if not items_data:
+        return jsonify({'error': 'items 不能为空'}), 400
+
+    allowed_statuses = ('not_impl', 'in_progress', 'implemented', 'unknown')
+    updated = []
+    errors = []
+
+    for entry in items_data:
+        story_id = entry.get('tapd_story_id')
+        if not story_id:
+            errors.append({'entry': entry, 'error': '缺少 tapd_story_id'})
+            continue
+
+        item = RequirementItem.query.filter_by(
+            iteration_id=iteration_id, tapd_story_id=str(story_id)
+        ).first()
+        if not item:
+            errors.append({'tapd_story_id': story_id, 'error': '需求不存在'})
+            continue
+
+        new_status = entry.get('impl_status')
+        if new_status and new_status not in allowed_statuses:
+            errors.append({'tapd_story_id': story_id, 'error': f'状态不合法: {new_status}'})
+            continue
+
+        if new_status:
+            item.impl_status = new_status
+        if 'impl_remark' in entry:
+            item.impl_remark = str(entry['impl_remark'] or '')[:500]
+        updated.append(story_id)
+
+    if updated:
+        db.session.commit()
+
+    return jsonify({
+        'updated_count': len(updated),
+        'updated_stories': updated,
+        'errors': errors,
+    })
 
 
 @api_bp.route('/requirements/items/<int:item_id>/engineering-changes',
               methods=['GET'])
 def list_item_engineering_changes(item_id):
-    """看这个需求关联到哪些代码变更（含 EngineeringChangeItem 详情）"""
+    """看这个需求关联到哪些函数/方法级代码变更（含文件信息）"""
     item = RequirementItem.query.get_or_404(item_id)
-    links = item.engineering_links.all()
+    links = item.function_links.all()
     change_ids = [l.change_item_id for l in links]
     if not change_ids:
         return jsonify({'item_id': item_id, 'changes': []})
+
     changes = EngineeringChangeItem.query.filter(
         EngineeringChangeItem.id.in_(change_ids)
     ).all()
     chmap = {c.id: c.to_dict() for c in changes}
+
     return jsonify({
         'item_id': item_id,
         'changes': [{
@@ -1001,3 +1241,186 @@ def agent_mark_refresh_fail(req_id):
     req.error_message = (data.get('error_message') or '')[:5000]
     db.session.commit()
     return jsonify(req.to_dict())
+
+
+# ==================== 删除迭代数据 ====================
+
+@api_bp.route('/requirements/iterations/<int:iteration_id>/data',
+              methods=['DELETE'])
+def delete_iteration_data(iteration_id):
+    """删除某个迭代的所有需求分析数据（需求条目 + 变更日志 + 用例关联 + 工程关联），
+    允许用户重新上传快照。
+    """
+    iteration = TestIteration.query.get(iteration_id)
+    if not iteration:
+        return jsonify({'error': '迭代不存在'}), 404
+
+    # 获取该迭代下所有需求条目 ID
+    item_ids = [r[0] for r in db.session.query(RequirementItem.id).filter_by(
+        iteration_id=iteration_id).all()]
+
+    deleted_logs = 0
+    deleted_links = 0
+    deleted_eng_links = 0
+    deleted_func_links = 0
+
+    if item_ids:
+        # 删除变更日志
+        deleted_logs = RequirementChangeLog.query.filter(
+            RequirementChangeLog.requirement_item_id.in_(item_ids)
+        ).delete(synchronize_session=False)
+
+        # 删除用例关联
+        deleted_links = RequirementTestcaseLink.query.filter(
+            RequirementTestcaseLink.requirement_item_id.in_(item_ids)
+        ).delete(synchronize_session=False)
+
+        # 删除工程变更关联（旧表）
+        deleted_eng_links = RequirementEngineeringLink.query.filter(
+            RequirementEngineeringLink.requirement_item_id.in_(item_ids)
+        ).delete(synchronize_session=False)
+
+        # 删除函数级关联（新表）
+        deleted_func_links = RequirementFunctionLink.query.filter(
+            RequirementFunctionLink.requirement_item_id.in_(item_ids)
+        ).delete(synchronize_session=False)
+
+
+    # 删除需求条目
+    deleted_items = RequirementItem.query.filter_by(
+        iteration_id=iteration_id).delete(synchronize_session=False)
+
+    db.session.commit()
+
+    log_action('delete', 'iteration_data', iteration_id,
+               iteration.name,
+               operator=_operator(),
+               detail=f'items={deleted_items} logs={deleted_logs} '
+                      f'links={deleted_links} eng_links={deleted_eng_links} '
+                      f'func_links={deleted_func_links}')
+
+    return jsonify({
+        'iteration_id': iteration_id,
+        'deleted_items': deleted_items,
+        'deleted_logs': deleted_logs,
+        'deleted_links': deleted_links,
+        'deleted_eng_links': deleted_eng_links,
+        'deleted_function_links': deleted_func_links,
+    })
+
+
+# ==================== 需求分析图谱 API ====================
+
+@api_bp.route('/requirements/iterations/<int:iteration_id>/domain-clusters',
+           methods=['GET'])
+def get_domain_clusters(iteration_id):
+    """获取某个迭代的功能域聚类"""
+    clusters = RequirementDomainCluster.query.filter_by(
+        iteration_id=iteration_id).all()
+    return jsonify([c.to_dict() for c in clusters])
+
+
+@api_bp.route('/requirements/domain-clusters', methods=['POST'])
+def create_domain_cluster():
+    """Agent 推送功能域聚类"""
+    data = request.get_json(force=True, silent=True) or {}
+    iteration_id = data.get('iteration_id')
+    domain_name = data.get('domain_name')
+    if not iteration_id or not domain_name:
+        return jsonify({'error': 'iteration_id 和 domain_name 必填'}), 400
+
+    # 幂等：已存在则更新
+    existing = RequirementDomainCluster.query.filter_by(
+        iteration_id=iteration_id, domain_name=domain_name).first()
+    if existing:
+        existing.requirement_count = data.get('requirement_count', 0)
+        existing.avg_score = data.get('avg_score', 0.0)
+        existing.top_issues = data.get('top_issues', '[]')
+        db.session.commit()
+        return jsonify(existing.to_dict())
+
+    cluster = RequirementDomainCluster(
+        iteration_id=iteration_id,
+        domain_name=domain_name,
+        requirement_count=data.get('requirement_count', 0),
+        avg_score=data.get('avg_score', 0.0),
+        top_issues=data.get('top_issues', '[]'),
+    )
+    db.session.add(cluster)
+    db.session.commit()
+    return jsonify(cluster.to_dict()), 201
+
+
+@api_bp.route('/requirements/iterations/<int:iteration_id>/consistency-issues',
+           methods=['GET'])
+def get_consistency_issues(iteration_id):
+    """获取某个迭代的一致性问题"""
+    issues = RequirementConsistencyIssue.query.filter_by(
+        iteration_id=iteration_id).all()
+    return jsonify([i.to_dict() for i in issues])
+
+
+@api_bp.route('/requirements/consistency-issues', methods=['POST'])
+def create_consistency_issue():
+    """Agent 推送一致性问题"""
+    data = request.get_json(force=True, silent=True) or {}
+    iteration_id = data.get('iteration_id')
+    issue_type = data.get('issue_type')
+    if not iteration_id or not issue_type:
+        return jsonify({'error': 'iteration_id 和 issue_type 必填'}), 400
+
+    issue = RequirementConsistencyIssue(
+        iteration_id=iteration_id,
+        issue_type=issue_type,
+        severity=data.get('severity', '中'),
+        domain=data.get('domain', ''),
+        requirement_ids=data.get('requirement_ids', '[]'),
+        detail=data.get('detail', ''),
+        status=data.get('status', 'open'),
+    )
+    db.session.add(issue)
+    db.session.commit()
+    return jsonify(issue.to_dict()), 201
+
+
+@api_bp.route('/requirements/consistency-issues/<int:issue_id>',
+           methods=['PUT'])
+def update_consistency_issue(issue_id):
+    """更新一致性问题（标记已修复）"""
+    issue = RequirementConsistencyIssue.query.get_or_404(issue_id)
+    data = request.get_json(force=True, silent=True) or {}
+
+    if 'status' in data:
+        issue.status = data['status']
+        if data['status'] == 'closed' and not issue.resolved_at:
+            issue.resolved_at = _now()
+            issue.resolved_by = _operator()
+    if 'severity' in data:
+        issue.severity = data['severity']
+    if 'detail' in data:
+        issue.detail = data['detail']
+    if 'requirement_ids' in data:
+        issue.requirement_ids = data['requirement_ids']
+
+    db.session.commit()
+    return jsonify(issue.to_dict())
+
+
+@api_bp.route('/requirements/consistency-issues/<int:issue_id>',
+           methods=['DELETE'])
+def delete_consistency_issue(issue_id):
+    """删除一致性问题"""
+    issue = RequirementConsistencyIssue.query.get_or_404(issue_id)
+    db.session.delete(issue)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+@api_bp.route('/requirements/domain-clusters/<int:cluster_id>',
+           methods=['DELETE'])
+def delete_domain_cluster(cluster_id):
+    """删除功能域聚类"""
+    cluster = RequirementDomainCluster.query.get_or_404(cluster_id)
+    db.session.delete(cluster)
+    db.session.commit()
+    return jsonify({'message': '已删除'})

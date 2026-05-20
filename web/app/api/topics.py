@@ -520,6 +520,7 @@ def list_review_rounds(topic_id):
     if topic.board != 'case_review':
         return jsonify({'error': '非用例评审课题'}), 400
     rounds = CaseReviewRound.query.filter_by(topic_id=topic_id)\
+        .filter((CaseReviewRound.is_deleted == False) | (CaseReviewRound.is_deleted == None))\
         .order_by(CaseReviewRound.round_number).all()
     return jsonify([rd.to_dict() for rd in rounds])
 
@@ -600,6 +601,74 @@ def submit_review_round(topic_id):
                detail='提交第 %d 轮用例评审' % new_round)
 
     return jsonify(rd.to_dict()), 201
+
+
+@api_bp.route('/topics/<int:topic_id>/review-rounds/<int:round_id>',
+              methods=['DELETE'])
+def delete_review_round(topic_id, round_id):
+    """删除一轮评审
+
+    - pending/rejected 状态可删除
+    - 有评审意见：软删除（标记 is_deleted，数据保留）
+    - 无评审意见：物理删除
+    - 删除后自动重排剩余轮次序号
+    - 只有发起者或管理员可以操作
+    """
+    topic = Topic.query.get_or_404(topic_id)
+    if topic.board != 'case_review':
+        return jsonify({'error': '非用例评审课题'}), 400
+
+    caller = _get_caller_info()
+    if not caller:
+        return jsonify({'error': '未登录'}), 401
+
+    is_author = (caller.get('claw_id') and caller['claw_id'] == topic.author_claw_id) or \
+                (caller.get('user_id') and caller['user_id'] == topic.author_user_id)
+    if not is_author and not caller['is_admin']:
+        return jsonify({'error': '只有发起者或管理员可以删除轮次'}), 403
+
+    rd = CaseReviewRound.query.filter_by(
+        id=round_id, topic_id=topic_id).first()
+    if not rd:
+        return jsonify({'error': '轮次不存在'}), 404
+
+    if rd.status not in ('pending', 'rejected'):
+        return jsonify({'error': '只能删除 pending 或 rejected 状态的轮次（当前: %s）' % rd.status}), 400
+
+    deleted_round_number = rd.round_number
+    comment_count = CaseReviewComment.query.filter_by(round_id=rd.id).count()
+
+    if comment_count > 0:
+        # 有评审意见：软删除
+        from datetime import datetime
+        rd.is_deleted = True
+        rd.deleted_at = datetime.now()
+        action_detail = '软删除第 %d 轮评审（保留 %d 条评审意见）' % (deleted_round_number, comment_count)
+    else:
+        # 无评审意见：物理删除
+        db.session.delete(rd)
+        action_detail = '删除第 %d 轮评审' % deleted_round_number
+
+    db.session.flush()
+
+    # 重排剩余未删除轮次的序号
+    remaining_rounds = CaseReviewRound.query.filter_by(
+        topic_id=topic_id
+    ).filter(
+        (CaseReviewRound.is_deleted == False) | (CaseReviewRound.is_deleted == None)
+    ).order_by(CaseReviewRound.submitted_at, CaseReviewRound.id).all()
+
+    for idx, r in enumerate(remaining_rounds, 1):
+        if r.round_number != idx:
+            r.round_number = idx
+
+    db.session.commit()
+
+    log_action('delete_review_round', 'topic', topic.id, topic.title,
+               operator=caller['username'],
+               detail=action_detail)
+
+    return jsonify({'message': action_detail}), 200
 
 
 def _do_add_review_comment(topic, rd, override_data=None, caller=None):
@@ -766,6 +835,8 @@ def update_review_status(topic_id):
         # 关闭评审：根据最新轮次结果决定用例库状态
         latest_round = CaseReviewRound.query.filter_by(
             topic_id=topic.id
+        ).filter(
+            (CaseReviewRound.is_deleted == False) | (CaseReviewRound.is_deleted == None)
         ).order_by(CaseReviewRound.round_number.desc()).first()
         if latest_round and latest_round.status == 'approved':
             _sync_library_review_status(topic, 'approved')

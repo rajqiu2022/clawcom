@@ -14,31 +14,8 @@ from app.api import api_bp
 
 def _get_current_user():
     """获取当前用户（支持 Web session 和 OpenClaw Bearer Token）"""
-    uid = session.get('user_id')
-    if uid:
-        return User.query.get(uid)
-
-    # Bearer Token → 找到 claw 的 owner 用户
-    from flask import request
-    auth = request.headers.get('Authorization', '')
-    if auth.startswith('Bearer '):
-        token = auth[7:]
-        from app.models import OpenClawInstance
-        for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
-            if claw.verify_token(token):
-                # admin claw 继承 admin 权限（不等同 super_admin）
-                if claw.role == 'admin':
-                    class _ClawAdminProxy:
-                        role = 'admin'
-                        username = claw.name
-                        managed_projects = [claw.project_id] if claw.project_id else []
-                    return _ClawAdminProxy()
-                # 非 admin 角色：返回 owner 用户（继承其权限），附带 claw_name 供 _can_edit 使用
-                owner = User.query.filter_by(username=claw.owner).first()
-                if owner:
-                    owner._claw_name = claw.name
-                    return owner
-    return None
+    from app.api.auth_utils import get_current_user
+    return get_current_user()
 
 
 def _user_project_ids(user):
@@ -69,14 +46,32 @@ def _rule_project_ids(rule):
 
 
 def _can_edit(user, resource):
-    """检查用户是否有权编辑资源（skill/rule）
-    super_admin 和 admin: 可以编辑一切（同等权限）
-    user: 只能编辑自己创建的（或通过 Token 认证的 OpenClaw 自己创建的）
+    """检查用户是否有权编辑资源（rule）
+
+    权限模型（修复 MEMORY #132）：
+      - super_admin / admin: 全权编辑（admin claw 如龙虾王作为审核人也属此列）
+      - 普通 user/test_manager 等: 只能编辑自己（或自己绑定 claw）创建的
+        + 项目 admin 可编辑其 managed_projects 范围内的资源
     """
     if not user:
         return False
-    if user.role == 'super_admin':
-        return True
+    # admin / super_admin 全权（文档承诺的"同等权限"）
+    if user.role in ('super_admin', 'admin'):
+        # 项目级 admin claw 仍受 managed_projects 限制；全局 admin（project_id=None）放过
+        if user.role == 'super_admin':
+            return True
+        managed_projects = _user_project_ids(user)
+        # 全局 admin（managed_projects 为空集）→ 视同 super_admin
+        if not managed_projects:
+            return True
+        res_projects = _rule_project_ids(resource)
+        # 项目 admin 在管辖项目内放过；不属于其管辖项目的资源用 created_by 兜底
+        if res_projects and (managed_projects & res_projects):
+            return True
+        # 资源没有项目归属（global rule）→ 项目 admin 也可改
+        if not res_projects:
+            return True
+        # 否则进入 created_by 兜底
     created_by = getattr(resource, 'created_by', None) or ''
     if created_by == user.username:
         return True
@@ -84,11 +79,6 @@ def _can_edit(user, resource):
     claw_name = getattr(user, '_claw_name', None)
     if claw_name and created_by == claw_name:
         return True
-    if user.role == 'admin':
-        managed_projects = _user_project_ids(user)
-        res_projects = _rule_project_ids(resource)
-        if managed_projects and res_projects and (managed_projects & res_projects):
-            return True
     return False
 
 
@@ -235,25 +225,31 @@ def get_rule(rule_id):
 @api_bp.route('/rules/<int:rule_id>/review', methods=['POST'])
 def review_rule(rule_id):
     """审核 Rule（通过/打回待修改/废弃）— admin/super_admin 可审核
-    
-    请求体：
+
+    请求体（v2 统一字段约定，详见 review_comments.parse_review_action）：
     {
-        "review_status": "approved" | "revise" | "rejected",
-        "review_comment": "审核意见"
+        "action":  "approve" | "revise" | "reject",     // 推荐
+        "comment": "审核意见（revise/reject 时必填）"
     }
+    兼容旧字段：review_status (approved/revise/rejected) + review_comment
     """
     from app.api.skills import _get_current_user, _notify_admin_claws, _notify_submitter_review_result
+    from app.api.review_comments import (
+        add_review_comment, parse_review_action, STATUS_FROM_ACTION,
+    )
+
     user = _get_current_user()
     if not user or user.role not in ('super_admin', 'admin'):
         return jsonify({'error': '仅管理员可审核 Rule'}), 403
 
     rule = Rule.query.get_or_404(rule_id)
     data = request.get_json()
-    status = (data or {}).get('review_status', '')
-    comment = (data or {}).get('review_comment', '')
-    
-    if status not in ('approved', 'revise', 'rejected'):
-        return jsonify({'error': 'review_status 必须为 approved、revise 或 rejected'}), 400
+    action, comment, err = parse_review_action(data)
+    if err:
+        return jsonify({'error': err}), 400
+    status = STATUS_FROM_ACTION[action]
+    if action in ('revise', 'reject') and not comment:
+        return jsonify({'error': f'{action} 操作必须填写 comment（审核意见）'}), 400
 
     # 校验状态流转合法性
     if rule.review_status == 'approved' and status != 'approved':
@@ -263,10 +259,7 @@ def review_rule(rule_id):
 
     old_status = rule.review_status
     rule.review_status = status
-    if comment:
-        rule.review_comment = comment
-    elif status in ('revise', 'rejected'):
-        rule.review_comment = comment
+    rule.review_comment = comment  # 一律覆盖（comment 已通过 strip + 必填校验）
 
     # 审核通过时：将镜像内容应用到原内容
     if status == 'approved' and rule.mirror_content:
@@ -318,7 +311,7 @@ def review_rule(rule_id):
         rule.mirror_updated_at = None
     
     status_labels = {'approved': '通过', 'revise': '打回待修改', 'rejected': '废弃'}
-    action = status_labels.get(status, status)
+    action_label = status_labels.get(status, status)
 
     # 审核完成后，自动关闭龙虾王的相关审核待办
     from app.models import ClawTodo, ClawTodoLog
@@ -336,24 +329,43 @@ def review_rule(rule_id):
         ).first()
         if log and log.status == 'pending':
             log.status = 'approved' if status == 'approved' else 'rejected'
-            log.result_summary = f'Rule「{rule.display_name}」已{action}'
+            log.result_summary = f'Rule「{rule.display_name}」已{action_label}'
             from app.models import _now as _model_now
             log.completed_at = _model_now()
 
+    # 写一条评审时间线记录（修复 #131）
+    add_review_comment(
+        resource_type='rule',
+        resource_id=rule.id,
+        action=action,
+        from_status=old_status or '',
+        to_status=status,
+        content=comment,
+        author=getattr(user, 'username', '') or 'system',
+        author_type='openclaw' if getattr(user, 'role', '') == 'admin' and hasattr(user, 'bound_claw_id') else 'user',
+        commit=False,
+    )
+
     db.session.commit()
 
-    notified_ids = _notify_admin_claws('Rule', f'审核{action}', rule.display_name,
+    notified_ids = _notify_admin_claws('Rule', f'审核{action_label}', rule.display_name,
                         f'{old_status} → {status}, 操作人: {user.username}' + (f'\n审核意见: {comment}' if comment else ''))
-    
+
     if status == 'revise':
-        _notify_submitter_review_result(rule.created_by, 'Rule', rule.display_name, action, comment)
-    
+        _notify_submitter_review_result(rule.created_by, 'Rule', rule.display_name, action_label, comment)
+
     db.session.commit()
     from app.api.agent_client import notify_claw
     for cid in notified_ids:
         notify_claw(cid)
 
-    return jsonify({'message': f'Rule 已{action}', 'review_status': status, 'review_comment': comment})
+    return jsonify({
+        'message': f'Rule 已{action_label}',
+        'action': action,
+        'review_status': status,
+        'review_comment': comment,
+        'comment': comment,
+    })
 
 
 @api_bp.route('/rules/<int:rule_id>', methods=['PUT'])
@@ -377,7 +389,23 @@ def update_rule(rule_id):
     if not isinstance(data, dict):
         return jsonify({'error': '请求体必须是 JSON 对象'}), 400
     old_review_status = rule.review_status
-    is_super_admin = user and user.role == 'super_admin'
+    # admin role（含 admin claw 如龙虾王）等同 super_admin：直接覆盖原内容，
+    # 跳过镜像 + 跳过状态重置（修复 MEMORY #132：admin 是审核人，自己改自己写
+    # 镜像就死锁了）
+    is_super_admin = user and user.role in ('super_admin', 'admin')
+
+    # review_status 不允许通过 PUT 修改（必须用 POST /review）。
+    # 但兼容"PUT 整对象"的常见场景（前端 GET 一份再 PUT 回去，自然携带 review_status）：
+    #   - 值与当前一致 → 静默 pop（视为无意附带）
+    #   - 值与当前不一致 → 真"偷改"，403 报错
+    # 修复 MEMORY #133：之前是"含此字段就 403"，admin/super_admin 也被卡。
+    if 'review_status' in data:
+        if data.get('review_status') != rule.review_status:
+            return jsonify({
+                'error': ('状态切换请改用 POST /rules/<id>/review；'
+                          '如仅想修改其他字段，请从 body 中移除 review_status'),
+            }), 403
+        data.pop('review_status', None)
 
     # 内容类字段
     content_fields = [
@@ -431,10 +459,6 @@ def update_rule(rule_id):
         notified_ids = _notify_admin_claws('Rule', '待审核（修改后重新提交）', rule.display_name,
                             f'类型: {rule.category}, 作用域: {rule.scope}, 提交人: {modifier}\n请审核后通过或拒绝。')
         _create_review_todo_for_admin_claws('Rule', rule.display_name, modifier, rule.category, rule.scope)
-
-    # review_status 只能通过专用审核接口修改
-    if 'review_status' in data:
-        return jsonify({'error': '请使用 POST /rules/<id>/review 接口修改审核状态'}), 403
 
     # 记录最后修改人 + 来源
     if data:

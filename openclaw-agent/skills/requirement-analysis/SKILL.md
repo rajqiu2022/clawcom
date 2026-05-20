@@ -26,7 +26,7 @@
 ## Hub 地址
 
 ```
-Hub 地址: http://your-hub-host:8088
+Hub 地址: http://clawteam.woa.com:18800
 API 前缀: /api/v1
 ```
 
@@ -336,7 +336,7 @@ baselines = mcp.call('tapd.baselines.list', workspace_id='70202650', version_id=
 
 ```python
 import os, requests
-HUB = os.environ['HUB_BASE_URL']    # http://your-hub-host:8088
+HUB = os.environ['HUB_BASE_URL']    # http://clawteam.woa.com:18800
 TOKEN = os.environ['HUB_API_TOKEN']
 HEADERS = {
     'Authorization': f'Bearer {TOKEN}',

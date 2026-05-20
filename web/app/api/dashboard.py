@@ -23,7 +23,6 @@ def _infer_task_category(task_text):
 
 
 
-
 def _get_visible_claws():
     """根据当前用户角色返回可见的 OpenClaw 列表（排除已删除）"""
     all_claws = OpenClawInstance.query.filter(
@@ -66,7 +65,7 @@ def _get_visible_claws():
 
 @api_bp.route('/dashboard/stats', methods=['GET'])
 def dashboard_stats():
-    """Dashboard 统计数据"""
+    """Dashboard 统计数据（已优化：消除 N+1 查询）"""
     # 清理超时的 SSE 连接
     _cleanup_stale_connections()
 
@@ -75,11 +74,11 @@ def dashboard_stats():
     visible_claws = _get_visible_claws()
     visible_ids = {c.id for c in visible_claws}
 
-    # 在线 OpenClaw 数量（工作/学习/摸鱼 都算在线，休息和 offline 算离线）
+    # 在线 OpenClaw 数量
     online_count = sum(1 for c in visible_claws if c.status in ('工作', '学习', '摸鱼', 'online'))
     total_claws = len(visible_claws)
 
-    # 今日任务统计（仅可见 claw）
+    # ===== 批量预加载：今日日报 =====
     if visible_ids:
         today_reports = DailyReport.query.filter(
             DailyReport.report_date == today,
@@ -87,8 +86,15 @@ def dashboard_stats():
         ).all()
     else:
         today_reports = []
+
+    # 按 openclaw_id 索引（取最新一条）
+    today_report_map = {}
+    for r in today_reports:
+        existing = today_report_map.get(r.openclaw_id)
+        if not existing or (r.report_time and (not existing.report_time or r.report_time > existing.report_time)):
+            today_report_map[r.openclaw_id] = r
+
     def _count_tasks(tasks_json):
-        """安全计算完成任务数量，兼容数组/字符串/None"""
         if not tasks_json:
             return 0
         if isinstance(tasks_json, list):
@@ -96,11 +102,10 @@ def dashboard_stats():
         if isinstance(tasks_json, str):
             return 1 if tasks_json.strip() else 0
         return 1
-    today_tasks = sum(
-        _count_tasks(r.tasks_completed) for r in today_reports
-    )
 
-    # 今日日报汇报率（仅可见 claw）
+    today_tasks = sum(_count_tasks(r.tasks_completed) for r in today_reports)
+
+    # 今日日报汇报率
     if visible_ids:
         today_reported = db.session.query(
             func.count(func.distinct(DailyReport.openclaw_id))
@@ -114,16 +119,10 @@ def dashboard_stats():
     # 知识库总条目
     total_knowledge = KnowledgeEntry.query.count()
 
-    # 待审核数（知识库 + Skill + Rule）
-    pending_count = KnowledgeEntry.query.filter_by(
-        status='pending_review'
-    ).count()
-    pending_count += Skill.query.filter_by(
-        review_status='pending', is_deleted=False
-    ).count()
-    pending_count += Rule.query.filter_by(
-        review_status='pending', is_deleted=False
-    ).count()
+    # 待审核数
+    pending_count = KnowledgeEntry.query.filter_by(status='pending_review').count()
+    pending_count += Skill.query.filter_by(review_status='pending', is_deleted=False).count()
+    pending_count += Rule.query.filter_by(review_status='pending', is_deleted=False).count()
 
     # 今日新增知识
     today_knowledge = KnowledgeEntry.query.filter(
@@ -140,20 +139,18 @@ def dashboard_stats():
         Project.tapd_workspace_id != ''
     ).count()
 
-    # 通信中心统计（在线状态以 SSE 为准，super_admin/admin 可见 admin 角色）
+    # 通信中心统计
     try:
-        _uid = flask_session.get('user_id')
-        _user = User.query.get(_uid) if _uid else None
+        uid = flask_session.get('user_id')
+        _user = User.query.get(uid) if uid else None
         _urole = _user.role if _user else 'guest'
         agent_query = Agent.query
         if _urole != 'super_admin':
             agent_query = agent_query.filter(Agent.role != 'admin')
         agents = agent_query.all()
-        online_statuses = {}
-        for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
-            online_statuses[claw.name] = claw.status in ('工作', '学习', '摸鱼', 'online')
-        online_agents = sum(1 for a in agents
-                           if online_statuses.get(a.name, a.status == 'online'))
+        # 复用已加载的 visible_claws 而非重新查询
+        online_statuses = {c.name: c.status in ('工作', '学习', '摸鱼', 'online') for c in visible_claws}
+        online_agents = sum(1 for a in agents if online_statuses.get(a.name, a.status == 'online'))
         total_agents = len(agents)
         unread_messages = Message.query.filter_by(status='unread').count()
     except Exception:
@@ -185,43 +182,53 @@ def dashboard_stats():
         .all()
     )
 
-    # OpenClaw 概览（仅可见 claw）
-    # 先计算每个 claw 的待办数（过滤闹钟类 interrupt）
-    claw_todo_counts = {}
+    # ===== 批量预加载：所有启用待办的今日 log =====
     if visible_ids:
         all_enabled_todos = ClawTodo.query.filter(
             ClawTodo.openclaw_id.in_(visible_ids),
             ClawTodo.enabled == True
         ).all()
-        for todo in all_enabled_todos:
-            st = (todo.schedule_time or '').strip()
-            if todo.urgency_level == 'interrupt' and st in ('15:00', '15:30', '21:00'):
-                continue
-            cid = todo.openclaw_id
-            today_log = ClawTodoLog.query.filter_by(
-                todo_id=todo.id, log_date=today
-            ).first()
-            if not today_log or today_log.status == 'pending':
-                claw_todo_counts[cid] = claw_todo_counts.get(cid, 0) + 1
+        enabled_todo_ids = [t.id for t in all_enabled_todos]
+    else:
+        all_enabled_todos = []
+        enabled_todo_ids = []
 
+    # 一次性批量查询所有今日 log（消除 N+1）
+    today_logs_map = {}  # todo_id → ClawTodoLog
+    if enabled_todo_ids:
+        today_logs = ClawTodoLog.query.filter(
+            ClawTodoLog.todo_id.in_(enabled_todo_ids),
+            ClawTodoLog.log_date == today
+        ).all()
+        for log in today_logs:
+            existing = today_logs_map.get(log.todo_id)
+            if not existing or (log.created_at and (not existing.created_at or log.created_at > existing.created_at)):
+                today_logs_map[log.todo_id] = log
+
+    # 计算每个 claw 的待办数
+    claw_todo_counts = {}
+    for todo in all_enabled_todos:
+        st = (todo.schedule_time or '').strip()
+        if todo.urgency_level == 'interrupt' and st in ('15:00', '15:30', '21:00'):
+            continue
+        today_log = today_logs_map.get(todo.id)
+        if not today_log or today_log.status == 'pending':
+            cid = todo.openclaw_id
+            claw_todo_counts[cid] = claw_todo_counts.get(cid, 0) + 1
+
+    # OpenClaw 概览（复用 today_report_map，不再逐个查 DailyReport）
     claw_summaries = []
     for c in visible_claws:
-        today_report = DailyReport.query.filter_by(
-            openclaw_id=c.id, report_date=today
-        ).order_by(DailyReport.report_time.desc()).first()
-
+        today_report = today_report_map.get(c.id)
         claw_summaries.append({
             'id': c.id,
             'name': c.name,
             'role_title': c.role_title,
             'status': c.status,
-            'last_activity': (str(c.last_activity)
-                              if c.last_activity else None),
+            'last_activity': (str(c.last_activity) if c.last_activity else None),
             'today_tasks': claw_todo_counts.get(c.id, 0),
-            'today_completed': (_count_tasks(today_report.tasks_completed)
-                                if today_report else 0),
-            'today_summary': (today_report.ai_summary
-                            if today_report else None),
+            'today_completed': (_count_tasks(today_report.tasks_completed) if today_report else 0),
+            'today_summary': (today_report.ai_summary if today_report else None),
             'avatar': c.avatar,
             'reported_today': today_report is not None,
             'project_name': c.project.name if c.project else (c.project_name or ''),
@@ -231,12 +238,12 @@ def dashboard_stats():
     three_days_ago = today - timedelta(days=3)
     recent_reports = DailyReport.query.filter(
         DailyReport.report_date >= three_days_ago,
-        DailyReport.openclaw_id.in_((visible_ids) if visible_ids else [0])
+        DailyReport.openclaw_id.in_(visible_ids if visible_ids else [0])
     ).order_by(DailyReport.report_date.desc(), DailyReport.report_time.desc()).all()
 
+    claw_name_map = {c.id: c.name for c in visible_claws}  # 移到循环外
     recent_tasks = []
-    for r in recent_reports[:50]:  # 最多取 50 条
-        claw_name_map = {c.id: c.name for c in visible_claws}
+    for r in recent_reports[:50]:
         tasks = r.tasks_completed
         if not tasks:
             continue
@@ -260,28 +267,50 @@ def dashboard_stats():
             })
 
     # ============== 今日待办（三阶段：待完成/已提交/已审核） ==============
-    upcoming_todos = []       # 今日待完成
-    submitted_todos = []      # 今日已提交（待审核）
+    upcoming_todos = []
+    submitted_todos = []
     if visible_ids:
         todos_q = ClawTodo.query.filter(
             ClawTodo.openclaw_id.in_(visible_ids)
         ).order_by(ClawTodo.created_at.desc()).all()
-        claw_name_map = {c.id: c.name for c in visible_claws}
+
+        # 批量查询所有待办的今日 log + 最近 log（消除 N+1）
+        all_todo_ids = [t.id for t in todos_q]
+        all_today_logs_map = {}
+        all_latest_logs_map = {}
+        if all_todo_ids:
+            # 今日 logs
+            all_today_logs = ClawTodoLog.query.filter(
+                ClawTodoLog.todo_id.in_(all_todo_ids),
+                ClawTodoLog.log_date == today
+            ).all()
+            for log in all_today_logs:
+                existing = all_today_logs_map.get(log.todo_id)
+                if not existing or (log.created_at and (not existing.created_at or log.created_at > existing.created_at)):
+                    all_today_logs_map[log.todo_id] = log
+
+            # 对于没有今日 log 的待办，批量查最新 submitted log
+            missing_today_ids = [tid for tid in all_todo_ids if tid not in all_today_logs_map]
+            if missing_today_ids:
+                # 取每个 todo 最新的一条 log
+                latest_logs = ClawTodoLog.query.filter(
+                    ClawTodoLog.todo_id.in_(missing_today_ids)
+                ).order_by(ClawTodoLog.log_date.desc(), ClawTodoLog.created_at.desc()).all()
+                for log in latest_logs:
+                    if log.todo_id not in all_latest_logs_map:
+                        all_latest_logs_map[log.todo_id] = log
+
         for todo in todos_q:
-            # 过滤 15:00 闹钟类待办（定时中断的提醒任务不显示）
             st = (todo.schedule_time or '').strip()
             if todo.urgency_level == 'interrupt' and st in ('15:00', '15:30', '21:00'):
                 continue
-            today_log = ClawTodoLog.query.filter_by(
-                todo_id=todo.id, log_date=today
-            ).first()
+
+            today_log = all_today_logs_map.get(todo.id)
             if not today_log:
-                latest_log = (ClawTodoLog.query
-                              .filter_by(todo_id=todo.id)
-                              .order_by(ClawTodoLog.log_date.desc(), ClawTodoLog.created_at.desc())
-                              .first())
+                latest_log = all_latest_logs_map.get(todo.id)
                 if latest_log and latest_log.status == 'submitted':
                     today_log = latest_log
+
             todo_base = {
                 'id': todo.id,
                 'title': todo.title,
@@ -302,21 +331,28 @@ def dashboard_stats():
                 upcoming_todos.append(todo_base)
             elif today_log and today_log.status == 'submitted':
                 submitted_todos.append(todo_base)
-            # approved/completed 以及 enabled=False 且无 today_log 的情况不在这两个列表中
     upcoming_todos = upcoming_todos[:30]
     submitted_todos = submitted_todos[:30]
 
     # ============== 近3天审核通过记录 ==============
     recent_approved = []
     if visible_ids:
-        since = today - timedelta(days=2)  # 含今天共3天
+        since = today - timedelta(days=2)
         approved_logs = ClawTodoLog.query.filter(
             ClawTodoLog.openclaw_id.in_(visible_ids),
             ClawTodoLog.log_date >= since,
             ClawTodoLog.status.in_(['approved', 'completed'])
         ).order_by(ClawTodoLog.completed_at.desc()).limit(30).all()
+
+        # 批量预加载 todo（消除 N+1）
+        approved_todo_ids = list({log.todo_id for log in approved_logs})
+        approved_todos_map = {}
+        if approved_todo_ids:
+            approved_todos = ClawTodo.query.filter(ClawTodo.id.in_(approved_todo_ids)).all()
+            approved_todos_map = {t.id: t for t in approved_todos}
+
         for log in approved_logs:
-            todo = ClawTodo.query.get(log.todo_id)
+            todo = approved_todos_map.get(log.todo_id)
             recent_approved.append({
                 'id': todo.id if todo else log.todo_id,
                 'title': todo.title if todo else '(已删除)',

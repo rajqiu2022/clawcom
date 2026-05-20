@@ -5,7 +5,7 @@ services:
     build: .
     container_name: clawteam-web
     ports:
-      - "8088:8088"
+      - "18800:18800"
     environment:
       - FLASK_ENV=production
       - MYSQL_HOST=${MYSQL_HOST:-127.0.0.1}

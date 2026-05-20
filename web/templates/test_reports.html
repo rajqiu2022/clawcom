@@ -1,0 +1,671 @@
+{% extends "base.html" %}
+{% block title %}测试报告 - OpenClaw 管理系统{% endblock %}
+{% block nav_test_reports %}active{% endblock %}
+{% block page_title %}测试报告{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <select id="filter-project" class="form-select" style="width:160px" onchange="loadReports(1)">
+        <option value="">全部项目</option>
+    </select>
+    <select id="filter-iteration" class="form-select" style="width:180px" onchange="loadReports(1)">
+        <option value="">全部版本/迭代</option>
+    </select>
+    <select id="filter-status" class="form-select" style="width:120px" onchange="loadReports(1)">
+        <option value="">全部状态</option>
+    </select>
+    <select id="filter-risk" class="form-select" style="width:110px" onchange="loadReports(1)">
+        <option value="">全部风险</option>
+    </select>
+    <input type="text" id="search-input" class="form-input" style="width:180px"
+           placeholder="🔍 标题/备注/版本..." oninput="debounceSearch()">
+    <button class="btn btn-primary" onclick="showCreateModal()">+ 新建报告</button>
+</div>
+{% endblock %}
+
+{% block content %}
+<style>
+    .type-tabs {
+        display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 14px;
+        padding: 4px 2px;
+    }
+    .type-tab {
+        padding: 6px 14px; border-radius: 18px; cursor: pointer;
+        border: 1px solid var(--border, #e2e8f0); background: var(--bg-card, #fff);
+        font-size: 13px; color: var(--text-secondary, #475569);
+        transition: all 0.15s ease;
+        user-select: none;
+    }
+    .type-tab:hover { border-color: #6366f1; color: #6366f1; }
+    .type-tab.active {
+        background: linear-gradient(135deg, #6366f1, #8b5cf6);
+        color: #fff; border-color: transparent;
+        box-shadow: 0 2px 6px rgba(99,102,241,0.35);
+    }
+    .status-badge {
+        display: inline-block; padding: 2px 8px; border-radius: 10px;
+        font-size: 12px; border: 1px solid;
+    }
+    /* 状态色刻意与风险色错开，避免「高风险 + 已废弃」全红难辨 */
+    .st-draft     { background: #94a3b822; color: #94a3b8; border-color: #94a3b866; }
+    .st-published { background: #3b82f622; color: #3b82f6; border-color: #3b82f666; }
+    .st-revised   { background: #d946ef22; color: #d946ef; border-color: #d946ef66; }
+    .st-abandoned { background: #64748b22; color: #64748b; border-color: #64748b66;
+                    text-decoration: line-through; }
+    .test-report-card {
+        background: var(--bg-card, #fff); border: 1px solid var(--border, #e2e8f0);
+        border-radius: 8px; padding: 14px 16px; cursor: pointer;
+        transition: all 0.15s ease;
+    }
+    .test-report-card:hover {
+        border-color: #6366f1; box-shadow: 0 2px 10px rgba(99,102,241,0.12);
+        transform: translateY(-1px);
+    }
+    /* Toast 提示 */
+    .tr-toast {
+        position: fixed; top: 24px; left: 50%; transform: translateX(-50%);
+        padding: 10px 22px; border-radius: 8px; font-size: 14px; z-index: 99999;
+        color: #fff; box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+        animation: trToastIn 0.25s ease; pointer-events: none;
+    }
+    .tr-toast.success { background: #10b981; }
+    .tr-toast.error   { background: #ef4444; }
+    .tr-toast.info    { background: #6366f1; }
+    .tr-toast.hide { opacity: 0; transition: opacity 0.3s ease; }
+    @keyframes trToastIn { from { opacity:0; transform:translateX(-50%) translateY(-10px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
+    /* 自定义确认弹窗 */
+    .tr-confirm-overlay {
+        position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 99998;
+        display: flex; align-items: center; justify-content: center;
+        animation: fadeIn 0.15s ease;
+    }
+    .tr-confirm-box {
+        background: var(--bg-card, #fff); border-radius: 12px; padding: 28px 32px 20px;
+        min-width: 340px; max-width: 460px; box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+    }
+    .tr-confirm-msg { font-size: 15px; color: var(--text-primary, #1e293b); margin-bottom: 20px; line-height: 1.6; }
+    .tr-confirm-btns { display: flex; justify-content: flex-end; gap: 10px; }
+    .tr-confirm-btns button {
+        padding: 7px 20px; border-radius: 6px; border: 1px solid var(--border, #e2e8f0);
+        font-size: 13px; cursor: pointer; transition: all 0.15s;
+    }
+    .tr-confirm-btns .btn-cancel { background: var(--bg-secondary, #f8fafc); color: var(--text-secondary, #475569); }
+    .tr-confirm-btns .btn-ok { background: #6366f1; color: #fff; border-color: #6366f1; }
+    .tr-confirm-btns .btn-ok:hover { background: #4f46e5; }
+    .tr-confirm-btns .btn-cancel:hover { background: #e2e8f0; }
+</style>
+
+<!-- 类型 tabs -->
+<div id="type-tabs" class="type-tabs"></div>
+
+<div id="report-list" style="display:flex;flex-direction:column;gap:10px;margin-top:6px">
+    <div class="loading"><span class="spinner"></span> 加载中...</div>
+</div>
+<div id="pagination" style="display:flex;justify-content:center;gap:8px;margin-top:16px"></div>
+
+<!-- 新建/编辑 弹窗 -->
+<div class="modal-overlay" id="edit-modal">
+    <div class="modal" style="max-width:880px;max-height:92vh;overflow:auto">
+        <h2 class="modal-title" id="edit-modal-title">新建测试报告</h2>
+        <form id="edit-form">
+            <input type="hidden" id="edit-report-id" value="">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                <div class="form-group">
+                    <label class="form-label">标题 *</label>
+                    <input class="form-input" id="edit-title" required maxlength="200"
+                           placeholder="一句话点明本份报告">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">报告类型 *</label>
+                    <select class="form-input" id="edit-type" required></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">项目 *</label>
+                    <select class="form-input" id="edit-project" required></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">关联版本/迭代</label>
+                    <select class="form-input" id="edit-iteration">
+                        <option value="">（无）</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">版本号（冗余展示）</label>
+                    <input class="form-input" id="edit-version" maxlength="100"
+                           placeholder="如 v3.2.1（关联迭代时自动填）">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">风险级别</label>
+                    <select class="form-input" id="edit-risk"></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">状态</label>
+                    <select class="form-input" id="edit-status"></select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">内容格式</label>
+                    <select class="form-input" id="edit-format">
+                        <option value="markdown">Markdown</option>
+                        <option value="html">HTML</option>
+                    </select>
+                </div>
+                <div class="form-group" style="display:flex;align-items:center;gap:8px;padding-top:24px">
+                    <input type="checkbox" id="edit-hidden" style="width:16px;height:16px">
+                    <label for="edit-hidden" style="font-size:13px;color:var(--text-secondary);cursor:pointer">
+                        隐藏（Web列表不显示，Agent可通过分享链接访问）
+                    </label>
+                </div>
+                <div class="form-group" style="grid-column:1/-1">
+                    <label class="form-label">备注 / 简短说明</label>
+                    <input class="form-input" id="edit-remark" maxlength="500"
+                           placeholder="一句话概述：本次发现、结论、风险等">
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">正文</label>
+                <textarea class="form-textarea" id="edit-content"
+                          style="min-height:300px;font-family:'JetBrains Mono',monospace"
+                          placeholder="Markdown / HTML"></textarea>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-ghost" onclick="closeEditModal()">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- 详情 弹窗 -->
+<div class="modal-overlay" id="detail-modal">
+    <div class="modal" style="max-width:980px;max-height:92vh;overflow:auto">
+        <div id="detail-body">
+            <div class="loading"><span class="spinner"></span> 加载中...</div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
+<script>
+// ========== 自定义 Toast / Confirm ==========
+function showToast(msg, type = 'success', duration = 2500) {
+    const t = document.createElement('div');
+    t.className = 'tr-toast ' + type;
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(() => { t.classList.add('hide'); setTimeout(() => t.remove(), 300); }, duration);
+}
+function showConfirm(msg) {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'tr-confirm-overlay';
+        overlay.innerHTML = `<div class="tr-confirm-box">
+            <div class="tr-confirm-msg">${msg}</div>
+            <div class="tr-confirm-btns">
+                <button class="btn-cancel">取消</button>
+                <button class="btn-ok">确认</button>
+            </div>
+        </div>`;
+        document.body.appendChild(overlay);
+        const close = (val) => { overlay.remove(); resolve(val); };
+        overlay.querySelector('.btn-cancel').onclick = () => close(false);
+        overlay.querySelector('.btn-ok').onclick = () => close(true);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) close(false); });
+    });
+}
+// =============================================
+
+const HUB = (window.HUB_PUBLIC_URL || location.origin).replace(/\/+$/, '');
+let META = { types: [], risk_levels: [], statuses: [], max_attachment_size: 10485760 };
+let PROJECTS = [];
+let ITERATIONS = [];
+let currentPage = 1;
+let pageSize = 20;
+
+function escapeHtml(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function renderMd(text) {
+    if (!text) return '';
+    try {
+        marked.setOptions({ breaks: true, gfm: true });
+        return marked.parse(text);
+    } catch (e) { return '<pre>' + escapeHtml(text) + '</pre>'; }
+}
+function fmtBytes(b) {
+    b = Number(b || 0);
+    if (b < 1024) return b + ' B';
+    if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+    return (b / 1024 / 1024).toFixed(2) + ' MB';
+}
+function riskBadge(level, label) {
+    const colors = { high: '#ef4444', medium: '#f59e0b', low: '#10b981', tbd: '#94a3b8' };
+    const c = colors[level] || '#94a3b8';
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;
+        background:${c}22;color:${c};font-size:12px;border:1px solid ${c}66">${escapeHtml(label || level)}</span>`;
+}
+// 6 种类型各分配语义色：版本/功能/专项/需求/工程/其他
+const TYPE_COLORS = {
+    version_plan:         '#3b82f6',  // 蓝 - 版本计划
+    feature_test:         '#8b5cf6',  // 紫 - 功能需求测试
+    specialized_test:     '#06b6d4',  // 青 - 专项测试
+    requirement_analysis: '#ec4899',  // 粉 - 需求分析
+    engineering_analysis: '#14b8a6',  // 蓝绿 - 工程分析
+    other_specialized:    '#64748b',  // 灰 - 其他专项
+};
+function typeBadge(t, label) {
+    const c = TYPE_COLORS[t] || '#6366f1';
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;
+        background:${c}22;color:${c};font-size:12px;border:1px solid ${c}66">${escapeHtml(label || t)}</span>`;
+}
+function statusBadge(status, label) {
+    return `<span class="status-badge st-${escapeHtml(status || 'draft')}">${escapeHtml(label || status)}</span>`;
+}
+
+// Modal open/close 必须用 class active（CSS 默认 opacity:0 + pointer-events:none）
+function openModal(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('active');
+}
+function closeModal(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+}
+
+async function bootstrapMeta() {
+    const [types, projects, iters] = await Promise.all([
+        fetch('/api/v1/test-reports/types').then(r => r.json()),
+        fetch('/api/v1/projects').then(r => r.json()).catch(() => []),
+        fetch('/api/v1/test-iterations').then(r => r.json()).catch(() => []),
+    ]);
+    META = types;
+    PROJECTS = Array.isArray(projects) ? projects : (projects.items || []);
+    ITERATIONS = Array.isArray(iters) ? iters : (iters.items || []);
+
+    const tabs = document.getElementById('type-tabs');
+    let tabsHtml = `<div class="type-tab active" data-type="" onclick="selectTypeTab(this, '')">全部类型</div>`;
+    META.types.forEach(t => {
+        const c = TYPE_COLORS[t.key] || '#6366f1';
+        tabsHtml += `<div class="type-tab" data-type="${escapeHtml(t.key)}" data-color="${c}"
+            onclick="selectTypeTab(this, '${escapeHtml(t.key)}')">
+            <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${c};margin-right:6px;vertical-align:middle"></span>${escapeHtml(t.label)}</div>`;
+    });
+    tabs.innerHTML = tabsHtml;
+
+    // filter 下拉
+    const fr = document.getElementById('filter-risk');
+    META.risk_levels.forEach(r => fr.insertAdjacentHTML('beforeend',
+        `<option value="${r.key}">${escapeHtml(r.label)}</option>`));
+    const fs = document.getElementById('filter-status');
+    META.statuses.forEach(s => fs.insertAdjacentHTML('beforeend',
+        `<option value="${s.key}">${escapeHtml(s.label)}</option>`));
+    const fp = document.getElementById('filter-project');
+    PROJECTS.forEach(p => fp.insertAdjacentHTML('beforeend',
+        `<option value="${p.id}">${escapeHtml(p.name)}</option>`));
+    const fi = document.getElementById('filter-iteration');
+    ITERATIONS.forEach(i => fi.insertAdjacentHTML('beforeend',
+        `<option value="${i.id}">${escapeHtml(i.name)}${i.version_name ? ' (' + escapeHtml(i.version_name) + ')' : ''}</option>`));
+
+    // 表单选项
+    const et = document.getElementById('edit-type');
+    META.types.forEach(t => et.insertAdjacentHTML('beforeend',
+        `<option value="${t.key}">${escapeHtml(t.label)}</option>`));
+    const er = document.getElementById('edit-risk');
+    META.risk_levels.forEach(r => er.insertAdjacentHTML('beforeend',
+        `<option value="${r.key}">${escapeHtml(r.label)}</option>`));
+    const es = document.getElementById('edit-status');
+    META.statuses.forEach(s => es.insertAdjacentHTML('beforeend',
+        `<option value="${s.key}">${escapeHtml(s.label)}</option>`));
+    const ep = document.getElementById('edit-project');
+    PROJECTS.forEach(p => ep.insertAdjacentHTML('beforeend',
+        `<option value="${p.id}">${escapeHtml(p.name)}</option>`));
+    const ei = document.getElementById('edit-iteration');
+    ITERATIONS.forEach(i => ei.insertAdjacentHTML('beforeend',
+        `<option value="${i.id}" data-version="${escapeHtml(i.version_name || '')}">${escapeHtml(i.name)}${i.version_name ? ' (' + escapeHtml(i.version_name) + ')' : ''}</option>`));
+    ei.addEventListener('change', () => {
+        const opt = ei.options[ei.selectedIndex];
+        const v = opt ? opt.getAttribute('data-version') : '';
+        if (v) document.getElementById('edit-version').value = v;
+    });
+}
+
+function selectTypeTab(el, typeKey) {
+    document.querySelectorAll('#type-tabs .type-tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    // 同步顶部 filter-type（隐藏的，实际就用 tab 替代了 select）—— 走 currentFilter
+    window._currentTypeKey = typeKey;
+    loadReports(1);
+}
+
+let _searchTimer = null;
+function debounceSearch() {
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(() => loadReports(1), 350);
+}
+
+async function loadReports(page) {
+    currentPage = page || 1;
+    const params = new URLSearchParams();
+    const fp = document.getElementById('filter-project').value;
+    const fi = document.getElementById('filter-iteration').value;
+    const ft = window._currentTypeKey || '';
+    const fr = document.getElementById('filter-risk').value;
+    const fs = document.getElementById('filter-status').value;
+    const search = document.getElementById('search-input').value.trim();
+    if (fp) params.set('project_id', fp);
+    if (fi) params.set('iteration_id', fi);
+    if (ft) params.set('report_type', ft);
+    if (fr) params.set('risk_level', fr);
+    if (fs) params.set('status', fs);
+    if (search) params.set('search', search);
+    params.set('page', currentPage);
+    params.set('page_size', pageSize);
+
+    const el = document.getElementById('report-list');
+    el.innerHTML = '<div class="loading"><span class="spinner"></span> 加载中...</div>';
+    const r = await fetch('/api/v1/test-reports?' + params.toString());
+    const data = await r.json();
+    if (!r.ok) { el.innerHTML = '<div class="empty">加载失败：' + escapeHtml(data.error || r.status) + '</div>'; return; }
+    if (!data.items || data.items.length === 0) {
+        el.innerHTML = '<div class="empty" style="padding:40px;text-align:center;color:var(--text-secondary);opacity:0.7">暂无报告，点右上角"+ 新建报告"开始</div>';
+        document.getElementById('pagination').innerHTML = '';
+        return;
+    }
+    el.innerHTML = data.items.map(r => renderCard(r)).join('');
+    renderPagination(data.total, data.page, data.page_size);
+}
+
+function renderCard(r) {
+    const meta = [];
+    if (r.project_name) meta.push(escapeHtml(r.project_name));
+    if (r.iteration_name || r.version_name) meta.push(escapeHtml(r.version_name || r.iteration_name));
+    meta.push(escapeHtml(r.submitter_name || 'unknown'));
+    meta.push(escapeHtml((r.created_at || '').slice(0, 16)));
+    const sharedBadge = r.is_shared
+        ? '<span style="margin-left:8px;color:#10b981;font-size:12px">🔗 已分享</span>' : '';
+    const hiddenBadge = r.is_hidden
+        ? '<span style="margin-left:8px;color:#f59e0b;font-size:12px;border:1px solid #f59e0b66;padding:1px 6px;border-radius:8px;background:#f59e0b11">隐藏</span>' : '';
+    return `<div class="test-report-card" data-id="${r.id}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+            <div style="flex:1;min-width:0">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+                    ${typeBadge(r.report_type, r.report_type_label)}
+                    ${riskBadge(r.risk_level, r.risk_level_label)}
+                    ${statusBadge(r.status, r.status_label)}
+                    <span style="font-weight:600;font-size:15px">${escapeHtml(r.title)}</span>
+                    ${hiddenBadge}${sharedBadge}
+                </div>
+                ${r.remark ? `<div style="color:var(--text-secondary);font-size:13px;margin-bottom:6px">${escapeHtml(r.remark)}</div>` : ''}
+                <div style="color:var(--text-secondary);font-size:12px;opacity:0.75">${meta.join(' · ')}</div>
+            </div>
+        </div>
+    </div>`;
+}
+
+// 用事件委托替代 inline onclick——更稳，避免函数作用域问题
+document.addEventListener('click', (e) => {
+    const card = e.target.closest('.test-report-card');
+    if (card && card.dataset.id) {
+        openDetail(parseInt(card.dataset.id, 10));
+    }
+});
+
+function renderPagination(total, page, ps) {
+    const pages = Math.max(1, Math.ceil(total / ps));
+    if (pages <= 1) { document.getElementById('pagination').innerHTML = ''; return; }
+    let html = '';
+    const make = (p, label, disabled, active) =>
+        `<button class="btn ${active ? 'btn-primary' : 'btn-ghost'}"
+                 ${disabled ? 'disabled' : ''} onclick="loadReports(${p})">${label}</button>`;
+    html += make(page - 1, '上一页', page <= 1, false);
+    html += `<span style="line-height:36px;color:var(--text-secondary)">第 ${page} / ${pages} 页（共 ${total}）</span>`;
+    html += make(page + 1, '下一页', page >= pages, false);
+    document.getElementById('pagination').innerHTML = html;
+}
+
+function showCreateModal() {
+    document.getElementById('edit-modal-title').textContent = '新建测试报告';
+    document.getElementById('edit-report-id').value = '';
+    document.getElementById('edit-title').value = '';
+    document.getElementById('edit-remark').value = '';
+    document.getElementById('edit-version').value = '';
+    document.getElementById('edit-content').value = '';
+    document.getElementById('edit-type').value =
+        (window._currentTypeKey) || (META.types[0] || {}).key || 'other_specialized';
+    document.getElementById('edit-risk').value = 'tbd';
+    document.getElementById('edit-status').value = 'draft';
+    document.getElementById('edit-format').value = 'markdown';
+    document.getElementById('edit-hidden').checked = false;
+    document.getElementById('edit-project').value = document.getElementById('filter-project').value || '';
+    document.getElementById('edit-iteration').value = document.getElementById('filter-iteration').value || '';
+    openModal('edit-modal');
+}
+
+function closeEditModal() { closeModal('edit-modal'); }
+
+document.getElementById('edit-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const id = document.getElementById('edit-report-id').value;
+    const payload = {
+        title: document.getElementById('edit-title').value.trim(),
+        report_type: document.getElementById('edit-type').value,
+        project_id: parseInt(document.getElementById('edit-project').value) || null,
+        iteration_id: parseInt(document.getElementById('edit-iteration').value) || null,
+        version_name: document.getElementById('edit-version').value.trim(),
+        remark: document.getElementById('edit-remark').value.trim(),
+        risk_level: document.getElementById('edit-risk').value,
+        status: document.getElementById('edit-status').value,
+        format: document.getElementById('edit-format').value,
+        content: document.getElementById('edit-content').value,
+        is_hidden: document.getElementById('edit-hidden').checked,
+    };
+    if (!payload.project_id) { showToast('请选择项目', 'error'); return; }
+    const url = id ? `/api/v1/test-reports/${id}` : '/api/v1/test-reports';
+    const method = id ? 'PUT' : 'POST';
+    const r = await fetch(url, {
+        method, headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    const data = await r.json();
+    if (!r.ok) { showToast('保存失败：' + (data.error || r.status), 'error'); return; }
+    closeEditModal();
+    loadReports(currentPage);
+    if (!id && data.id) openDetail(data.id);
+});
+
+async function openDetail(id) {
+    openModal('detail-modal');
+    const body = document.getElementById('detail-body');
+    body.innerHTML = '<div class="loading"><span class="spinner"></span> 加载中...</div>';
+    const r = await fetch('/api/v1/test-reports/' + id);
+    const d = await r.json();
+    if (!r.ok) { body.innerHTML = '<div class="empty">加载失败：' + escapeHtml(d.error || r.status) + '</div>'; return; }
+    const rendered = (d.format === 'html')
+        ? `<iframe sandbox="" style="width:100%;height:55vh;border:0;background:#fff;border-radius:6px" srcdoc="${escapeHtml(d.content || '')}"></iframe>`
+        : renderMd(d.content || '');
+    const attachments = (d.attachments || []).map(a => `
+        <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;margin-top:6px;background:var(--bg-secondary)">
+            <span style="flex:1">${escapeHtml(a.filename)} <span style="color:var(--text-secondary)">(${fmtBytes(a.size_bytes)})</span></span>
+            <a class="btn btn-ghost" href="${a.download_url}" target="_blank">下载</a>
+            ${d.can_edit ? `<button class="btn btn-danger" onclick="deleteAtt(${d.id}, ${a.id})">删除</button>` : ''}
+        </div>`).join('');
+
+    // 状态快速切换按钮（仅 can_edit）
+    const statusSwitchHtml = d.can_edit ? `
+        <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+            <span style="color:var(--text-secondary);font-size:13px">切换状态：</span>
+            ${META.statuses.map(s =>
+                `<button class="btn ${s.key === d.status ? 'btn-primary' : 'btn-ghost'}"
+                         style="padding:3px 10px;font-size:12px"
+                         onclick="changeStatus(${d.id}, '${s.key}')">${escapeHtml(s.label)}</button>`
+            ).join('')}
+        </div>` : '';
+
+    const shareSection = d.can_edit ? `
+        <div style="margin-top:14px;padding:10px;border:1px dashed var(--border-light);border-radius:8px;background:var(--bg-secondary)">
+            <div style="font-weight:600;margin-bottom:6px">分享外链（项目外可见，匿名只读）</div>
+            ${d.is_shared
+                ? `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                       <input class="form-input" readonly id="share-url-${d.id}"
+                              value="${HUB}/r/${d.share_token}" style="flex:1;min-width:240px">
+                       <button class="btn btn-success" onclick="copyShare(${d.id})">复制</button>
+                       <button class="btn btn-info" onclick="enableShare(${d.id}, true)">重新生成</button>
+                       <button class="btn btn-danger" onclick="revokeShare(${d.id})">撤销分享</button>
+                   </div>`
+                : `<button class="btn btn-primary" onclick="enableShare(${d.id}, false)">生成分享链接</button>`}
+        </div>` : (d.is_shared ? `<div style="margin-top:14px;color:#10b981">🔗 此报告已分享：<a href="${HUB}/r/${d.share_token}" target="_blank">${HUB}/r/${d.share_token}</a></div>` : '');
+
+    body.innerHTML = `
+        <div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+            ${typeBadge(d.report_type, d.report_type_label)}
+            ${riskBadge(d.risk_level, d.risk_level_label)}
+            ${statusBadge(d.status, d.status_label)}
+            ${d.is_hidden ? '<span style="padding:2px 8px;border-radius:10px;font-size:12px;background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b66">隐藏</span>' : ''}
+            <h2 style="margin:0;font-size:20px;flex:1;min-width:200px">${escapeHtml(d.title)}</h2>
+            ${d.can_edit ? `<button class="btn btn-primary" onclick="editReport(${d.id})">编辑</button>
+                            <button class="btn btn-danger" onclick="deleteReport(${d.id})">删除</button>` : ''}
+            <button class="btn btn-ghost" onclick="closeModal('detail-modal')">关闭</button>
+        </div>
+        <div style="color:var(--text-secondary);font-size:13px;margin-bottom:10px">
+            ${escapeHtml(d.project_name || '')}
+            ${d.version_name || d.iteration_name ? ' · ' + escapeHtml(d.version_name || d.iteration_name) : ''}
+            · 提交：${escapeHtml(d.submitter_name || '')}
+            · 创建：${escapeHtml((d.created_at || '').slice(0, 16))}
+            ${d.updated_at && d.updated_at !== d.created_at ? ' · 修改：' + escapeHtml(d.updated_at.slice(0, 16)) : ''}
+        </div>
+        ${statusSwitchHtml}
+        ${d.remark ? `<div style="padding:8px 10px;background:var(--bg-secondary);border-left:3px solid var(--accent);border-radius:4px;margin-bottom:10px;color:var(--text-secondary)">${escapeHtml(d.remark)}</div>` : ''}
+        <div class="markdown-body" style="border-top:1px solid var(--border);padding-top:12px">${rendered}</div>
+        <div style="margin-top:14px">
+            <div style="font-weight:600;margin-bottom:6px">附件</div>
+            ${attachments || '<div style="color:var(--text-secondary);font-size:13px;opacity:0.7">暂无附件</div>'}
+            ${d.can_edit ? `
+                <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+                    <input type="file" id="att-file-${d.id}">
+                    <button class="btn btn-ghost" onclick="uploadAtt(${d.id})">上传</button>
+                    <span style="color:var(--text-secondary);font-size:12px;opacity:0.7">单个 ≤ 10MB，超出请联系管理员</span>
+                </div>` : ''}
+        </div>
+        ${shareSection}
+    `;
+}
+
+async function changeStatus(id, newStatus) {
+    const r = await fetch('/api/v1/test-reports/' + id, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+    });
+    if (!r.ok) { const e = await r.json(); showToast('切换状态失败：' + (e.error || r.status), 'error'); return; }
+    openDetail(id);
+    loadReports(currentPage);
+}
+
+async function editReport(id) {
+    const r = await fetch('/api/v1/test-reports/' + id);
+    const d = await r.json();
+    if (!r.ok) { showToast('加载失败', 'error'); return; }
+    document.getElementById('edit-modal-title').textContent = '编辑测试报告';
+    document.getElementById('edit-report-id').value = d.id;
+    document.getElementById('edit-title').value = d.title || '';
+    document.getElementById('edit-type').value = d.report_type;
+    document.getElementById('edit-project').value = d.project_id || '';
+    document.getElementById('edit-iteration').value = d.iteration_id || '';
+    document.getElementById('edit-version').value = d.version_name || '';
+    document.getElementById('edit-remark').value = d.remark || '';
+    document.getElementById('edit-risk').value = d.risk_level || 'tbd';
+    document.getElementById('edit-status').value = d.status || 'draft';
+    document.getElementById('edit-format').value = d.format || 'markdown';
+    document.getElementById('edit-hidden').checked = !!d.is_hidden;
+    document.getElementById('edit-content').value = d.content || '';
+    closeModal('detail-modal');
+    openModal('edit-modal');
+}
+
+async function deleteReport(id) {
+    if (!await showConfirm('确认删除该报告？删除后分享链接同时失效。')) return;
+    const r = await fetch('/api/v1/test-reports/' + id, { method: 'DELETE' });
+    if (!r.ok) { showToast('删除失败', 'error'); return; }
+    closeModal('detail-modal');
+    loadReports(currentPage);
+}
+
+async function enableShare(id, refresh) {
+    const r = await fetch(`/api/v1/test-reports/${id}/share${refresh ? '?refresh=1' : ''}`, { method: 'POST' });
+    const d = await r.json();
+    if (!r.ok) { showToast('分享失败：' + (d.error || r.status), 'error'); return; }
+    openDetail(id);
+}
+
+async function revokeShare(id) {
+    if (!await showConfirm('撤销分享后旧链接立即失效，确认？')) return;
+    const r = await fetch(`/api/v1/test-reports/${id}/share`, { method: 'DELETE' });
+    if (!r.ok) { showToast('撤销失败', 'error'); return; }
+    openDetail(id);
+}
+
+function copyShare(id) {
+    const el = document.getElementById('share-url-' + id);
+    if (!el) return;
+    el.select();
+    document.execCommand('copy');
+    showToast('已复制到剪贴板', 'success');
+}
+
+async function uploadAtt(reportId) {
+    const fi = document.getElementById('att-file-' + reportId);
+    if (!fi || !fi.files || fi.files.length === 0) { showToast('请选择文件', 'error'); return; }
+    const f = fi.files[0];
+    if (f.size > META.max_attachment_size) {
+        showToast(`文件超过 ${(META.max_attachment_size / 1024 / 1024).toFixed(0)}MB 上限，请联系管理员`, 'error');
+        return;
+    }
+    const fd = new FormData();
+    fd.append('file', f);
+    const r = await fetch(`/api/v1/test-reports/${reportId}/attachments`, {
+        method: 'POST', body: fd,
+    });
+    const d = await r.json();
+    if (!r.ok) { showToast('上传失败：' + (d.error || r.status), 'error'); return; }
+    openDetail(reportId);
+}
+
+async function deleteAtt(reportId, attId) {
+    if (!await showConfirm('确认删除该附件？')) return;
+    const r = await fetch(`/api/v1/test-reports/${reportId}/attachments/${attId}`, { method: 'DELETE' });
+    if (!r.ok) { showToast('删除失败', 'error'); return; }
+    openDetail(reportId);
+}
+
+// Modal 背景点击关闭
+document.addEventListener('click', (e) => {
+    if (e.target.classList && e.target.classList.contains('modal-overlay')) {
+        e.target.classList.remove('active');
+    }
+});
+// ESC 关闭
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        document.querySelectorAll('.modal-overlay.active').forEach(m => m.classList.remove('active'));
+    }
+});
+
+// 入口
+(async function () {
+    await bootstrapMeta();
+    const params = new URLSearchParams(location.search);
+    if (params.get('project_id')) document.getElementById('filter-project').value = params.get('project_id');
+    if (params.get('iteration_id')) document.getElementById('filter-iteration').value = params.get('iteration_id');
+    if (params.get('report_type')) {
+        const tab = document.querySelector(`#type-tabs .type-tab[data-type="${params.get('report_type')}"]`);
+        if (tab) selectTypeTab(tab, params.get('report_type'));
+    }
+    if (params.get('status')) document.getElementById('filter-status').value = params.get('status');
+    await loadReports(1);
+    if (params.get('report_id')) openDetail(parseInt(params.get('report_id')));
+})();
+</script>
+{% endblock %}

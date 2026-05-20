@@ -33,11 +33,13 @@ from app.hermes_models import (
     normalize_hermes_model,
 )
 from app.services.agent_deployer import (
+    AGENT_SERVICE_GROUP,
     AGENT_ROOT_DIR,
     DeployRequest,
     _SSHRunner,
     _render_config_yaml,
     _render_env_file,
+    _render_sidecar_env,
     _render_sidecar_unit,
     _render_sidecar_wrapper,
     _render_systemd_unit,
@@ -113,6 +115,26 @@ def _default_hermes_install_dir() -> str:
         or rows.get('hermes_install_dir')
         or DEFAULT_HERMES_INSTALL_DIR
     ).strip().rstrip('/')
+
+
+def _build_remote_base_dir_compat(claw: OpenClawInstance, safe_name: str = '') -> str:
+    """兼容旧版 agent_deployer（无 safe_name 参数）。"""
+    try:
+        return build_remote_base_dir(
+            claw.id, claw.name or f'claw-{claw.id}', safe_name=safe_name
+        )
+    except TypeError:
+        return build_remote_base_dir(claw.id, claw.name or f'claw-{claw.id}')
+
+
+def _build_default_data_dir_compat(claw: OpenClawInstance, safe_name: str = '') -> str:
+    """兼容旧版 build_default_systemd_data_dir（无 safe_name 参数）。"""
+    try:
+        return build_default_systemd_data_dir(
+            claw.id, claw.name or f'claw-{claw.id}', safe_name=safe_name
+        )
+    except TypeError:
+        return build_default_systemd_data_dir(claw.id, claw.name or f'claw-{claw.id}')
 
 
 def _deployment_defaults() -> dict:
@@ -199,15 +221,55 @@ def _restart_systemd_agent(claw: OpenClawInstance, actor_name: str) -> dict:
         cfg_path = f'{data}/config.yaml' if deploy_req.systemd_split_layout() else f'{data}/config/config.yaml'
         env_path = f'{data}/.env' if deploy_req.systemd_split_layout() else f'{data}/config/.env'
         wrapper_path = f'{data}/scripts/hermes_sidecar_wrapper.sh'
+        sidecar_script = f'{data}/scripts/sidecar_v2.py'
+        sidecar_env_path = f'{data}/scripts/sidecar.env'
         service_user = deploy_req.systemd_service_user()
         sidecar_unit = f'openclaw-sidecar-v2-claw-{int(claw.id)}.service'
         sidecar_unit_path = f'/etc/systemd/system/{sidecar_unit}'
         unit_path = f'/etc/systemd/system/{unit}'
 
+        # 先修复运行目录权限，避免 ExecStartPre 在 data/sessions|logs 上权限失败。
+        runtime_dirs = [data, f'{data}/home', f'{data}/sessions', f'{data}/logs', f'{data}/scripts']
+        runtime_fix_cmd = (
+            f"mkdir -p {' '.join(shlex.quote(p) for p in runtime_dirs)} && "
+            f"chown -R {shlex.quote(service_user)}:{shlex.quote(AGENT_SERVICE_GROUP)} {shlex.quote(data)} && "
+            f"chmod 0700 {shlex.quote(data)} {shlex.quote(data + '/home')} "
+            f"{shlex.quote(data + '/sessions')} {shlex.quote(data + '/logs')} {shlex.quote(data + '/scripts')}"
+        )
+        runtime_fix = ssh.run(runtime_fix_cmd, timeout=30, name='fix hermes runtime dir ownership')
+        if not runtime_fix.ok:
+            raise RuntimeError(f'修复运行目录权限失败：{(runtime_fix.stderr or runtime_fix.stdout)[-800:]}')
+
+        # sidecar v2 脚本/环境文件在 restart 时也要补齐，避免 "Failed to load environment files"。
+        sidecar_url = (
+            f"{(deploy_req.hub_url or '').rstrip('/')}"
+            "/static/skills/hub-sse-sidecar-v2/scripts/sidecar_v2.py"
+        )
+        download_cmd = (
+            f"SIDECAR_URL={shlex.quote(sidecar_url)} "
+            f"SIDECAR_PATH={shlex.quote(sidecar_script)} "
+            "python3 - <<'PY'\n"
+            "import os, urllib.request\n"
+            "url = os.environ['SIDECAR_URL']\n"
+            "path = os.environ['SIDECAR_PATH']\n"
+            "with urllib.request.urlopen(url, timeout=30) as r:\n"
+            "    data = r.read()\n"
+            "if not data.startswith(b'#!/usr/bin/env python3'):\n"
+            "    raise SystemExit('unexpected sidecar content')\n"
+            "with open(path, 'wb') as f:\n"
+            "    f.write(data)\n"
+            "PY\n"
+            f"chmod 0755 {shlex.quote(sidecar_script)}"
+        )
+        sidecar_download = ssh.run(download_cmd, timeout=45, name='download sidecar_v2.py')
+        if not sidecar_download.ok:
+            raise RuntimeError(f'下载 sidecar_v2.py 失败：{(sidecar_download.stderr or sidecar_download.stdout)[-800:]}')
+
         for content, path, mode, name in (
                 (_render_config_yaml(deploy_req), cfg_path, '0644', 'sync config.yaml'),
                 (_render_env_file(deploy_req), env_path, '0600', 'sync .env'),
                 (_render_sidecar_wrapper(deploy_req), wrapper_path, '0755', 'sync sidecar wrapper'),
+                (_render_sidecar_env(deploy_req), sidecar_env_path, '0600', 'sync sidecar env'),
                 (_render_systemd_unit(deploy_req), unit_path, '0644', 'sync hermes unit'),
                 (_render_sidecar_unit(deploy_req), sidecar_unit_path, '0644', 'sync sidecar unit')):
             sr = ssh.put_text(content, path, mode=mode, name=name)
@@ -222,10 +284,12 @@ def _restart_systemd_agent(claw: OpenClawInstance, actor_name: str) -> dict:
 
         sync = ssh.run(
             f"chown {shlex.quote(service_user)}:openclaw_agents "
-            f"{shlex.quote(cfg_path)} {shlex.quote(env_path)} {shlex.quote(wrapper_path)} && "
+            f"{shlex.quote(cfg_path)} {shlex.quote(env_path)} {shlex.quote(wrapper_path)} "
+            f"{shlex.quote(sidecar_env_path)} {shlex.quote(sidecar_script)} && "
             f"chmod 0644 {shlex.quote(cfg_path)} && "
             f"chmod 0600 {shlex.quote(env_path)} && "
-            f"chmod 0755 {shlex.quote(wrapper_path)}",
+            f"chmod 0755 {shlex.quote(wrapper_path)} {shlex.quote(sidecar_script)} && "
+            f"chmod 0600 {shlex.quote(sidecar_env_path)}",
             timeout=20, name='chown synced hermes files')
         if not sync.ok:
             raise RuntimeError(f'同步配置权限失败：{(sync.stderr or sync.stdout)[-800:]}')
@@ -274,9 +338,13 @@ def _path_in_agent_root(path: str, claw: OpenClawInstance) -> bool:
         return False
     # 优先使用 claw.safe_name（数据库中存储的，第一次创建时生成，后续不变）
     safe = claw.safe_name or ''
-    base = build_remote_base_dir(claw.id, claw.name or f'claw-{claw.id}', safe_name=safe).rstrip('/')
+    base = _build_remote_base_dir_compat(claw, safe_name=safe).rstrip('/')
     cleaned = path.rstrip('/')
-    return cleaned == base or cleaned.startswith(base + '/')
+    if cleaned == base or cleaned.startswith(base + '/'):
+        return True
+    # 兼容历史目录：claw 名称变更后，旧目录可能仍为 claw-{id}-old-safe。
+    legacy_prefix = f"{AGENT_ROOT_DIR}/claw-{int(claw.id)}-"
+    return cleaned.startswith(legacy_prefix)
 
 
 def _parse_deploy_options(data: dict, claw: OpenClawInstance,
@@ -361,13 +429,11 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
                 else:
                     # 优先使用 claw.safe_name（数据库中存储的，第一次创建时生成，后续不变）
                     safe = claw.safe_name or ''
-                    hermes_data_dir = build_default_systemd_data_dir(
-                        claw.id, claw.name or f'claw-{claw.id}', safe_name=safe)
+                    hermes_data_dir = _build_default_data_dir_compat(claw, safe_name=safe)
             else:
                 # 优先使用 claw.safe_name
                 safe = claw.safe_name or ''
-                hermes_data_dir = build_default_systemd_data_dir(
-                    claw.id, claw.name or f'claw-{claw.id}', safe_name=safe)
+                hermes_data_dir = _build_default_data_dir_compat(claw, safe_name=safe)
         if hermes_home and (hermes_install_dir or hermes_data_dir):
             raise ValueError('请勿同时填写 hermes_home 与 hermes_install_dir/hermes_data_dir')
         if hermes_install_dir and not hermes_data_dir:
@@ -389,7 +455,7 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
         if not _path_in_agent_root(work_dir, claw):
             # 优先使用 claw.safe_name（数据库中存储的，第一次创建时生成，后续不变）
             safe = claw.safe_name or ''
-            private_base = build_remote_base_dir(claw.id, claw.name or f'claw-{claw.id}', safe_name=safe)
+            private_base = _build_remote_base_dir_compat(claw, safe_name=safe)
             raise ValueError(
                 f'agent 私有工作目录必须位于 {private_base}/ 下；'
                 f'即 {AGENT_ROOT_DIR} 的本 claw 子目录。共享目录固定为 /opt/agent_share，'
@@ -469,7 +535,7 @@ def create_deployment_record(claw: OpenClawInstance, req: DeployRequest) -> Agen
     else:
         # 优先使用 claw.safe_name（数据库中存储的，第一次创建时生成，后续不变）
         safe = claw.safe_name or ''
-        remote_base = build_remote_base_dir(claw.id, claw.name or f'claw-{claw.id}', safe_name=safe)
+        remote_base = _build_remote_base_dir_compat(claw, safe_name=safe)
         container = build_container_name(claw.id)
         image = req.image
 
