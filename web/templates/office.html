@@ -284,6 +284,21 @@ const AREA_POSITIONS = {
     ]
 };
 
+// 区域漫步边界 (agent 可以在这些范围内随机走动)
+const AREA_BOUNDS = {
+    writing:     { xMin: 200, xMax: 420, yMin: 250, yMax: 400 },
+    researching: { xMin: 380, xMax: 540, yMin: 240, yMax: 380 },
+    breakroom:   { xMin: 500, xMax: 750, yMin: 140, yMax: 280 },
+    error:       { xMin: 980, xMax: 1140, yMin: 190, yMax: 280 }
+};
+
+// 漫步配置
+const ROAM_CONFIG = {
+    interval: 4000,      // 每 4 秒考虑一次换位置
+    chance: 0.4,         // 40% 概率触发移动
+    pauseChance: 0.2,    // 20% 概率原地停留（模拟思考）
+};
+
 // 布局配置 (复用 Star Office UI 的布局逻辑)
 const LAYOUT = {
     game: { width: 1280, height: 720 },
@@ -566,6 +581,36 @@ class OfficeScene extends Phaser.Scene {
             }
         }
 
+        // === 随机漫步：定期给 agent 分配区域内新目标 ===
+        for (const id in agents) {
+            const container = agents[id];
+            if (!container || !container.active) continue;
+
+            // 初始化漫步计时器
+            if (!container._roamNextTime) {
+                container._roamNextTime = time + ROAM_CONFIG.interval * (0.5 + Math.random());
+            }
+
+            if (time >= container._roamNextTime) {
+                container._roamNextTime = time + ROAM_CONFIG.interval * (0.7 + Math.random() * 0.6);
+
+                // 决定是否移动
+                if (Math.random() < ROAM_CONFIG.chance) {
+                    const area = container._area || 'breakroom';
+                    const bounds = AREA_BOUNDS[area] || AREA_BOUNDS.breakroom;
+                    // 在区域范围内随机选点
+                    const newX = bounds.xMin + Math.random() * (bounds.xMax - bounds.xMin);
+                    const newY = bounds.yMin + Math.random() * (bounds.yMax - bounds.yMin);
+                    container._targetX = newX;
+                    container._targetY = newY;
+                } else if (Math.random() < ROAM_CONFIG.pauseChance) {
+                    // 原地微动（呼吸感）
+                    container._targetX = container.x + (Math.random() - 0.5) * 10;
+                    container._targetY = container.y + (Math.random() - 0.5) * 6;
+                }
+            }
+        }
+
         // 移动所有 agent 到目标位置 (平滑过渡)
         for (const id in agents) {
             const container = agents[id];
@@ -651,11 +696,11 @@ class OfficeScene extends Phaser.Scene {
             const isWorking = (status === '工作' || status === 'online');
             const isStudying = (status === '学习');
 
-            // 像素小人图标
+            // 像素小人图标 — 优先使用 claw 自己的 avatar
+            const clawAvatar = claw.avatar || '🦞';
             let bodyIcon;
             if (isWorking || isStudying) {
-                // 工作中/学习中显示 ⭐
-                bodyIcon = this.add.text(0, 0, '🦞', {
+                bodyIcon = this.add.text(0, 0, clawAvatar, {
                     fontFamily: 'ArkPixel, monospace', fontSize: '28px'
                 }).setOrigin(0.5);
             } else if (status === '摸鱼') {
@@ -667,7 +712,7 @@ class OfficeScene extends Phaser.Scene {
                     fontFamily: 'ArkPixel, monospace', fontSize: '28px'
                 }).setOrigin(0.5);
             } else {
-                bodyIcon = this.add.text(0, 0, '🦞', {
+                bodyIcon = this.add.text(0, 0, clawAvatar, {
                     fontFamily: 'ArkPixel, monospace', fontSize: '28px'
                 }).setOrigin(0.5);
             }
@@ -696,11 +741,13 @@ class OfficeScene extends Phaser.Scene {
             container.setSize(40, 60);
             container.setInteractive(new Phaser.Geom.Rectangle(0, -10, 40, 60), Phaser.Geom.Rectangle.Contains);
             container._clawId = clawId;
+            container._area = area;
 
             agents[clawId] = container;
         } else {
             // 更新已有 agent
             const container = agents[clawId];
+            container._area = area;
             container._targetX = pos.x;
             container._targetY = pos.y;
             container._status = status;
@@ -708,12 +755,13 @@ class OfficeScene extends Phaser.Scene {
             // 更新图标
             const bodyIcon = container.getAt(0);
             if (bodyIcon && bodyIcon.name === 'bodyIcon') {
+                const clawAvatar = claw.avatar || '🦞';
                 const isWorking = (status === '工作' || status === 'online');
                 const isStudying = (status === '学习');
-                if (isWorking || isStudying) bodyIcon.setText('🦞');
+                if (isWorking || isStudying) bodyIcon.setText(clawAvatar);
                 else if (status === '摸鱼') bodyIcon.setText('🎮');
                 else if (status === '休息') bodyIcon.setText('💤');
-                else bodyIcon.setText('🦞');
+                else bodyIcon.setText(clawAvatar);
             }
 
             // 更新状态点

@@ -178,10 +178,29 @@
     padding: 16px; max-height: 70vh; overflow: auto; color: var(--text-primary);
 }
 .tp-report-view h1, .tp-report-view h2, .tp-report-view h3 { margin: 0.8em 0 0.35em; color: var(--text-primary); }
+.tp-report-view h4, .tp-report-view h5, .tp-report-view h6 { margin: 0.6em 0 0.3em; color: var(--text-primary); }
 .tp-report-view p { line-height: 1.7; margin: 0.45em 0; }
 .tp-report-view ul, .tp-report-view ol { padding-left: 1.4em; }
-.tp-report-view code { background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; }
+.tp-report-view li { margin: 0.2em 0; line-height: 1.6; }
+.tp-report-view code { background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; font-size: 0.88em; }
 .tp-report-view pre { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow:auto; }
+.tp-report-view pre code { background: none; border: none; padding: 0; }
+.tp-report-view table { border-collapse: collapse; width: 100%; margin: 0.8em 0; font-size: 0.88em; }
+.tp-report-view th, .tp-report-view td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
+.tp-report-view th { background: var(--bg-card); font-weight: 600; }
+.tp-report-view blockquote { border-left: 3px solid var(--accent); margin: 0.8em 0; padding: 4px 12px; color: var(--text-secondary); background: var(--bg-card); border-radius: 0 6px 6px 0; }
+.tp-report-view a { color: var(--accent); text-decoration: underline; }
+.tp-report-view img { max-width: 100%; border-radius: 6px; margin: 0.5em 0; cursor: pointer; }
+.tp-report-view hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+
+/* 全屏模式 */
+.modal-overlay.fullscreen .modal {
+    max-width: 100vw !important; max-height: 100vh !important;
+    width: 100vw; height: 100vh;
+    border-radius: 0; margin: 0;
+}
+.modal-overlay.fullscreen { padding: 0; }
+.modal-overlay.fullscreen .tp-report-view { max-height: none; }
 
 /* 标签样式 */
 .tp-tag {
@@ -381,6 +400,7 @@
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
 <script>
 // ===== 数据 =====
 let iterations = [];
@@ -969,11 +989,14 @@ async function openReportDetail(planId, reportId, title) {
     overlay.innerHTML = `
     <div class="modal" style="max-width:900px;width:min(900px,94vw);max-height:90vh;overflow:hidden;display:flex;flex-direction:column">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
-            <div>
+            <div style="flex:1;min-width:0">
                 <h3 style="margin:0;font-size:1.05rem">${esc(title)}</h3>
                 <div id="report-detail-meta" style="font-size:0.78rem;color:var(--text-muted);margin-top:4px">加载中...</div>
             </div>
-            <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
+            <div style="display:flex;gap:6px;align-items:center">
+                <button class="btn btn-ghost" onclick="toggleReportFullscreen(this)" title="全屏查看" style="padding:4px 8px;font-size:0.85rem">⛶ 全屏</button>
+                <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
+            </div>
         </div>
         <div id="report-detail-content" class="tp-report-view" style="flex:1;overflow-y:auto;min-height:200px">加载中...</div>
         <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
@@ -990,6 +1013,7 @@ async function openReportDetail(planId, reportId, title) {
             contentEl.innerHTML = `<iframe sandbox="" style="width:100%;height:65vh;border:0;background:white;border-radius:8px" srcdoc="${esc(r.content || '').replace(/"/g, '&quot;')}"></iframe>`;
         } else {
             contentEl.innerHTML = renderMarkdown(r.content || '');
+            _bindReportImages(contentEl);
         }
     } catch (e) {
         overlay.querySelector('#report-detail-content').innerHTML =
@@ -1012,35 +1036,29 @@ async function deleteReport(planId, reportId, title) {
 }
 
 function renderMarkdown(markdown) {
-    const escaped = esc(markdown);
-    const lines = escaped.split('\n');
-    let html = '';
-    let inList = false;
-    let inCode = false;
-    for (const line of lines) {
-        if (line.startsWith('```')) {
-            html += inCode ? '</code></pre>' : '<pre><code>';
-            inCode = !inCode;
-            continue;
-        }
-        if (inCode) {
-            html += line + '\n';
-            continue;
-        }
-        if (/^###\s+/.test(line)) html += `<h3>${line.replace(/^###\s+/, '')}</h3>`;
-        else if (/^##\s+/.test(line)) html += `<h2>${line.replace(/^##\s+/, '')}</h2>`;
-        else if (/^#\s+/.test(line)) html += `<h1>${line.replace(/^#\s+/, '')}</h1>`;
-        else if (/^[-*]\s+/.test(line)) {
-            if (!inList) { html += '<ul>'; inList = true; }
-            html += `<li>${line.replace(/^[-*]\s+/, '')}</li>`;
-        } else {
-            if (inList) { html += '</ul>'; inList = false; }
-            html += line.trim() ? `<p>${line}</p>` : '<br>';
-        }
+    if (!markdown) return '';
+    try {
+        marked.setOptions({ breaks: true, gfm: true });
+        return marked.parse(markdown);
+    } catch (e) {
+        return '<pre>' + esc(markdown) + '</pre>';
     }
-    if (inList) html += '</ul>';
-    if (inCode) html += '</code></pre>';
-    return html;
+}
+
+// 全屏切换
+function toggleReportFullscreen(btn) {
+    const overlay = btn.closest('.modal-overlay');
+    if (!overlay) return;
+    overlay.classList.toggle('fullscreen');
+    btn.textContent = overlay.classList.contains('fullscreen') ? '⛶ 退出全屏' : '⛶ 全屏';
+}
+
+// 报告内图片点击放大
+function _bindReportImages(container) {
+    container.querySelectorAll('img').forEach(img => {
+        img.style.cursor = 'pointer';
+        img.onclick = function() { window.open(this.src, '_blank'); };
+    });
 }
 
 // ===== TAPD 迭代多选（下拉式） =====
@@ -2170,11 +2188,14 @@ async function openTaskReportDetail(planId, taskId, reportId, title) {
     overlay.innerHTML = `
     <div class="modal" style="max-width:900px;width:min(900px,94vw);max-height:90vh;overflow:hidden;display:flex;flex-direction:column">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
-            <div>
+            <div style="flex:1;min-width:0">
                 <h3 style="margin:0;font-size:1.05rem">${esc(title)}</h3>
                 <div id="task-report-detail-meta" style="font-size:0.78rem;color:var(--text-muted);margin-top:4px">加载中...</div>
             </div>
-            <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
+            <div style="display:flex;gap:6px;align-items:center">
+                <button class="btn btn-ghost" onclick="toggleReportFullscreen(this)" title="全屏查看" style="padding:4px 8px;font-size:0.85rem">⛶ 全屏</button>
+                <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
+            </div>
         </div>
         <div id="task-report-detail-content" class="tp-report-view" style="flex:1;overflow-y:auto;min-height:200px">加载中...</div>
         <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
@@ -2191,6 +2212,7 @@ async function openTaskReportDetail(planId, taskId, reportId, title) {
             contentEl.innerHTML = `<iframe sandbox="" style="width:100%;height:65vh;border:0;background:white;border-radius:8px" srcdoc="${esc(r.content || '').replace(/"/g, '&quot;')}"></iframe>`;
         } else {
             contentEl.innerHTML = renderMarkdown(r.content || '');
+            _bindReportImages(contentEl);
         }
     } catch (e) {
         overlay.querySelector('#task-report-detail-content').innerHTML =
@@ -2291,8 +2313,13 @@ async function openChainReport(planId, chainId) {
     overlay.innerHTML = `
     <div class="modal" style="max-width:900px;width:min(900px,94vw);max-height:90vh;overflow:hidden;display:flex;flex-direction:column">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
-            <h3 style="margin:0;font-size:1.05rem">📄 任务链执行报告</h3>
-            <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
+            <div style="flex:1;min-width:0">
+                <h3 style="margin:0;font-size:1.05rem">📄 任务链执行报告</h3>
+            </div>
+            <div style="display:flex;gap:6px;align-items:center">
+                <button class="btn btn-ghost" onclick="toggleReportFullscreen(this)" title="全屏查看" style="padding:4px 8px;font-size:0.85rem">⛶ 全屏</button>
+                <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
+            </div>
         </div>
         <div id="chain-report-content" class="tp-report-view" style="flex:1;overflow-y:auto;min-height:200px">加载中...</div>
         <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:14px;padding-top:10px;border-top:1px solid var(--border)">
@@ -2311,6 +2338,7 @@ async function openChainReport(planId, chainId) {
             contentEl.innerHTML = `<iframe sandbox="" style="width:100%;height:65vh;border:0;background:white;border-radius:8px" srcdoc="${esc(chain.execution_conclusion).replace(/"/g, '&quot;')}"></iframe>`;
         } else {
             contentEl.innerHTML = renderMarkdown(chain.execution_conclusion);
+            _bindReportImages(contentEl);
         }
     } catch (e) {
         overlay.querySelector('#chain-report-content').innerHTML =

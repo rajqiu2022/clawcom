@@ -485,7 +485,9 @@ function previewRule(id) {
     // 审核按钮
     const canReview = _isAdmin() && (rule.review_status === 'pending' || rule.review_status === 'revise');
     const canEdit = _canEditRule(rule) && rule.review_status !== 'pending';
+    window._previewRuleData = rule;
     $('#preview-actions').innerHTML = `
+        <button class="btn btn-ghost" onclick="showFullRule()">全屏查看</button>
         <button class="btn btn-ghost" onclick="closePreviewModal()">关闭</button>
         ${canReview ? `<button class="btn" style="background:#22c55e;color:#fff" onclick="closePreviewModal();reviewRule(${rule.id},'approved')">通过</button><button class="btn" style="background:#f97316;color:#fff" onclick="closePreviewModal();reviewRule(${rule.id},'revise')">打回</button><button class="btn" style="background:#6b7280;color:#fff" onclick="closePreviewModal();reviewRule(${rule.id},'rejected')">废弃</button>` : ''}
         ${canReview ? '' : canEdit ? `<button class="btn btn-primary" onclick="closePreviewModal();editRule(${rule.id})">编辑</button>` : ''}
@@ -494,6 +496,47 @@ function previewRule(id) {
 }
 function closePreviewModal() { $('#preview-modal').classList.remove('active'); }
 $('#preview-modal').addEventListener('click', e => { if (e.target === $('#preview-modal')) closePreviewModal(); });
+
+// 全屏查看 Rule
+let fullRuleModal = null;
+function showFullRule() {
+    const rule = window._previewRuleData;
+    if (!rule) return;
+    if (!fullRuleModal) {
+        fullRuleModal = document.createElement('div');
+        fullRuleModal.id = 'full-rule-modal';
+        fullRuleModal.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:var(--bg-primary, #191919);color:var(--text-primary, #e8e6e1);z-index:10000;display:flex;flex-direction:column;overflow:hidden';
+        fullRuleModal.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid var(--border);flex-shrink:0">
+                <span id="full-rule-title" style="font-weight:600;font-size:1.15rem"></span>
+                <button onclick="closeFullRule()" style="background:none;border:none;color:var(--text-muted);font-size:1.6rem;cursor:pointer;line-height:1;padding:4px 8px">&times;</button>
+            </div>
+            <div id="full-rule-body" style="flex:1;overflow:auto;padding:24px 32px"></div>
+            <div style="padding:12px 24px;border-top:1px solid var(--border);text-align:right;flex-shrink:0">
+                <button class="btn btn-primary" onclick="closeFullRule()">关闭</button>
+            </div>`;
+        document.body.appendChild(fullRuleModal);
+    }
+    document.getElementById('full-rule-title').textContent = rule.display_name;
+    document.getElementById('full-rule-body').innerHTML = `
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px">
+            <span class="tag tag-accent">${escapeHtml(rule.category || '通用')}</span>
+            <span class="tag tag-blue">${rule.scope === 'project' ? '项目级' : '全局'}</span>
+            ${rule.review_status ? `<span class="tag">${rule.review_status}</span>` : ''}
+        </div>
+        ${rule.description ? `<div style="margin-bottom:16px;font-size:0.95rem;color:var(--text-secondary);line-height:1.6">${escapeHtml(rule.description)}</div>` : ''}
+        <div style="margin-bottom:10px;font-size:0.9rem;font-weight:600">规则内容</div>
+        <div style="background:var(--bg-secondary);padding:18px 20px;border-radius:var(--radius-sm);font-family:monospace;font-size:0.88rem;white-space:pre-wrap;line-height:1.8;color:var(--text)">${escapeHtml(rule.content_template || rule.description || '(无内容)')}</div>
+        <div style="margin-top:16px;font-size:0.82rem;color:var(--text-muted)">
+            创建者: ${escapeHtml(rule.created_by || '-')} · 最近修改: ${rule.updated_at || '-'}
+        </div>
+    `;
+    fullRuleModal.style.display = 'flex';
+    closePreviewModal();
+}
+function closeFullRule() {
+    if (fullRuleModal) fullRuleModal.style.display = 'none';
+}
 
 // AI 生成
 let aiGenerating = false;

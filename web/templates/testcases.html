@@ -168,7 +168,7 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
 
 .tc-case-card {
     display: grid;
-    grid-template-columns: 56px 1fr 130px 56px 72px 110px 48px;
+    grid-template-columns: 140px 1fr 130px 56px 72px 110px 48px;
     align-items: center; gap: 0;
     padding: 8px 16px;
     background: var(--bg-card);
@@ -188,6 +188,7 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
     font-family: 'JetBrains Mono', monospace;
     font-size: 0.75rem; color: var(--text-muted);
     letter-spacing: 0.02em;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
 .tc-case-title {
@@ -222,7 +223,7 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
 /* 列表表头 */
 .tc-list-head {
     display: grid;
-    grid-template-columns: 56px 1fr 130px 56px 72px 110px 48px;
+    grid-template-columns: 140px 1fr 130px 56px 72px 110px 48px;
     padding: 6px 16px;
     font-size: 0.72rem; font-weight: 600;
     color: var(--text-muted);

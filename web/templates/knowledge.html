@@ -359,7 +359,7 @@ function renderEntry(e) {
                 <button class="kn-act-btn" onclick="showEditModal(${e.id})" title="编辑">✏️</button>
                 <button class="kn-act-btn del" onclick="deleteEntry(${e.id})" title="删除">🗑️</button>
             </div>
-            <div class="kn-card-title" title="${escapeHtml(e.title)}">${escapeHtml(e.title)}</div>
+            <div class="kn-card-title" title="${escapeHtml(e.title)}"><span style="font-size:0.72rem;color:var(--text-muted);font-weight:400;margin-right:6px">#${e.id}</span>${escapeHtml(e.title)}</div>
             <div class="kn-card-preview">${escapeHtml(preview)}${(e.content||'').length > 160 ? '...' : ''}</div>
             <div class="kn-card-tags">
                 ${src ? `<span class="tag ${src[0]}">${src[1]}</span>` : ''}
