@@ -63,9 +63,21 @@ def _can_edit(user, resource):
       - super_admin / admin: 全权编辑（admin claw 如龙虾王作为审核人也属此列）
       - 普通 user/test_manager 等: 只能编辑自己（或自己绑定 claw）创建的
         + 项目 admin 可编辑其 managed_projects 范围内的资源
+      - 私有 Skill：作者始终可编辑
     """
     if not user:
         return False
+    # 私有 Skill 作者始终可编辑
+    if getattr(resource, 'visibility', None) == 'private':
+        created_by = getattr(resource, 'created_by', None) or ''
+        if created_by == user.username:
+            return True
+        claw_name = getattr(user, '_claw_name', None)
+        if claw_name and created_by == claw_name:
+            return True
+        claw_id = getattr(user, 'bound_claw_id', None) or getattr(user, '_claw_id', None)
+        if claw_id and getattr(resource, 'owner_claw_id', None) == claw_id:
+            return True
     # admin / super_admin 全权（文档承诺的"同等权限"）
     if user.role in ('super_admin', 'admin'):
         if user.role == 'super_admin':
@@ -120,6 +132,44 @@ def list_skills():
             Skill.name.notin_(list(OFF_SHELF_SKILL_NAMES)),
             Skill.id.notin_(list(OFF_SHELF_SKILL_IDS)),
         )
+
+    # 私有 Skill 可见性过滤
+    visibility_filter = request.args.get('visibility')
+    if visibility_filter == 'private':
+        # 仅显示当前用户自己的私有 Skill
+        if user:
+            claw_name = getattr(user, '_claw_name', None)
+            own_filters = [Skill.created_by == user.username]
+            if claw_name:
+                own_filters.append(Skill.created_by == claw_name)
+            claw_id = getattr(user, 'bound_claw_id', None) or getattr(user, '_claw_id', None)
+            if claw_id:
+                own_filters.append(Skill.owner_claw_id == claw_id)
+            query = query.filter(Skill.visibility == 'private').filter(db.or_(*own_filters))
+        else:
+            query = query.filter(db.false())
+    else:
+        # 默认列表隐藏私有 Skill（除非是管理员）
+        if is_admin_user:
+            # 管理员能看到所有（含私有）
+            pass
+        else:
+            # 普通用户：公开的 + 自己的私有
+            if user:
+                claw_name = getattr(user, '_claw_name', None)
+                own_filters = [Skill.created_by == user.username]
+                if claw_name:
+                    own_filters.append(Skill.created_by == claw_name)
+                claw_id = getattr(user, 'bound_claw_id', None) or getattr(user, '_claw_id', None)
+                if claw_id:
+                    own_filters.append(Skill.owner_claw_id == claw_id)
+                query = query.filter(db.or_(
+                    Skill.visibility != 'private',
+                    Skill.visibility.is_(None),
+                    *own_filters
+                ))
+            else:
+                query = query.filter(db.or_(Skill.visibility != 'private', Skill.visibility.is_(None)))
 
     # scope=admin 的 Skill 仅超级管理员和管理员可见
     if not user or user.role not in ('super_admin', 'admin'):
@@ -299,7 +349,8 @@ def create_skill():
 
     # 判断提交者身份，决定审核状态
     user = _get_current_user()
-    if user and user.role == 'super_admin':
+    is_private = data.get('visibility') == 'private'
+    if is_private or (user and user.role == 'super_admin'):
         review_status = 'approved'
     else:
         review_status = 'pending'
@@ -326,6 +377,8 @@ def create_skill():
         created_by=created_by,
         is_standard=bool(data.get('is_standard', False)),
         review_status=review_status,
+        visibility='private' if is_private else 'public',
+        owner_claw_id=data.get('owner_claw_id') if is_private else None,
     )
 
     # 进化技能额外字段
@@ -344,17 +397,19 @@ def create_skill():
     db.session.add(skill)
     db.session.commit()
 
-    if review_status == 'pending':
-        notified_ids = _notify_admin_claws('Skill', '待审核', skill.display_name,
-                            f'类型: {skill.category}, 作用域: {skill.scope}, 提交人: {skill.created_by}\n请审核后通过或拒绝。')
-        _create_review_todo_for_admin_claws('Skill', skill.display_name, skill.created_by, skill.category, skill.scope)
-    else:
-        notified_ids = _notify_admin_claws('Skill', '新建', skill.display_name,
-                            f'类型: {skill.category}, 作用域: {skill.scope}')
-    db.session.commit()
-    from app.api.agent_client import notify_claw
-    for cid in notified_ids:
-        notify_claw(cid)
+    # 私有 Skill 不需要审核通知
+    if not is_private:
+        if review_status == 'pending':
+            notified_ids = _notify_admin_claws('Skill', '待审核', skill.display_name,
+                                f'类型: {skill.category}, 作用域: {skill.scope}, 提交人: {skill.created_by}\n请审核后通过或拒绝。')
+            _create_review_todo_for_admin_claws('Skill', skill.display_name, skill.created_by, skill.category, skill.scope)
+        else:
+            notified_ids = _notify_admin_claws('Skill', '新建', skill.display_name,
+                                f'类型: {skill.category}, 作用域: {skill.scope}')
+        db.session.commit()
+        from app.api.agent_client import notify_claw
+        for cid in notified_ids:
+            notify_claw(cid)
 
     return jsonify(skill.to_dict()), 201
 
@@ -739,6 +794,12 @@ def update_skill(skill_id):
                 setattr(skill, field, data[field])
         notified_ids = _notify_admin_claws('Skill', '更新', skill.display_name,
                             f'更新字段: {", ".join(data.keys())}')
+    elif skill.visibility == 'private':
+        # 私有 Skill：作者可直接修改，无需镜像/审核
+        for field in content_fields + meta_fields:
+            if field in data:
+                setattr(skill, field, data[field])
+        notified_ids = []
     else:
         # 非超级管理员：内容字段写入镜像，元数据字段直接改
         modifier = (
@@ -820,6 +881,14 @@ def delete_skill(skill_id):
     can_delete = False
     if user.role in ('super_admin', 'admin'):
         can_delete = True
+    elif skill.visibility == 'private':
+        # 私有 Skill 作者可直接删除
+        created_by = skill.created_by or ''
+        if created_by == user.username or created_by == getattr(user, '_claw_name', None):
+            can_delete = True
+        claw_id = getattr(user, 'bound_claw_id', None) or getattr(user, '_claw_id', None)
+        if claw_id and skill.owner_claw_id == claw_id:
+            can_delete = True
     else:
         # 普通用户只能删除自己创建的
         created_by = skill.created_by or ''
@@ -838,8 +907,11 @@ def delete_skill(skill_id):
     # 禁用所有安装关联（OpenClaw 不再能看到此 Skill）
     OpenClawSkill.query.filter_by(skill_id=skill_id).update({'enabled': False})
 
-    notified_ids = _notify_admin_claws('Skill', '删除（隐藏）', skill.display_name,
-                        f'由 {user.username} 软删除，OpenClaw 将无法搜索安装')
+    if skill.visibility != 'private':
+        notified_ids = _notify_admin_claws('Skill', '删除（隐藏）', skill.display_name,
+                            f'由 {user.username} 软删除，OpenClaw 将无法搜索安装')
+    else:
+        notified_ids = []
     db.session.commit()
     from app.api.agent_client import notify_claw
     for cid in notified_ids:

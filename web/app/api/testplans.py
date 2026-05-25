@@ -1066,6 +1066,161 @@ def list_task_cases(plan_id, task_id):
     return jsonify([tc.to_dict() for tc in cases])
 
 
+@api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/cases', methods=['POST'])
+def add_cases_to_task(plan_id, task_id):
+    """向已有任务手动关联用例
+
+    请求体：
+    {
+        "case_ids": [1, 2, 3],                    // 方式1：直接指定用例ID列表
+        "library_id": 5,                           // 方式2：从用例库筛选导入
+        "case_filter": {                           // 配合 library_id 使用
+            "module_paths": ["模块A/子模块"],
+            "priorities": ["P0", "P1"],
+            "types": ["可自动化"],
+            "tags": ["冒烟"]
+        },
+        "replace": false                           // 是否清空已有关联再导入（默认 false=追加）
+    }
+    """
+    task = TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': '请求体不能为空'}), 400
+
+    case_ids = data.get('case_ids', [])
+    library_id = data.get('library_id')
+    case_filter = data.get('case_filter', {})
+    replace = data.get('replace', False)
+
+    # 方式2：从用例库筛选
+    if library_id and not case_ids:
+        query = TestCase.query.filter_by(library_id=library_id).filter(
+            TestCase.is_placeholder != True
+        )
+        module_paths = case_filter.get('module_paths', [])
+        priorities = case_filter.get('priorities', [])
+        types = case_filter.get('types', [])
+        tags = case_filter.get('tags', [])
+        filter_case_ids = case_filter.get('case_ids', [])
+
+        if module_paths:
+            or_filters = []
+            for mp in module_paths:
+                or_filters.append(TestCase.module_path == mp)
+                or_filters.append(TestCase.module_path.like(mp + '/%'))
+            query = query.filter(db.or_(*or_filters))
+
+        if priorities:
+            query = query.filter(TestCase.priority.in_(priorities))
+
+        if filter_case_ids:
+            query = query.filter(TestCase.id.in_(filter_case_ids))
+
+        if types:
+            query = query.filter(TestCase.type.in_(types))
+
+        if tags:
+            # tags 存储在 JSON 字段中，用 LIKE 模糊匹配
+            tag_filters = []
+            for tag in tags:
+                tag_filters.append(TestCase.tags.like(f'%"{tag}"%'))
+            query = query.filter(db.or_(*tag_filters))
+
+        cases = query.all()
+        case_ids = [c.id for c in cases]
+
+    if not case_ids:
+        return jsonify({'error': '未指定任何用例（case_ids 为空或筛选结果为空）'}), 400
+
+    # 是否清空已有关联
+    if replace:
+        TestTaskCase.query.filter_by(task_id=task.id).delete()
+
+    # 获取已关联的 case_id 集合（避免重复）
+    existing_ids = set(
+        row[0] for row in db.session.query(TestTaskCase.case_id)
+        .filter_by(task_id=task.id).all()
+    )
+
+    added = 0
+    skipped = 0
+    for cid in case_ids:
+        if cid in existing_ids:
+            skipped += 1
+            continue
+        tc = TestTaskCase(task_id=task.id, case_id=cid, status='pending')
+        db.session.add(tc)
+        existing_ids.add(cid)
+        added += 1
+
+    # 更新任务的 library_id（如果通过用例库导入）
+    if library_id:
+        task.library_id = library_id
+        if case_filter:
+            task.case_filter = case_filter
+
+    _recalc_task_case_stats(task)
+    plan = TestPlan.query.get(plan_id)
+    if plan:
+        _recalc_plan_stats(plan)
+
+    db.session.commit()
+    return jsonify({
+        'message': f'已关联 {added} 条用例（{skipped} 条已存在跳过）',
+        'added': added,
+        'skipped': skipped,
+        'total_cases': task.total_cases,
+    }), 201
+
+
+@api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/cases/remove', methods=['POST'])
+def remove_cases_from_task(plan_id, task_id):
+    """从任务中移除关联的用例
+
+    请求体：
+    {
+        "case_ids": [1, 2, 3],     // 要移除的用例ID列表
+        "tc_ids": [10, 11, 12]     // 或按 TestTaskCase.id 移除
+    }
+    """
+    task = TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': '请求体不能为空'}), 400
+
+    case_ids = data.get('case_ids', [])
+    tc_ids = data.get('tc_ids', [])
+
+    removed = 0
+    if tc_ids:
+        removed = TestTaskCase.query.filter(
+            TestTaskCase.task_id == task.id,
+            TestTaskCase.id.in_(tc_ids)
+        ).delete(synchronize_session=False)
+    elif case_ids:
+        removed = TestTaskCase.query.filter(
+            TestTaskCase.task_id == task.id,
+            TestTaskCase.case_id.in_(case_ids)
+        ).delete(synchronize_session=False)
+    else:
+        return jsonify({'error': '需要提供 case_ids 或 tc_ids'}), 400
+
+    _recalc_task_case_stats(task)
+    plan = TestPlan.query.get(plan_id)
+    if plan:
+        _recalc_plan_stats(plan)
+
+    db.session.commit()
+    return jsonify({
+        'message': f'已移除 {removed} 条用例关联',
+        'removed': removed,
+        'total_cases': task.total_cases,
+    })
+
+
 @api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/cases/<int:tc_id>', methods=['PUT'])
 def update_task_case(plan_id, task_id, tc_id):
     """更新用例执行状态（OpenClaw 核心接口）
@@ -1130,12 +1285,19 @@ def batch_update_task_cases(plan_id, task_id):
         return jsonify({'error': 'updates 为必填项'}), 400
 
     updated = 0
+    skipped = []
     for item in data['updates']:
+        tc = None
         tc_id = item.get('tc_id')
-        if not tc_id:
-            continue
-        tc = TestTaskCase.query.filter_by(task_id=task_id, id=tc_id).first()
+        case_id = item.get('case_id')
+        # 优先按 tc_id（TestTaskCase.id）匹配
+        if tc_id:
+            tc = TestTaskCase.query.filter_by(task_id=task_id, id=tc_id).first()
+        # 其次按 case_id（TestCase.id）匹配
+        if not tc and case_id:
+            tc = TestTaskCase.query.filter_by(task_id=task_id, case_id=case_id).first()
         if not tc:
+            skipped.append({'tc_id': tc_id, 'case_id': case_id, 'reason': 'not_found'})
             continue
         if item.get('status'):
             tc.status = item['status']
@@ -1155,7 +1317,11 @@ def batch_update_task_cases(plan_id, task_id):
         _recalc_plan_stats(plan)
 
     db.session.commit()
-    return jsonify({'message': f'已更新 {updated} 条用例状态', 'updated': updated})
+    result = {'message': f'已更新 {updated} 条用例状态', 'updated': updated}
+    if skipped:
+        result['skipped'] = skipped
+        result['skipped_count'] = len(skipped)
+    return jsonify(result)
 
 
 # ==================== OpenClaw API（Token 认证） ====================
@@ -1207,7 +1373,14 @@ def report_task_progress(claw_id, task_id):
     }
     """
     claw = OpenClawInstance.query.get_or_404(claw_id)
-    task = TestTask.query.filter_by(id=task_id, assignee_claw_id=claw_id).first_or_404()
+    # 优先匹配自己指派的任务；管理员 claw 可操作任何任务
+    task = TestTask.query.filter_by(id=task_id, assignee_claw_id=claw_id).first()
+    if not task:
+        # admin 角色的 claw 可以代报任何任务
+        if claw.role in ('admin', 'super_admin'):
+            task = TestTask.query.get(task_id)
+        if not task:
+            return jsonify({'error': '任务不存在或未指派给该 OpenClaw'}), 404
 
     data = request.get_json()
     if not data:
@@ -1221,14 +1394,19 @@ def report_task_progress(claw_id, task_id):
     if data.get('result_summary'):
         task.result_summary = data['result_summary']
 
-    # 更新用例执行状态
+    # 更新用例执行状态（支持 tc_id 或 case_id 匹配）
     case_updates = data.get('case_updates', [])
     for cu in case_updates:
-        case_id = cu.get('case_id')
-        if not case_id:
+        tc = None
+        # 优先按 tc_id（TestTaskCase.id）匹配
+        if cu.get('tc_id'):
+            tc = TestTaskCase.query.filter_by(task_id=task_id, id=cu['tc_id']).first()
+        # 其次按 case_id（TestCase.id）匹配
+        if not tc and cu.get('case_id'):
+            tc = TestTaskCase.query.filter_by(task_id=task_id, case_id=cu['case_id']).first()
+        if not tc:
             continue
-        tc = TestTaskCase.query.filter_by(task_id=task_id, case_id=case_id).first()
-        if tc and cu.get('status'):
+        if cu.get('status'):
             tc.status = cu['status']
             tc.executed_at = datetime.now()
             tc.executed_by = claw.name
@@ -1249,7 +1427,17 @@ def report_task_progress(claw_id, task_id):
     if plan:
         _recalc_plan_stats(plan)
 
-    db.session.commit()
+    # Deadlock retry
+    for _retry in range(3):
+        try:
+            db.session.commit()
+            break
+        except Exception as e:
+            if 'Deadlock' in str(e) and _retry < 2:
+                db.session.rollback()
+                import time; time.sleep(0.3)
+                continue
+            raise
     return jsonify(task.to_dict())
 
 

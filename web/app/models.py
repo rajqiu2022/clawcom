@@ -27,6 +27,7 @@ class User(db.Model):
     bound_claw_id = db.Column(db.Integer, comment='绑定的 OpenClaw ID')
     managed_projects = db.Column(db.JSON, comment='管理的项目ID列表（admin角色用）')
     created_at = db.Column(db.DateTime, default=_now)
+    last_login_at = db.Column(db.DateTime, comment='最后登录时间')
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -43,6 +44,7 @@ class User(db.Model):
             'bound_claw_id': self.bound_claw_id,
             'managed_projects': self.managed_projects or [],
             'created_at': str(self.created_at) if self.created_at else None,
+            'last_login_at': str(self.last_login_at) if self.last_login_at else None,
         }
         # 添加绑定的 claw 名（供前端权限判断）
         if self.bound_claw_id:
@@ -290,6 +292,11 @@ class Skill(db.Model):
     rating = db.Column(db.Float, default=3.0,
                        comment='星级评分（1~5，支持0.5步进，默认3）')
 
+    # 私有 Skill：仅创建者自己可见可用，免审核
+    visibility = db.Column(db.String(20), default='public',
+                           comment='可见性：public=公开（默认），private=私有（仅作者可见）')
+    owner_claw_id = db.Column(db.Integer, comment='私有 Skill 归属的 OpenClaw ID')
+
     def to_dict(self):
         data = {
             'id': self.id,
@@ -321,6 +328,8 @@ class Skill(db.Model):
             'last_modified_by': self.last_modified_by or None,
             'last_modified_at': str(self.last_modified_at) if self.last_modified_at else None,
             'last_modified_source': self.last_modified_source or 'web',
+            'visibility': self.visibility or 'public',
+            'owner_claw_id': self.owner_claw_id,
         }
         # 进化指标
         if self.category == 'evolved':
@@ -707,6 +716,8 @@ class Rule(db.Model):
 
     # 生成的规范内容（Markdown格式，会被写入OpenClaw的配置文件）
     content_template = db.Column(db.Text, comment='规范内容模板')
+    visibility = db.Column(db.String(20), default='public',
+                           comment='可见性：public=公开（默认），private=私有（仅作者可见）')
     is_standard = db.Column(db.Boolean, default=False,
                            comment='是否标准化 Rules（注册时自动安装）')
 
@@ -772,6 +783,8 @@ class Rule(db.Model):
             'last_modified_by': self.last_modified_by or None,
             'last_modified_at': str(self.last_modified_at) if self.last_modified_at else None,
             'last_modified_source': self.last_modified_source or 'web',
+            'visibility': self.visibility or 'public',
+            'owner_claw_id': self.owner_claw_id,
         }
 
 

@@ -19,6 +19,7 @@
 {% block content %}
 <div class="tab-bar">
     <div class="tab-item active" data-tab="all" onclick="filterSkills('all')">全部</div>
+    <div class="tab-item" data-tab="private" onclick="filterSkills('private')">&#x1F512; 我的私有</div>
     <div class="tab-item" data-tab="standard" onclick="filterSkills('standard')">通用</div>
     <div class="tab-item" data-tab="hub_system" onclick="filterSkills('hub_system')">Hub系统</div>
     <div class="tab-item" data-tab="project" onclick="filterSkills('project')">项目</div>
@@ -86,6 +87,20 @@
                     <input type="checkbox" id="skill-is-standard">
                     <span class="form-label" style="margin:0">标准 Skill（所有注册的 OpenClaw 必须安装）</span>
                 </label>
+            </div>
+            <!-- 可见性 -->
+            <div class="form-group">
+                <label class="form-label">可见性</label>
+                <div style="display:flex;gap:16px;margin-top:6px">
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="visibility" value="public" checked>
+                        <span>公开（进入市场，需审核）</span>
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+                        <input type="radio" name="visibility" value="private">
+                        <span>&#x1F512; 私有（仅自己可见，免审核）</span>
+                    </label>
+                </div>
             </div>
             <div class="form-group">
                 <label class="form-label">模板内容</label>
@@ -223,6 +238,10 @@ function reviewStatusTag(s) {
     if (s.review_status === 'pending') return '<span class="tag" style="background:#f59e0b;color:#fff;font-weight:600">待审核</span>';
     if (s.review_status === 'revise') return '<span class="tag" style="background:#f97316;color:#fff;font-weight:600">待修改</span>';
     if (s.review_status === 'rejected') return '<span class="tag" style="background:#6b7280;color:#fff;font-weight:600">已废弃</span>';
+    return '';
+}
+function visibilityTag(s) {
+    if (s.visibility === 'private') return '<span class="tag" style="background:#6366f1;color:#fff;font-weight:600">&#x1F512; 私有</span>';
     return '';
 }
 
@@ -450,13 +469,15 @@ async function doSearch() {
 function renderSkills() {
     let filtered;
     if (currentFilter === 'all') {
-        filtered = allSkills;
+        filtered = allSkills.filter(s => s.visibility !== 'private');
+    } else if (currentFilter === 'private') {
+        filtered = allSkills.filter(s => s.visibility === 'private');
     } else if (currentFilter === 'standard') {
-        filtered = allSkills.filter(s => s.category === 'standard' || s.is_standard);
+        filtered = allSkills.filter(s => (s.category === 'standard' || s.is_standard) && s.visibility !== 'private');
     } else if (currentFilter === 'pending') {
         filtered = allSkills.filter(s => s.review_status === 'pending');
     } else {
-        filtered = allSkills.filter(s => s.category === currentFilter);
+        filtered = allSkills.filter(s => s.category === currentFilter && s.visibility !== 'private');
     }
     const sorted = filtered;
     const grid = $('#skills-grid');
@@ -480,6 +501,7 @@ function renderSkills() {
                 ${categoryTag(s)}
                 ${s.is_standard ? '<span class="tag" style="background:#e74c3c;color:#fff;font-weight:600">标准</span>' : ''}
                 ${reviewStatusTag(s)}
+                ${visibilityTag(s)}
             </div>
             <div style="margin-top:4px">${scopeLabel(s)}</div>
             <div style="margin-top:4px">${renderStars(s.rating, s.id, _isAdmin())}</div>
@@ -570,6 +592,10 @@ async function editSkill(id) {
         document.querySelectorAll('input[name="applicable_modules"]').forEach(el => { el.checked = s.applicable_modules.includes(el.value); });
     }
 
+    // 设置可见性
+    const visRadios = document.querySelectorAll('#create-form input[name="visibility"]');
+    visRadios.forEach(el => { el.checked = el.value === (s.visibility || 'public'); });
+
     $('#create-modal').classList.add('active');
 }
 
@@ -598,6 +624,10 @@ $('#create-form').addEventListener('submit', async e => {
         // 创建时自动填入作者，优先用 bound_claw_name（OpenClaw 名字）
         if (!data.created_by || !data.created_by.trim()) {
             data.created_by = currentUser ? (currentUser.bound_claw_name || currentUser.display_name || currentUser.username) : 'system';
+        }
+        // 私有 Skill 自动设置 owner_claw_id
+        if (data.visibility === 'private' && currentUser && currentUser.bound_claw_id) {
+            data.owner_claw_id = currentUser.bound_claw_id;
         }
     }
 
@@ -744,7 +774,7 @@ function previewSkill(id) {
     if (!s) return;
     $('#preview-title').textContent = s.display_name;
     const contentHtml = s.template_content
-        ? `<div style="background:var(--bg-secondary);padding:14px;border-radius:var(--radius-sm);font-family:monospace;font-size:0.85rem;white-space:pre-wrap;line-height:1.7;max-height:40vh;overflow-y:auto;cursor:pointer;position:relative" onclick="showFullContent('${escapeAttr(s.template_content)}')" title="点击查看完整内容">${escapeHtml(s.template_content)}<span style="position:absolute;top:4px;right:8px;background:rgba(255,255,255,0.15);color:#aaa;padding:1px 6px;border-radius:3px;font-size:0.72rem">点击全屏</span></div>`
+        ? `<div style="background:var(--bg-secondary);padding:14px;border-radius:var(--radius-sm);font-family:monospace;font-size:0.85rem;white-space:pre-wrap;line-height:1.7;max-height:40vh;overflow-y:auto">${escapeHtml(s.template_content)}</div>`
         : '<div style="color:var(--text-muted)">暂无模板内容</div>';
 
     // 镜像内容（待审核的修改）
@@ -829,7 +859,7 @@ function showFullContent(content) {
     if (!fullContentModal) {
         fullContentModal = document.createElement('div');
         fullContentModal.id = 'full-content-modal';
-        fullContentModal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:var(--bg, #1a1a2e);z-index:10000;display:flex;flex-direction:column;overflow:hidden';
+        fullContentModal.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:var(--bg-primary, #191919);color:var(--text-primary, #e8e6e1);z-index:10000;display:flex;flex-direction:column;overflow:hidden';
         fullContentModal.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid var(--border);flex-shrink:0"><span style="font-weight:600;font-size:1.1rem">模板内容 - 全屏查看</span><button onclick="closeFullContent()" style="background:none;border:none;color:var(--text-muted);font-size:1.6rem;cursor:pointer;line-height:1;padding:4px 8px">&times;</button></div><div id="full-content-body" style="flex:1;overflow:auto;padding:24px 32px;font-family:monospace;font-size:0.9rem;white-space:pre-wrap;line-height:1.8"></div><div style="padding:12px 24px;border-top:1px solid var(--border);text-align:right;flex-shrink:0"><button class="btn btn-primary" onclick="closeFullContent()">关闭</button></div>';
         document.body.appendChild(fullContentModal);
     }
@@ -848,7 +878,7 @@ function showFullSkill() {
     if (!fullSkillModal) {
         fullSkillModal = document.createElement('div');
         fullSkillModal.id = 'full-skill-modal';
-        fullSkillModal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:var(--bg, #1a1a2e);z-index:10000;display:flex;flex-direction:column;overflow:hidden';
+        fullSkillModal.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;background:var(--bg-primary, #191919);color:var(--text-primary, #e8e6e1);z-index:10000;display:flex;flex-direction:column;overflow:hidden';
         fullSkillModal.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:center;padding:16px 24px;border-bottom:1px solid var(--border);flex-shrink:0">
                 <span id="full-skill-title" style="font-weight:600;font-size:1.15rem"></span>

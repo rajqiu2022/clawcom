@@ -185,6 +185,11 @@ def _consume_tai_identity():
         logger.warning('[TAI] 自动创建用户 %s (staff_id=%s)',
                        login_name, payload.staff_id)
 
+    # 更新最后登录时间（每次 TAI 认证通过都更新）
+    from datetime import datetime
+    user.last_login_at = datetime.now()
+    db.session.commit()
+
     session.permanent = True
     session['user_id'] = user.id
     return True

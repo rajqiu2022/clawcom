@@ -203,6 +203,17 @@ def create_app(config_name=None):
                     except Exception:
                         pass
 
+                    # skills 表添加私有 Skill 字段
+                    for col, coltype in [
+                        ('visibility', "VARCHAR(20) DEFAULT 'public'"),
+                        ('owner_claw_id', 'INT DEFAULT NULL'),
+                    ]:
+                        try:
+                            conn.execute(text(f'ALTER TABLE skills ADD COLUMN {col} {coltype}'))
+                            logger.info(f'已添加 skills.{col} 列')
+                        except Exception:
+                            pass
+
                     # skills 表添加镜像内容和历史记录字段
                     for col, coltype in [
                         ('mirror_content', 'LONGTEXT DEFAULT NULL'),
@@ -1691,6 +1702,16 @@ def create_app(config_name=None):
                             logger.info('test_reports 历史数据已回迁')
                     except Exception as e:
                         logger.info(f'test_reports 回迁跳过: {e}')
+
+                    # users 表添加 last_login_at 字段
+                    try:
+                        conn.execute(text(
+                            "ALTER TABLE users ADD COLUMN last_login_at DATETIME DEFAULT NULL "
+                            "COMMENT '最后登录时间'"
+                        ))
+                        logger.info('已添加 users.last_login_at 列')
+                    except Exception:
+                        pass
 
             except Exception as e:
                 logger.warning(f'自动迁移检查异常: {e}')

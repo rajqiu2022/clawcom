@@ -3,6 +3,7 @@ import hashlib
 import os
 import random
 import time
+from datetime import datetime
 import requests
 from flask import request, jsonify, session
 from app import db
@@ -322,6 +323,9 @@ def login():
     if not user or not user.check_password(password):
         return jsonify({'error': '用户名或密码错误'}), 401
 
+    user.last_login_at = datetime.now()
+    db.session.commit()
+
     session.permanent = True
     session['user_id'] = user.id
     session['bypass_ngn'] = True
@@ -440,7 +444,10 @@ def woa_callback():
     else:
         if nickname and user.display_name != nickname:
             user.display_name = nickname
-            db.session.commit()
+
+    # 更新最后登录时间
+    user.last_login_at = datetime.now()
+    db.session.commit()
 
     # 写入 session 并跳转首页
     session.permanent = True
@@ -624,22 +631,35 @@ def list_users():
     users = User.query.order_by(User.created_at).all()
 
     if operator.role == 'super_admin':
-        return jsonify([u.to_dict() for u in users])
+        user_list = users
+    else:
+        # 非超管：只看同项目用户（admin/user/guest）
+        operator_project_ids = _collect_user_project_ids(operator)
+        user_list = []
+        for u in users:
+            if u.id == operator.id:
+                user_list.append(u)
+                continue
+            u_project_ids = _collect_user_project_ids(u)
+            if operator_project_ids and (operator_project_ids & u_project_ids):
+                user_list.append(u)
 
-    # 非超管：只看同项目用户（admin/user/guest）
-    operator_project_ids = _collect_user_project_ids(operator)
+    # 批量查询每个用户拥有的 OpenClaw 数目（按 owner == username 关联）
+    from sqlalchemy import func
+    claw_counts = dict(
+        db.session.query(OpenClawInstance.owner, func.count(OpenClawInstance.id))
+        .filter(OpenClawInstance.status != 'deleted')
+        .group_by(OpenClawInstance.owner)
+        .all()
+    )
 
-    filtered = []
-    for u in users:
-        # 自身始终可见
-        if u.id == operator.id:
-            filtered.append(u)
-            continue
-        u_project_ids = _collect_user_project_ids(u)
-        if operator_project_ids and (operator_project_ids & u_project_ids):
-            filtered.append(u)
+    result = []
+    for u in user_list:
+        d = u.to_dict()
+        d['openclaw_count'] = claw_counts.get(u.username, 0)
+        result.append(d)
 
-    return jsonify([u.to_dict() for u in filtered])
+    return jsonify(result)
 
 
 @api_bp.route('/users', methods=['POST'])
