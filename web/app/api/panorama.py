@@ -397,6 +397,49 @@ def create_panorama_change():
     return jsonify(change.to_dict()), 201
 
 
+@api_bp.route('/panorama/changes/<int:change_id>', methods=['GET'])
+def get_panorama_change(change_id):
+    """获取单条变更记录详情"""
+    change = GameModuleChangeLog.query.get_or_404(change_id)
+    return jsonify(change.to_dict())
+
+
+@api_bp.route('/panorama/changes/<int:change_id>', methods=['PUT'])
+def update_panorama_change(change_id):
+    """更新一条变更记录（用于修正历史数据）
+
+    可更新字段：change_type / summary / detail / affected_cases /
+    test_suggestion / risk_level / source / module_id（迁移到其他模块）
+    """
+    change = GameModuleChangeLog.query.get_or_404(change_id)
+    data = request.get_json(force=True) or {}
+
+    # 允许迁移到其他模块
+    new_module_id = data.get('module_id')
+    if new_module_id is not None and new_module_id != change.module_id:
+        target = GameModulePanorama.query.get(new_module_id)
+        if not target:
+            return jsonify({'error': f'目标模块 {new_module_id} 不存在'}), 400
+        change.module_id = new_module_id
+
+    for field in ('change_type', 'summary', 'detail', 'affected_cases',
+                  'test_suggestion', 'risk_level', 'source'):
+        if field in data:
+            setattr(change, field, data[field])
+
+    db.session.commit()
+    return jsonify(change.to_dict())
+
+
+@api_bp.route('/panorama/changes/<int:change_id>', methods=['DELETE'])
+def delete_panorama_change(change_id):
+    """删除一条变更记录（用于清理错误历史数据）"""
+    change = GameModuleChangeLog.query.get_or_404(change_id)
+    db.session.delete(change)
+    db.session.commit()
+    return jsonify({'ok': True, 'deleted_id': change_id})
+
+
 @api_bp.route('/panorama/changes/batch', methods=['POST'])
 def batch_create_panorama_changes():
     """批量记录变更（Agent 用）

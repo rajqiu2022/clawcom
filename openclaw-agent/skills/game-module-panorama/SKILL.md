@@ -36,9 +36,18 @@
 | GET | `/changes?module_id=N&change_type=X&start_date=&end_date=` | 查询变更记录（全局） |
 | POST | `/changes` | 记录单次变更 |
 | POST | `/changes/batch` | 批量记录变更 |
+| GET | `/changes/{id}` | 获取单条变更详情 |
+| PUT | `/changes/{id}` | **修正**单条变更（用于历史数据更正，可改 module_id 迁移模块） |
+| DELETE | `/changes/{id}` | 删除单条变更（清理错误历史） |
 | GET | `/modules/{id}/changes?start_date=&end_date=&limit=&offset=` | 查询指定模块的变更记录 |
 | POST | `/modules/{id}/changes` | 为指定模块记录单次变更 |
 | POST | `/modules/{id}/changes/batch` | 为指定模块批量记录变更 |
+
+> **关于 PUT / DELETE 单条变更**：
+> - 主要用于修正历史误录入数据（例如 module_id 关联错了、summary 写错、change_type 标错）
+> - PUT 可更新字段：`change_type / summary / detail / affected_cases / test_suggestion / risk_level / source / module_id`
+> - PUT 时如果传 `module_id`，会校验目标模块存在；否则保持原 module_id 不变
+> - DELETE 用于彻底删除错误条目；如果只是想标记"该变更已废弃"，建议用 PUT 改 `summary` 加 `[已废弃]` 前缀
 
 ### 统计
 
