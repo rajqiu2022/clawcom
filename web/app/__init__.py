@@ -61,14 +61,19 @@ def create_app(config_name=None):
 
     # 全局注入 hub_public_url 给所有模板使用。
     # 历史教训 #126b/#127：前端不能信 location.origin（浏览器可能从 https://clawteam.woa.com
-    # 进，撞 lampp Apache 必 404；唯一对 claw 可达的真身入口是 http://clawteam.woa.com:18800）。
-    # 模板里用 {{ hub_public_url }} 拼"发给 claw / Agent 用的"URL，再也不能用 location.origin 了。
+    # 进，撞 lampp Apache 必 404；唯一对 claw 可达的真身入口是 http://your-hub-host:18800）。
+    # 模板里用 {{ hub_public_url }} 拼"发给 claw / Agent 用的"URL（IP+端口）。
+    # {{ hub_web_url }} 拼"给用户浏览器访问的"URL（https 域名）。
     import os as _os_ctx
     @app.context_processor
     def _inject_hub_public_url():
         return {
             'hub_public_url': (
                 _os_ctx.environ.get('HUB_PUBLIC_URL')
+                or 'http://your-hub-host:18800'
+            ).rstrip('/'),
+            'hub_web_url': (
+                _os_ctx.environ.get('HUB_WEB_URL')
                 or 'https://clawteam.woa.com:18800'
             ).rstrip('/'),
         }
@@ -1710,6 +1715,59 @@ def create_app(config_name=None):
                             "COMMENT '最后登录时间'"
                         ))
                         logger.info('已添加 users.last_login_at 列')
+                    except Exception:
+                        pass
+
+                    # ===== 游戏功能模块全景视图表 =====
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS game_module_panorama (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            project_id INT DEFAULT NULL,
+                            parent_id INT DEFAULT NULL,
+                            name VARCHAR(200) NOT NULL,
+                            path VARCHAR(500) DEFAULT NULL,
+                            description TEXT DEFAULT NULL,
+                            code_paths LONGTEXT DEFAULT NULL,
+                            resource_paths LONGTEXT DEFAULT NULL,
+                            test_focus TEXT DEFAULT NULL,
+                            related_case_libraries LONGTEXT DEFAULT NULL,
+                            status VARCHAR(20) DEFAULT 'active',
+                            risk_level VARCHAR(20) DEFAULT 'normal',
+                            last_change_summary TEXT DEFAULT NULL,
+                            last_changed_at DATETIME DEFAULT NULL,
+                            extra LONGTEXT DEFAULT NULL,
+                            created_by VARCHAR(120) DEFAULT NULL,
+                            updated_by VARCHAR(120) DEFAULT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            FOREIGN KEY (parent_id) REFERENCES game_module_panorama(id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS game_module_change_logs (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            module_id INT NOT NULL,
+                            change_type VARCHAR(30) NOT NULL,
+                            summary TEXT NOT NULL,
+                            detail LONGTEXT DEFAULT NULL,
+                            affected_cases LONGTEXT DEFAULT NULL,
+                            test_suggestion TEXT DEFAULT NULL,
+                            risk_level VARCHAR(20) DEFAULT 'normal',
+                            source VARCHAR(50) DEFAULT NULL,
+                            created_by VARCHAR(120) DEFAULT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (module_id) REFERENCES game_module_panorama(id),
+                            INDEX idx_module_id (module_id),
+                            INDEX idx_created_at (created_at)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    logger.info('game_module_panorama / game_module_change_logs 表已就绪')
+
+                    # 增量迁移: game_module_panorama 添加 is_new 列
+                    try:
+                        conn.execute(text("ALTER TABLE game_module_panorama ADD COLUMN is_new TINYINT(1) DEFAULT 0 COMMENT '是否新增模块，由Agent标记'"))
+                        logger.info('game_module_panorama 添加 is_new 列成功')
                     except Exception:
                         pass
 

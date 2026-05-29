@@ -4394,6 +4394,101 @@ class TestReport(db.Model):
         return data
 
 
+# ============== 游戏功能模块全景视图 ==============
+
+class GameModulePanorama(db.Model):
+    """游戏功能模块全景节点 — 由 Agent 建立和维护的功能模块树"""
+    __tablename__ = 'game_module_panorama'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True)
+    parent_id = db.Column(db.Integer, db.ForeignKey('game_module_panorama.id'), nullable=True,
+                          comment='父节点 ID，NULL 为顶层模块')
+    name = db.Column(db.String(200), nullable=False, comment='模块名称，如"漂移系统"')
+    path = db.Column(db.String(500), comment='模块全路径，如"赛车/漂移系统"')
+    description = db.Column(db.Text, comment='模块功能描述')
+    code_paths = db.Column(db.JSON, comment='关联的代码路径模式列表，JSON 数组')
+    resource_paths = db.Column(db.JSON, comment='关联的资源路径模式列表，JSON 数组')
+    test_focus = db.Column(db.Text, comment='测试重点说明')
+    related_case_libraries = db.Column(db.JSON, comment='关联的用例库 ID 列表')
+    status = db.Column(db.String(20), default='active', comment='active/deprecated/planned')
+    risk_level = db.Column(db.String(20), default='normal', comment='low/normal/high/critical')
+    last_change_summary = db.Column(db.Text, comment='最近一次变更摘要')
+    last_changed_at = db.Column(db.DateTime, comment='最近变更时间')
+    is_new = db.Column(db.Boolean, default=False, comment='是否新增模块，由 Agent 标记')
+    extra = db.Column(db.JSON, comment='扩展字段')
+    created_by = db.Column(db.String(120), comment='创建者（agent 名或用户名）')
+    updated_by = db.Column(db.String(120), comment='最后更新者')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    children = db.relationship('GameModulePanorama', backref=db.backref('parent', remote_side='GameModulePanorama.id'), lazy='dynamic')
+
+    def to_dict(self, include_children=False):
+        d = {
+            'id': self.id,
+            'project_id': self.project_id,
+            'parent_id': self.parent_id,
+            'name': self.name,
+            'path': self.path,
+            'description': self.description,
+            'code_paths': self.code_paths or [],
+            'resource_paths': self.resource_paths or [],
+            'test_focus': self.test_focus,
+            'related_case_libraries': self.related_case_libraries or [],
+            'status': self.status or 'active',
+            'risk_level': self.risk_level or 'normal',
+            'last_change_summary': self.last_change_summary,
+            'last_changed_at': str(self.last_changed_at) if self.last_changed_at else None,
+            'is_new': bool(self.is_new) if self.is_new else False,
+            'extra': self.extra,
+            'created_by': self.created_by,
+            'updated_by': self.updated_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if include_children:
+            d['children'] = [c.to_dict(include_children=True) for c in self.children]
+        return d
+
+
+class GameModuleChangeLog(db.Model):
+    """功能模块变更记录 — Agent 每次更新全景视图时写入"""
+    __tablename__ = 'game_module_change_logs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    module_id = db.Column(db.Integer, db.ForeignKey('game_module_panorama.id'), nullable=False, index=True)
+    change_type = db.Column(db.String(30), nullable=False,
+                            comment='logic/resource/config/api/refactor/bugfix/feature')
+    summary = db.Column(db.Text, nullable=False, comment='变更摘要')
+    detail = db.Column(db.JSON, comment='变更详情：changed_files, commit_range, diff_highlights 等')
+    affected_cases = db.Column(db.JSON, comment='受影响用例描述列表')
+    test_suggestion = db.Column(db.Text, comment='测试建议')
+    risk_level = db.Column(db.String(20), default='normal')
+    source = db.Column(db.String(50), comment='变更来源：agent/manual/webhook')
+    created_by = db.Column(db.String(120))
+    created_at = db.Column(db.DateTime, default=_now)
+
+    module = db.relationship('GameModulePanorama', backref='change_logs')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'module_id': self.module_id,
+            'module_name': self.module.name if self.module else None,
+            'module_path': self.module.path if self.module else None,
+            'change_type': self.change_type,
+            'summary': self.summary,
+            'detail': self.detail,
+            'affected_cases': self.affected_cases or [],
+            'test_suggestion': self.test_suggestion,
+            'risk_level': self.risk_level or 'normal',
+            'source': self.source,
+            'created_by': self.created_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
 class TestReportAttachment(db.Model):
     """测试报告附件。文件存磁盘，DB 存元数据。单文件 10MB 上限。"""
     __tablename__ = 'test_report_attachments'

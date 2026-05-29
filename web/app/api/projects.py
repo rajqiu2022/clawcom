@@ -6,41 +6,58 @@ from app.api import api_bp
 
 # ==================== 项目管理 ====================
 
-@api_bp.route('/projects', methods=['GET'])
-def list_projects():
-    """获取项目列表
-    super_admin: 看全部项目
-    其他用户: 只看自己关联的项目（managed_projects 或 bound_claw 的项目）
+def _filter_projects_for_user(projects):
+    """根据当前登录用户/Token 过滤项目列表。
+
+    规则：
+    - super_admin（用户）/ admin claw（如龙虾王，全平台）：看全部
+    - admin（用户）：只看 managed_projects 中的项目
+    - 其他用户：看 managed_projects + 绑定 claw 所属项目
+    - 未登录：看全部（兼容性）
     """
-    projects = Project.query.order_by(Project.name).all()
+    from app.api.auth_utils import get_current_user
+    user = get_current_user()
+    if not user:
+        # 兼容未登录场景，返回全部（前端有自己的过滤）
+        return projects
 
-    uid = session.get('user_id')
-    user = User.query.get(uid) if uid else None
+    role = getattr(user, 'role', None)
 
-    if not user or user.role in ('super_admin', 'admin'):
-        return jsonify([p.to_dict() for p in projects])
+    # super_admin 或全平台 admin claw
+    if role == 'super_admin' or getattr(user, 'is_global', False):
+        return projects
 
-    # 收集用户关联的项目 ID
     user_project_ids = set()
+    for pid in (getattr(user, 'managed_projects', None) or []):
+        try:
+            user_project_ids.add(int(pid))
+        except Exception:
+            continue
 
-    # admin 角色的 managed_projects
-    if user.managed_projects:
-        user_project_ids.update(user.managed_projects)
-
-    # 普通用户绑定的 claw 所属项目
-    if user.bound_claw_id:
+    bound_claw_id = getattr(user, 'bound_claw_id', None)
+    if bound_claw_id:
         from app.models import OpenClawInstance
-        claw = OpenClawInstance.query.get(user.bound_claw_id)
+        claw = OpenClawInstance.query.get(bound_claw_id)
         if claw:
             if claw.project_id:
-                user_project_ids.add(claw.project_id)
+                user_project_ids.add(int(claw.project_id))
             elif claw.project_name:
                 p = Project.query.filter_by(name=claw.project_name).first()
                 if p:
                     user_project_ids.add(p.id)
 
-    # 过滤：只返回关联的项目
-    filtered = [p for p in projects if p.id in user_project_ids]
+    return [p for p in projects if p.id in user_project_ids]
+
+
+@api_bp.route('/projects', methods=['GET'])
+def list_projects():
+    """获取项目列表
+    super_admin: 看全部项目
+    admin: 只看自己 managed_projects 中的项目
+    其他用户: 只看自己关联的项目（managed_projects 或 bound_claw 的项目）
+    """
+    projects = Project.query.order_by(Project.name).all()
+    filtered = _filter_projects_for_user(projects)
     return jsonify([p.to_dict() for p in filtered])
 
 

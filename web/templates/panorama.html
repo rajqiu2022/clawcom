@@ -1,0 +1,1763 @@
+{% extends "base.html" %}
+{% block title %}功能全景 - OpenClaw{% endblock %}
+{% block page_title %}游戏功能模块全景视图{% endblock %}
+<!-- panorama v2.1 2026-05-28 -->
+{% block nav_panorama %}active{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <select class="form-select" id="filter-project" onchange="onProjectChange()" style="min-width:140px">
+        <option value="">全部项目</option>
+    </select>
+    <select class="form-select" id="filter-risk" onchange="onFilterChange()" style="min-width:120px">
+        <option value="">全部风险</option>
+        <option value="critical">严重</option>
+        <option value="high">高</option>
+        <option value="normal">普通</option>
+        <option value="low">低</option>
+    </select>
+    <button class="btn btn-primary" onclick="openModuleModal()" style="display:none">+ 新建模块</button>
+</div>
+{% endblock %}
+
+{% block head %}
+<style>
+/* ========================================
+   功能全景 — Geometric Industrial Design
+   ======================================== */
+
+/* Tab Bar */
+.pano-tabs {
+    display: flex; gap: 2px; padding: 6px;
+    background: var(--bg-secondary);
+    border-radius: var(--radius-lg);
+    margin-bottom: 16px;
+    border: 1px solid var(--border);
+}
+.pano-tab {
+    flex: 1; text-align: center;
+    padding: 10px 16px; font-size: 0.82rem; font-weight: 600;
+    color: var(--text-muted); cursor: pointer;
+    border-radius: var(--radius); user-select: none;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    position: relative;
+}
+.pano-tab:hover { color: var(--text-primary); background: var(--bg-hover); }
+.pano-tab.active {
+    color: var(--accent);
+    background: var(--bg-card);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+}
+.pano-tab-icon { font-size: 1.1rem; }
+.pano-tab .tab-count {
+    font-size: 0.68rem; font-weight: 700;
+    padding: 1px 6px; border-radius: 8px;
+    background: var(--accent-dim); color: var(--accent);
+}
+.pano-tab.active .tab-count { background: var(--accent); color: #fff; }
+
+/* View Containers */
+.pano-view { display: none; animation: fadeSlideIn 0.3s ease; }
+.pano-view.active { display: block; }
+@keyframes fadeSlideIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* ===== Topology View ===== */
+.topo-wrap {
+    display: grid;
+    grid-template-columns: 1fr 360px;
+    gap: 0;
+    height: calc(100vh - 200px);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+}
+.topo-wrap.panel-collapsed { grid-template-columns: 1fr 0; }
+
+.topo-canvas-area {
+    position: relative;
+    background:
+        radial-gradient(circle at 50% 50%, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+    overflow: hidden;
+}
+.topo-canvas-area::before {
+    content: '';
+    position: absolute; inset: 0;
+    background-image:
+        radial-gradient(circle, var(--border) 1px, transparent 1px);
+    background-size: 40px 40px;
+    opacity: 0.3;
+    pointer-events: none;
+}
+.topo-canvas-area canvas {
+    position: relative; z-index: 1;
+    width: 100%; height: 100%; display: block; cursor: grab;
+}
+.topo-canvas-area canvas:active { cursor: grabbing; }
+
+/* Topo Loading */
+.topo-loading { position:absolute; inset:0; z-index:10; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; background:var(--bg-primary); transition:opacity 0.3s; }
+.topo-loading.hidden { opacity:0; pointer-events:none; display:none; }
+.topo-loading-spinner { width:40px; height:40px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:topo-spin 0.8s linear infinite; }
+@keyframes topo-spin { to { transform:rotate(360deg); } }
+.topo-loading-text { font-size:0.88rem; color:var(--text-secondary); font-weight:500; }
+
+/* Floating Controls */
+.topo-legend {
+    position: absolute; top: 16px; left: 16px; z-index: 10;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 12px 16px;
+    font-size: 0.74rem; color: var(--text-secondary);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(8px);
+}
+.topo-legend-item { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+.topo-legend-item:last-child { margin-bottom: 0; }
+.topo-legend-dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 4px currentColor; }
+.topo-legend-pulse { animation: legendPulse 2s infinite; }
+@keyframes legendPulse { 0%,100%{box-shadow:0 0 4px #3b82f6} 50%{box-shadow:0 0 12px #3b82f6,0 0 20px rgba(59,130,246,.3)} }
+
+.topo-minimap {
+    position: absolute; bottom: 16px; left: 16px; z-index: 10;
+    width: 140px; height: 100px;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
+    box-shadow: var(--shadow); opacity: 0.9;
+}
+.topo-minimap canvas { width: 100%; height: 100%; }
+
+.topo-controls {
+    position: absolute; bottom: 16px; right: 16px; z-index: 10;
+    display: flex; flex-direction: column; gap: 4px;
+}
+.topo-ctrl-btn {
+    width: 36px; height: 36px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--bg-card);
+    color: var(--text-secondary); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem; font-weight: 500;
+    box-shadow: var(--shadow-sm); transition: all 0.15s;
+}
+.topo-ctrl-btn:hover {
+    border-color: var(--accent); color: var(--accent);
+    background: var(--accent-dim); transform: scale(1.05);
+}
+
+.topo-search {
+    position: absolute; top: 16px; right: 16px; z-index: 10;
+}
+.topo-search input {
+    width: 200px; padding: 8px 12px 8px 32px;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--bg-card); font-size: 0.8rem; color: var(--text-primary);
+    box-shadow: var(--shadow-sm); transition: all 0.2s;
+}
+.topo-search input:focus { outline: none; border-color: var(--accent); width: 260px; box-shadow: 0 0 0 3px var(--accent-dim); }
+.topo-search::before {
+    content: '⌕'; position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+    font-size: 0.9rem; color: var(--text-muted); pointer-events: none;
+}
+
+/* Detail Panel */
+.topo-detail {
+    border-left: 1px solid var(--border);
+    background: var(--bg-card);
+    overflow-y: auto; overflow-x: hidden;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.topo-detail.collapsed { width: 0; border-left: none; overflow: hidden; }
+.topo-detail-inner { padding: 24px; min-width: 360px; }
+.topo-detail .empty-hint {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    height: 100%; gap: 12px; color: var(--text-muted);
+}
+.topo-detail .empty-hint svg { width: 48px; height: 48px; opacity: 0.3; }
+.topo-detail .empty-hint p { font-size: 0.84rem; }
+
+/* Detail Content */
+.detail-header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    margin-bottom: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border);
+}
+.detail-title { font-size: 1.05rem; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
+.detail-title .risk-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.detail-actions { display: flex; gap: 4px; }
+.detail-actions button {
+    width: 28px; height: 28px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--bg-secondary);
+    color: var(--text-muted); cursor: pointer; font-size: 0.8rem;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s;
+}
+.detail-actions button:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+.detail-actions button.danger:hover { border-color: var(--red); color: var(--red); background: var(--red-dim); }
+
+.detail-meta {
+    display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px;
+}
+.detail-desc {
+    font-size: 0.82rem; color: var(--text-secondary);
+    line-height: 1.6; margin-bottom: 16px;
+    padding: 10px 14px; background: var(--bg-secondary);
+    border-radius: var(--radius-sm); border-left: 3px solid var(--border-light);
+}
+
+.detail-section { margin-bottom: 20px; }
+.detail-section-title {
+    font-size: 0.78rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.5px; color: var(--text-muted);
+    margin-bottom: 10px; padding-bottom: 6px;
+    border-bottom: 1px dashed var(--border);
+    display: flex; align-items: center; gap: 6px;
+}
+.detail-section-title .sec-icon { font-size: 0.9rem; }
+
+.test-focus-card {
+    padding: 12px 16px; border-radius: var(--radius);
+    background: linear-gradient(135deg, var(--accent-dim), transparent);
+    border: 1px solid var(--accent);
+    font-size: 0.82rem; line-height: 1.7; color: var(--text-primary);
+    position: relative; overflow: hidden;
+}
+.test-focus-card::before {
+    content: '🎯';
+    position: absolute; top: -4px; right: 8px; font-size: 2rem; opacity: 0.1;
+}
+
+.child-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.child-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 12px; border-radius: 20px; font-size: 0.76rem;
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    cursor: pointer; transition: all 0.15s; font-weight: 500;
+}
+.child-chip:hover { border-color: var(--accent); background: var(--accent-dim); transform: translateY(-1px); }
+.child-chip .cc-dot { width: 6px; height: 6px; border-radius: 50%; }
+
+.path-tag {
+    display: inline-block; padding: 3px 8px; border-radius: 4px;
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;
+    margin: 0 4px 4px 0; color: var(--text-secondary);
+}
+
+/* Change Cards */
+.change-card {
+    padding: 10px 14px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background: var(--bg-primary);
+    margin-bottom: 8px; transition: all 0.15s;
+}
+.change-card:hover { border-color: var(--border-light); background: var(--bg-secondary); }
+.change-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.change-type-badge {
+    font-size: 0.66rem; padding: 2px 7px; border-radius: 4px;
+    font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;
+}
+.ct-logic { background: #dbeafe; color: #1d4ed8; }
+.ct-resource { background: #fef3c7; color: #92400e; }
+.ct-config { background: #e0e7ff; color: #4338ca; }
+.ct-api { background: #ede9fe; color: #6d28d9; }
+.ct-refactor { background: #f3e8ff; color: #7c3aed; }
+.ct-bugfix { background: #fce7f3; color: #be185d; }
+.ct-feature { background: #d1fae5; color: #065f46; }
+.change-card-summary { font-size: 0.8rem; color: var(--text-primary); font-weight: 500; }
+.change-card-meta { font-size: 0.7rem; color: var(--text-muted); margin-top: 4px; }
+.change-card-suggestion {
+    margin-top: 6px; padding: 6px 10px; border-radius: 4px;
+    background: var(--accent-dim); font-size: 0.76rem; color: var(--accent);
+    border-left: 2px solid var(--accent);
+}
+
+/* ===== Table View ===== */
+.table-wrap {
+    border: 1px solid var(--border); border-radius: var(--radius-lg);
+    overflow: hidden; background: var(--bg-card);
+}
+.table-scroll { max-height: calc(100vh - 220px); overflow-y: auto; }
+.pano-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.pano-table th {
+    background: var(--bg-secondary); padding: 12px 14px; text-align: left;
+    font-weight: 600; font-size: 0.76rem; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.4px;
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 2;
+}
+.pano-table td {
+    padding: 12px 14px; border-bottom: 1px solid var(--border);
+    color: var(--text-primary); vertical-align: middle;
+}
+.pano-table tbody tr { transition: background 0.1s; cursor: pointer; }
+.pano-table tbody tr:hover td { background: var(--bg-hover); }
+.pano-table tbody tr:last-child td { border-bottom: none; }
+
+.tbl-name-cell { display: flex; align-items: center; gap: 6px; }
+.tbl-indent { display: inline-block; }
+.tbl-toggle {
+    width: 18px; height: 18px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.65rem; color: var(--text-muted); cursor: pointer;
+    transition: all 0.2s; background: var(--bg-secondary);
+}
+.tbl-toggle:hover { background: var(--accent-dim); color: var(--accent); }
+.tbl-toggle.open { transform: rotate(90deg); }
+.tbl-risk-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.tbl-pulse {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--blue);
+    animation: tblPulse 2s infinite;
+}
+@keyframes tblPulse { 0%,100%{opacity:1;box-shadow:0 0 3px var(--blue)} 50%{opacity:0.4;box-shadow:none} }
+.tbl-new-tag { font-size:0.58rem; font-weight:700; padding:1px 4px; background:#ef4444; color:#fff; border-radius:3px; letter-spacing:0.5px; animation:newTagPop 0.4s ease; }
+@keyframes newTagPop { from{transform:scale(0.5);opacity:0} to{transform:scale(1);opacity:1} }
+.tbl-module-name { font-weight: 500; }
+.tbl-child-count { font-size: 0.68rem; color: var(--text-muted); margin-left: 2px; }
+
+/* Pills & Badges */
+.risk-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 9px; border-radius: 12px; font-size: 0.7rem; font-weight: 600;
+}
+.risk-pill-critical { background: var(--red-dim); color: var(--red); }
+.risk-pill-high { background: rgba(249,115,22,0.1); color: #ea580c; }
+.risk-pill-normal { background: rgba(234,179,8,0.1); color: #ca8a04; }
+.risk-pill-low { background: var(--green-dim); color: var(--green); }
+
+.status-badge {
+    padding: 3px 9px; border-radius: 12px; font-size: 0.7rem; font-weight: 500;
+}
+.status-active { background: var(--green-dim); color: var(--green); }
+.status-planned { background: var(--blue-dim); color: var(--blue); }
+.status-deprecated { background: var(--bg-secondary); color: var(--text-muted); }
+
+/* ===== Stats View ===== */
+.stats-container { animation: fadeSlideIn 0.3s ease; }
+.stats-summary {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px; margin-bottom: 24px;
+}
+.stat-card {
+    padding: 20px; border-radius: var(--radius-lg);
+    border: 1px solid var(--border); background: var(--bg-card);
+    text-align: center; transition: all 0.2s;
+    position: relative; overflow: hidden;
+}
+.stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
+.stat-card-click { cursor: pointer; }
+.stat-card-click:hover { border-color: var(--stat-color, var(--accent)); }
+/* Case library collapsible & link styles */
+.case-lib-section .collapse-arrow { display:inline-block; transition:transform 0.2s; margin-left:6px; font-size:0.7rem; }
+.case-lib-section.collapsed .collapse-arrow { transform: rotate(-90deg); }
+.case-lib-section.collapsed .case-lib-body { display:none !important; }
+.case-lib-toggle { cursor:pointer; user-select:none; }
+.case-lib-link, .case-lib-card { display:flex; align-items:center; gap:8px; padding:6px 10px; background:var(--bg-main); border-radius:6px; border:1px solid var(--border); text-decoration:none; transition: border-color 0.15s, background 0.15s; }
+.case-lib-link:hover, .case-lib-card:hover { border-color:var(--accent); background:var(--accent-dim, rgba(99,102,241,0.06)); }
+.case-lib-card { padding:12px 16px; background:var(--bg-secondary); border-radius:var(--radius-sm); flex-direction:column; gap:6px; }
+.case-lib-jump-icon { font-size:0.72rem; color:var(--accent); opacity:0; transition:opacity 0.15s; margin-left:auto; }
+.case-lib-link:hover .case-lib-jump-icon, .case-lib-card:hover .case-lib-jump-icon { opacity:1; }
+.case-lib-dir-link, .case-lib-dir-tag { display:inline-flex; align-items:center; gap:3px; margin-left:auto; text-decoration:none; border-radius:4px; padding:1px 4px; transition: background 0.15s; }
+.case-lib-dir-link:hover, .case-lib-dir-tag:hover { background:var(--accent-dim, rgba(99,102,241,0.1)); }
+.case-lib-dir-link .case-lib-jump-icon, .case-lib-dir-tag .case-lib-jump-icon { opacity:0.6; margin-left:0; font-size:0.65rem; }
+.case-lib-dir-link:hover .case-lib-jump-icon, .case-lib-dir-tag:hover .case-lib-jump-icon { opacity:1; }
+.stat-card::after {
+    content: ''; position: absolute; top: 0; left: 0; right: 0;
+    height: 3px; background: var(--stat-color, var(--accent));
+    border-radius: 0 0 4px 4px;
+}
+.stat-value {
+    font-size: 2rem; font-weight: 800; color: var(--stat-color, var(--text-primary));
+    font-family: 'JetBrains Mono', 'Inter Tight', sans-serif;
+    line-height: 1.2;
+}
+.stat-label { font-size: 0.78rem; color: var(--text-muted); margin-top: 4px; font-weight: 500; }
+
+.stats-section {
+    border: 1px solid var(--border); border-radius: var(--radius-lg);
+    padding: 24px; background: var(--bg-card);
+}
+.stats-section h4 {
+    font-size: 0.9rem; font-weight: 700; color: var(--text-primary);
+    margin-bottom: 16px; display: flex; align-items: center; gap: 8px;
+}
+
+/* Tooltip */
+.topo-tooltip {
+    position: fixed; z-index: 9999; pointer-events: none;
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 12px 16px;
+    box-shadow: var(--shadow-lg); max-width: 280px;
+    display: none; font-size: 0.8rem;
+    backdrop-filter: blur(8px);
+}
+.tt-name { font-weight: 700; font-size: 0.86rem; margin-bottom: 4px; color: var(--text-primary); }
+.tt-desc { color: var(--text-secondary); margin-bottom: 4px; line-height: 1.4; }
+.tt-change { color: var(--accent); font-size: 0.74rem; font-style: italic; }
+.tt-risk { display: inline-block; margin-top: 4px; }
+
+/* Modal */
+.pano-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    backdrop-filter: blur(4px);
+    z-index: 10000; display: flex; align-items: center; justify-content: center;
+    animation: overlayIn 0.2s ease;
+}
+@keyframes overlayIn { from{opacity:0} to{opacity:1} }
+.pano-modal {
+    background: var(--bg-card); border-radius: var(--radius-lg);
+    padding: 28px; width: 560px; max-width: 95vw; max-height: 85vh;
+    overflow-y: auto; box-shadow: var(--shadow-lg);
+    animation: modalSlideIn 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+@keyframes modalSlideIn { from{opacity:0;transform:scale(0.96) translateY(8px)} to{opacity:1;transform:scale(1) translateY(0)} }
+.pano-modal h3 { margin: 0 0 20px; font-size: 1rem; font-weight: 700; }
+.pano-modal .form-group { margin-bottom: 14px; }
+.pano-modal .form-group label {
+    display: block; font-size: 0.78rem; font-weight: 600;
+    margin-bottom: 5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.3px;
+}
+.pano-modal .form-group input,
+.pano-modal .form-group textarea,
+.pano-modal .form-group select {
+    width: 100%; padding: 9px 12px; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); font-size: 0.84rem;
+    background: var(--bg-primary); color: var(--text-primary);
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+.pano-modal .form-group input:focus,
+.pano-modal .form-group textarea:focus,
+.pano-modal .form-group select:focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.pano-modal .form-group textarea { min-height: 60px; resize: vertical; }
+.pano-modal .form-row { display: flex; gap: 12px; }
+.pano-modal .form-row .form-group { flex: 1; }
+.pano-modal .form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+
+/* Empty state */
+.pano-empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 60px 20px; color: var(--text-muted); gap: 12px;
+}
+.pano-empty svg { width: 56px; height: 56px; opacity: 0.25; }
+.pano-empty p { font-size: 0.86rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Tab Bar -->
+<div class="pano-tabs">
+    <div class="pano-tab active" data-view="topo" onclick="switchView('topo')">
+        <span class="pano-tab-icon">◎</span> 拓扑图
+        <span class="tab-count" id="tab-count-topo">0</span>
+    </div>
+    <div class="pano-tab" data-view="table" onclick="switchView('table')">
+        <span class="pano-tab-icon">≡</span> 列表
+    </div>
+    <div class="pano-tab" data-view="stats" onclick="switchView('stats')">
+        <span class="pano-tab-icon">▦</span> 统计
+    </div>
+</div>
+
+<!-- Topology View -->
+<div class="pano-view active" id="view-topo">
+    <div class="topo-wrap" id="topo-wrap">
+        <div class="topo-canvas-area">
+            <div class="topo-loading" id="topo-loading">
+                <div class="topo-loading-spinner"></div>
+                <div class="topo-loading-text">正在努力生成拓扑图...</div>
+            </div>
+            <canvas id="topo-canvas"></canvas>
+            <div class="topo-legend">
+                <div class="topo-legend-item"><span class="topo-legend-dot" style="background:#ef4444;color:#ef4444"></span> 严重</div>
+                <div class="topo-legend-item"><span class="topo-legend-dot" style="background:#f97316;color:#f97316"></span> 高风险</div>
+                <div class="topo-legend-item"><span class="topo-legend-dot" style="background:#eab308;color:#eab308"></span> 普通</div>
+                <div class="topo-legend-item"><span class="topo-legend-dot" style="background:#22c55e;color:#22c55e"></span> 低风险</div>
+                <div class="topo-legend-item"><span class="topo-legend-dot topo-legend-pulse" style="background:#3b82f6;color:#3b82f6"></span> 近期变更</div>
+                <div class="topo-legend-item"><span style="width:16px;border-top:2px solid rgba(100,116,139,0.7)"></span> 父子关系</div>
+                <div class="topo-legend-item"><span style="width:16px;border-top:2px dashed #8b5cf6"></span> 依赖关系</div>
+            </div>
+            <div class="topo-search">
+                <input type="text" id="topo-search-input" placeholder="搜索模块..." oninput="onTopoSearch(this.value)">
+            </div>
+            <div class="topo-controls">
+                <button class="topo-ctrl-btn" onclick="topoZoomIn()" title="放大">+</button>
+                <button class="topo-ctrl-btn" onclick="topoZoomOut()" title="缩小">−</button>
+                <button class="topo-ctrl-btn" onclick="topoFitAll()" title="适应全部">⊡</button>
+                <button class="topo-ctrl-btn" onclick="topoReset()" title="重置布局">↻</button>
+            </div>
+        </div>
+        <div class="topo-detail" id="topo-detail">
+            <div class="empty-hint">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>
+                <p>点击节点查看模块详情</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Table View -->
+<div class="pano-view" id="view-table">
+    <div class="table-wrap">
+        <div class="table-scroll">
+            <table class="pano-table">
+                <thead>
+                    <tr>
+                        <th style="width:32%">模块名称</th>
+                        <th style="width:10%">风险</th>
+                        <th style="width:9%">状态</th>
+                        <th style="width:28%">最近变更</th>
+                        <th style="width:11%">更新时间</th>
+                        <th style="width:10%">操作</th>
+                    </tr>
+                </thead>
+                <tbody id="table-body"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<!-- Stats View -->
+<div class="pano-view" id="view-stats">
+    <div class="stats-container" id="stats-area"></div>
+</div>
+
+<!-- Tooltip -->
+<div class="topo-tooltip" id="topo-tooltip"></div>
+
+<!-- Modal Container -->
+<div id="modal-container"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ===== State =====
+let allModules = [];
+let treeModules = [];
+let projects = [];
+let statsData = null;
+let currentView = 'topo';
+
+const RISK_COLORS = { critical: '#ef4444', high: '#f97316', normal: '#eab308', low: '#22c55e' };
+const RISK_LABELS = { critical: '严重', high: '高', normal: '普通', low: '低' };
+const CHANGE_TYPES = { logic: '逻辑', resource: '资源', config: '配置', api: '接口', refactor: '重构', bugfix: '修复', feature: '新功能' };
+const STATUS_LABELS = { active: '活跃', planned: '规划中', deprecated: '已废弃' };
+function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+
+// ===== Init =====
+(async function init() {
+    await loadProjects();
+    await loadAllData();
+})();
+
+async function loadProjects() {
+    try {
+        projects = await API.get('/projects');
+        const sel = document.getElementById('filter-project');
+        projects.forEach(p => { sel.innerHTML += `<option value="${p.name}">${esc(p.name)}</option>`; });
+        // Use global project filter (shared across pages via project name)
+        initProjectFilter(sel, () => loadAllData());
+    } catch(e) {}
+}
+
+function _getSelectedProjectId() {
+    const name = document.getElementById('filter-project').value;
+    if (!name) return '';
+    const p = projects.find(x => x.name === name);
+    return p ? p.id : '';
+}
+
+async function loadAllData() {
+    const loadingEl = document.getElementById('topo-loading');
+    if (loadingEl) loadingEl.classList.remove('hidden');
+    await Promise.all([loadModules(), loadStats()]);
+    updateTabCount();
+    renderCurrentView();
+}
+
+function onProjectChange() {
+    loadAllData();
+}
+function onFilterChange() { renderCurrentView(); }
+
+async function loadModules() {
+    const pid = _getSelectedProjectId();
+    const params = pid ? `?project_id=${pid}` : '';
+    try {
+        [allModules, treeModules] = await Promise.all([
+            API.get('/panorama/modules' + params),
+            API.get('/panorama/modules' + params + (params ? '&tree=1' : '?tree=1'))
+        ]);
+    } catch(e) { allModules = []; treeModules = []; }
+}
+
+async function loadStats() {
+    const pid = _getSelectedProjectId();
+    try { statsData = await API.get('/panorama/stats' + (pid ? `?project_id=${pid}` : '')); }
+    catch(e) { statsData = null; }
+}
+
+function updateTabCount() {
+    document.getElementById('tab-count-topo').textContent = allModules.length;
+}
+
+// ===== View Switching =====
+function switchView(view) {
+    currentView = view;
+    document.querySelectorAll('.pano-tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
+    document.querySelectorAll('.pano-view').forEach(v => v.classList.toggle('active', v.id === `view-${view}`));
+    // Close any open modal/detail panel when switching views
+    document.getElementById('modal-container').innerHTML = '';
+    renderCurrentView();
+}
+
+function renderCurrentView() {
+    const risk = document.getElementById('filter-risk').value;
+    const filtered = risk ? allModules.filter(m => m.risk_level === risk) : allModules;
+    const filteredTree = risk ? filterTree(treeModules, risk) : treeModules;
+    if (currentView === 'topo') renderTopology(filtered);
+    else if (currentView === 'table') renderTable(filteredTree);
+    else if (currentView === 'stats') renderStats();
+}
+
+function filterTree(nodes, risk) {
+    return nodes.filter(n => {
+        if (n.risk_level === risk) return true;
+        if (n.children && filterTree(n.children, risk).length) return true;
+        return false;
+    }).map(n => ({ ...n, children: n.children ? filterTree(n.children, risk) : [] }));
+}
+
+// ==================================================
+// ===== TOPOLOGY VIEW — Force-Directed Graph =====
+// ==================================================
+let tNodes = [], tEdges = [];
+let tScale = 1, tOffX = 0, tOffY = 0;
+let tDragging = null, tPanning = false, tPanStart = {x:0,y:0};
+let tHovered = null, tSelected = null;
+let tAnimFrame = null, tSimRunning = false;
+let tSearchTerm = '';
+
+/**
+ * Concentric circle layout:
+ * - Outermost ring: isolated nodes (no connections)
+ * - Outer ring: large nodes (root / high childCount)
+ * - Inner ring: small nodes (leaf / low childCount)
+ * Result: big nodes surround the core, small nodes cluster in the center, isolated nodes float outside.
+ */
+function _layoutInitialPositions(nodes, edges, idMap, W, H) {
+    if (!nodes.length) return;
+    const cx = W / 2, cy = H / 2;
+    const maxR = Math.min(W, H) / 2 - 50;
+
+    // Determine connectivity
+    const connected = new Set();
+    edges.forEach(e => { connected.add(e.source); connected.add(e.target); });
+
+    const isolated = [];      // no edges at all
+    const connectedNodes = []; // has at least one edge
+
+    nodes.forEach((n, i) => {
+        if (!connected.has(i)) {
+            isolated.push(i);
+        } else {
+            connectedNodes.push(i);
+        }
+    });
+
+    // Sort connected nodes by radius descending (big first)
+    connectedNodes.sort((a, b) => nodes[b].radius - nodes[a].radius);
+
+    // Split into outer (big) and inner (small) — top half = outer ring, bottom half = inner ring
+    const splitIdx = Math.ceil(connectedNodes.length / 2);
+    const outerGroup = connectedNodes.slice(0, splitIdx);   // big nodes
+    const innerGroup = connectedNodes.slice(splitIdx);       // small nodes
+
+    // ---- Inner ring (small nodes) — closer to center ----
+    const innerR = maxR * 0.35;
+    innerGroup.forEach((ni, idx) => {
+        const angle = (2 * Math.PI * idx / innerGroup.length) - Math.PI / 2;
+        const r = innerR + (Math.random() - 0.5) * 20;
+        nodes[ni].x = cx + r * Math.cos(angle);
+        nodes[ni].y = cy + r * Math.sin(angle);
+    });
+
+    // ---- Outer ring (big nodes) — further from center ----
+    const outerR = maxR * 0.68;
+    outerGroup.forEach((ni, idx) => {
+        const angle = (2 * Math.PI * idx / outerGroup.length) - Math.PI / 2;
+        const r = outerR + (Math.random() - 0.5) * 20;
+        nodes[ni].x = cx + r * Math.cos(angle);
+        nodes[ni].y = cy + r * Math.sin(angle);
+    });
+
+    // ---- Outermost ring (isolated nodes) — at the edge ----
+    const isoR = maxR * 0.95;
+    isolated.forEach((ni, idx) => {
+        const angle = (2 * Math.PI * idx / isolated.length) - Math.PI / 4;
+        const r = isoR + (Math.random() - 0.5) * 15;
+        nodes[ni].x = cx + r * Math.cos(angle);
+        nodes[ni].y = cy + r * Math.sin(angle);
+    });
+}
+
+function renderTopology(modules) {
+    const canvas = document.getElementById('topo-canvas');
+    const area = canvas.parentElement;
+    const loadingEl = document.getElementById('topo-loading');
+    canvas.width = area.clientWidth * (window.devicePixelRatio || 1);
+    canvas.height = area.clientHeight * (window.devicePixelRatio || 1);
+    canvas.style.width = area.clientWidth + 'px';
+    canvas.style.height = area.clientHeight + 'px';
+
+    const W = area.clientWidth, H = area.clientHeight;
+    tNodes = []; tEdges = [];
+    const idMap = {};
+
+    if (modules.length === 0) {
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
+        ctx.clearRect(0, 0, W, H);
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-muted');
+        ctx.font = '14px "Inter Tight", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('暂无模块数据', W/2, H/2);
+        if (loadingEl) loadingEl.classList.add('hidden');
+        return;
+    }
+
+    modules.forEach((m, i) => {
+        const now = Date.now();
+        const lastChanged = m.last_changed_at ? new Date(m.last_changed_at).getTime() : 0;
+        const recent = (now - lastChanged) < 7 * 24 * 3600 * 1000;
+        const isNew = !!m.is_new;
+        const children = modules.filter(c => c.parent_id === m.id).length;
+        const isRoot = !m.parent_id || !modules.find(x => x.id === m.parent_id);
+
+        tNodes.push({
+            id: m.id, label: m.name, risk: m.risk_level || 'normal',
+            status: m.status, recent, isNew, parent_id: m.parent_id,
+            description: m.description, last_change_summary: m.last_change_summary,
+            childCount: children, isRoot,
+            radius: isRoot ? Math.max(28, Math.min(44, 28 + children * 3)) : Math.max(18, Math.min(32, 18 + children * 3)),
+            x: 0, y: 0, vx: 0, vy: 0,
+            highlight: false,
+        });
+        idMap[m.id] = tNodes.length - 1;
+    });
+
+    // Parent-child edges
+    modules.forEach(m => {
+        if (m.parent_id && idMap[m.parent_id] !== undefined && idMap[m.id] !== undefined) {
+            tEdges.push({ source: idMap[m.parent_id], target: idMap[m.id], type: 'child' });
+        }
+    });
+
+    // Dependency edges
+    modules.forEach(m => {
+        if (m.extra && m.extra.dependencies) {
+            m.extra.dependencies.forEach(depId => {
+                if (idMap[depId] !== undefined && idMap[m.id] !== undefined) {
+                    tEdges.push({ source: idMap[m.id], target: idMap[depId], type: 'dep' });
+                }
+            });
+        }
+    });
+
+    // ---- Concentric layout: big outer, small inner, isolated outermost ----
+    _layoutInitialPositions(tNodes, tEdges, idMap, W, H);
+
+    tScale = 1; tOffX = 0; tOffY = 0; tSelected = null; tHovered = null;
+    const activeCanvas = setupCanvasEvents(canvas, W, H);
+    startSimulation(activeCanvas, W, H);
+}
+
+function startSimulation(canvas, W, H) {
+    if (tAnimFrame) cancelAnimationFrame(tAnimFrame);
+    tSimRunning = true;
+    let iter = 0;
+    const maxIter = 250;
+    function step() {
+        if (!tSimRunning || iter > maxIter) {
+            tSimRunning = false;
+            const loadingEl = document.getElementById('topo-loading');
+            if (loadingEl) loadingEl.classList.add('hidden');
+            requestAnimationFrame(() => drawGraph(canvas, W, H));
+            return;
+        }
+        simulateForces(W, H);
+        drawGraph(canvas, W, H);
+        iter++;
+        tAnimFrame = requestAnimationFrame(step);
+    }
+    step();
+}
+
+function simulateForces(W, H) {
+    const repulsion = 6000, attraction = 0.006, center = 0.012, damping = 0.55;
+    const cx = W/2, cy = H/2;
+
+    for (let i = 0; i < tNodes.length; i++) {
+        for (let j = i+1; j < tNodes.length; j++) {
+            const a = tNodes[i], b = tNodes[j];
+            const dx = a.x - b.x, dy = a.y - b.y;
+            const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
+            const f = repulsion / (dist * dist);
+            const fx = (dx/dist) * f, fy = (dy/dist) * f;
+            a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+        }
+    }
+
+    tEdges.forEach(e => {
+        const s = tNodes[e.source], t = tNodes[e.target];
+        const dx = t.x - s.x, dy = t.y - s.y;
+        const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
+        const idealDist = e.type === 'child' ? 120 : 180;
+        const f = (dist - idealDist) * attraction;
+        const fx = (dx/dist)*f, fy = (dy/dist)*f;
+        s.vx += fx; s.vy += fy; t.vx -= fx; t.vy -= fy;
+    });
+
+    // Radial bias: big nodes pushed outward, small nodes pulled inward
+    tNodes.forEach(n => {
+        n.vx += (cx - n.x) * center;
+        n.vy += (cy - n.y) * center;
+        // Radial force based on node size
+        const dx = n.x - cx, dy = n.y - cy;
+        const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
+        if (n.radius >= 28) {
+            // Big node → push outward gently
+            const outForce = 0.15;
+            n.vx += (dx / dist) * outForce;
+            n.vy += (dy / dist) * outForce;
+        } else {
+            // Small node → pull inward gently
+            const inForce = 0.1;
+            n.vx -= (dx / dist) * inForce;
+            n.vy -= (dy / dist) * inForce;
+        }
+    });
+
+    tNodes.forEach(n => {
+        if (n === tDragging) return;
+        n.vx *= damping; n.vy *= damping;
+        n.x += n.vx; n.y += n.vy;
+        n.x = Math.max(n.radius + 10, Math.min(W - n.radius - 10, n.x));
+        n.y = Math.max(n.radius + 10, Math.min(H - n.radius - 10, n.y));
+    });
+}
+
+function drawGraph(canvas, W, H) {
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.save();
+    ctx.translate(tOffX, tOffY);
+    ctx.scale(tScale, tScale);
+
+    // Edges
+    tEdges.forEach(e => {
+        const s = tNodes[e.source], t = tNodes[e.target];
+        const angle = Math.atan2(t.y - s.y, t.x - s.x);
+        // Start/end at node borders
+        const sx = s.x + s.radius * Math.cos(angle);
+        const sy = s.y + s.radius * Math.sin(angle);
+        const ex = t.x - t.radius * Math.cos(angle);
+        const ey = t.y - t.radius * Math.sin(angle);
+
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+
+        if (e.type === 'dep') {
+            // Curved dependency line (purple dashed with arrow)
+            const mx = (sx + ex)/2, my = (sy + ey)/2;
+            const dx = ex - sx, dy = ey - sy;
+            const nx = -dy * 0.18, ny = dx * 0.18;
+            ctx.quadraticCurveTo(mx + nx, my + ny, ex, ey);
+            ctx.strokeStyle = 'rgba(139,92,246,0.7)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]);
+        } else {
+            // Parent-child solid line (clearer)
+            ctx.lineTo(ex, ey);
+            ctx.strokeStyle = 'rgba(100,116,139,0.55)';
+            ctx.lineWidth = 1.8;
+            ctx.setLineDash([]);
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Arrow head for all edges (deps: purple, child: gray)
+        const arrowLen = e.type === 'dep' ? 10 : 7;
+        const arrowAngle = e.type === 'dep' ? 0.4 : 0.35;
+        const arrowColor = e.type === 'dep' ? 'rgba(139,92,246,0.8)' : 'rgba(100,116,139,0.6)';
+        ctx.beginPath();
+        ctx.moveTo(ex, ey);
+        ctx.lineTo(ex - arrowLen*Math.cos(angle-arrowAngle), ey - arrowLen*Math.sin(angle-arrowAngle));
+        ctx.moveTo(ex, ey);
+        ctx.lineTo(ex - arrowLen*Math.cos(angle+arrowAngle), ey - arrowLen*Math.sin(angle+arrowAngle));
+        ctx.strokeStyle = arrowColor;
+        ctx.lineWidth = e.type === 'dep' ? 2 : 1.5;
+        ctx.stroke();
+
+        // Edge label for deps
+        if (e.type === 'dep' && e.label) {
+            const lx = (sx + ex)/2 + (-( ey - sy))*0.09;
+            const ly = (sy + ey)/2 + ((ex - sx))*0.09;
+            ctx.font = '10px system-ui';
+            ctx.fillStyle = 'rgba(139,92,246,0.8)';
+            ctx.textAlign = 'center';
+            ctx.fillText(e.label || '依赖', lx, ly);
+        }
+    });
+
+    // Nodes
+    const now = Date.now();
+    tNodes.forEach((n, idx) => {
+        const isSel = tSelected === idx;
+        const isHov = tHovered === idx;
+        const color = RISK_COLORS[n.risk] || RISK_COLORS.normal;
+        const dimmed = tSearchTerm && !n.highlight;
+
+        ctx.globalAlpha = dimmed ? 0.2 : 1;
+
+        // Glow for recently changed
+        if (n.recent && !dimmed) {
+            const pulse = 0.5 + 0.5 * Math.sin(now / 600 + idx);
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, n.radius + 5 + pulse * 4, 0, Math.PI * 2);
+            const glow = ctx.createRadialGradient(n.x, n.y, n.radius, n.x, n.y, n.radius + 10);
+            glow.addColorStop(0, color + '40');
+            glow.addColorStop(1, color + '00');
+            ctx.fillStyle = glow;
+            ctx.fill();
+        }
+
+        // Selection ring
+        if (isSel) {
+            ctx.beginPath();
+            ctx.arc(n.x, n.y, n.radius + 4, 0, Math.PI * 2);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2.5;
+            ctx.setLineDash([4, 3]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+
+        // Node body
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
+        const grad = ctx.createRadialGradient(n.x - n.radius*0.25, n.y - n.radius*0.25, 0, n.x, n.y, n.radius);
+        grad.addColorStop(0, color + (n.isRoot ? 'ee' : 'cc'));
+        grad.addColorStop(1, color + (n.isRoot ? 'aa' : '77'));
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        // Hover ring
+        if (isHov && !isSel) {
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+
+        // Label
+        const fontSize = Math.max(9, Math.min(13, n.radius * 0.48));
+        ctx.font = `${isSel ? '700' : '500'} ${fontSize}px "Inter Tight", sans-serif`;
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const maxChars = Math.floor(n.radius * 2 / (fontSize * 0.55));
+        const label = n.label.length > maxChars ? n.label.substring(0, maxChars - 1) + '…' : n.label;
+        ctx.fillText(label, n.x, n.y);
+
+        // Child count badge
+        if (n.childCount > 0 && !dimmed) {
+            const bx = n.x + n.radius * 0.65, by = n.y - n.radius * 0.65;
+            ctx.beginPath();
+            ctx.arc(bx, by, 9, 0, Math.PI * 2);
+            ctx.fillStyle = '#3b82f6';
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.fillStyle = '#fff';
+            ctx.font = '600 8px "JetBrains Mono", monospace';
+            ctx.fillText(n.childCount, bx, by + 0.5);
+        }
+
+        // NEW badge for recently created modules
+        if (n.isNew && !dimmed) {
+            const nx = n.x - n.radius * 0.65, ny = n.y - n.radius * 0.75;
+            ctx.font = '600 7px "Inter Tight", sans-serif';
+            const tw = ctx.measureText('NEW').width + 6;
+            ctx.fillStyle = '#ef4444';
+            ctx.beginPath();
+            const rr = 4;
+            ctx.roundRect(nx - tw/2, ny - 6, tw, 12, rr);
+            ctx.fill();
+            ctx.fillStyle = '#fff';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('NEW', nx, ny);
+        }
+
+        ctx.globalAlpha = 1;
+    });
+
+    ctx.restore();
+
+    // Request another frame if recent nodes exist (for pulse animation)
+    if (tNodes.some(n => n.recent) && !tSimRunning) {
+        tAnimFrame = requestAnimationFrame(() => drawGraph(canvas, W, H));
+    }
+}
+
+function setupCanvasEvents(canvas, W, H) {
+    const newC = canvas.cloneNode(true);
+    canvas.parentElement.replaceChild(newC, canvas);
+    // Return the new active canvas for simulation to draw on
+
+    newC.addEventListener('mousedown', e => {
+        const {x, y} = toWorld(e, newC, W, H);
+        const hit = hitNode(x, y);
+        if (hit !== null) {
+            tDragging = tNodes[hit];
+            tSelected = hit;
+            showDetail(hit);
+        } else {
+            tPanning = true;
+            tPanStart = {x: e.clientX - tOffX, y: e.clientY - tOffY};
+        }
+    });
+
+    newC.addEventListener('mousemove', e => {
+        if (tDragging) {
+            const {x, y} = toWorld(e, newC, W, H);
+            tDragging.x = x; tDragging.y = y;
+            tDragging.vx = 0; tDragging.vy = 0;
+            drawGraph(newC, W, H);
+        } else if (tPanning) {
+            tOffX = e.clientX - tPanStart.x;
+            tOffY = e.clientY - tPanStart.y;
+            drawGraph(newC, W, H);
+        } else {
+            const {x, y} = toWorld(e, newC, W, H);
+            const hit = hitNode(x, y);
+            if (hit !== tHovered) { tHovered = hit; drawGraph(newC, W, H); showTooltip(e, hit); }
+            else if (hit !== null) moveTooltip(e);
+            newC.style.cursor = hit !== null ? 'pointer' : 'grab';
+        }
+    });
+
+    newC.addEventListener('mouseup', () => { tDragging = null; tPanning = false; });
+    newC.addEventListener('mouseleave', () => { tDragging = null; tPanning = false; hideTooltip(); tHovered = null; drawGraph(newC, W, H); });
+
+    newC.addEventListener('wheel', e => {
+        e.preventDefault();
+        const rect = newC.getBoundingClientRect();
+        const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+        const delta = e.deltaY > 0 ? 0.9 : 1.1;
+        const newScale = Math.max(0.3, Math.min(4, tScale * delta));
+        // Zoom toward cursor
+        tOffX = mx - (mx - tOffX) * (newScale / tScale);
+        tOffY = my - (my - tOffY) * (newScale / tScale);
+        tScale = newScale;
+        drawGraph(newC, W, H);
+    }, {passive: false});
+
+    newC.addEventListener('dblclick', e => {
+        const {x, y} = toWorld(e, newC, W, H);
+        const hit = hitNode(x, y);
+        if (hit !== null) showDetail(hit);
+    });
+    return newC;
+}
+
+function toWorld(e, canvas, W, H) {
+    const rect = canvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+    return { x: (cx - tOffX) / tScale, y: (cy - tOffY) / tScale };
+}
+
+function hitNode(x, y) {
+    for (let i = tNodes.length - 1; i >= 0; i--) {
+        const n = tNodes[i];
+        const dx = x - n.x, dy = y - n.y;
+        if (dx*dx + dy*dy <= (n.radius + 4) * (n.radius + 4)) return i;
+    }
+    return null;
+}
+
+// Search
+function onTopoSearch(term) {
+    tSearchTerm = term.toLowerCase().trim();
+    tNodes.forEach(n => { n.highlight = !tSearchTerm || n.label.toLowerCase().includes(tSearchTerm); });
+    const canvas = document.querySelector('#view-topo canvas');
+    if (canvas) {
+        const area = canvas.parentElement;
+        drawGraph(canvas, area.clientWidth, area.clientHeight);
+    }
+}
+
+// Tooltip
+function showTooltip(e, idx) {
+    const tt = document.getElementById('topo-tooltip');
+    if (idx === null) { tt.style.display = 'none'; return; }
+    const n = tNodes[idx];
+    tt.innerHTML = `
+        <div class="tt-name">${esc(n.label)}</div>
+        ${n.description ? `<div class="tt-desc">${esc(n.description).substring(0, 100)}</div>` : ''}
+        ${n.last_change_summary ? `<div class="tt-change">● ${esc(n.last_change_summary).substring(0, 60)}</div>` : ''}
+        <span class="tt-risk"><span class="risk-pill risk-pill-${n.risk}">${RISK_LABELS[n.risk] || '普通'}</span></span>
+    `;
+    tt.style.display = 'block';
+    moveTooltip(e);
+}
+function moveTooltip(e) {
+    const tt = document.getElementById('topo-tooltip');
+    const x = e.clientX + 14, y = e.clientY + 14;
+    tt.style.left = Math.min(x, window.innerWidth - 300) + 'px';
+    tt.style.top = Math.min(y, window.innerHeight - 150) + 'px';
+}
+function hideTooltip() { document.getElementById('topo-tooltip').style.display = 'none'; }
+
+// Zoom controls
+function topoZoomIn() { tScale = Math.min(4, tScale * 1.25); redrawTopo(); }
+function topoZoomOut() { tScale = Math.max(0.3, tScale * 0.8); redrawTopo(); }
+function topoFitAll() {
+    if (!tNodes.length) return;
+    const canvas = document.querySelector('#view-topo canvas');
+    const area = canvas.parentElement;
+    const W = area.clientWidth, H = area.clientHeight;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    tNodes.forEach(n => { minX = Math.min(minX, n.x - n.radius); maxX = Math.max(maxX, n.x + n.radius); minY = Math.min(minY, n.y - n.radius); maxY = Math.max(maxY, n.y + n.radius); });
+    const pw = maxX - minX + 80, ph = maxY - minY + 80;
+    tScale = Math.min(W / pw, H / ph, 2);
+    tOffX = (W - (minX + maxX) * tScale) / 2;
+    tOffY = (H - (minY + maxY) * tScale) / 2;
+    drawGraph(canvas, W, H);
+}
+function topoReset() {
+    tScale = 1; tOffX = 0; tOffY = 0;
+    renderTopology(getFilteredModules());
+}
+function redrawTopo() {
+    const canvas = document.querySelector('#view-topo canvas');
+    if (canvas) { const a = canvas.parentElement; drawGraph(canvas, a.clientWidth, a.clientHeight); }
+}
+
+function getFilteredModules() {
+    const risk = document.getElementById('filter-risk').value;
+    return risk ? allModules.filter(m => m.risk_level === risk) : allModules;
+}
+
+// Detail Panel
+async function showDetail(idx) {
+    const n = tNodes[idx];
+    const panel = document.getElementById('topo-detail');
+    panel.classList.remove('collapsed');
+    document.getElementById('topo-wrap').classList.remove('panel-collapsed');
+    panel.innerHTML = '<div class="topo-detail-inner" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted)"><p>加载中...</p></div>';
+
+    try {
+        const m = await API.get(`/panorama/modules/${n.id}`);
+        renderDetailContent(m);
+    } catch(e) {
+        panel.innerHTML = '<div class="topo-detail-inner"><p style="color:var(--text-muted)">加载失败</p></div>';
+    }
+}
+
+function renderDetailContent(m) {
+    // Normalize related_case_libraries (may be string in some edge cases)
+    m.related_case_libraries = _parseLibs(m.related_case_libraries);
+    const panel = document.getElementById('topo-detail');
+    const children = m.children || [];
+    const riskColor = RISK_COLORS[m.risk_level] || RISK_COLORS.normal;
+    const now = Date.now();
+    const createdAt = m.created_at ? new Date(m.created_at).getTime() : 0;
+    const isNew = !!m.is_new;
+
+    panel.innerHTML = `<div class="topo-detail-inner">
+        <div class="detail-header">
+            <div class="detail-title">
+                <span class="risk-dot" style="background:${riskColor}"></span>
+                ${esc(m.name)}
+                ${isNew ? '<span class="tbl-new-tag" style="margin-left:6px;font-size:0.62rem">NEW</span>' : ''}
+            </div>
+            <div class="detail-actions">
+            </div>
+        </div>
+
+        <div class="detail-meta">
+            <span class="risk-pill risk-pill-${m.risk_level}">${RISK_LABELS[m.risk_level] || '普通'}</span>
+            <span class="status-badge status-${m.status || 'active'}">${STATUS_LABELS[m.status] || '活跃'}</span>
+            ${m.path ? `<span class="path-tag">${esc(m.path)}</span>` : ''}
+        </div>
+
+        ${m.description ? `<div class="detail-desc">${esc(m.description)}</div>` : ''}
+
+        ${m.test_focus ? `
+        <div class="detail-section">
+            <div class="detail-section-title"><span class="sec-icon">🎯</span> 测试重点</div>
+            <div class="test-focus-card">${esc(m.test_focus)}</div>
+        </div>` : ''}
+
+        ${children.length ? `
+        <div class="detail-section">
+            <div class="detail-section-title"><span class="sec-icon">📦</span> 子模块 (${children.length})</div>
+            <div class="child-chips">${children.map(c => `
+                <span class="child-chip" onclick="navigateToModule(${c.id})">
+                    <span class="cc-dot" style="background:${RISK_COLORS[c.risk_level] || RISK_COLORS.normal}"></span>
+                    ${esc(c.name)}
+                </span>`).join('')}
+            </div>
+        </div>` : ''}
+
+        ${m.code_paths && m.code_paths.length ? `
+        <div class="detail-section">
+            <div class="detail-section-title"><span class="sec-icon">📂</span> 代码路径</div>
+            <div>${m.code_paths.map(p => `<span class="path-tag">${esc(p)}</span>`).join('')}</div>
+        </div>` : ''}
+
+        ${m.resource_paths && m.resource_paths.length ? `
+        <div class="detail-section">
+            <div class="detail-section-title"><span class="sec-icon">🎨</span> 资源路径</div>
+            <div>${m.resource_paths.map(p => `<span class="path-tag">${esc(p)}</span>`).join('')}</div>
+        </div>` : ''}
+
+        ${m.related_case_libraries && m.related_case_libraries.length ? `
+        <div class="detail-section case-lib-section collapsed">
+            <div class="detail-section-title case-lib-toggle" onclick="this.parentElement.classList.toggle('collapsed')" title="点击展开/折叠">
+                <span class="sec-icon">🧪</span> 关联用例库 (${m.related_case_libraries.length})
+                <span class="collapse-arrow">▾</span>
+            </div>
+            <div class="case-lib-body" style="display:flex;flex-direction:column;gap:6px">
+                ${m.related_case_libraries.map(lib => `<a href="/testcases/${lib.library_id}${lib.directory_path ? '#dir=' + encodeURIComponent(lib.directory_path) : ''}" target="_blank" class="case-lib-link" title="点击跳转到用例库「${esc(lib.library_name || '')}」${lib.directory_path ? ' → 目录: ' + esc(lib.directory_path) : ''}">
+                    <span style="font-size:0.78rem;font-weight:600;color:var(--text)">${esc(lib.library_name || '未命名')}</span>
+                    ${lib.case_count != null ? `<span style="font-size:0.68rem;padding:1px 6px;background:var(--primary);color:#fff;border-radius:8px">${lib.case_count} 条</span>` : ''}
+                    ${lib.directory_path ? `<span class="case-lib-dir-tag"><span class="path-tag" style="font-size:0.68rem">${esc(lib.directory_path)}</span><span class="case-lib-jump-icon" style="opacity:0.6;margin-left:2px;font-size:0.65rem">↗</span></span>` : ''}
+                    <span class="case-lib-jump-icon" title="跳转">↗</span>
+                </a>`).join('')}
+            </div>
+        </div>` : ''}
+
+        <div class="detail-section" id="changelog-section">
+            <div class="detail-section-title"><span class="sec-icon">📋</span> 变更记录</div>
+            <div class="changelog-filters" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+                <input type="date" id="cl-start" style="font-size:0.72rem;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);color:var(--text)" title="开始日期">
+                <span style="font-size:0.72rem;color:var(--text-muted)">~</span>
+                <input type="date" id="cl-end" style="font-size:0.72rem;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);color:var(--text)" title="结束日期">
+                <button class="btn btn-sm" onclick="loadChangelog(0)" style="padding:2px 8px;font-size:0.72rem">筛选</button>
+            </div>
+            <div id="changelog-list"></div>
+            <div id="changelog-pager" style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:0.72rem;color:var(--text-muted)"></div>
+        </div>
+
+        <div style="font-size:0.72rem;color:var(--text-muted);padding-top:12px;border-top:1px dashed var(--border)">
+            创建: ${esc(m.created_by || '-')} · 更新: ${m.updated_at || '-'}
+        </div>
+    </div>`;
+    // Auto-load first page of changelog — default to last 7 days
+    window._clModuleId = m.id;
+    const _today = new Date(), _weekAgo = new Date();
+    _weekAgo.setDate(_today.getDate() - 7);
+    const _clStart = document.getElementById('cl-start');
+    const _clEnd = document.getElementById('cl-end');
+    if (_clStart && !_clStart.value) _clStart.value = _weekAgo.toISOString().slice(0, 10);
+    if (_clEnd && !_clEnd.value) _clEnd.value = _today.toISOString().slice(0, 10);
+    loadChangelog(0);
+}
+
+const CL_PAGE_SIZE = 20;
+async function loadChangelog(offset) {
+    const list = document.getElementById('changelog-list');
+    const pager = document.getElementById('changelog-pager');
+    if (!list) return;
+    const moduleId = window._clModuleId;
+    if (!moduleId) { list.innerHTML = '<p style="font-size:0.8rem;color:var(--text-muted)">暂无</p>'; return; }
+
+    let url = `/api/v1/panorama/changes?module_id=${moduleId}&limit=${CL_PAGE_SIZE}&offset=${offset}`;
+    const startEl = document.getElementById('cl-start');
+    const endEl = document.getElementById('cl-end');
+    if (startEl && startEl.value) url += `&start_date=${startEl.value}`;
+    if (endEl && endEl.value) url += `&end_date=${endEl.value}`;
+
+    list.innerHTML = '<p style="font-size:0.78rem;color:var(--text-muted)">加载中...</p>';
+    try {
+        const res = await API.get(url.replace('/api/v1', ''));
+        const items = res.items || [];
+        const total = res.total || 0;
+        if (!items.length) {
+            list.innerHTML = '<p style="font-size:0.8rem;color:var(--text-muted);padding:8px 0">暂无变更记录</p>';
+            pager.innerHTML = '';
+            return;
+        }
+        // Group by date
+        const groups = {};
+        items.forEach(c => {
+            const day = (c.created_at || '').substring(0, 10) || '未知日期';
+            if (!groups[day]) groups[day] = [];
+            groups[day].push(c);
+        });
+        let html = '';
+        Object.keys(groups).sort().reverse().forEach(day => {
+            html += `<div class="cl-date-group" style="margin-bottom:8px"><div style="font-size:0.72rem;font-weight:600;color:var(--text-muted);margin-bottom:4px;padding:2px 0;border-bottom:1px solid var(--border)">${day}</div>`;
+            groups[day].forEach(c => {
+                html += `<div class="change-card"><div class="change-card-header"><span class="change-type-badge ct-${c.change_type}">${CHANGE_TYPES[c.change_type] || c.change_type}</span><span class="change-card-summary">${esc(c.summary)}</span></div>${c.test_suggestion ? `<div class="change-card-suggestion">💡 ${esc(c.test_suggestion)}</div>` : ''}<div class="change-card-meta">${(c.created_at || '').substring(11, 19)} · ${esc(c.created_by || '')}</div></div>`;
+            });
+            html += '</div>';
+        });
+        list.innerHTML = html;
+
+        // Pager
+        const page = Math.floor(offset / CL_PAGE_SIZE) + 1;
+        const totalPages = Math.ceil(total / CL_PAGE_SIZE);
+        let pagerHtml = `<span>共 ${total} 条</span><span>`;
+        if (page > 1) pagerHtml += `<a href="#" onclick="event.preventDefault();loadChangelog(${offset - CL_PAGE_SIZE})" style="margin-right:8px;color:var(--primary)">← 上一页</a>`;
+        pagerHtml += `${page}/${totalPages}`;
+        if (page < totalPages) pagerHtml += `<a href="#" onclick="event.preventDefault();loadChangelog(${offset + CL_PAGE_SIZE})" style="margin-left:8px;color:var(--primary)">下一页 →</a>`;
+        pagerHtml += '</span>';
+        pager.innerHTML = pagerHtml;
+    } catch(e) {
+        list.innerHTML = '<p style="font-size:0.8rem;color:var(--text-muted)">加载失败</p>';
+        pager.innerHTML = '';
+    }
+}
+
+async function navigateToModule(moduleId) {
+    const idx = tNodes.findIndex(n => n.id === moduleId);
+    if (idx >= 0) { tSelected = idx; redrawTopo(); await showDetail(idx); }
+    else { try { const m = await API.get(`/panorama/modules/${moduleId}`); renderDetailContent(m); } catch(e){} }
+}
+
+// ===========================
+// ===== TABLE VIEW =====
+// ===========================
+let expandedRows = new Set();
+
+function renderTable(tree) {
+    const tbody = document.getElementById('table-body');
+    if (!tree.length) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-muted)">暂无模块数据</td></tr>';
+        return;
+    }
+    tbody.innerHTML = buildTableRows(tree, 0);
+}
+
+function buildTableRows(nodes, depth) {
+    return nodes.map(n => {
+        const hasKids = n.children && n.children.length > 0;
+        const open = expandedRows.has(n.id);
+        const indent = depth * 24;
+        const riskColor = RISK_COLORS[n.risk_level] || RISK_COLORS.normal;
+        const now = Date.now();
+        const last = n.last_changed_at ? new Date(n.last_changed_at).getTime() : 0;
+        const recent = (now - last) < 7*24*3600*1000;
+        const isNew = !!n.is_new;
+
+        let row = `<tr onclick="onRowClick(${n.id})" data-id="${n.id}">
+            <td>
+                <div class="tbl-name-cell">
+                    <span class="tbl-indent" style="width:${indent}px"></span>
+                    ${hasKids ? `<span class="tbl-toggle ${open?'open':''}" onclick="event.stopPropagation();toggleRow(${n.id})">▶</span>` : '<span style="width:18px"></span>'}
+                    <span class="tbl-risk-dot" style="background:${riskColor}"></span>
+                    ${recent ? '<span class="tbl-pulse"></span>' : ''}
+                    ${isNew ? '<span class="tbl-new-tag">NEW</span>' : ''}
+                    <span class="tbl-module-name" style="font-weight:${depth===0?600:400}">${esc(n.name)}</span>
+                    ${hasKids ? `<span class="tbl-child-count">(${n.children.length})</span>` : ''}
+                    ${_parseLibs(n.related_case_libraries).length ? `<span style="font-size:0.62rem;padding:1px 5px;background:#e0f2fe;color:#0369a1;border-radius:8px;margin-left:4px" title="关联${_parseLibs(n.related_case_libraries).length}个用例库">🧪${_parseLibs(n.related_case_libraries).length}</span>` : ''}
+                </div>
+            </td>
+            <td><span class="risk-pill risk-pill-${n.risk_level}">${RISK_LABELS[n.risk_level] || '普通'}</span></td>
+            <td><span class="status-badge status-${n.status||'active'}">${STATUS_LABELS[n.status] || '活跃'}</span></td>
+            <td style="font-size:0.78rem;color:var(--text-secondary)">${esc((n.last_change_summary||'').substring(0,40))}</td>
+            <td style="font-size:0.76rem;color:var(--text-muted)">${n.updated_at ? n.updated_at.substring(0,10) : '-'}</td>
+            <td></td>
+        </tr>`;
+        if (hasKids && open) row += buildTableRows(n.children, depth + 1);
+        return row;
+    }).join('');
+}
+
+function toggleRow(id) {
+    if (expandedRows.has(id)) expandedRows.delete(id);
+    else expandedRows.add(id);
+    renderCurrentView();
+}
+
+function onRowClick(id) {
+    showModuleDetailModal(id);
+}
+
+async function showModuleDetailModal(moduleId) {
+    const container = document.getElementById('modal-container');
+    container.innerHTML = `<div class="modal-backdrop" onclick="closeDetailModal()">
+        <div class="modal-box" style="max-width:640px;max-height:80vh;overflow-y:auto" onclick="event.stopPropagation()">
+            <div style="display:flex;align-items:center;justify-content:center;height:120px;color:var(--text-muted)">加载中...</div>
+        </div>
+    </div>`;
+    try {
+        const m = await API.get(`/panorama/modules/${moduleId}`);
+        m.related_case_libraries = _parseLibs(m.related_case_libraries);
+        const children = m.children || [];
+        const riskColor = RISK_COLORS[m.risk_level] || RISK_COLORS.normal;
+        container.innerHTML = `<div class="modal-backdrop" onclick="closeDetailModal()">
+            <div class="modal-box" style="max-width:640px;max-height:80vh;overflow-y:auto" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <span class="risk-dot" style="background:${riskColor}"></span>
+                    <span style="font-weight:600;font-size:1.05rem">${esc(m.name)}</span>
+                    <span style="flex:1"></span>
+                    <button class="modal-close-btn" onclick="closeDetailModal()">✕</button>
+                </div>
+                <div style="padding:20px 24px">
+                    <div class="detail-meta" style="margin-bottom:14px">
+                        <span class="risk-pill risk-pill-${m.risk_level}">${RISK_LABELS[m.risk_level] || '普通'}</span>
+                        <span class="status-badge status-${m.status || 'active'}">${STATUS_LABELS[m.status] || '活跃'}</span>
+                        ${m.path ? `<span class="path-tag">${esc(m.path)}</span>` : ''}
+                    </div>
+                    ${m.description ? `<div class="detail-desc" style="margin-bottom:14px">${esc(m.description)}</div>` : ''}
+                    ${m.test_focus ? `<div class="detail-section"><div class="detail-section-title"><span class="sec-icon">🎯</span> 测试重点</div><div class="test-focus-card">${esc(m.test_focus)}</div></div>` : ''}
+                    ${children.length ? `<div class="detail-section"><div class="detail-section-title"><span class="sec-icon">📦</span> 子模块 (${children.length})</div><div class="child-chips">${children.map(c => `<span class="child-chip" onclick="closeDetailModal();showModuleDetailModal(${c.id})"><span class="cc-dot" style="background:${RISK_COLORS[c.risk_level] || RISK_COLORS.normal}"></span>${esc(c.name)}</span>`).join('')}</div></div>` : ''}
+                    ${m.code_paths && m.code_paths.length ? `<div class="detail-section"><div class="detail-section-title"><span class="sec-icon">📂</span> 代码路径</div><div>${m.code_paths.map(p => `<span class="path-tag">${esc(p)}</span>`).join('')}</div></div>` : ''}
+                    ${m.resource_paths && m.resource_paths.length ? `<div class="detail-section"><div class="detail-section-title"><span class="sec-icon">🎨</span> 资源路径</div><div>${m.resource_paths.map(p => `<span class="path-tag">${esc(p)}</span>`).join('')}</div></div>` : ''}
+                    ${m.related_case_libraries && m.related_case_libraries.length ? `<div class="detail-section case-lib-section collapsed"><div class="detail-section-title case-lib-toggle" onclick="this.parentElement.classList.toggle('collapsed')" title="点击展开/折叠"><span class="sec-icon">🧪</span> 关联用例库 (${m.related_case_libraries.length})<span class="collapse-arrow">▾</span></div><div class="case-lib-body" style="display:flex;flex-direction:column;gap:6px">${m.related_case_libraries.map(lib => `<a href="/testcases/${lib.library_id}${lib.directory_path ? '#dir=' + encodeURIComponent(lib.directory_path) : ''}" target="_blank" class="case-lib-link" title="点击跳转到用例库「${esc(lib.library_name || '')}」${lib.directory_path ? ' → 目录: ' + esc(lib.directory_path) : ''}"><span style="font-size:0.78rem;font-weight:600;color:var(--text)">${esc(lib.library_name || '未命名')}</span>${lib.case_count != null ? `<span style="font-size:0.68rem;padding:1px 6px;background:var(--primary);color:#fff;border-radius:8px">${lib.case_count} 条</span>` : ''}${lib.directory_path ? `<span class="case-lib-dir-link" title="跳转到目录: ${esc(lib.directory_path)}"><span class="path-tag" style="font-size:0.68rem">${esc(lib.directory_path)}</span><span class="case-lib-jump-icon">↗</span></span>` : ''}<span class="case-lib-jump-icon" title="跳转到用例库">↗</span></a>`).join('')}</div></div>` : ''}
+                    <div class="detail-section">
+                        <div class="detail-section-title"><span class="sec-icon">📋</span> 变更记录</div>
+                        <div class="changelog-filters" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+                            <input type="date" id="modal-cl-start" style="font-size:0.72rem;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);color:var(--text)" title="开始日期">
+                            <span style="font-size:0.72rem;color:var(--text-muted)">~</span>
+                            <input type="date" id="modal-cl-end" style="font-size:0.72rem;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);color:var(--text)" title="结束日期">
+                            <button class="btn btn-sm" onclick="loadModalChangelog(0)" style="padding:2px 8px;font-size:0.72rem">筛选</button>
+                        </div>
+                        <div id="modal-changelog-list"></div>
+                        <div id="modal-changelog-pager" style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;font-size:0.72rem;color:var(--text-muted)"></div>
+                    </div>
+                    <div style="font-size:0.72rem;color:var(--text-muted);padding-top:12px;border-top:1px dashed var(--border)">
+                        创建: ${esc(m.created_by || '-')} · 更新: ${m.updated_at || '-'}
+                    </div>
+                    <div style="text-align:center;margin-top:16px;font-size:0.72rem;color:var(--text-muted)">
+                        <span>模块数据由 Agent 维护</span>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+    } catch(e) {
+        container.innerHTML = `<div class="modal-backdrop" onclick="closeDetailModal()">
+            <div class="modal-box" style="max-width:400px" onclick="event.stopPropagation()">
+                <div style="padding:30px;text-align:center;color:var(--text-muted)">加载失败</div>
+            </div>
+        </div>`;
+    }
+    // Auto-load modal changelog — default to last 7 days
+    window._modalClModuleId = moduleId;
+    const _mToday = new Date(), _mWeekAgo = new Date();
+    _mWeekAgo.setDate(_mToday.getDate() - 7);
+    const _mClStart = document.getElementById('modal-cl-start');
+    const _mClEnd = document.getElementById('modal-cl-end');
+    if (_mClStart && !_mClStart.value) _mClStart.value = _mWeekAgo.toISOString().slice(0, 10);
+    if (_mClEnd && !_mClEnd.value) _mClEnd.value = _mToday.toISOString().slice(0, 10);
+    loadModalChangelog(0);
+}
+
+async function loadModalChangelog(offset) {
+    const list = document.getElementById('modal-changelog-list');
+    const pager = document.getElementById('modal-changelog-pager');
+    if (!list) return;
+    const moduleId = window._modalClModuleId;
+    if (!moduleId) { list.innerHTML = '<p style="font-size:0.8rem;color:var(--text-muted)">暂无</p>'; return; }
+
+    let url = `/api/v1/panorama/changes?module_id=${moduleId}&limit=${CL_PAGE_SIZE}&offset=${offset}`;
+    const startEl = document.getElementById('modal-cl-start');
+    const endEl = document.getElementById('modal-cl-end');
+    if (startEl && startEl.value) url += `&start_date=${startEl.value}`;
+    if (endEl && endEl.value) url += `&end_date=${endEl.value}`;
+
+    list.innerHTML = '<p style="font-size:0.78rem;color:var(--text-muted)">加载中...</p>';
+    try {
+        const res = await API.get(url.replace('/api/v1', ''));
+        const items = res.items || [];
+        const total = res.total || 0;
+        if (!items.length) {
+            list.innerHTML = '<p style="font-size:0.8rem;color:var(--text-muted);padding:8px 0">暂无变更记录</p>';
+            pager.innerHTML = '';
+            return;
+        }
+        const groups = {};
+        items.forEach(c => {
+            const day = (c.created_at || '').substring(0, 10) || '未知日期';
+            if (!groups[day]) groups[day] = [];
+            groups[day].push(c);
+        });
+        let html = '';
+        Object.keys(groups).sort().reverse().forEach(day => {
+            html += `<div class="cl-date-group" style="margin-bottom:8px"><div style="font-size:0.72rem;font-weight:600;color:var(--text-muted);margin-bottom:4px;padding:2px 0;border-bottom:1px solid var(--border)">${day}</div>`;
+            groups[day].forEach(c => {
+                html += `<div class="change-card"><div class="change-card-header"><span class="change-type-badge ct-${c.change_type}">${CHANGE_TYPES[c.change_type] || c.change_type}</span><span class="change-card-summary">${esc(c.summary)}</span></div>${c.test_suggestion ? `<div class="change-card-suggestion">💡 ${esc(c.test_suggestion)}</div>` : ''}<div class="change-card-meta">${(c.created_at || '').substring(11, 19)} · ${esc(c.created_by || '')}</div></div>`;
+            });
+            html += '</div>';
+        });
+        list.innerHTML = html;
+        const page = Math.floor(offset / CL_PAGE_SIZE) + 1;
+        const totalPages = Math.ceil(total / CL_PAGE_SIZE);
+        let pagerHtml = `<span>共 ${total} 条</span><span>`;
+        if (page > 1) pagerHtml += `<a href="#" onclick="event.preventDefault();loadModalChangelog(${offset - CL_PAGE_SIZE})" style="margin-right:8px;color:var(--primary)">← 上一页</a>`;
+        pagerHtml += `${page}/${totalPages}`;
+        if (page < totalPages) pagerHtml += `<a href="#" onclick="event.preventDefault();loadModalChangelog(${offset + CL_PAGE_SIZE})" style="margin-left:8px;color:var(--primary)">下一页 →</a>`;
+        pagerHtml += '</span>';
+        pager.innerHTML = pagerHtml;
+    } catch(e) {
+        list.innerHTML = '<p style="font-size:0.8rem;color:var(--text-muted)">加载失败</p>';
+        pager.innerHTML = '';
+    }
+}
+
+function closeDetailModal() {
+    document.getElementById('modal-container').innerHTML = '';
+}
+
+// ===========================
+// ===== STATS VIEW =====
+// ===========================
+function renderStats() {
+    const area = document.getElementById('stats-area');
+    if (!statsData) {
+        area.innerHTML = '<div class="pano-empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3v18h18"/><path d="M7 16l4-4 4 4 5-7"/></svg><p>暂无统计数据</p></div>';
+        return;
+    }
+    const s = statsData;
+    // Build case library stats
+    const libModules = allModules.filter(m => {
+        const libs = _parseLibs(m.related_case_libraries);
+        return libs.length > 0;
+    });
+    const allLibs = new Map();
+    allModules.forEach(m => {
+        const libs = _parseLibs(m.related_case_libraries);
+        libs.forEach(lib => {
+            if (!allLibs.has(lib.library_id)) allLibs.set(lib.library_id, { ...lib, module_count: 0, total_cases: 0 });
+            const entry = allLibs.get(lib.library_id);
+            entry.module_count++;
+            entry.total_cases += (lib.case_count || 0);
+        });
+    });
+
+    area.innerHTML = `
+        <div class="stats-summary">
+            <div class="stat-card stat-card-click" style="--stat-color:var(--text-primary)" onclick="statJumpToList('')"><div class="stat-value">${s.total_modules}</div><div class="stat-label">功能模块总数</div></div>
+            <div class="stat-card stat-card-click" style="--stat-color:var(--green)" onclick="statJumpToList('')"><div class="stat-value">${s.active_modules}</div><div class="stat-label">活跃模块</div></div>
+            <div class="stat-card" style="--stat-color:var(--blue)"><div class="stat-value">${s.total_changes}</div><div class="stat-label">变更记录</div></div>
+            <div class="stat-card" style="--stat-color:var(--accent)"><div class="stat-value">${s.recent_changes_7d}</div><div class="stat-label">近7天变更</div></div>
+            <div class="stat-card stat-card-click" style="--stat-color:#ef4444" onclick="statJumpToList('critical')"><div class="stat-value">${s.risk_stats.critical||0}</div><div class="stat-label">严重风险</div></div>
+            <div class="stat-card stat-card-click" style="--stat-color:#f97316" onclick="statJumpToList('high')"><div class="stat-value">${s.risk_stats.high||0}</div><div class="stat-label">高风险</div></div>
+            <div class="stat-card stat-card-click" style="--stat-color:#eab308" onclick="statJumpToList('normal')"><div class="stat-value">${s.risk_stats.normal||0}</div><div class="stat-label">普通</div></div>
+            <div class="stat-card stat-card-click" style="--stat-color:#22c55e" onclick="statJumpToList('low')"><div class="stat-value">${s.risk_stats.low||0}</div><div class="stat-label">低风险</div></div>
+        </div>
+        ${allLibs.size ? `
+        <div class="stats-section case-lib-section collapsed">
+            <h4 class="case-lib-toggle" onclick="this.parentElement.classList.toggle('collapsed')" style="cursor:pointer;user-select:none" title="点击展开/折叠">🧪 关联用例库概览 (${allLibs.size}) <span class="collapse-arrow">▾</span></h4>
+            <div class="case-lib-body" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-top:10px">
+                ${[...allLibs.values()].map(lib => `
+                <a href="/testcases/${lib.library_id}" target="_blank" class="case-lib-card" title="点击跳转到用例库「${esc(lib.library_name || '')}」">
+                    <div style="display:flex;align-items:center;gap:6px">
+                        <span style="font-weight:600;font-size:0.88rem;color:var(--text)">${esc(lib.library_name || '未命名')}</span>
+                        <span class="case-lib-jump-icon" title="跳转">↗</span>
+                    </div>
+                    <div style="display:flex;gap:10px;font-size:0.76rem;color:var(--text-secondary)">
+                        <span>覆盖 <b style="color:var(--primary)">${lib.module_count}</b> 个模块</span>
+                        <span>共 <b style="color:var(--accent)">${lib.total_cases}</b> 条用例</span>
+                    </div>
+                </a>`).join('')}
+            </div>
+        </div>` : ''}
+        <div class="stats-section">
+            <h4>📖 使用指南</h4>
+            <div style="font-size:0.84rem;color:var(--text-secondary);line-height:1.8">
+                <p style="margin-bottom:12px">功能全景视图由 Agent 自动建立和维护，帮助团队实时掌握游戏各功能模块的结构与变化。</p>
+                <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px">
+                    <div style="padding:12px 16px;background:var(--bg-secondary);border-radius:var(--radius-sm);border-left:3px solid var(--accent)">
+                        <b>拓扑图模式</b><br>力导向图可视化模块关系网络。节点大小=子模块数量，颜色=风险等级，发光=近期变更。紫色虚线=依赖关系。支持搜索过滤、拖拽布局、缩放。
+                    </div>
+                    <div style="padding:12px 16px;background:var(--bg-secondary);border-radius:var(--radius-sm);border-left:3px solid var(--blue)">
+                        <b>列表模式</b><br>树形表格展示所有模块层级。点击行可切换到拓扑图查看详情。支持展开/折叠子模块。
+                    </div>
+                    <div style="padding:12px 16px;background:var(--bg-secondary);border-radius:var(--radius-sm);border-left:3px solid var(--green)">
+                        <b>Agent 自动更新</b><br>Agent 分析代码后自动更新模块的风险等级、变更摘要和测试建议。无需手动维护。
+                    </div>
+                    <div style="padding:12px 16px;background:var(--bg-secondary);border-radius:var(--radius-sm);border-left:3px solid var(--purple)">
+                        <b>依赖关系</b><br>通过编辑模块的"依赖模块ID"字段设置模块间依赖，拓扑图会自动绘制紫色曲线。
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function _parseLibs(val) {
+    if (!val) return [];
+    if (Array.isArray(val)) return val;
+    if (typeof val === 'string') { try { const p = JSON.parse(val); return Array.isArray(p) ? p : []; } catch(e) { return []; } }
+    return [];
+}
+
+function statJumpToList(riskLevel) {
+    // Switch to table view with optional risk filter
+    document.getElementById('filter-risk').value = riskLevel;
+    switchView('table');
+}
+
+// ===========================
+// ===== CRUD =====
+// ===========================
+async function openModuleModal(editId) {
+    let module = null;
+    if (editId) { try { module = await API.get(`/panorama/modules/${editId}`); } catch(e){} }
+    const pid = _getSelectedProjectId();
+    let flatModules = [];
+    try { flatModules = await API.get('/panorama/modules' + (pid ? `?project_id=${pid}` : '')); } catch(e){}
+
+    document.getElementById('modal-container').innerHTML = `
+    <div class="pano-overlay" onclick="closeModal(event)">
+        <div class="pano-modal" onclick="event.stopPropagation()">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+                <h3 style="margin:0">${module ? '编辑模块' : '新建功能模块'}</h3>
+                <button style="background:none;border:none;font-size:1.4rem;color:var(--text-muted);cursor:pointer;padding:4px" onclick="closeModal()">×</button>
+            </div>
+            <div class="form-group">
+                <label>模块名称 *</label>
+                <input id="mm-name" value="${module ? esc(module.name) : ''}" placeholder="如：漂移系统">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>父模块</label>
+                    <select id="mm-parent">
+                        <option value="">无（顶层模块）</option>
+                        ${flatModules.filter(m => !editId || m.id !== editId).map(m => `<option value="${m.id}" ${module && module.parent_id === m.id ? 'selected' : ''}>${esc(m.path || m.name)}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>所属项目</label>
+                    <select id="mm-project">
+                        <option value="">无</option>
+                        ${projects.map(p => `<option value="${p.id}" ${(module && module.project_id === p.id) || (!module && pid == p.id) ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+                    </select>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>功能描述</label>
+                <textarea id="mm-desc" rows="2" placeholder="模块功能简述">${module ? esc(module.description || '') : ''}</textarea>
+            </div>
+            <div class="form-group">
+                <label>代码路径（逗号分隔）</label>
+                <input id="mm-code-paths" value="${module && module.code_paths ? module.code_paths.join(', ') : ''}" placeholder="Assets/Scripts/Racing/Drift/">
+            </div>
+            <div class="form-group">
+                <label>资源路径（逗号分隔）</label>
+                <input id="mm-res-paths" value="${module && module.resource_paths ? module.resource_paths.join(', ') : ''}" placeholder="Assets/Resources/Drift/">
+            </div>
+            <div class="form-group">
+                <label>测试重点</label>
+                <textarea id="mm-test-focus" rows="2" placeholder="描述该模块的测试重点">${module ? esc(module.test_focus || '') : ''}</textarea>
+            </div>
+            <div class="form-group">
+                <label>依赖模块ID（逗号分隔）</label>
+                <input id="mm-deps" value="${module && module.extra && module.extra.dependencies ? module.extra.dependencies.join(', ') : ''}" placeholder="12, 15, 23">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>状态</label>
+                    <select id="mm-status">
+                        <option value="active" ${module && module.status === 'active' ? 'selected' : ''}>活跃</option>
+                        <option value="planned" ${module && module.status === 'planned' ? 'selected' : ''}>规划中</option>
+                        <option value="deprecated" ${module && module.status === 'deprecated' ? 'selected' : ''}>已废弃</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>风险等级</label>
+                    <select id="mm-risk">
+                        <option value="low" ${module && module.risk_level === 'low' ? 'selected' : ''}>低</option>
+                        <option value="normal" ${!module || module.risk_level === 'normal' ? 'selected' : ''}>普通</option>
+                        <option value="high" ${module && module.risk_level === 'high' ? 'selected' : ''}>高</option>
+                        <option value="critical" ${module && module.risk_level === 'critical' ? 'selected' : ''}>严重</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button class="btn" onclick="closeModal()">关闭</button>
+                <button class="btn btn-primary" onclick="saveModule(${editId || 'null'})">${module ? '保存' : '创建'}</button>
+            </div>
+        </div>
+    </div>`;
+}
+
+function closeModal(e) {
+    if (e && e.target !== e.currentTarget) return;
+    document.getElementById('modal-container').innerHTML = '';
+}
+
+async function saveModule(editId) {
+    const name = document.getElementById('mm-name').value.trim();
+    if (!name) { showToast('请填写模块名称', 'error'); return; }
+
+    const codePaths = document.getElementById('mm-code-paths').value.split(',').map(s=>s.trim()).filter(Boolean);
+    const resPaths = document.getElementById('mm-res-paths').value.split(',').map(s=>s.trim()).filter(Boolean);
+    const deps = document.getElementById('mm-deps').value.split(',').map(s=>parseInt(s.trim())).filter(n=>!isNaN(n));
+    const parentId = document.getElementById('mm-parent').value || null;
+    const projectId = document.getElementById('mm-project').value || null;
+
+    const body = {
+        name,
+        parent_id: parentId ? parseInt(parentId) : null,
+        project_id: projectId ? parseInt(projectId) : null,
+        description: document.getElementById('mm-desc').value.trim() || null,
+        code_paths: codePaths.length ? codePaths : null,
+        resource_paths: resPaths.length ? resPaths : null,
+        test_focus: document.getElementById('mm-test-focus').value.trim() || null,
+        status: document.getElementById('mm-status').value,
+        risk_level: document.getElementById('mm-risk').value,
+        extra: deps.length ? { dependencies: deps } : null,
+    };
+
+    try {
+        if (editId) { await API.put(`/panorama/modules/${editId}`, body); showToast('模块已更新', 'success'); }
+        else { await API.post('/panorama/modules', body); showToast('模块已创建', 'success'); }
+        closeModal();
+        await loadAllData();
+    } catch(e) { showToast('操作失败: ' + e.message, 'error'); }
+}
+
+async function deleteModule(moduleId) {
+    const ok = await customConfirm({
+        title: '确认删除模块',
+        msg: '删除该模块将同时删除所有子模块和变更记录，此操作不可撤销。',
+        type: 'danger',
+        okText: '确认删除',
+        cancelText: '取消'
+    });
+    if (!ok) return;
+    try {
+        await API.del(`/panorama/modules/${moduleId}`);
+        showToast('已删除', 'success');
+        await loadAllData();
+    } catch(e) { showToast('删除失败: ' + e.message, 'error'); }
+}
+
+// Resize
+window.addEventListener('resize', () => {
+    if (currentView === 'topo') {
+        const canvas = document.querySelector('#view-topo canvas');
+        if (canvas) {
+            const area = canvas.parentElement;
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = area.clientWidth * dpr;
+            canvas.height = area.clientHeight * dpr;
+            canvas.style.width = area.clientWidth + 'px';
+            canvas.style.height = area.clientHeight + 'px';
+            drawGraph(canvas, area.clientWidth, area.clientHeight);
+        }
+    }
+});
+</script>
+{% endblock %}

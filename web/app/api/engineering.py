@@ -1231,8 +1231,15 @@ def create_test_task_from_impact(impact_id):
 
 @api_bp.route('/engineering/lookups/projects', methods=['GET'])
 def lookup_projects():
-    """供前端下拉框用：返回项目列表（去重）"""
+    """供前端下拉框用：返回项目列表（去重）
+
+    与 GET /projects 共享权限过滤：
+    - super_admin / admin claw（全平台）：全部
+    - admin/普通用户：仅自己关联的项目
+    """
+    from app.api.projects import _filter_projects_for_user
     projects = Project.query.order_by(Project.name).all()
+    projects = _filter_projects_for_user(projects)
     return jsonify({
         'projects': [{'id': p.id, 'name': p.name} for p in projects],
     })
