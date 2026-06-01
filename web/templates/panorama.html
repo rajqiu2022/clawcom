@@ -744,7 +744,7 @@ function renderTopology(modules) {
             childCount: children, isRoot,
             radius: isRoot ? Math.max(28, Math.min(44, 28 + children * 3)) : Math.max(18, Math.min(32, 18 + children * 3)),
             x: 0, y: 0, vx: 0, vy: 0,
-            highlight: false,
+            searchMatch: true,
         });
         idMap[m.id] = tNodes.length - 1;
     });
@@ -921,7 +921,7 @@ function drawGraph(canvas, W, H) {
         const isSel = tSelected === idx;
         const isHov = tHovered === idx;
         const color = RISK_COLORS[n.risk] || RISK_COLORS.normal;
-        const dimmed = tSearchTerm && !n.highlight;
+        const dimmed = tSearchTerm && !n.searchMatch;
 
         ctx.globalAlpha = dimmed ? 0.2 : 1;
 
@@ -1115,7 +1115,7 @@ function hitNode(x, y) {
 // Search
 function onTopoSearch(term) {
     tSearchTerm = term.toLowerCase().trim();
-    tNodes.forEach(n => { n.highlight = !tSearchTerm || n.label.toLowerCase().includes(tSearchTerm); });
+    tNodes.forEach(n => { n.searchMatch = !tSearchTerm || n.label.toLowerCase().includes(tSearchTerm); });
     const canvas = document.querySelector('#view-topo canvas');
     if (canvas) {
         const area = canvas.parentElement;
