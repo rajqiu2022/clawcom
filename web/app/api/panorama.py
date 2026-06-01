@@ -92,6 +92,7 @@ def create_panorama_module():
         status=data.get('status', 'active'),
         risk_level=data.get('risk_level', 'normal'),
         is_new=bool(data.get('is_new', False)),
+        highlight=bool(data.get('highlight', False)),
         extra=data.get('extra'),
         created_by=_operator_info(),
         updated_by=_operator_info(),
@@ -154,6 +155,8 @@ def batch_upsert_panorama_modules():
                 existing.risk_level = item['risk_level']
             if item.get('is_new') is not None:
                 existing.is_new = bool(item['is_new'])
+            if item.get('highlight') is not None:
+                existing.highlight = bool(item['highlight'])
             if item.get('extra') is not None:
                 existing.extra = item['extra']
             existing.updated_by = operator
@@ -174,6 +177,7 @@ def batch_upsert_panorama_modules():
                 status=item.get('status', 'active'),
                 risk_level=item.get('risk_level', 'normal'),
                 is_new=bool(item.get('is_new', False)),
+                highlight=bool(item.get('highlight', False)),
                 extra=item.get('extra'),
                 created_by=operator,
                 updated_by=operator,
@@ -209,7 +213,8 @@ def update_panorama_module(module_id):
     data = request.get_json(force=True)
 
     updatable = ['name', 'description', 'code_paths', 'resource_paths', 'test_focus',
-                 'related_case_libraries', 'status', 'risk_level', 'extra', 'parent_id', 'path']
+                 'related_case_libraries', 'status', 'risk_level', 'is_new', 'highlight',
+                 'extra', 'parent_id', 'path']
     for key in updatable:
         if key in data:
             setattr(module, key, data[key])
@@ -217,6 +222,25 @@ def update_panorama_module(module_id):
     module.updated_by = _operator_info()
     db.session.commit()
     return jsonify(module.to_dict())
+
+
+@api_bp.route('/panorama/modules/clear-highlights', methods=['POST'])
+def clear_panorama_highlights():
+    """清空所有模块的 highlight 标记。
+
+    Agent 在新一轮变更分析开始前调用：先清空全局 highlight，
+    然后通过 batch upsert 把本轮涉及的模块标 highlight=true。
+
+    可选参数：
+    - project_id：仅清空指定项目下模块的 highlight
+    """
+    project_id = request.args.get('project_id', type=int)
+    q = GameModulePanorama.query.filter_by(highlight=True)
+    if project_id is not None:
+        q = q.filter_by(project_id=project_id)
+    count = q.update({'highlight': False}, synchronize_session=False)
+    db.session.commit()
+    return jsonify({'cleared': count})
 
 
 @api_bp.route('/panorama/modules/<int:module_id>', methods=['DELETE'])

@@ -1771,6 +1771,111 @@ def create_app(config_name=None):
                     except Exception:
                         pass
 
+                    # 增量迁移: game_module_panorama 添加 highlight 列
+                    try:
+                        conn.execute(text("ALTER TABLE game_module_panorama ADD COLUMN highlight TINYINT(1) DEFAULT 0 COMMENT '本轮是否有变更，Agent每轮更新时标记'"))
+                        logger.info('game_module_panorama 添加 highlight 列成功')
+                    except Exception:
+                        pass
+
+                    # ===== Agent 考试系统 =====
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS exam_papers (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            name VARCHAR(200) NOT NULL,
+                            description TEXT DEFAULT NULL,
+                            category VARCHAR(50) DEFAULT 'general',
+                            difficulty VARCHAR(20) DEFAULT 'normal',
+                            total_score INT DEFAULT 100,
+                            pass_score INT DEFAULT 60,
+                            time_limit_min INT DEFAULT 60,
+                            applicable_skill_ids LONGTEXT DEFAULT NULL,
+                            status VARCHAR(20) DEFAULT 'draft',
+                            is_deleted TINYINT(1) DEFAULT 0,
+                            created_by VARCHAR(120) DEFAULT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            INDEX idx_status (status),
+                            INDEX idx_category (category)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS exam_questions (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            paper_id INT NOT NULL,
+                            order_index INT DEFAULT 0,
+                            type VARCHAR(30) NOT NULL,
+                            title VARCHAR(500) NOT NULL,
+                            description TEXT DEFAULT NULL,
+                            options LONGTEXT DEFAULT NULL,
+                            points INT DEFAULT 10,
+                            standard_answer LONGTEXT DEFAULT NULL,
+                            grading_criteria TEXT DEFAULT NULL,
+                            auto_grade_script TEXT DEFAULT NULL,
+                            skill_tag VARCHAR(80) DEFAULT NULL,
+                            is_deleted TINYINT(1) DEFAULT 0,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            INDEX idx_paper (paper_id),
+                            FOREIGN KEY (paper_id) REFERENCES exam_papers(id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS exam_sessions (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            paper_id INT NOT NULL,
+                            examinee_claw_id INT DEFAULT NULL,
+                            examinee_user_id INT DEFAULT NULL,
+                            examinee_display VARCHAR(120) DEFAULT NULL,
+                            started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            submitted_at DATETIME DEFAULT NULL,
+                            deadline_at DATETIME DEFAULT NULL,
+                            status VARCHAR(20) DEFAULT 'in_progress',
+                            auto_score INT DEFAULT 0,
+                            manual_score INT DEFAULT 0,
+                            total_score INT DEFAULT 0,
+                            passed TINYINT(1) DEFAULT 0,
+                            summary TEXT DEFAULT NULL,
+                            INDEX idx_paper (paper_id),
+                            INDEX idx_examinee_claw (examinee_claw_id),
+                            INDEX idx_status (status),
+                            FOREIGN KEY (paper_id) REFERENCES exam_papers(id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS exam_answers (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            session_id INT NOT NULL,
+                            question_id INT NOT NULL,
+                            answer_content TEXT DEFAULT NULL,
+                            auto_score INT DEFAULT NULL,
+                            peer_scores LONGTEXT DEFAULT NULL,
+                            final_score INT DEFAULT 0,
+                            grading_notes TEXT DEFAULT NULL,
+                            answered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            INDEX idx_session (session_id),
+                            INDEX idx_question (question_id),
+                            FOREIGN KEY (session_id) REFERENCES exam_sessions(id),
+                            FOREIGN KEY (question_id) REFERENCES exam_questions(id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS exam_peer_reviews (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            session_id INT NOT NULL,
+                            reviewer_claw_id INT DEFAULT NULL,
+                            reviewer_user_id INT DEFAULT NULL,
+                            reviewer_display VARCHAR(120) DEFAULT NULL,
+                            status VARCHAR(20) DEFAULT 'pending',
+                            invited_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            completed_at DATETIME DEFAULT NULL,
+                            INDEX idx_session (session_id),
+                            INDEX idx_reviewer_claw (reviewer_claw_id),
+                            FOREIGN KEY (session_id) REFERENCES exam_sessions(id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    logger.info('exam_papers / exam_questions / exam_sessions / exam_answers / exam_peer_reviews 表已就绪')
+
             except Exception as e:
                 logger.warning(f'自动迁移检查异常: {e}')
                 try:

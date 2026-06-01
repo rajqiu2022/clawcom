@@ -4416,6 +4416,8 @@ class GameModulePanorama(db.Model):
     last_change_summary = db.Column(db.Text, comment='最近一次变更摘要')
     last_changed_at = db.Column(db.DateTime, comment='最近变更时间')
     is_new = db.Column(db.Boolean, default=False, comment='是否新增模块，由 Agent 标记')
+    highlight = db.Column(db.Boolean, default=False,
+                          comment='本轮是否有变更（红点高亮），Agent 每次更新时设置；与 is_new 不同：is_new 表示首次创建，highlight 表示本轮被涉及')
     extra = db.Column(db.JSON, comment='扩展字段')
     created_by = db.Column(db.String(120), comment='创建者（agent 名或用户名）')
     updated_by = db.Column(db.String(120), comment='最后更新者')
@@ -4441,6 +4443,7 @@ class GameModulePanorama(db.Model):
             'last_change_summary': self.last_change_summary,
             'last_changed_at': str(self.last_changed_at) if self.last_changed_at else None,
             'is_new': bool(self.is_new) if self.is_new else False,
+            'highlight': bool(self.highlight) if self.highlight else False,
             'extra': self.extra,
             'created_by': self.created_by,
             'updated_by': self.updated_by,
@@ -4521,4 +4524,219 @@ class TestReportAttachment(db.Model):
                 None if for_public
                 else f'/api/v1/test-reports/{self.report_id}/attachments/{self.id}/download'
             ),
+        }
+
+
+# ============== Agent 考试系统 ==============
+
+class ExamPaper(db.Model):
+    """试卷：一组题目的集合"""
+    __tablename__ = 'exam_papers'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(200), nullable=False, comment='试卷名称')
+    description = db.Column(db.Text, comment='试卷描述/考核目的')
+    category = db.Column(db.String(50), default='general',
+                         comment='hub_ops/testcase/review/specialty/risk/general')
+    difficulty = db.Column(db.String(20), default='normal',
+                           comment='easy/normal/hard/expert')
+    total_score = db.Column(db.Integer, default=100, comment='总分')
+    pass_score = db.Column(db.Integer, default=60, comment='及格分')
+    time_limit_min = db.Column(db.Integer, default=60,
+                               comment='时长分钟，0 表示不限时')
+    applicable_skill_ids = db.Column(db.JSON,
+                                     comment='[skill_id, ...] 关联的考核能力点')
+    status = db.Column(db.String(20), default='draft',
+                       comment='draft/published/archived')
+    is_deleted = db.Column(db.Boolean, default=False)
+    created_by = db.Column(db.String(120))
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    def to_dict(self, include_questions=False, hide_answer=True):
+        d = {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'category': self.category,
+            'difficulty': self.difficulty,
+            'total_score': self.total_score,
+            'pass_score': self.pass_score,
+            'time_limit_min': self.time_limit_min,
+            'applicable_skill_ids': self.applicable_skill_ids or [],
+            'status': self.status,
+            'is_deleted': bool(self.is_deleted),
+            'created_by': self.created_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+            'question_count': ExamQuestion.query.filter_by(
+                paper_id=self.id, is_deleted=False).count(),
+        }
+        if include_questions:
+            qs = ExamQuestion.query.filter_by(paper_id=self.id, is_deleted=False)\
+                .order_by(ExamQuestion.order_index, ExamQuestion.id).all()
+            d['questions'] = [q.to_dict(hide_answer=hide_answer) for q in qs]
+        return d
+
+
+class ExamQuestion(db.Model):
+    """题目：属于某试卷"""
+    __tablename__ = 'exam_questions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    paper_id = db.Column(db.Integer, db.ForeignKey('exam_papers.id'),
+                         nullable=False, index=True)
+    order_index = db.Column(db.Integer, default=0, comment='题目顺序')
+    type = db.Column(db.String(30), nullable=False,
+                     comment='single/multiple/judge/fill/essay/api_op/case_design/scenario')
+    title = db.Column(db.String(500), nullable=False, comment='题目标题')
+    description = db.Column(db.Text, comment='题干 markdown')
+    options = db.Column(db.JSON,
+                        comment='选项列表（单/多选用），[{"key":"A","text":"..."}]')
+    points = db.Column(db.Integer, default=10, comment='本题分值')
+    standard_answer = db.Column(db.JSON,
+                                comment='标准答案（仅超管可见，单选="A"，多选=["A","B"]，开放题为评分要点列表）')
+    grading_criteria = db.Column(db.Text,
+                                 comment='评分细则 markdown，主观题用')
+    auto_grade_script = db.Column(db.Text,
+                                  comment='Python 表达式/脚本，可选，用于 api_op 题自动判分')
+    skill_tag = db.Column(db.String(80), comment='对应的 skill 名（题目分类）')
+    is_deleted = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    paper = db.relationship('ExamPaper', backref=db.backref('all_questions', lazy='dynamic'))
+
+    def to_dict(self, hide_answer=True):
+        d = {
+            'id': self.id,
+            'paper_id': self.paper_id,
+            'order_index': self.order_index,
+            'type': self.type,
+            'title': self.title,
+            'description': self.description,
+            'options': self.options or [],
+            'points': self.points,
+            'skill_tag': self.skill_tag,
+            'is_deleted': bool(self.is_deleted),
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+        if not hide_answer:
+            d['standard_answer'] = self.standard_answer
+            d['grading_criteria'] = self.grading_criteria
+            d['auto_grade_script'] = self.auto_grade_script
+        return d
+
+
+class ExamSession(db.Model):
+    """一次考试：某 agent / 用户对某试卷的一次作答"""
+    __tablename__ = 'exam_sessions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    paper_id = db.Column(db.Integer, db.ForeignKey('exam_papers.id'),
+                         nullable=False, index=True)
+    examinee_claw_id = db.Column(db.Integer, comment='应考的 OpenClaw id')
+    examinee_user_id = db.Column(db.Integer, comment='应考的 User id（人考）')
+    examinee_display = db.Column(db.String(120), comment='展示名（冗余）')
+    started_at = db.Column(db.DateTime, default=_now)
+    submitted_at = db.Column(db.DateTime)
+    deadline_at = db.Column(db.DateTime, comment='截止时间（基于 time_limit_min）')
+    status = db.Column(db.String(20), default='in_progress',
+                       comment='in_progress/submitted/grading/completed/expired')
+    auto_score = db.Column(db.Integer, default=0, comment='客观题自动得分')
+    manual_score = db.Column(db.Integer, default=0, comment='主观题人工/同行评分')
+    total_score = db.Column(db.Integer, default=0, comment='合计得分')
+    passed = db.Column(db.Boolean, default=False)
+    summary = db.Column(db.Text, comment='结果摘要/评语')
+
+    paper = db.relationship('ExamPaper', backref=db.backref('sessions', lazy='dynamic'))
+
+    def to_dict(self, include_answers=False):
+        d = {
+            'id': self.id,
+            'paper_id': self.paper_id,
+            'paper_name': self.paper.name if self.paper else None,
+            'examinee_claw_id': self.examinee_claw_id,
+            'examinee_user_id': self.examinee_user_id,
+            'examinee_display': self.examinee_display,
+            'started_at': str(self.started_at) if self.started_at else None,
+            'submitted_at': str(self.submitted_at) if self.submitted_at else None,
+            'deadline_at': str(self.deadline_at) if self.deadline_at else None,
+            'status': self.status,
+            'auto_score': self.auto_score or 0,
+            'manual_score': self.manual_score or 0,
+            'total_score': self.total_score or 0,
+            'passed': bool(self.passed),
+            'summary': self.summary or '',
+        }
+        if include_answers:
+            ans = ExamAnswer.query.filter_by(session_id=self.id).all()
+            d['answers'] = [a.to_dict() for a in ans]
+        return d
+
+
+class ExamAnswer(db.Model):
+    """每道题的作答"""
+    __tablename__ = 'exam_answers'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    session_id = db.Column(db.Integer, db.ForeignKey('exam_sessions.id'),
+                           nullable=False, index=True)
+    question_id = db.Column(db.Integer, db.ForeignKey('exam_questions.id'),
+                            nullable=False)
+    answer_content = db.Column(db.Text, comment='答题内容（JSON 字符串或文本）')
+    auto_score = db.Column(db.Integer, comment='自动判分得分；NULL 表示未判分')
+    peer_scores = db.Column(db.JSON,
+                            comment='[{"reviewer_claw_id":N, "reviewer_display":"x", "score":8, "comment":"..."}, ...]')
+    final_score = db.Column(db.Integer, default=0)
+    grading_notes = db.Column(db.Text, comment='判分备注')
+    answered_at = db.Column(db.DateTime, default=_now)
+
+    session = db.relationship('ExamSession', backref=db.backref('answer_entries', lazy='dynamic'))
+    question = db.relationship('ExamQuestion')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'session_id': self.session_id,
+            'question_id': self.question_id,
+            'question_title': self.question.title if self.question else None,
+            'question_type': self.question.type if self.question else None,
+            'question_points': self.question.points if self.question else None,
+            'answer_content': self.answer_content or '',
+            'auto_score': self.auto_score,
+            'peer_scores': self.peer_scores or [],
+            'final_score': self.final_score or 0,
+            'grading_notes': self.grading_notes or '',
+            'answered_at': str(self.answered_at) if self.answered_at else None,
+        }
+
+
+class ExamPeerReview(db.Model):
+    """同行互评分配：哪个 reviewer 评哪份卷的哪些题"""
+    __tablename__ = 'exam_peer_reviews'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    session_id = db.Column(db.Integer, db.ForeignKey('exam_sessions.id'),
+                           nullable=False, index=True)
+    reviewer_claw_id = db.Column(db.Integer)
+    reviewer_user_id = db.Column(db.Integer)
+    reviewer_display = db.Column(db.String(120))
+    status = db.Column(db.String(20), default='pending',
+                       comment='pending/in_progress/completed/skipped')
+    invited_at = db.Column(db.DateTime, default=_now)
+    completed_at = db.Column(db.DateTime)
+
+    session = db.relationship('ExamSession', backref=db.backref('peer_reviews', lazy='dynamic'))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'session_id': self.session_id,
+            'reviewer_claw_id': self.reviewer_claw_id,
+            'reviewer_user_id': self.reviewer_user_id,
+            'reviewer_display': self.reviewer_display,
+            'status': self.status,
+            'invited_at': str(self.invited_at) if self.invited_at else None,
+            'completed_at': str(self.completed_at) if self.completed_at else None,
         }

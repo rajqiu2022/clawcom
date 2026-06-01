@@ -24,10 +24,11 @@
 |------|------|------|
 | GET | `/modules?project_id=N&tree=1` | 获取模块树 |
 | POST | `/modules` | 创建单个模块 |
-| POST | `/modules/batch` | 批量创建/更新模块 |
+| POST | `/modules/batch` | 批量创建/更新模块（支持 is_new / highlight） |
 | GET | `/modules/{id}` | 获取模块详情（含子节点+变更记录） |
-| PUT | `/modules/{id}` | 更新模块 |
+| PUT | `/modules/{id}` | 更新模块（可改 is_new / highlight 等） |
 | DELETE | `/modules/{id}` | 删除模块（级联） |
+| POST | `/modules/clear-highlights?project_id=N` | **清空所有 highlight 标记**（每轮分析开始前调用） |
 
 ### 变更记录
 
@@ -108,17 +109,27 @@ Content-Type: application/json
       "description": "小喷、CW喷、氮气加速",
       "code_paths": ["Assets/Scripts/Racing/Boost/"],
       "test_focus": "各段加速值数值校验、叠加规则",
-      "is_new": true
+      "is_new": true,
+      "highlight": true
     }
   ]
 }
 ```
 
-> **关于 `is_new` 字段**：
+> **关于 `is_new` 字段**（新增模块标记 — NEW 徽章）：
 > - 首次建立模块树时，所有模块可不传或传 `false`（默认）
 > - 增量分析新版本时，识别出**本次新加的模块**（从未在 panorama 中出现过的），传 `is_new: true`
-> - 模块"成熟"后（如下个迭代周期开始时），调用 `PUT /modules/{id}` 或 batch 接口将 `is_new` 改回 `false`，移除 NEW 标记
+> - 模块"成熟"后（如下个迭代周期开始时），调用 `PUT /modules/{id}` 或 batch 接口将 `is_new` 改回 `false`，移除 NEW 徽章
 > - 该字段由 Agent 自主管理，不依赖时间自动判断
+
+> **关于 `highlight` 字段**（本轮变更标记 — 红点脉动）：
+> - 与 `is_new` 不同：`is_new` 表示"首次创建的模块"；`highlight` 表示"本轮分析中被涉及/有变更的模块"
+> - **每轮分析的标准流程**：
+>   1. 调 `POST /panorama/modules/clear-highlights?project_id=N` 先清空全局 highlight
+>   2. 通过 batch upsert 更新本轮涉及的模块时，传 `highlight: true`
+>   3. 创建本轮的变更记录（`POST /panorama/changes/batch`）
+> - 前端会在拓扑图节点上画**红色脉动点**，列表/详情面板也会显示，让用户一眼看到"这一轮哪些模块被改了"
+> - 区别于 `last_changed_at`（时间戳，自动按 7 天判断"近期变更"），`highlight` 是 Agent 显式控制的"本轮焦点"
 
 ### 流程二：增量更新（记录变更）
 

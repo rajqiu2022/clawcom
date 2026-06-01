@@ -733,12 +733,13 @@ function renderTopology(modules) {
         const lastChanged = m.last_changed_at ? new Date(m.last_changed_at).getTime() : 0;
         const recent = (now - lastChanged) < 7 * 24 * 3600 * 1000;
         const isNew = !!m.is_new;
+        const highlight = !!m.highlight;
         const children = modules.filter(c => c.parent_id === m.id).length;
         const isRoot = !m.parent_id || !modules.find(x => x.id === m.parent_id);
 
         tNodes.push({
             id: m.id, label: m.name, risk: m.risk_level || 'normal',
-            status: m.status, recent, isNew, parent_id: m.parent_id,
+            status: m.status, recent, isNew, highlight, parent_id: m.parent_id,
             description: m.description, last_change_summary: m.last_change_summary,
             childCount: children, isRoot,
             radius: isRoot ? Math.max(28, Math.min(44, 28 + children * 3)) : Math.max(18, Math.min(32, 18 + children * 3)),
@@ -1004,13 +1005,33 @@ function drawGraph(canvas, W, H) {
             ctx.fillText('NEW', nx, ny);
         }
 
+        // HIGHLIGHT 红点（本轮有变更，由 Agent 显式标记）
+        if (n.highlight && !dimmed) {
+            const hx = n.x + n.radius * 0.7, hy = n.y + n.radius * 0.7;
+            const t = Date.now() / 600;
+            const pulse = 0.6 + 0.4 * Math.abs(Math.sin(t));
+            // 外圈光晕
+            ctx.beginPath();
+            ctx.arc(hx, hy, 9 * pulse, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(239, 68, 68, ${0.25 * pulse})`;
+            ctx.fill();
+            // 实心红点
+            ctx.beginPath();
+            ctx.arc(hx, hy, 5, 0, Math.PI * 2);
+            ctx.fillStyle = '#ef4444';
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+        }
+
         ctx.globalAlpha = 1;
     });
 
     ctx.restore();
 
-    // Request another frame if recent nodes exist (for pulse animation)
-    if (tNodes.some(n => n.recent) && !tSimRunning) {
+    // Request another frame if recent/highlight nodes exist (for pulse animation)
+    if (tNodes.some(n => n.recent || n.highlight) && !tSimRunning) {
         tAnimFrame = requestAnimationFrame(() => drawGraph(canvas, W, H));
     }
 }
@@ -1179,12 +1200,14 @@ function renderDetailContent(m) {
     const now = Date.now();
     const createdAt = m.created_at ? new Date(m.created_at).getTime() : 0;
     const isNew = !!m.is_new;
+    const highlight = !!m.highlight;
 
     panel.innerHTML = `<div class="topo-detail-inner">
         <div class="detail-header">
             <div class="detail-title">
                 <span class="risk-dot" style="background:${riskColor}"></span>
                 ${esc(m.name)}
+                ${highlight ? '<span class="tbl-pulse" style="margin-left:6px" title="本轮有变更"></span>' : ''}
                 ${isNew ? '<span class="tbl-new-tag" style="margin-left:6px;font-size:0.62rem">NEW</span>' : ''}
             </div>
             <div class="detail-actions">
@@ -1405,6 +1428,7 @@ function buildTableRows(nodes, depth) {
         const last = n.last_changed_at ? new Date(n.last_changed_at).getTime() : 0;
         const recent = (now - last) < 7*24*3600*1000;
         const isNew = !!n.is_new;
+        const highlight = !!n.highlight;
 
         let row = `<tr onclick="onRowClick(${n.id})" data-id="${n.id}">
             <td>
@@ -1412,7 +1436,7 @@ function buildTableRows(nodes, depth) {
                     <span class="tbl-indent" style="width:${indent}px"></span>
                     ${hasKids ? `<span class="tbl-toggle ${open?'open':''}" onclick="event.stopPropagation();toggleRow(${n.id})">▶</span>` : '<span style="width:18px"></span>'}
                     <span class="tbl-risk-dot" style="background:${riskColor}"></span>
-                    ${recent ? '<span class="tbl-pulse"></span>' : ''}
+                    ${highlight ? '<span class="tbl-pulse" style="background:#ef4444" title="本轮有变更"></span>' : (recent ? '<span class="tbl-pulse"></span>' : '')}
                     ${isNew ? '<span class="tbl-new-tag">NEW</span>' : ''}
                     <span class="tbl-module-name" style="font-weight:${depth===0?600:400}">${esc(n.name)}</span>
                     ${hasKids ? `<span class="tbl-child-count">(${n.children.length})</span>` : ''}
