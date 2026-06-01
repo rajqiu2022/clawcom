@@ -1245,7 +1245,13 @@ function renderDetailContent(m) {
         </div>` : ''}
 
         <div class="detail-section" id="changelog-section">
-            <div class="detail-section-title"><span class="sec-icon">📋</span> 变更记录</div>
+            <div class="detail-section-title">
+                <span class="sec-icon">📋</span> 变更记录
+                ${children.length ? `<label style="margin-left:8px;font-size:0.7rem;font-weight:400;color:var(--text-muted);cursor:pointer">
+                    <input type="checkbox" id="cl-include-desc" checked onchange="loadChangelog(0)" style="vertical-align:middle;margin-right:3px">
+                    含子模块
+                </label>` : ''}
+            </div>
             <div class="changelog-filters" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
                 <input type="date" id="cl-start" style="font-size:0.72rem;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--bg-card);color:var(--text)" title="开始日期">
                 <span style="font-size:0.72rem;color:var(--text-muted)">~</span>
@@ -1279,7 +1285,11 @@ async function loadChangelog(offset) {
     const moduleId = window._clModuleId;
     if (!moduleId) { list.innerHTML = '<p style="font-size:0.8rem;color:var(--text-muted)">暂无</p>'; return; }
 
+    const includeDescEl = document.getElementById('cl-include-desc');
+    const includeDesc = includeDescEl ? includeDescEl.checked : false;
+
     let url = `/api/v1/panorama/changes?module_id=${moduleId}&limit=${CL_PAGE_SIZE}&offset=${offset}`;
+    if (includeDesc) url += '&include_descendants=1';
     const startEl = document.getElementById('cl-start');
     const endEl = document.getElementById('cl-end');
     if (startEl && startEl.value) url += `&start_date=${startEl.value}`;
@@ -1295,27 +1305,65 @@ async function loadChangelog(offset) {
             pager.innerHTML = '';
             return;
         }
-        // Group by date
-        const groups = {};
-        items.forEach(c => {
-            const day = (c.created_at || '').substring(0, 10) || '未知日期';
-            if (!groups[day]) groups[day] = [];
-            groups[day].push(c);
-        });
+
         let html = '';
-        Object.keys(groups).sort().reverse().forEach(day => {
-            html += `<div class="cl-date-group" style="margin-bottom:8px"><div style="font-size:0.72rem;font-weight:600;color:var(--text-muted);margin-bottom:4px;padding:2px 0;border-bottom:1px solid var(--border)">${day}</div>`;
-            groups[day].forEach(c => {
-                html += `<div class="change-card"><div class="change-card-header"><span class="change-type-badge ct-${c.change_type}">${CHANGE_TYPES[c.change_type] || c.change_type}</span><span class="change-card-summary">${esc(c.summary)}</span></div>${c.test_suggestion ? `<div class="change-card-suggestion">💡 ${esc(c.test_suggestion)}</div>` : ''}<div class="change-card-meta">${(c.created_at || '').substring(11, 19)} · ${esc(c.created_by || '')}</div></div>`;
+        if (includeDesc) {
+            // 按模块分组（path 升序，让父模块在前），每个模块内按日期倒序
+            const byModule = {};
+            items.forEach(c => {
+                const key = c.module_path || c.module_name || `#${c.module_id}`;
+                if (!byModule[key]) byModule[key] = { name: c.module_name || key, path: c.module_path || '', items: [] };
+                byModule[key].items.push(c);
             });
-            html += '</div>';
-        });
+            const sortedKeys = Object.keys(byModule).sort();
+            sortedKeys.forEach(k => {
+                const grp = byModule[k];
+                // 计算缩进层级（按 path 中 '/' 的数量）
+                const depth = (grp.path || '').split('/').filter(Boolean).length - 1;
+                const indent = Math.max(0, depth) * 12;
+                html += `<div class="cl-module-group" style="margin-bottom:10px;border-left:2px solid var(--border);padding-left:${8 + indent}px">
+                    <div style="font-size:0.74rem;font-weight:600;color:var(--text);margin-bottom:4px;display:flex;align-items:center;gap:6px">
+                        <span style="color:var(--primary)">▸</span>
+                        <span>${esc(grp.name)}</span>
+                        <span style="font-size:0.66rem;color:var(--text-muted);font-weight:400">${esc(grp.path)} · ${grp.items.length}条</span>
+                    </div>`;
+                // 模块内按日期再分组
+                const byDay = {};
+                grp.items.forEach(c => {
+                    const day = (c.created_at || '').substring(0, 10) || '未知';
+                    if (!byDay[day]) byDay[day] = [];
+                    byDay[day].push(c);
+                });
+                Object.keys(byDay).sort().reverse().forEach(day => {
+                    html += `<div style="font-size:0.7rem;color:var(--text-muted);margin:4px 0 2px 0">${day}</div>`;
+                    byDay[day].forEach(c => {
+                        html += `<div class="change-card"><div class="change-card-header"><span class="change-type-badge ct-${c.change_type}">${CHANGE_TYPES[c.change_type] || c.change_type}</span><span class="change-card-summary">${esc(c.summary)}</span></div>${c.test_suggestion ? `<div class="change-card-suggestion">💡 ${esc(c.test_suggestion)}</div>` : ''}<div class="change-card-meta">${(c.created_at || '').substring(11, 19)} · ${esc(c.created_by || '')}</div></div>`;
+                    });
+                });
+                html += '</div>';
+            });
+        } else {
+            // 仅本模块：按日期分组
+            const groups = {};
+            items.forEach(c => {
+                const day = (c.created_at || '').substring(0, 10) || '未知日期';
+                if (!groups[day]) groups[day] = [];
+                groups[day].push(c);
+            });
+            Object.keys(groups).sort().reverse().forEach(day => {
+                html += `<div class="cl-date-group" style="margin-bottom:8px"><div style="font-size:0.72rem;font-weight:600;color:var(--text-muted);margin-bottom:4px;padding:2px 0;border-bottom:1px solid var(--border)">${day}</div>`;
+                groups[day].forEach(c => {
+                    html += `<div class="change-card"><div class="change-card-header"><span class="change-type-badge ct-${c.change_type}">${CHANGE_TYPES[c.change_type] || c.change_type}</span><span class="change-card-summary">${esc(c.summary)}</span></div>${c.test_suggestion ? `<div class="change-card-suggestion">💡 ${esc(c.test_suggestion)}</div>` : ''}<div class="change-card-meta">${(c.created_at || '').substring(11, 19)} · ${esc(c.created_by || '')}</div></div>`;
+                });
+                html += '</div>';
+            });
+        }
         list.innerHTML = html;
 
         // Pager
         const page = Math.floor(offset / CL_PAGE_SIZE) + 1;
         const totalPages = Math.ceil(total / CL_PAGE_SIZE);
-        let pagerHtml = `<span>共 ${total} 条</span><span>`;
+        let pagerHtml = `<span>共 ${total} 条${includeDesc ? '（含子模块）' : ''}</span><span>`;
         if (page > 1) pagerHtml += `<a href="#" onclick="event.preventDefault();loadChangelog(${offset - CL_PAGE_SIZE})" style="margin-right:8px;color:var(--primary)">← 上一页</a>`;
         pagerHtml += `${page}/${totalPages}`;
         if (page < totalPages) pagerHtml += `<a href="#" onclick="event.preventDefault();loadChangelog(${offset + CL_PAGE_SIZE})" style="margin-left:8px;color:var(--primary)">下一页 →</a>`;

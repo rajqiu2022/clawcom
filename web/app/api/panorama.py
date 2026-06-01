@@ -324,8 +324,13 @@ def batch_create_module_changes(module_id):
 
 @api_bp.route('/panorama/changes', methods=['GET'])
 def list_panorama_changes():
-    """查询变更记录（支持按模块、类型、时间范围筛选）"""
+    """查询变更记录（支持按模块、类型、时间范围筛选）
+
+    特殊参数：
+    - include_descendants=1 配合 module_id 时，会把所有子孙模块的变更也一并返回（按时间倒序）
+    """
     module_id = request.args.get('module_id', type=int)
+    include_descendants = request.args.get('include_descendants', '0') in ('1', 'true', 'yes')
     change_type = request.args.get('change_type')
     risk_level = request.args.get('risk_level')
     project_id = request.args.get('project_id', type=int)
@@ -336,7 +341,20 @@ def list_panorama_changes():
 
     q = GameModuleChangeLog.query
     if module_id:
-        q = q.filter_by(module_id=module_id)
+        if include_descendants:
+            # 收集 module_id 自身 + 所有后代模块 ID
+            module_ids = {module_id}
+            frontier = [module_id]
+            while frontier:
+                kids = GameModulePanorama.query.filter(
+                    GameModulePanorama.parent_id.in_(frontier)
+                ).with_entities(GameModulePanorama.id).all()
+                next_frontier = [r[0] for r in kids if r[0] not in module_ids]
+                module_ids.update(next_frontier)
+                frontier = next_frontier
+            q = q.filter(GameModuleChangeLog.module_id.in_(list(module_ids)))
+        else:
+            q = q.filter_by(module_id=module_id)
     if change_type:
         q = q.filter_by(change_type=change_type)
     if risk_level:
