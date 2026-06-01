@@ -430,6 +430,26 @@ def topics_page():
     return render_template('topics.html')
 
 
+@views_bp.route('/panorama')
+def panorama_page():
+    return render_template('panorama.html')
+
+
+@views_bp.route('/exams')
+def exams_page():
+    return render_template('exams.html')
+
+
+@views_bp.route('/exams/papers/<int:paper_id>/edit')
+def exam_paper_edit_page(paper_id):
+    return render_template('exam_paper_edit.html', paper_id=paper_id)
+
+
+@views_bp.route('/exams/sessions/<int:session_id>')
+def exam_session_page(session_id):
+    return render_template('exam_session.html', session_id=session_id)
+
+
 @views_bp.route('/topics/<int:topic_id>')
 def topic_detail(topic_id):
     return render_template('topic_detail.html', topic_id=topic_id)
