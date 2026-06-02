@@ -4740,3 +4740,61 @@ class ExamPeerReview(db.Model):
             'invited_at': str(self.invited_at) if self.invited_at else None,
             'completed_at': str(self.completed_at) if self.completed_at else None,
         }
+
+
+# ============== Skill 密钥保险箱 ==============
+
+class ClawSecret(db.Model):
+    """Agent 加密密钥/Token 保险箱。
+
+    Agent 把外部 API 凭据（Tavily Key、企微 Webhook 等）加密存到这里，
+    Skill 内容里只写占位符 ${SECRET:key_name}，运行时由 Agent 自己取明文。
+    数据用 _simple_encrypt（XOR+base64）加密存储，仅 owner 可解密读取。
+    """
+    __tablename__ = 'claw_secrets'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    owner_claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
+                              comment='归属的 OpenClaw（按 claw 隔离）')
+    owner_user_id = db.Column(db.Integer, db.ForeignKey('users.id'),
+                              comment='归属的 Web 用户（人工存的）')
+    key = db.Column(db.String(120), nullable=False,
+                    comment='密钥名，例如 tavily_api_key / wecom_webhook_xx')
+    encrypted_value = db.Column(db.Text, nullable=False, comment='加密后的值')
+    description = db.Column(db.String(500), comment='用途说明')
+    last_used_at = db.Column(db.DateTime, comment='最后一次被读取的时间')
+    use_count = db.Column(db.Integer, default=0, comment='被读取次数')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        db.UniqueConstraint('owner_claw_id', 'owner_user_id', 'key', name='uq_claw_secret_owner_key'),
+        db.Index('idx_claw_secret_owner', 'owner_claw_id', 'owner_user_id'),
+    )
+
+    def to_dict(self, include_value=False):
+        d = {
+            'id': self.id,
+            'owner_claw_id': self.owner_claw_id,
+            'owner_user_id': self.owner_user_id,
+            'key': self.key,
+            'description': self.description or '',
+            'has_value': bool(self.encrypted_value),
+            'value_length': len(_simple_decrypt(self.encrypted_value)) if self.encrypted_value else 0,
+            'last_used_at': str(self.last_used_at) if self.last_used_at else None,
+            'use_count': self.use_count or 0,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if include_value:
+            d['value'] = _simple_decrypt(self.encrypted_value) if self.encrypted_value else ''
+        return d
+
+    def set_value(self, plaintext):
+        """加密存储明文值"""
+        self.encrypted_value = _simple_encrypt(plaintext or '')
+
+    def get_value(self):
+        """获取明文值"""
+        return _simple_decrypt(self.encrypted_value) if self.encrypted_value else ''
+

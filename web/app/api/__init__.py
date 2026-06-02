@@ -86,7 +86,7 @@ def require_auth():
     return jsonify({'error': '未认证，请在 Header 中携带 Authorization: Bearer {TOKEN} 或先登录 Web'}), 401
 
 
-from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans, engineering, requirements, test_accounts, review_comments, wecom, agent_deployments, agent_templates, shared_articles, test_reports  # noqa: F401
+from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans, engineering, requirements, test_accounts, review_comments, wecom, agent_deployments, agent_templates, shared_articles, test_reports, panorama, exams, secrets  # noqa: F401
 
 # 注册 Agent Hub 通信中心蓝图
 api_bp.register_blueprint(agent_hub.agent_hub_bp, url_prefix='/agent-hub')

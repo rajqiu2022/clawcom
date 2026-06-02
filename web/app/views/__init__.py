@@ -440,6 +440,11 @@ def exams_page():
     return render_template('exams.html')
 
 
+@views_bp.route('/secrets')
+def secrets_page():
+    return render_template('secrets.html')
+
+
 @views_bp.route('/exams/papers/<int:paper_id>/edit')
 def exam_paper_edit_page(paper_id):
     return render_template('exam_paper_edit.html', paper_id=paper_id)

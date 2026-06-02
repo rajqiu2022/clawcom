@@ -1876,6 +1876,27 @@ def create_app(config_name=None):
                     """))
                     logger.info('exam_papers / exam_questions / exam_sessions / exam_answers / exam_peer_reviews 表已就绪')
 
+                    # ===== Skill 密钥保险箱 =====
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS claw_secrets (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            owner_claw_id INT DEFAULT NULL,
+                            owner_user_id INT DEFAULT NULL,
+                            `key` VARCHAR(120) NOT NULL,
+                            encrypted_value LONGTEXT NOT NULL,
+                            description VARCHAR(500) DEFAULT NULL,
+                            last_used_at DATETIME DEFAULT NULL,
+                            use_count INT DEFAULT 0,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            UNIQUE KEY uq_claw_secret_owner_key (owner_claw_id, owner_user_id, `key`),
+                            INDEX idx_claw_secret_owner (owner_claw_id, owner_user_id),
+                            FOREIGN KEY (owner_claw_id) REFERENCES openclaw_instances(id),
+                            FOREIGN KEY (owner_user_id) REFERENCES users(id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    logger.info('claw_secrets 表已就绪')
+
             except Exception as e:
                 logger.warning(f'自动迁移检查异常: {e}')
                 try:
