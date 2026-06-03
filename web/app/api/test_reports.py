@@ -541,8 +541,9 @@ def enable_share(report_id):
         db.session.rollback()
         return jsonify({'error': f'保存失败: {e}'}), 500
 
-    hub = (os.environ.get('HUB_PUBLIC_URL')
-           or 'https://clawteam.woa.com').rstrip('/')
+    hub = (os.environ.get('HUB_WEB_URL')
+           or os.environ.get('HUB_PUBLIC_URL')
+           or 'https://clawteam.woa.com:18800').rstrip('/')
     return jsonify({
         'is_shared': True,
         'share_token': report.share_token,

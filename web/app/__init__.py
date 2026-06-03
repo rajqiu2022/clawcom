@@ -65,6 +65,8 @@ def create_app(config_name=None):
     # 模板里用 {{ hub_public_url }} 拼"发给 claw / Agent 用的"URL（IP+端口）。
     # {{ hub_web_url }} 拼"给用户浏览器访问的"URL（https 域名）。
     import os as _os_ctx
+    import time as _time_ctx
+    _app_start_ts = str(int(_time_ctx.time()))
     @app.context_processor
     def _inject_hub_public_url():
         return {
@@ -74,8 +76,9 @@ def create_app(config_name=None):
             ).rstrip('/'),
             'hub_web_url': (
                 _os_ctx.environ.get('HUB_WEB_URL')
-                or 'https://clawteam.woa.com:18800'
+                or 'https://clawteam.woa.com'
             ).rstrip('/'),
+            'cache_bust': _app_start_ts,
         }
 
     # HTML 页面强制不缓存（避免 base.html / 子模板缓存导致 inline JS 与版本号不一致）。
@@ -1896,6 +1899,17 @@ def create_app(config_name=None):
                         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """))
                     logger.info('claw_secrets 表已就绪')
+
+                    # 增量迁移：share_scope / share_project_id
+                    for col, ddl in [
+                        ('share_scope', "ALTER TABLE claw_secrets ADD COLUMN share_scope VARCHAR(20) DEFAULT 'private' COMMENT '共享范围：private/project/public'"),
+                        ('share_project_id', "ALTER TABLE claw_secrets ADD COLUMN share_project_id INT DEFAULT NULL COMMENT '共享项目ID'"),
+                    ]:
+                        try:
+                            conn.execute(text(ddl))
+                            logger.info(f'claw_secrets 新增列 {col}')
+                        except Exception:
+                            pass  # 已存在则跳过
 
             except Exception as e:
                 logger.warning(f'自动迁移检查异常: {e}')

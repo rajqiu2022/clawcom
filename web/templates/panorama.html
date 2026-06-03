@@ -478,6 +478,7 @@
                 <div class="topo-legend-item"><span class="topo-legend-dot topo-legend-pulse" style="background:#3b82f6;color:#3b82f6"></span> 近期变更</div>
                 <div class="topo-legend-item"><span style="width:16px;border-top:2px solid rgba(100,116,139,0.7)"></span> 父子关系</div>
                 <div class="topo-legend-item"><span style="width:16px;border-top:2px dashed #8b5cf6"></span> 依赖关系</div>
+                <div class="topo-legend-item"><span style="width:16px;border-top:2px solid #22c55e"></span> 影响关系</div>
             </div>
             <div class="topo-search">
                 <input type="text" id="topo-search-input" placeholder="搜索模块..." oninput="onTopoSearch(this.value)">
@@ -675,31 +676,35 @@ function _layoutInitialPositions(nodes, edges, idMap, W, H) {
     const outerGroup = connectedNodes.slice(0, splitIdx);   // big nodes
     const innerGroup = connectedNodes.slice(splitIdx);       // small nodes
 
-    // ---- Inner ring (small nodes) — closer to center ----
-    const innerR = maxR * 0.35;
+    // ---- Inner ring (small nodes) — center area ----
+    const innerR = maxR * 0.25;
     innerGroup.forEach((ni, idx) => {
         const angle = (2 * Math.PI * idx / innerGroup.length) - Math.PI / 2;
-        const r = innerR + (Math.random() - 0.5) * 20;
+        const r = innerR + (Math.random() - 0.5) * 15;
         nodes[ni].x = cx + r * Math.cos(angle);
         nodes[ni].y = cy + r * Math.sin(angle);
+        nodes[ni]._targetR = innerR;
     });
 
-    // ---- Outer ring (big nodes) — further from center ----
-    const outerR = maxR * 0.68;
+    // ---- Outer ring (big nodes) — far from center ----
+    const outerR = maxR * 0.75;
     outerGroup.forEach((ni, idx) => {
         const angle = (2 * Math.PI * idx / outerGroup.length) - Math.PI / 2;
         const r = outerR + (Math.random() - 0.5) * 20;
         nodes[ni].x = cx + r * Math.cos(angle);
         nodes[ni].y = cy + r * Math.sin(angle);
+        nodes[ni]._targetR = outerR;
     });
 
-    // ---- Outermost ring (isolated nodes) — at the edge ----
-    const isoR = maxR * 0.95;
+    // ---- Outermost ring (isolated nodes) — edge ----
+    const isoR = maxR * 0.96;
     isolated.forEach((ni, idx) => {
         const angle = (2 * Math.PI * idx / isolated.length) - Math.PI / 4;
-        const r = isoR + (Math.random() - 0.5) * 15;
+        const r = isoR + (Math.random() - 0.5) * 10;
         nodes[ni].x = cx + r * Math.cos(angle);
         nodes[ni].y = cy + r * Math.sin(angle);
+        nodes[ni]._isolated = true;
+        nodes[ni]._targetR = isoR;
     });
 }
 
@@ -756,12 +761,39 @@ function renderTopology(modules) {
         }
     });
 
-    // Dependency edges
+    // Cross-module edges: depends_on + affects
+    // 数据格式: extra.cross_module.depends_on/affects = ["模块名(id):说明", ...]
+    function _extractModuleId(str) {
+        const m = String(str).match(/\((\d+)\)/);
+        return m ? parseInt(m[1], 10) : null;
+    }
     modules.forEach(m => {
-        if (m.extra && m.extra.dependencies) {
+        const cm = m.extra && m.extra.cross_module;
+        if (!cm) return;
+        // depends_on: 本模块依赖谁 → 箭头从本模块指向被依赖模块
+        if (cm.depends_on && Array.isArray(cm.depends_on)) {
+            cm.depends_on.forEach(dep => {
+                const depId = _extractModuleId(dep);
+                if (depId !== null && idMap[depId] !== undefined && idMap[m.id] !== undefined) {
+                    tEdges.push({ source: idMap[m.id], target: idMap[depId], type: 'dep', label: '' });
+                }
+            });
+        }
+        // affects: 本模块影响谁 → 箭头从本模块指向被影响模块
+        if (cm.affects && Array.isArray(cm.affects)) {
+            cm.affects.forEach(aff => {
+                const affId = _extractModuleId(aff);
+                if (affId !== null && idMap[affId] !== undefined && idMap[m.id] !== undefined) {
+                    tEdges.push({ source: idMap[m.id], target: idMap[affId], type: 'affects', label: '' });
+                }
+            });
+        }
+        // 兼容旧格式: extra.dependencies (ID 数组)
+        if (m.extra.dependencies && Array.isArray(m.extra.dependencies)) {
             m.extra.dependencies.forEach(depId => {
                 if (idMap[depId] !== undefined && idMap[m.id] !== undefined) {
-                    tEdges.push({ source: idMap[m.id], target: idMap[depId], type: 'dep' });
+                    const exists = tEdges.some(e => e.source === idMap[m.id] && e.target === idMap[depId]);
+                    if (!exists) tEdges.push({ source: idMap[m.id], target: idMap[depId], type: 'dep', label: '' });
                 }
             });
         }
@@ -797,50 +829,46 @@ function startSimulation(canvas, W, H) {
 }
 
 function simulateForces(W, H) {
-    const repulsion = 6000, attraction = 0.006, center = 0.012, damping = 0.55;
+    const repulsion = 8000, attraction = 0.003, damping = 0.45;
     const cx = W/2, cy = H/2;
+    const maxR = Math.min(W, H) / 2 - 50;
 
+    // 1. Node-node repulsion (stronger to keep spacing)
     for (let i = 0; i < tNodes.length; i++) {
         for (let j = i+1; j < tNodes.length; j++) {
             const a = tNodes[i], b = tNodes[j];
             const dx = a.x - b.x, dy = a.y - b.y;
             const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
-            const f = repulsion / (dist * dist);
+            const minDist = a.radius + b.radius + 30;
+            const f = repulsion / (dist * dist) * (dist < minDist ? 2.5 : 1);
             const fx = (dx/dist) * f, fy = (dy/dist) * f;
             a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
         }
     }
 
+    // 2. Edge spring force (weaker so it doesn't collapse structure)
     tEdges.forEach(e => {
         const s = tNodes[e.source], t = tNodes[e.target];
         const dx = t.x - s.x, dy = t.y - s.y;
         const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
-        const idealDist = e.type === 'child' ? 120 : 180;
+        const idealDist = e.type === 'child' ? 140 : (e.type === 'affects' ? 200 : 180);
         const f = (dist - idealDist) * attraction;
         const fx = (dx/dist)*f, fy = (dy/dist)*f;
         s.vx += fx; s.vy += fy; t.vx -= fx; t.vy -= fy;
     });
 
-    // Radial bias: big nodes pushed outward, small nodes pulled inward
+    // 3. Strong radial anchor — uses per-node _targetR set during layout
+    const anchorStrength = 0.08;
     tNodes.forEach(n => {
-        n.vx += (cx - n.x) * center;
-        n.vy += (cy - n.y) * center;
-        // Radial force based on node size
+        const targetR = n._targetR || (maxR * 0.5);
         const dx = n.x - cx, dy = n.y - cy;
-        const dist = Math.max(1, Math.sqrt(dx*dx + dy*dy));
-        if (n.radius >= 28) {
-            // Big node → push outward gently
-            const outForce = 0.15;
-            n.vx += (dx / dist) * outForce;
-            n.vy += (dy / dist) * outForce;
-        } else {
-            // Small node → pull inward gently
-            const inForce = 0.1;
-            n.vx -= (dx / dist) * inForce;
-            n.vy -= (dy / dist) * inForce;
-        }
+        const curR = Math.max(1, Math.sqrt(dx*dx + dy*dy));
+        const radialDiff = targetR - curR;
+        n.vx += (dx / curR) * radialDiff * anchorStrength;
+        n.vy += (dy / curR) * radialDiff * anchorStrength;
     });
 
+    // 4. Apply velocity, damping, boundary
     tNodes.forEach(n => {
         if (n === tDragging) return;
         n.vx *= damping; n.vy *= damping;
@@ -873,7 +901,7 @@ function drawGraph(canvas, W, H) {
         ctx.moveTo(sx, sy);
 
         if (e.type === 'dep') {
-            // Curved dependency line (purple dashed with arrow)
+            // 依赖关系：紫色虚线曲线
             const mx = (sx + ex)/2, my = (sy + ey)/2;
             const dx = ex - sx, dy = ey - sy;
             const nx = -dy * 0.18, ny = dx * 0.18;
@@ -881,8 +909,17 @@ function drawGraph(canvas, W, H) {
             ctx.strokeStyle = 'rgba(139,92,246,0.7)';
             ctx.lineWidth = 2;
             ctx.setLineDash([6, 4]);
+        } else if (e.type === 'affects') {
+            // 影响关系：绿色实线曲线（反方向弯曲以区分）
+            const mx = (sx + ex)/2, my = (sy + ey)/2;
+            const dx = ex - sx, dy = ey - sy;
+            const nx = dy * 0.15, ny = -dx * 0.15;
+            ctx.quadraticCurveTo(mx + nx, my + ny, ex, ey);
+            ctx.strokeStyle = 'rgba(34,197,94,0.7)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([]);
         } else {
-            // Parent-child solid line (clearer)
+            // 父子关系：灰色实线
             ctx.lineTo(ex, ey);
             ctx.strokeStyle = 'rgba(100,116,139,0.55)';
             ctx.lineWidth = 1.8;
@@ -891,28 +928,19 @@ function drawGraph(canvas, W, H) {
         ctx.stroke();
         ctx.setLineDash([]);
 
-        // Arrow head for all edges (deps: purple, child: gray)
-        const arrowLen = e.type === 'dep' ? 10 : 7;
-        const arrowAngle = e.type === 'dep' ? 0.4 : 0.35;
-        const arrowColor = e.type === 'dep' ? 'rgba(139,92,246,0.8)' : 'rgba(100,116,139,0.6)';
+        // Arrow head
+        const isDep = e.type === 'dep', isAff = e.type === 'affects';
+        const arrowLen = (isDep || isAff) ? 10 : 7;
+        const arrowAng = (isDep || isAff) ? 0.4 : 0.35;
+        const arrowColor = isDep ? 'rgba(139,92,246,0.8)' : (isAff ? 'rgba(34,197,94,0.8)' : 'rgba(100,116,139,0.6)');
         ctx.beginPath();
         ctx.moveTo(ex, ey);
-        ctx.lineTo(ex - arrowLen*Math.cos(angle-arrowAngle), ey - arrowLen*Math.sin(angle-arrowAngle));
+        ctx.lineTo(ex - arrowLen*Math.cos(angle-arrowAng), ey - arrowLen*Math.sin(angle-arrowAng));
         ctx.moveTo(ex, ey);
-        ctx.lineTo(ex - arrowLen*Math.cos(angle+arrowAngle), ey - arrowLen*Math.sin(angle+arrowAngle));
+        ctx.lineTo(ex - arrowLen*Math.cos(angle+arrowAng), ey - arrowLen*Math.sin(angle+arrowAng));
         ctx.strokeStyle = arrowColor;
-        ctx.lineWidth = e.type === 'dep' ? 2 : 1.5;
+        ctx.lineWidth = (isDep || isAff) ? 2 : 1.5;
         ctx.stroke();
-
-        // Edge label for deps
-        if (e.type === 'dep' && e.label) {
-            const lx = (sx + ex)/2 + (-( ey - sy))*0.09;
-            const ly = (sy + ey)/2 + ((ex - sx))*0.09;
-            ctx.font = '10px system-ui';
-            ctx.fillStyle = 'rgba(139,92,246,0.8)';
-            ctx.textAlign = 'center';
-            ctx.fillText(e.label || '依赖', lx, ly);
-        }
     });
 
     // Nodes
@@ -1191,6 +1219,47 @@ async function showDetail(idx) {
     }
 }
 
+function _renderCrossModuleSection(m) {
+    const cm = m.extra && m.extra.cross_module;
+    if (!cm) return '';
+    const deps = cm.depends_on || [];
+    const affs = cm.affects || [];
+    const risk = cm.risk_if_changed || '';
+    const summary = cm.summary || '';
+    if (!deps.length && !affs.length) return '';
+
+    function _renderRelItem(str, color) {
+        // "模块名(id):说明" → 可点击跳转
+        const match = String(str).match(/^(.+?)\((\d+)\)(?::(.*))?$/);
+        if (match) {
+            const name = match[1], id = match[2], desc = match[3] || '';
+            return `<span class="child-chip" onclick="navigateToModule(${id})" style="border-left:3px solid ${color}">
+                <span class="cc-dot" style="background:${color}"></span>
+                ${esc(name)} ${desc ? '<span style="color:var(--text-muted);font-size:0.68rem">· ' + esc(desc) + '</span>' : ''}
+            </span>`;
+        }
+        return `<span class="child-chip" style="border-left:3px solid ${color};cursor:default">${esc(str)}</span>`;
+    }
+
+    let html = '<div class="detail-section">';
+    html += '<div class="detail-section-title"><span class="sec-icon">🔗</span> 跨模块关联</div>';
+    if (summary) html += `<div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:8px">${esc(summary)}</div>`;
+    if (risk) {
+        const riskColors = {high:'#ef4444', normal:'#eab308', low:'#22c55e'};
+        html += `<div style="font-size:0.72rem;margin-bottom:8px">变更风险: <span style="color:${riskColors[risk] || 'var(--text)'};font-weight:600">${({high:'高',normal:'中',low:'低'})[risk] || risk}</span></div>`;
+    }
+    if (deps.length) {
+        html += `<div style="font-size:0.74rem;font-weight:600;color:var(--text-secondary);margin-bottom:4px">依赖 (${deps.length})</div>`;
+        html += `<div class="child-chips" style="margin-bottom:8px">${deps.map(d => _renderRelItem(d, '#8b5cf6')).join('')}</div>`;
+    }
+    if (affs.length) {
+        html += `<div style="font-size:0.74rem;font-weight:600;color:var(--text-secondary);margin-bottom:4px">影响 (${affs.length})</div>`;
+        html += `<div class="child-chips">${affs.map(a => _renderRelItem(a, '#22c55e')).join('')}</div>`;
+    }
+    html += '</div>';
+    return html;
+}
+
 function renderDetailContent(m) {
     // Normalize related_case_libraries (may be string in some edge cases)
     m.related_case_libraries = _parseLibs(m.related_case_libraries);
@@ -1266,6 +1335,8 @@ function renderDetailContent(m) {
                 </a>`).join('')}
             </div>
         </div>` : ''}
+
+        ${_renderCrossModuleSection(m)}
 
         <div class="detail-section" id="changelog-section">
             <div class="detail-section-title">
@@ -1659,7 +1730,7 @@ function renderStats() {
                         <b>Agent 自动更新</b><br>Agent 分析代码后自动更新模块的风险等级、变更摘要和测试建议。无需手动维护。
                     </div>
                     <div style="padding:12px 16px;background:var(--bg-secondary);border-radius:var(--radius-sm);border-left:3px solid var(--purple)">
-                        <b>依赖关系</b><br>通过编辑模块的"依赖模块ID"字段设置模块间依赖，拓扑图会自动绘制紫色曲线。
+                        <b>跨模块关联</b><br>Agent 分析代码后自动标注模块间"依赖"（紫色虚线）和"影响"（绿色实线）关系，点击节点可查看关联详情。
                     </div>
                 </div>
             </div>

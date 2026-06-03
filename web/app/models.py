@@ -4762,6 +4762,10 @@ class ClawSecret(db.Model):
                     comment='密钥名，例如 tavily_api_key / wecom_webhook_xx')
     encrypted_value = db.Column(db.Text, nullable=False, comment='加密后的值')
     description = db.Column(db.String(500), comment='用途说明')
+    share_scope = db.Column(db.String(20), default='private',
+                            comment='共享范围：private=仅owner / project=同项目claw / public=所有claw')
+    share_project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                                 comment='共享给哪个项目（share_scope=project 时有效）')
     last_used_at = db.Column(db.DateTime, comment='最后一次被读取的时间')
     use_count = db.Column(db.Integer, default=0, comment='被读取次数')
     created_at = db.Column(db.DateTime, default=_now)
@@ -4773,12 +4777,38 @@ class ClawSecret(db.Model):
     )
 
     def to_dict(self, include_value=False):
+        # 解析 owner 显示信息（claw 名 / 用户名）
+        owner_claw_name = ''
+        owner_username = ''
+        if self.owner_claw_id:
+            claw = OpenClawInstance.query.get(self.owner_claw_id)
+            if claw:
+                owner_claw_name = claw.name
+        if self.owner_user_id:
+            user = User.query.get(self.owner_user_id)
+            if user:
+                owner_username = user.username
+
+        # 共享项目名
+        share_project_name = ''
+        if self.share_project_id:
+            from app.models import Project
+            proj = Project.query.get(self.share_project_id)
+            if proj:
+                share_project_name = proj.name
+
         d = {
             'id': self.id,
             'owner_claw_id': self.owner_claw_id,
+            'owner_claw_name': owner_claw_name,
             'owner_user_id': self.owner_user_id,
+            'owner_username': owner_username,
+            'owner_label': owner_claw_name and ('claw:' + owner_claw_name) or (owner_username and ('user:' + owner_username)) or '',
             'key': self.key,
             'description': self.description or '',
+            'share_scope': self.share_scope or 'private',
+            'share_project_id': self.share_project_id,
+            'share_project_name': share_project_name,
             'has_value': bool(self.encrypted_value),
             'value_length': len(_simple_decrypt(self.encrypted_value)) if self.encrypted_value else 0,
             'last_used_at': str(self.last_used_at) if self.last_used_at else None,

@@ -231,7 +231,7 @@ function showConfirm(msg) {
 }
 // =============================================
 
-const HUB = (window.HUB_PUBLIC_URL || location.origin).replace(/\/+$/, '');
+const HUB = (window.HUB_WEB_URL || window.HUB_PUBLIC_URL || location.origin).replace(/\/+$/, '');
 let META = { types: [], risk_levels: [], statuses: [], max_attachment_size: 10485760 };
 let PROJECTS = [];
 let ITERATIONS = [];
