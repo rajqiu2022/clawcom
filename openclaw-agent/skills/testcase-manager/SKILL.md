@@ -9,6 +9,8 @@
 - **AI 智能生成**：通过需求描述自动生成用例、对话式管理
 - **导入导出**：YAML / XMind 格式
 - **版本管理**：类 git 的快照/回滚/对比（commit / log / checkout / diff）
+- **功能全景关联**：用例库/目录可关联功能全景模块，支持双向展示和覆盖统计
+- **最近变更追踪**：按时间段快速查询新增、修改、删除的用例，用于评审或测试
 
 ---
 
@@ -579,11 +581,84 @@ GET /api/v1/testcase-libraries/{LIBRARY_ID}/export/xmind
 
 ---
 
-## 七、版本管理（类 git）
+## 七、功能全景关联与最近变更
+
+### 18. 查询用例库关联的功能全景模块
+
+```
+GET /api/v1/testcase-libraries/{LIBRARY_ID}/panorama-links
+```
+
+返回该用例库或目录关联的功能全景模块、模块路径、关联目录和覆盖用例数。
+
+### 19. 创建/维护用例库 ↔ 功能全景关联
+
+```
+POST /api/v1/testcase-panorama-links
+
+{
+  "workspace_id": 12,
+  "module_id": 88,
+  "library_id": 20,
+  "module_path": "技能/连招",
+  "link_level": "directory",
+  "source": "agent"
+}
+```
+
+`link_level` 可选：
+
+- `library`：整库覆盖该功能模块
+- `directory`：某个用例目录覆盖该功能模块
+- `case`：单条用例覆盖该功能模块（预留/高级用法）
+
+删除用例、用例库或功能全景模块时，Hub 会硬删除失效关联；审计信息写入变更日志。
+
+### 20. 同步/清理关联
+
+```
+POST /api/v1/testcase-panorama-links/sync
+
+{
+  "project_id": 6,
+  "workspace_id": 12,
+  "library_id": 20,
+  "dry_run": false
+}
+```
+
+用于清理历史脏关联、重算 `case_count` 和功能全景测试覆盖指标。页面刷新不会自动全量同步；需要时主动调用。
+
+### 21. 查询最近变更用例
+
+```
+GET /api/v1/testcase-libraries/{LIBRARY_ID}/changes?since=2026-06-15T00:00&until=2026-06-15T23:59
+GET /api/v1/testcase-libraries/{LIBRARY_ID}/changes?module_path=技能/连招&change_type=updated
+GET /api/v1/panorama/modules/{MODULE_ID}/testcase-changes?since=2026-06-15T00:00&include_children=1
+```
+
+返回新增/修改/删除/批量操作日志。Agent 收到“评审最近一天变更用例”时，优先用该接口，不要通过整库快照 diff 现场全量计算。
+
+若从功能全景模块维度反查用例变更，使用 `testcase-changes` 接口。功能全景侧的覆盖与风险指标由 `test-metrics` 提供，其中 `bug_risk_score` / `bug_count` 可由 Agent 在 `game-module-panorama` Skill 中提交。
+
+推荐汇报：
+
+```markdown
+## 最近变更用例
+- 用例库：<library_name>
+- 时间范围：<since> ~ <until>
+- 新增 / 修改 / 删除：<n>/<n>/<n>
+- 重点目录：<module_path>
+- 关联功能模块：<module_path 列表>
+```
+
+---
+
+## 八、版本管理（类 git）
 
 版本管理支持对用例库进行快照、回滚、对比，防止误操作丢失数据。
 
-### 18. 创建快照（commit）
+### 22. 创建快照（commit）
 
 ```
 POST /api/v1/testcase-libraries/{LIBRARY_ID}/snapshots
@@ -613,7 +688,7 @@ POST /api/v1/testcase-libraries/{LIBRARY_ID}/snapshots
 }
 ```
 
-### 19. 查看版本历史（log）
+### 23. 查看版本历史（log）
 
 ```
 GET /api/v1/testcase-libraries/{LIBRARY_ID}/snapshots
@@ -631,7 +706,7 @@ GET /api/v1/testcase-libraries/{LIBRARY_ID}/snapshots
 ]
 ```
 
-### 20. 查看某个版本详情（show）
+### 24. 查看某个版本详情（show）
 
 ```
 GET /api/v1/testcase-libraries/{LIBRARY_ID}/snapshots/{VERSION}

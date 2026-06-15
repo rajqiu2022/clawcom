@@ -9,6 +9,10 @@
     <select class="form-select" id="filter-project" onchange="onProjectChange()" style="min-width:140px">
         <option value="">全部项目</option>
     </select>
+    <select class="form-select" id="filter-workspace" onchange="onWorkspaceChange()" style="min-width:160px">
+        <option value="">项目功能全景图</option>
+    </select>
+    <button class="btn btn-ghost" onclick="createWorkspace()">+ 标题</button>
     <select class="form-select" id="filter-risk" onchange="onFilterChange()" style="min-width:120px">
         <option value="">全部风险</option>
         <option value="critical">严重</option>
@@ -16,6 +20,8 @@
         <option value="normal">普通</option>
         <option value="low">低</option>
     </select>
+    <button class="btn btn-ghost" onclick="openImpactAnalyzeModal()">分析变更</button>
+    <button class="btn btn-ghost" onclick="createPanoramaSnapshot()">创建快照</button>
     <button class="btn btn-primary" onclick="openModuleModal()" style="display:none">+ 新建模块</button>
 </div>
 {% endblock %}
@@ -119,6 +125,19 @@
 .topo-legend-item:last-child { margin-bottom: 0; }
 .topo-legend-dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 4px currentColor; }
 .topo-legend-pulse { animation: legendPulse 2s infinite; }
+.topo-relation-toggle {
+    cursor: pointer;
+    user-select: none;
+}
+.topo-relation-toggle input {
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent);
+    margin: 0;
+}
+.topo-relation-toggle:has(input:not(:checked)) {
+    opacity: 0.45;
+}
 @keyframes legendPulse { 0%,100%{box-shadow:0 0 4px #3b82f6} 50%{box-shadow:0 0 12px #3b82f6,0 0 20px rgba(59,130,246,.3)} }
 
 .topo-minimap {
@@ -145,6 +164,22 @@
 .topo-ctrl-btn:hover {
     border-color: var(--accent); color: var(--accent);
     background: var(--accent-dim); transform: scale(1.05);
+}
+.topo-ctrl-btn.active {
+    border-color: var(--accent);
+    color: #fff;
+    background: var(--accent);
+}
+.topo-selection-status {
+    min-width: 36px;
+    text-align: center;
+    font-size: 0.66rem;
+    color: var(--text-muted);
+    padding: 4px 2px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    box-shadow: var(--shadow-sm);
 }
 
 .topo-search {
@@ -476,14 +511,33 @@
                 <div class="topo-legend-item"><span class="topo-legend-dot" style="background:#eab308;color:#eab308"></span> 普通</div>
                 <div class="topo-legend-item"><span class="topo-legend-dot" style="background:#22c55e;color:#22c55e"></span> 低风险</div>
                 <div class="topo-legend-item"><span class="topo-legend-dot topo-legend-pulse" style="background:#3b82f6;color:#3b82f6"></span> 近期变更</div>
-                <div class="topo-legend-item"><span style="width:16px;border-top:2px solid rgba(100,116,139,0.7)"></span> 父子关系</div>
-                <div class="topo-legend-item"><span style="width:16px;border-top:2px dashed #8b5cf6"></span> 依赖关系</div>
-                <div class="topo-legend-item"><span style="width:16px;border-top:2px solid #22c55e"></span> 影响关系</div>
+                <label class="topo-legend-item topo-relation-toggle">
+                    <input type="checkbox" checked onchange="toggleTopoRelation('child', this.checked)">
+                    <span style="width:16px;border-top:2px solid rgba(100,116,139,0.7)"></span> 父子关系
+                </label>
+                <label class="topo-legend-item topo-relation-toggle">
+                    <input type="checkbox" checked onchange="toggleTopoRelation('dep', this.checked)">
+                    <span style="width:16px;border-top:2px dashed #8b5cf6"></span> 依赖关系
+                </label>
+                <label class="topo-legend-item topo-relation-toggle">
+                    <input type="checkbox" checked onchange="toggleTopoRelation('affects', this.checked)">
+                    <span style="width:16px;border-top:2px solid #22c55e"></span> 影响关系
+                </label>
             </div>
             <div class="topo-search">
                 <input type="text" id="topo-search-input" placeholder="搜索模块..." oninput="onTopoSearch(this.value)">
             </div>
+            <div style="position:absolute;top:58px;right:16px;z-index:10;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:6px 8px;box-shadow:var(--shadow-sm);font-size:0.76rem;color:var(--text-secondary)">
+                <span style="margin-right:6px">视图</span>
+                <select id="topo-metric-mode" class="form-select" style="height:28px;padding:2px 8px;font-size:0.76rem" onchange="setTopoMetricMode(this.value)">
+                    <option value="structure">模块结构</option>
+                    <option value="test">测试覆盖/风险</option>
+                </select>
+            </div>
             <div class="topo-controls">
+                <button class="topo-ctrl-btn" id="topo-relation-filter-btn" onclick="toggleTopoRelationFilter()" title="只显示从选中节点出发的全部下游关联">关</button>
+                <button class="topo-ctrl-btn" onclick="clearTopoSelection()" title="清空节点选择">清</button>
+                <div class="topo-selection-status" id="topo-selection-status">0选</div>
                 <button class="topo-ctrl-btn" onclick="topoZoomIn()" title="放大">+</button>
                 <button class="topo-ctrl-btn" onclick="topoZoomOut()" title="缩小">−</button>
                 <button class="topo-ctrl-btn" onclick="topoFitAll()" title="适应全部">⊡</button>
@@ -537,9 +591,14 @@
 // ===== State =====
 let allModules = [];
 let treeModules = [];
+let graphData = { nodes: [], edges: [], metrics: {} };
+let panoramaSnapshots = [];
+let latestImpactResult = null;
 let projects = [];
+let workspaces = [];
 let statsData = null;
 let currentView = 'topo';
+let topoMetricMode = 'structure';
 
 const RISK_COLORS = { critical: '#ef4444', high: '#f97316', normal: '#eab308', low: '#22c55e' };
 const RISK_LABELS = { critical: '严重', high: '高', normal: '普通', low: '低' };
@@ -547,9 +606,82 @@ const CHANGE_TYPES = { logic: '逻辑', resource: '资源', config: '配置', ap
 const STATUS_LABELS = { active: '活跃', planned: '规划中', deprecated: '已废弃' };
 function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
 
+function setTopoMetricMode(mode) {
+    topoMetricMode = mode || 'structure';
+    if (currentView === 'topo') renderCurrentView();
+}
+
+async function syncTestcaseLinks() {
+    try {
+        const pid = _getSelectedProjectId();
+        const wid = _getSelectedWorkspaceId();
+        await API.post('/testcase-panorama-links/sync', {
+            project_id: pid ? parseInt(pid, 10) : null,
+            workspace_id: wid ? parseInt(wid, 10) : null,
+        });
+        await loadAllData();
+        alert('关联同步完成');
+    } catch (e) {
+        alert('同步失败：' + (e?.message || e));
+    }
+}
+
+function testMetricColor(metric) {
+    const score = Number(metric?.bug_risk_score ?? 0);
+    const bugCount = Number(metric?.bug_count ?? 0);
+    const value = score || (bugCount > 10 ? 90 : bugCount > 3 ? 65 : bugCount > 0 ? 35 : 0);
+    if (value >= 80) return '#ef4444';
+    if (value >= 55) return '#f97316';
+    if (value > 0) return '#eab308';
+    return '#22c55e';
+}
+
+function testMetricRadius(metric, isRoot) {
+    const count = Number(metric?.subtree_case_count ?? 0);
+    const base = isRoot ? 28 : 18;
+    if (count <= 0) return base;
+    return Math.max(base, Math.min(isRoot ? 48 : 36, base + Math.log10(count + 1) * 12));
+}
+
+function normalizeCrossModuleRelation(rel) {
+    if (rel === null || rel === undefined) return { id: null, name: '', reason: '' };
+
+    if (typeof rel === 'number' || /^\d+$/.test(String(rel).trim())) {
+        const id = parseInt(rel, 10);
+        return { id, name: '', reason: '' };
+    }
+
+    if (typeof rel === 'object') {
+        const rawId = rel.id ?? rel.module_id ?? rel.target_id ?? rel.targetModuleId;
+        const id = rawId !== null && rawId !== undefined && /^\d+$/.test(String(rawId).trim())
+            ? parseInt(rawId, 10)
+            : null;
+        let name = rel.name || rel.module_name || rel.target_name || rel.targetModuleName || '';
+        if (name) name = String(name).replace(/\(\d+\)\s*$/, '').trim();
+        return {
+            id,
+            name,
+            reason: rel.reason || rel.desc || rel.description || rel.summary || '',
+        };
+    }
+
+    const text = String(rel).trim();
+    const match = text.match(/^(.+?)\((\d+)\)(?::(.*))?$/);
+    if (match) {
+        return {
+            id: parseInt(match[2], 10),
+            name: match[1].trim(),
+            reason: (match[3] || '').trim(),
+        };
+    }
+
+    return { id: null, name: text, reason: '' };
+}
+
 // ===== Init =====
 (async function init() {
     await loadProjects();
+    await loadWorkspaces();
     await loadAllData();
 })();
 
@@ -559,7 +691,10 @@ async function loadProjects() {
         const sel = document.getElementById('filter-project');
         projects.forEach(p => { sel.innerHTML += `<option value="${p.name}">${esc(p.name)}</option>`; });
         // Use global project filter (shared across pages via project name)
-        initProjectFilter(sel, () => loadAllData());
+        initProjectFilter(sel, async () => {
+            await loadWorkspaces();
+            await loadAllData();
+        });
     } catch(e) {}
 }
 
@@ -570,34 +705,144 @@ function _getSelectedProjectId() {
     return p ? p.id : '';
 }
 
+function _getSelectedWorkspaceId() {
+    const sel = document.getElementById('filter-workspace');
+    return sel ? sel.value : '';
+}
+
+function _workspaceStorageKey() {
+    return `panorama_workspace_${_getSelectedProjectId() || 'all'}`;
+}
+
+function _queryWithWorkspace(extra = '') {
+    const pid = _getSelectedProjectId();
+    const wid = _getSelectedWorkspaceId();
+    const params = new URLSearchParams();
+    if (pid) params.set('project_id', pid);
+    if (wid) params.set('workspace_id', wid);
+    if (extra) {
+        const src = new URLSearchParams(extra.replace(/^\?/, ''));
+        src.forEach((v, k) => params.set(k, v));
+    }
+    const s = params.toString();
+    return s ? '?' + s : '';
+}
+
+async function loadWorkspaces() {
+    const sel = document.getElementById('filter-workspace');
+    if (!sel) return;
+    const pid = _getSelectedProjectId();
+    try {
+        workspaces = await API.get('/panorama/workspaces' + (pid ? `?project_id=${pid}` : ''));
+    } catch(e) {
+        workspaces = [];
+    }
+    if (!workspaces.length) {
+        sel.innerHTML = '<option value="">项目功能全景图</option>';
+        return;
+    }
+    const saved = localStorage.getItem(_workspaceStorageKey()) || '';
+    sel.innerHTML = workspaces.map(w => `<option value="${w.id}">${esc(w.title)}${w.is_default ? '（默认）' : ''}</option>`).join('');
+    if (saved && workspaces.some(w => String(w.id) === String(saved))) sel.value = saved;
+    else {
+        const def = workspaces.find(w => w.is_default) || workspaces[0];
+        sel.value = def ? def.id : '';
+    }
+}
+
+function createWorkspace() {
+    const pid = _getSelectedProjectId();
+    if (!pid) { showToast('请先选择项目', 'error'); return; }
+    document.getElementById('modal-container').innerHTML = `
+    <div class="pano-overlay" onclick="closeModal(event)">
+        <div class="pano-modal" onclick="event.stopPropagation()" style="max-width:520px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+                <div>
+                    <h3 style="margin:0 0 4px">新建功能全景标题</h3>
+                    <div style="font-size:0.78rem;color:var(--text-muted)">一个标题就是当前项目下的一份独立功能全景。</div>
+                </div>
+                <button style="background:none;border:none;font-size:1.4rem;color:var(--text-muted);cursor:pointer;padding:4px" onclick="closeModal()">×</button>
+            </div>
+            <div class="form-group">
+                <label>标题 *</label>
+                <input id="workspace-title-input" placeholder="如：程序功能、配置模块、XX模块" maxlength="180" onkeydown="if(event.key==='Enter') submitWorkspace()">
+            </div>
+            <div class="form-group">
+                <label>说明（可选）</label>
+                <textarea id="workspace-desc-input" rows="2" placeholder="补充这个全景覆盖的范围，便于团队识别"></textarea>
+            </div>
+            <div class="form-actions">
+                <button class="btn" onclick="closeModal()">取消</button>
+                <button class="btn btn-primary" onclick="submitWorkspace()">创建并切换</button>
+            </div>
+        </div>
+    </div>`;
+    setTimeout(() => {
+        const input = document.getElementById('workspace-title-input');
+        if (input) input.focus();
+    }, 0);
+}
+
+async function submitWorkspace() {
+    const pid = _getSelectedProjectId();
+    const titleEl = document.getElementById('workspace-title-input');
+    const descEl = document.getElementById('workspace-desc-input');
+    const clean = (titleEl && titleEl.value ? titleEl.value : '').trim();
+    if (!clean) { showToast('标题不能为空', 'error'); return; }
+    try {
+        const w = await API.post('/panorama/workspaces', {
+            project_id: pid ? parseInt(pid, 10) : null,
+            title: clean,
+            description: descEl ? descEl.value.trim() || null : null,
+        });
+        await loadWorkspaces();
+        document.getElementById('filter-workspace').value = w.id;
+        localStorage.setItem(_workspaceStorageKey(), w.id);
+        closeModal();
+        await loadAllData();
+        showToast('功能全景标题已创建', 'success');
+    } catch(e) { showToast('创建失败: ' + e.message, 'error'); }
+}
+
 async function loadAllData() {
     const loadingEl = document.getElementById('topo-loading');
     if (loadingEl) loadingEl.classList.remove('hidden');
-    await Promise.all([loadModules(), loadStats()]);
+    await Promise.all([loadModules(), loadStats(), loadSnapshots()]);
     updateTabCount();
     renderCurrentView();
 }
 
 function onProjectChange() {
+    loadWorkspaces().then(() => loadAllData());
+}
+function onWorkspaceChange() {
+    localStorage.setItem(_workspaceStorageKey(), _getSelectedWorkspaceId());
     loadAllData();
 }
 function onFilterChange() { renderCurrentView(); }
 
 async function loadModules() {
-    const pid = _getSelectedProjectId();
-    const params = pid ? `?project_id=${pid}` : '';
+    const params = _queryWithWorkspace();
     try {
-        [allModules, treeModules] = await Promise.all([
+        [allModules, treeModules, graphData] = await Promise.all([
             API.get('/panorama/modules' + params),
-            API.get('/panorama/modules' + params + (params ? '&tree=1' : '?tree=1'))
+            API.get('/panorama/modules' + _queryWithWorkspace('tree=1')),
+            API.get('/panorama/graph' + params),
         ]);
-    } catch(e) { allModules = []; treeModules = []; }
+    } catch(e) { allModules = []; treeModules = []; graphData = { nodes: [], edges: [], metrics: {} }; }
 }
 
 async function loadStats() {
-    const pid = _getSelectedProjectId();
-    try { statsData = await API.get('/panorama/stats' + (pid ? `?project_id=${pid}` : '')); }
+    try { statsData = await API.get('/panorama/stats' + _queryWithWorkspace()); }
     catch(e) { statsData = null; }
+}
+
+async function loadSnapshots() {
+    try {
+        panoramaSnapshots = await API.get('/panorama/snapshots' + _queryWithWorkspace('limit=20'));
+    } catch(e) {
+        panoramaSnapshots = statsData && statsData.recent_snapshots ? statsData.recent_snapshots : [];
+    }
 }
 
 function updateTabCount() {
@@ -618,7 +863,10 @@ function renderCurrentView() {
     const risk = document.getElementById('filter-risk').value;
     const filtered = risk ? allModules.filter(m => m.risk_level === risk) : allModules;
     const filteredTree = risk ? filterTree(treeModules, risk) : treeModules;
-    if (currentView === 'topo') renderTopology(filtered);
+    if (currentView === 'topo') {
+        const graph = buildFilteredGraph(filtered);
+        renderTopology(graph.nodes, graph.edges);
+    }
     else if (currentView === 'table') renderTable(filteredTree);
     else if (currentView === 'stats') renderStats();
 }
@@ -631,15 +879,144 @@ function filterTree(nodes, risk) {
     }).map(n => ({ ...n, children: n.children ? filterTree(n.children, risk) : [] }));
 }
 
+function buildFilteredGraph(filteredModules) {
+    const filteredIds = new Set(filteredModules.map(m => m.id));
+    const nodes = (graphData.nodes && graphData.nodes.length) ? graphData.nodes.filter(n => filteredIds.has(n.id)) : filteredModules;
+    const edges = (graphData.edges || []).filter(e =>
+        filteredIds.has(e.source_module_id) && filteredIds.has(e.target_module_id)
+    );
+    return { nodes, edges };
+}
+
 // ==================================================
 // ===== TOPOLOGY VIEW — Force-Directed Graph =====
 // ==================================================
 let tNodes = [], tEdges = [];
 let tScale = 1, tOffX = 0, tOffY = 0;
 let tDragging = null, tPanning = false, tPanStart = {x:0,y:0};
-let tHovered = null, tSelected = null;
+let tHovered = null, tSelected = new Set();
 let tAnimFrame = null, tSimRunning = false;
 let tSearchTerm = '';
+let topoRelationVisible = { child: true, dep: true, affects: true };
+let topoRelationFilterActive = false;
+
+function isTopoEdgeVisible(edge) {
+    return topoRelationVisible[edge.type] !== false;
+}
+
+function toggleTopoRelation(type, visible) {
+    topoRelationVisible[type] = !!visible;
+    redrawTopo();
+}
+
+function getTopoVisibleNodeIndices() {
+    if (!topoRelationFilterActive || !tSelected.size) {
+        return new Set(tNodes.map((_, idx) => idx));
+    }
+    const visible = new Set(tSelected);
+    const queue = Array.from(tSelected);
+    let cursor = 0;
+    while (cursor < queue.length) {
+        const current = queue[cursor++];
+        tEdges.forEach(e => {
+            if (!isTopoEdgeVisible(e) || e.source !== current || visible.has(e.target)) return;
+            visible.add(e.target);
+            queue.push(e.target);
+        });
+    }
+    return visible;
+}
+
+function getTopoVisibleEdgeSet(visibleNodes) {
+    if (!topoRelationFilterActive || !tSelected.size) return null;
+    const selectedKey = new Set(tSelected);
+    const visibleEdges = new Set();
+    const queue = Array.from(tSelected);
+    let cursor = 0;
+    while (cursor < queue.length) {
+        const current = queue[cursor++];
+        tEdges.forEach((e, idx) => {
+            if (!isTopoEdgeVisible(e) || e.source !== current || !visibleNodes.has(e.target)) return;
+            visibleEdges.add(idx);
+            if (!selectedKey.has(e.target)) {
+                selectedKey.add(e.target);
+                queue.push(e.target);
+            }
+        });
+    }
+    return visibleEdges;
+}
+
+function getTopoFilterSummary() {
+    if (!topoRelationFilterActive || !tSelected.size) return '';
+    const visibleNodes = getTopoVisibleNodeIndices();
+    const downstreamCount = Math.max(0, visibleNodes.size - tSelected.size);
+    return `下游${downstreamCount}`;
+}
+
+function refreshTopoFilterSummary() {
+    const status = document.getElementById('topo-selection-status');
+    if (!status) return;
+    const count = tSelected ? tSelected.size : 0;
+    const summary = getTopoFilterSummary();
+    status.textContent = summary ? `${count}选/${summary}` : `${count}选`;
+}
+
+function isTopoNodeInFilteredView(idx) {
+    if (!topoRelationFilterActive || !tSelected.size) return true;
+    return getTopoVisibleNodeIndices().has(idx);
+}
+
+function isTopoEdgeInFilteredView(edgeIndex, visibleNodes, visibleEdges) {
+    if (!topoRelationFilterActive || !tSelected.size) {
+        const e = tEdges[edgeIndex];
+        return visibleNodes.has(e.source) && visibleNodes.has(e.target);
+    }
+    return visibleEdges && visibleEdges.has(edgeIndex);
+}
+
+function updateTopoSelectionUi() {
+    refreshTopoFilterSummary();
+    const btn = document.getElementById('topo-relation-filter-btn');
+    if (btn) {
+        btn.classList.toggle('active', topoRelationFilterActive);
+        btn.textContent = topoRelationFilterActive ? '全' : '关';
+        btn.title = topoRelationFilterActive ? '显示全部节点' : '只显示从选中节点出发的全部下游关联';
+    }
+}
+
+function toggleTopoRelationFilter() {
+    if (!tSelected.size) {
+        showToast('请先点击选择节点；按住 Ctrl 可多选', 'error');
+        return;
+    }
+    topoRelationFilterActive = !topoRelationFilterActive;
+    updateTopoSelectionUi();
+    redrawTopo();
+}
+
+function selectTopoNode(hit, additive) {
+    if (additive) {
+        if (tSelected.has(hit)) tSelected.delete(hit);
+        else tSelected.add(hit);
+    } else {
+        tSelected.clear();
+        tSelected.add(hit);
+    }
+    if (!tSelected.size) topoRelationFilterActive = false;
+    updateTopoSelectionUi();
+}
+
+function clearTopoSelection() {
+    tSelected.clear();
+    topoRelationFilterActive = false;
+    updateTopoSelectionUi();
+    const panel = document.getElementById('topo-detail');
+    if (panel) {
+        panel.innerHTML = '<div class="empty-hint"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg><p>点击节点查看模块详情，按住 Ctrl 可多选</p></div>';
+    }
+    redrawTopo();
+}
 
 /**
  * Concentric circle layout:
@@ -708,7 +1085,13 @@ function _layoutInitialPositions(nodes, edges, idMap, W, H) {
     });
 }
 
-function renderTopology(modules) {
+function normalizeTopoEdgeType(relationType) {
+    if (relationType === 'child') return 'child';
+    if (relationType === 'affects') return 'affects';
+    return 'dep';
+}
+
+function renderTopology(modules, graphEdges = []) {
     const canvas = document.getElementById('topo-canvas');
     const area = canvas.parentElement;
     const loadingEl = document.getElementById('topo-loading');
@@ -741,68 +1124,82 @@ function renderTopology(modules) {
         const highlight = !!m.highlight;
         const children = modules.filter(c => c.parent_id === m.id).length;
         const isRoot = !m.parent_id || !modules.find(x => x.id === m.parent_id);
+        const metric = m.test_metrics || {};
+        const structureRadius = isRoot ? Math.max(28, Math.min(44, 28 + children * 3)) : Math.max(18, Math.min(32, 18 + children * 3));
+        const radius = topoMetricMode === 'test' ? testMetricRadius(metric, isRoot) : structureRadius;
+        const color = topoMetricMode === 'test' ? testMetricColor(metric) : (RISK_COLORS[m.risk_level || 'normal'] || RISK_COLORS.normal);
 
         tNodes.push({
             id: m.id, label: m.name, risk: m.risk_level || 'normal',
             status: m.status, recent, isNew, highlight, parent_id: m.parent_id,
             description: m.description, last_change_summary: m.last_change_summary,
             childCount: children, isRoot,
-            radius: isRoot ? Math.max(28, Math.min(44, 28 + children * 3)) : Math.max(18, Math.min(32, 18 + children * 3)),
+            radius,
+            color,
+            testMetrics: metric,
             x: 0, y: 0, vx: 0, vy: 0,
             searchMatch: true,
         });
         idMap[m.id] = tNodes.length - 1;
     });
 
-    // Parent-child edges
-    modules.forEach(m => {
-        if (m.parent_id && idMap[m.parent_id] !== undefined && idMap[m.id] !== undefined) {
-            tEdges.push({ source: idMap[m.parent_id], target: idMap[m.id], type: 'child' });
-        }
-    });
-
-    // Cross-module edges: depends_on + affects
-    // 数据格式: extra.cross_module.depends_on/affects = ["模块名(id):说明", ...]
-    function _extractModuleId(str) {
-        const m = String(str).match(/\((\d+)\)/);
-        return m ? parseInt(m[1], 10) : null;
+    if (graphEdges && graphEdges.length) {
+        graphEdges.forEach(e => {
+            if (idMap[e.source_module_id] !== undefined && idMap[e.target_module_id] !== undefined) {
+                tEdges.push({
+                    source: idMap[e.source_module_id],
+                    target: idMap[e.target_module_id],
+                    type: normalizeTopoEdgeType(e.relation_type),
+                    relationType: e.relation_type,
+                    confidence: e.confidence,
+                    evidence: e.evidence || {},
+                });
+            }
+        });
+    } else {
+        // Fallback for older deployments/data: derive edges from parent_id and module.extra.
+        modules.forEach(m => {
+            if (m.parent_id && idMap[m.parent_id] !== undefined && idMap[m.id] !== undefined) {
+                tEdges.push({ source: idMap[m.parent_id], target: idMap[m.id], type: 'child' });
+            }
+        });
+        modules.forEach(m => {
+            const cm = m.extra && m.extra.cross_module;
+            if (cm && cm.depends_on && Array.isArray(cm.depends_on)) {
+                cm.depends_on.forEach(dep => {
+                    const depId = normalizeCrossModuleRelation(dep).id;
+                    if (depId !== null && idMap[depId] !== undefined && idMap[m.id] !== undefined) {
+                        tEdges.push({ source: idMap[m.id], target: idMap[depId], type: 'dep', label: '' });
+                    }
+                });
+            }
+            if (cm && cm.affects && Array.isArray(cm.affects)) {
+                cm.affects.forEach(aff => {
+                    const affId = normalizeCrossModuleRelation(aff).id;
+                    if (affId !== null && idMap[affId] !== undefined && idMap[m.id] !== undefined) {
+                        tEdges.push({ source: idMap[m.id], target: idMap[affId], type: 'affects', label: '' });
+                    }
+                });
+            }
+            if (m.extra && m.extra.dependencies && Array.isArray(m.extra.dependencies)) {
+                m.extra.dependencies.forEach(depId => {
+                    if (idMap[depId] !== undefined && idMap[m.id] !== undefined) {
+                        const exists = tEdges.some(e => e.source === idMap[m.id] && e.target === idMap[depId]);
+                        if (!exists) tEdges.push({ source: idMap[m.id], target: idMap[depId], type: 'dep', label: '' });
+                    }
+                });
+            }
+        });
     }
-    modules.forEach(m => {
-        const cm = m.extra && m.extra.cross_module;
-        if (!cm) return;
-        // depends_on: 本模块依赖谁 → 箭头从本模块指向被依赖模块
-        if (cm.depends_on && Array.isArray(cm.depends_on)) {
-            cm.depends_on.forEach(dep => {
-                const depId = _extractModuleId(dep);
-                if (depId !== null && idMap[depId] !== undefined && idMap[m.id] !== undefined) {
-                    tEdges.push({ source: idMap[m.id], target: idMap[depId], type: 'dep', label: '' });
-                }
-            });
-        }
-        // affects: 本模块影响谁 → 箭头从本模块指向被影响模块
-        if (cm.affects && Array.isArray(cm.affects)) {
-            cm.affects.forEach(aff => {
-                const affId = _extractModuleId(aff);
-                if (affId !== null && idMap[affId] !== undefined && idMap[m.id] !== undefined) {
-                    tEdges.push({ source: idMap[m.id], target: idMap[affId], type: 'affects', label: '' });
-                }
-            });
-        }
-        // 兼容旧格式: extra.dependencies (ID 数组)
-        if (m.extra.dependencies && Array.isArray(m.extra.dependencies)) {
-            m.extra.dependencies.forEach(depId => {
-                if (idMap[depId] !== undefined && idMap[m.id] !== undefined) {
-                    const exists = tEdges.some(e => e.source === idMap[m.id] && e.target === idMap[depId]);
-                    if (!exists) tEdges.push({ source: idMap[m.id], target: idMap[depId], type: 'dep', label: '' });
-                }
-            });
-        }
-    });
 
     // ---- Concentric layout: big outer, small inner, isolated outermost ----
     _layoutInitialPositions(tNodes, tEdges, idMap, W, H);
 
-    tScale = 1; tOffX = 0; tOffY = 0; tSelected = null; tHovered = null;
+    tScale = 1; tOffX = 0; tOffY = 0;
+    tSelected = new Set();
+    topoRelationFilterActive = false;
+    tHovered = null;
+    updateTopoSelectionUi();
     const activeCanvas = setupCanvasEvents(canvas, W, H);
     startSimulation(activeCanvas, W, H);
 }
@@ -886,9 +1283,12 @@ function drawGraph(canvas, W, H) {
     ctx.save();
     ctx.translate(tOffX, tOffY);
     ctx.scale(tScale, tScale);
+    const visibleNodes = getTopoVisibleNodeIndices();
+    const visibleEdges = getTopoVisibleEdgeSet(visibleNodes);
 
     // Edges
-    tEdges.forEach(e => {
+    tEdges.forEach((e, edgeIndex) => {
+        if (!isTopoEdgeVisible(e) || !isTopoEdgeInFilteredView(edgeIndex, visibleNodes, visibleEdges)) return;
         const s = tNodes[e.source], t = tNodes[e.target];
         const angle = Math.atan2(t.y - s.y, t.x - s.x);
         // Start/end at node borders
@@ -946,9 +1346,10 @@ function drawGraph(canvas, W, H) {
     // Nodes
     const now = Date.now();
     tNodes.forEach((n, idx) => {
-        const isSel = tSelected === idx;
+        if (!visibleNodes.has(idx)) return;
+        const isSel = tSelected.has(idx);
         const isHov = tHovered === idx;
-        const color = RISK_COLORS[n.risk] || RISK_COLORS.normal;
+        const color = n.color || RISK_COLORS[n.risk] || RISK_COLORS.normal;
         const dimmed = tSearchTerm && !n.searchMatch;
 
         ctx.globalAlpha = dimmed ? 0.2 : 1;
@@ -1073,9 +1474,21 @@ function setupCanvasEvents(canvas, W, H) {
         const {x, y} = toWorld(e, newC, W, H);
         const hit = hitNode(x, y);
         if (hit !== null) {
-            tDragging = tNodes[hit];
-            tSelected = hit;
-            showDetail(hit);
+            const additive = e.ctrlKey || e.metaKey;
+            if (topoRelationFilterActive && !additive) {
+                tDragging = null;
+                showDetail(hit);
+                drawGraph(newC, W, H);
+                return;
+            }
+            selectTopoNode(hit, additive);
+            if (tSelected.has(hit)) {
+                tDragging = tNodes[hit];
+                showDetail(hit);
+            } else {
+                tDragging = null;
+            }
+            drawGraph(newC, W, H);
         } else {
             tPanning = true;
             tPanStart = {x: e.clientX - tOffX, y: e.clientY - tOffY};
@@ -1132,7 +1545,9 @@ function toWorld(e, canvas, W, H) {
 }
 
 function hitNode(x, y) {
+    const visibleNodes = getTopoVisibleNodeIndices();
     for (let i = tNodes.length - 1; i >= 0; i--) {
+        if (!visibleNodes.has(i)) continue;
         const n = tNodes[i];
         const dx = x - n.x, dy = y - n.y;
         if (dx*dx + dy*dy <= (n.radius + 4) * (n.radius + 4)) return i;
@@ -1181,8 +1596,16 @@ function topoFitAll() {
     const canvas = document.querySelector('#view-topo canvas');
     const area = canvas.parentElement;
     const W = area.clientWidth, H = area.clientHeight;
+    const visibleNodes = getTopoVisibleNodeIndices();
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    tNodes.forEach(n => { minX = Math.min(minX, n.x - n.radius); maxX = Math.max(maxX, n.x + n.radius); minY = Math.min(minY, n.y - n.radius); maxY = Math.max(maxY, n.y + n.radius); });
+    tNodes.forEach((n, idx) => {
+        if (!visibleNodes.has(idx)) return;
+        minX = Math.min(minX, n.x - n.radius);
+        maxX = Math.max(maxX, n.x + n.radius);
+        minY = Math.min(minY, n.y - n.radius);
+        maxY = Math.max(maxY, n.y + n.radius);
+    });
+    if (!Number.isFinite(minX)) return;
     const pw = maxX - minX + 80, ph = maxY - minY + 80;
     tScale = Math.min(W / pw, H / ph, 2);
     tOffX = (W - (minX + maxX) * tScale) / 2;
@@ -1191,7 +1614,8 @@ function topoFitAll() {
 }
 function topoReset() {
     tScale = 1; tOffX = 0; tOffY = 0;
-    renderTopology(getFilteredModules());
+    const graph = buildFilteredGraph(getFilteredModules());
+    renderTopology(graph.nodes, graph.edges);
 }
 function redrawTopo() {
     const canvas = document.querySelector('#view-topo canvas');
@@ -1228,17 +1652,17 @@ function _renderCrossModuleSection(m) {
     const summary = cm.summary || '';
     if (!deps.length && !affs.length) return '';
 
-    function _renderRelItem(str, color) {
-        // "模块名(id):说明" → 可点击跳转
-        const match = String(str).match(/^(.+?)\((\d+)\)(?::(.*))?$/);
-        if (match) {
-            const name = match[1], id = match[2], desc = match[3] || '';
-            return `<span class="child-chip" onclick="navigateToModule(${id})" style="border-left:3px solid ${color}">
+    function _renderRelItem(rel, color) {
+        const item = normalizeCrossModuleRelation(rel);
+        if (item.id) {
+            const name = item.name || `模块 #${item.id}`;
+            const desc = item.reason || '';
+            return `<span class="child-chip" onclick="navigateToModule(${item.id})" style="border-left:3px solid ${color}">
                 <span class="cc-dot" style="background:${color}"></span>
                 ${esc(name)} ${desc ? '<span style="color:var(--text-muted);font-size:0.68rem">· ' + esc(desc) + '</span>' : ''}
             </span>`;
         }
-        return `<span class="child-chip" style="border-left:3px solid ${color};cursor:default">${esc(str)}</span>`;
+        return `<span class="child-chip" style="border-left:3px solid ${color};cursor:default">${esc(item.name || rel)}</span>`;
     }
 
     let html = '<div class="detail-section">';
@@ -1295,6 +1719,18 @@ function renderDetailContent(m) {
         <div class="detail-section">
             <div class="detail-section-title"><span class="sec-icon">🎯</span> 测试重点</div>
             <div class="test-focus-card">${esc(m.test_focus)}</div>
+        </div>` : ''}
+
+        ${m.test_metrics ? `
+        <div class="detail-section">
+            <div class="detail-section-title"><span class="sec-icon">🧪</span> 测试覆盖 / Bug 风险</div>
+            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;font-size:0.78rem">
+                <div class="case-lib-card"><strong>${m.test_metrics.direct_case_count || 0}</strong><span>直接关联用例</span></div>
+                <div class="case-lib-card"><strong>${m.test_metrics.subtree_case_count || 0}</strong><span>含子模块用例</span></div>
+                <div class="case-lib-card"><strong>${m.test_metrics.bug_count || 0}</strong><span>Bug 数</span></div>
+                <div class="case-lib-card"><strong>${m.test_metrics.bug_risk_score || 0}</strong><span>Bug 风险分</span></div>
+            </div>
+            <button class="btn btn-sm btn-ghost" style="margin-top:8px" onclick="syncTestcaseLinks()">同步关联</button>
         </div>` : ''}
 
         ${children.length ? `
@@ -1383,6 +1819,8 @@ async function loadChangelog(offset) {
     const includeDesc = includeDescEl ? includeDescEl.checked : false;
 
     let url = `/api/v1/panorama/changes?module_id=${moduleId}&limit=${CL_PAGE_SIZE}&offset=${offset}`;
+    if (_getSelectedWorkspaceId()) url += `&workspace_id=${_getSelectedWorkspaceId()}`;
+    if (_getSelectedWorkspaceId()) url += `&workspace_id=${_getSelectedWorkspaceId()}`;
     if (includeDesc) url += '&include_descendants=1';
     const startEl = document.getElementById('cl-start');
     const endEl = document.getElementById('cl-end');
@@ -1692,12 +2130,89 @@ function renderStats() {
             <div class="stat-card stat-card-click" style="--stat-color:var(--text-primary)" onclick="statJumpToList('')"><div class="stat-value">${s.total_modules}</div><div class="stat-label">功能模块总数</div></div>
             <div class="stat-card stat-card-click" style="--stat-color:var(--green)" onclick="statJumpToList('')"><div class="stat-value">${s.active_modules}</div><div class="stat-label">活跃模块</div></div>
             <div class="stat-card" style="--stat-color:var(--blue)"><div class="stat-value">${s.total_changes}</div><div class="stat-label">变更记录</div></div>
+            <div class="stat-card" style="--stat-color:#8b5cf6"><div class="stat-value">${s.total_relations || 0}</div><div class="stat-label">模块关系</div></div>
+            <div class="stat-card" style="--stat-color:#06b6d4"><div class="stat-value">${s.total_code_entities || 0}</div><div class="stat-label">代码实体</div></div>
+            <div class="stat-card" style="--stat-color:#14b8a6"><div class="stat-value">${s.total_module_code_links || 0}</div><div class="stat-label">代码关联</div></div>
             <div class="stat-card" style="--stat-color:var(--accent)"><div class="stat-value">${s.recent_changes_7d}</div><div class="stat-label">近7天变更</div></div>
             <div class="stat-card stat-card-click" style="--stat-color:#ef4444" onclick="statJumpToList('critical')"><div class="stat-value">${s.risk_stats.critical||0}</div><div class="stat-label">严重风险</div></div>
             <div class="stat-card stat-card-click" style="--stat-color:#f97316" onclick="statJumpToList('high')"><div class="stat-value">${s.risk_stats.high||0}</div><div class="stat-label">高风险</div></div>
             <div class="stat-card stat-card-click" style="--stat-color:#eab308" onclick="statJumpToList('normal')"><div class="stat-value">${s.risk_stats.normal||0}</div><div class="stat-label">普通</div></div>
             <div class="stat-card stat-card-click" style="--stat-color:#22c55e" onclick="statJumpToList('low')"><div class="stat-value">${s.risk_stats.low||0}</div><div class="stat-label">低风险</div></div>
+            <div class="stat-card" style="--stat-color:#64748b"><div class="stat-value">${(s.graph_metrics && s.graph_metrics.isolated_count) || 0}</div><div class="stat-label">孤立模块</div></div>
+            <div class="stat-card" style="--stat-color:#dc2626"><div class="stat-value">${(s.graph_metrics && s.graph_metrics.untested_high_risk_count) || 0}</div><div class="stat-label">未覆盖高风险</div></div>
         </div>
+        ${s.graph_metrics && (s.graph_metrics.hub_modules || []).length ? `
+        <div class="stats-section">
+            <h4>关系洞察</h4>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px">
+                <div style="padding:12px 16px;background:var(--bg-secondary);border-radius:var(--radius-sm);border-left:3px solid #8b5cf6">
+                    <b>高连接模块</b><br>
+                    <span style="font-size:0.78rem;color:var(--text-secondary)">
+                        ${s.graph_metrics.hub_modules.map(m => `${esc(m.name)}(${m.degree})`).join('、')}
+                    </span>
+                </div>
+                <div style="padding:12px 16px;background:var(--bg-secondary);border-radius:var(--radius-sm);border-left:3px solid #22c55e">
+                    <b>桥接模块</b><br>
+                    <span style="font-size:0.78rem;color:var(--text-secondary)">
+                        ${(s.graph_metrics.bridge_modules || []).length ? s.graph_metrics.bridge_modules.map(m => `${esc(m.name)}(${m.degree})`).join('、') : '暂无'}
+                    </span>
+                </div>
+                <div style="padding:12px 16px;background:var(--bg-secondary);border-radius:var(--radius-sm);border-left:3px solid #ef4444">
+                    <b>异常关系提示</b><br>
+                    <span style="font-size:0.78rem;color:var(--text-secondary)">跨顶层模块关系 ${s.graph_metrics.surprising_relation_count || 0} 条</span>
+                </div>
+            </div>
+        </div>` : ''}
+        ${latestImpactResult ? `
+        <div class="stats-section">
+            <h4>最小测试上下文</h4>
+            <div style="padding:12px 16px;background:var(--bg-secondary);border-radius:var(--radius-sm);border-left:3px solid var(--accent)">
+                <div style="font-size:0.84rem;font-weight:600;margin-bottom:6px">${esc(latestImpactResult.summary || '影响分析结果')}</div>
+                <div style="font-size:0.76rem;color:var(--text-secondary);margin-bottom:8px">
+                    风险 <span class="risk-pill risk-pill-${latestImpactResult.risk_level || 'low'}">${RISK_LABELS[latestImpactResult.risk_level] || latestImpactResult.risk_level || '低'}</span>
+                    · 节省上下文 ${Math.round(((latestImpactResult.token_savings && latestImpactResult.token_savings.saved_ratio) || 0) * 100)}%
+                </div>
+                <div style="font-size:0.74rem;color:var(--text-secondary)">
+                    受影响模块：${(latestImpactResult.affected_modules || []).map(m => esc(m.module_name || m.module_path || m.module_id)).join('、') || '无'}
+                </div>
+                <div style="font-size:0.74rem;color:var(--text-secondary);margin-top:4px">
+                    推荐用例库：${(latestImpactResult.recommended_case_libraries || []).map(l => esc(l.library_name || l.library_id)).join('、') || '无'}
+                </div>
+            </div>
+        </div>` : ''}
+        ${(panoramaSnapshots.length || (s.recent_snapshots || []).length) ? `
+        <div class="stats-section">
+            <h4>快照对比</h4>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+                <select id="snapshot-from" class="form-select" style="min-width:180px">
+                    ${(panoramaSnapshots.length ? panoramaSnapshots : (s.recent_snapshots || [])).map(s => `<option value="${s.id}">${esc(s.name)} (${s.created_at || ''})</option>`).join('')}
+                </select>
+                <span style="color:var(--text-muted)">→</span>
+                <select id="snapshot-to" class="form-select" style="min-width:180px">
+                    ${(panoramaSnapshots.length ? panoramaSnapshots : (s.recent_snapshots || [])).map(s => `<option value="${s.id}">${esc(s.name)} (${s.created_at || ''})</option>`).join('')}
+                </select>
+                <button class="btn btn-sm btn-primary" onclick="comparePanoramaSnapshots()">对比</button>
+                <button class="btn btn-sm" onclick="restorePanoramaSnapshot()">恢复右侧快照</button>
+            </div>
+            <div id="snapshot-diff-result" style="font-size:0.78rem;color:var(--text-secondary)">选择两个快照后点击对比。</div>
+        </div>` : ''}
+        ${(s.recent_impacts || []).length ? `
+        <div class="stats-section">
+            <h4>最近影响分析</h4>
+            <div style="display:flex;flex-direction:column;gap:8px">
+                ${s.recent_impacts.map(a => `
+                <div style="padding:10px 12px;background:var(--bg-secondary);border-radius:var(--radius-sm);display:flex;justify-content:space-between;gap:12px;align-items:center">
+                    <div>
+                        <div style="font-size:0.84rem;font-weight:600">${esc(a.summary || '影响分析')}</div>
+                        <div style="font-size:0.72rem;color:var(--text-muted)">${esc((a.input_payload && (a.input_payload.commit_range || (a.input_payload.changed_files || []).join(', '))) || '')}</div>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;white-space:nowrap">
+                        <span class="risk-pill risk-pill-${a.risk_level || 'low'}">${RISK_LABELS[a.risk_level] || a.risk_level || '低'}</span>
+                        <span style="font-size:0.74rem;color:var(--text-muted)">${a.created_at || ''}</span>
+                    </div>
+                </div>`).join('')}
+            </div>
+        </div>` : ''}
         ${allLibs.size ? `
         <div class="stats-section case-lib-section collapsed">
             <h4 class="case-lib-toggle" onclick="this.parentElement.classList.toggle('collapsed')" style="cursor:pointer;user-select:none" title="点击展开/折叠">🧪 关联用例库概览 (${allLibs.size}) <span class="collapse-arrow">▾</span></h4>
@@ -1751,6 +2266,140 @@ function statJumpToList(riskLevel) {
     switchView('table');
 }
 
+async function createPanoramaSnapshot() {
+    const pid = _getSelectedProjectId();
+    const wid = _getSelectedWorkspaceId();
+    const name = prompt('快照名称（可留空自动生成）', '');
+    if (name === null) return;
+    try {
+        const body = {
+            name: (name || '').trim() || undefined,
+            project_id: pid ? parseInt(pid, 10) : null,
+            workspace_id: wid ? parseInt(wid, 10) : null,
+        };
+        await API.post('/panorama/snapshots', body);
+        showToast('快照已创建', 'success');
+        await loadAllData();
+        if (currentView === 'stats') renderStats();
+    } catch(e) {
+        showToast('创建快照失败: ' + e.message, 'error');
+    }
+}
+
+async function restorePanoramaSnapshot() {
+    const toEl = document.getElementById('snapshot-to');
+    const snapshotId = toEl ? toEl.value : '';
+    if (!snapshotId) { showToast('请选择要恢复的快照', 'error'); return; }
+    const ok = await customConfirm({
+        title: '恢复功能全景存档',
+        msg: '将用该存档覆盖当前标题下的模块和关系，其他标题不受影响。确认恢复？',
+        type: 'warning',
+        okText: '确认恢复',
+        cancelText: '取消',
+    });
+    if (!ok) return;
+    try {
+        const result = await API.post(`/panorama/snapshots/${snapshotId}/restore`, {});
+        showToast(`已恢复：${result.restored_modules || 0} 模块 / ${result.restored_relations || 0} 关系`, 'success');
+        await loadAllData();
+    } catch(e) { showToast('恢复失败: ' + e.message, 'error'); }
+}
+
+async function comparePanoramaSnapshots() {
+    const fromEl = document.getElementById('snapshot-from');
+    const toEl = document.getElementById('snapshot-to');
+    const out = document.getElementById('snapshot-diff-result');
+    if (!fromEl || !toEl || !out) return;
+    const fromId = fromEl.value;
+    const toId = toEl.value;
+    if (!fromId || !toId) {
+        out.textContent = '请选择两个快照。';
+        return;
+    }
+    out.textContent = '对比中...';
+    try {
+        const diff = await API.get(`/panorama/snapshots/diff?from=${fromId}&to=${toId}`);
+        const s = diff.summary || {};
+        out.innerHTML = `
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;margin-bottom:10px">
+                <div>新增模块 <b>${s.module_added || 0}</b></div>
+                <div>删除模块 <b>${s.module_removed || 0}</b></div>
+                <div>变更模块 <b>${s.module_changed || 0}</b></div>
+                <div>新增关系 <b>${s.relation_added || 0}</b></div>
+                <div>删除关系 <b>${s.relation_removed || 0}</b></div>
+                <div>风险升级 <b>${s.risk_escalations || 0}</b></div>
+            </div>
+            ${(diff.changed_modules || []).length ? `<div style="margin-bottom:6px"><b>模块变更</b>：${diff.changed_modules.map(m => `${esc(m.path)}(${Object.keys(m.changes || {}).join(',')})`).join('、')}</div>` : ''}
+            ${(diff.added_modules || []).length ? `<div style="margin-bottom:6px"><b>新增</b>：${diff.added_modules.map(m => esc(m.path)).join('、')}</div>` : ''}
+            ${(diff.removed_modules || []).length ? `<div><b>删除</b>：${diff.removed_modules.map(m => esc(m.path)).join('、')}</div>` : ''}
+        `;
+    } catch(e) {
+        out.textContent = '对比失败: ' + e.message;
+    }
+}
+
+function openImpactAnalyzeModal() {
+    const pid = _getSelectedProjectId();
+    document.getElementById('modal-container').innerHTML = `
+    <div class="pano-overlay" onclick="closeModal(event)">
+        <div class="pano-modal" onclick="event.stopPropagation()" style="max-width:640px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+                <h3 style="margin:0">分析变更影响</h3>
+                <button style="background:none;border:none;font-size:1.4rem;color:var(--text-muted);cursor:pointer;padding:4px" onclick="closeModal()">×</button>
+            </div>
+            <div class="form-group">
+                <label>变更文件（每行一个路径）</label>
+                <textarea id="impact-files" rows="6" placeholder="Assets/Scripts/Racing/Drift/DriftController.cs"></textarea>
+            </div>
+            <div class="form-group">
+                <label>Commit Range（可选）</label>
+                <input id="impact-commit-range" placeholder="abc123..def456">
+            </div>
+            <div class="form-actions">
+                <button class="btn" onclick="closeModal()">取消</button>
+                <button class="btn btn-primary" onclick="submitImpactAnalyze(${pid ? parseInt(pid, 10) : 'null'})">开始分析</button>
+            </div>
+            <div id="impact-result" style="margin-top:12px;font-size:0.78rem;color:var(--text-secondary)"></div>
+        </div>
+    </div>`;
+}
+
+async function submitImpactAnalyze(projectId) {
+    const files = document.getElementById('impact-files').value.split('\n').map(s => s.trim()).filter(Boolean);
+    const commitRange = (document.getElementById('impact-commit-range').value || '').trim();
+    const out = document.getElementById('impact-result');
+    if (!files.length && !commitRange) {
+        out.textContent = '请至少填写变更文件或 commit range。';
+        return;
+    }
+    out.textContent = '分析中...';
+    try {
+        const result = await API.post('/panorama/impact/analyze', {
+            project_id: projectId,
+            workspace_id: _getSelectedWorkspaceId() ? parseInt(_getSelectedWorkspaceId(), 10) : null,
+            changed_files: files,
+            commit_range: commitRange || null,
+        });
+        latestImpactResult = result;
+        out.innerHTML = `
+            <div style="padding:10px 12px;background:var(--bg-secondary);border-radius:var(--radius-sm)">
+                <div style="font-weight:600;margin-bottom:6px">${esc(result.summary || '分析完成')}</div>
+                <div>风险：<span class="risk-pill risk-pill-${result.risk_level || 'low'}">${RISK_LABELS[result.risk_level] || result.risk_level || '低'}</span></div>
+                <div style="margin-top:4px">受影响模块：${(result.affected_modules || []).map(m => esc(m.module_name || m.module_path)).join('、') || '无'}</div>
+                <div style="margin-top:4px">推荐用例库：${(result.recommended_case_libraries || []).map(l => esc(l.library_name || l.library_id)).join('、') || '无'}</div>
+                <div style="margin-top:4px">上下文节省：${Math.round(((result.token_savings && result.token_savings.saved_ratio) || 0) * 100)}%</div>
+            </div>
+        `;
+        showToast('影响分析完成', 'success');
+        await loadAllData();
+        if (currentView === 'topo') renderCurrentView();
+        else if (currentView === 'stats') renderStats();
+    } catch(e) {
+        out.textContent = '分析失败: ' + e.message;
+        showToast('分析失败: ' + e.message, 'error');
+    }
+}
+
 // ===========================
 // ===== CRUD =====
 // ===========================
@@ -1759,7 +2408,7 @@ async function openModuleModal(editId) {
     if (editId) { try { module = await API.get(`/panorama/modules/${editId}`); } catch(e){} }
     const pid = _getSelectedProjectId();
     let flatModules = [];
-    try { flatModules = await API.get('/panorama/modules' + (pid ? `?project_id=${pid}` : '')); } catch(e){}
+    try { flatModules = await API.get('/panorama/modules' + _queryWithWorkspace()); } catch(e){}
 
     document.getElementById('modal-container').innerHTML = `
     <div class="pano-overlay" onclick="closeModal(event)">
@@ -1854,6 +2503,7 @@ async function saveModule(editId) {
         name,
         parent_id: parentId ? parseInt(parentId) : null,
         project_id: projectId ? parseInt(projectId) : null,
+        workspace_id: _getSelectedWorkspaceId() ? parseInt(_getSelectedWorkspaceId(), 10) : null,
         description: document.getElementById('mm-desc').value.trim() || null,
         code_paths: codePaths.length ? codePaths : null,
         resource_paths: resPaths.length ? resPaths : null,

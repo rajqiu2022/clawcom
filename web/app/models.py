@@ -57,6 +57,9 @@ class User(db.Model):
 # 简单加密，用于存储可还原的 token 明文
 # 注意：实际生产环境建议使用更安全的密钥管理
 _ENCODING_KEY = base64.urlsafe_b64encode(b'change-me-in-prod-32bytes-secret')
+_LEGACY_ENCODING_KEYS = (
+    base64.urlsafe_b64encode(b'openaclaw-secret-key-32bytes!'),
+)
 
 
 def _simple_encrypt(text: str) -> str:
@@ -68,17 +71,36 @@ def _simple_encrypt(text: str) -> str:
     return base64.urlsafe_b64encode(''.join(result).encode()).decode()
 
 
+def _looks_like_plain_secret(text: str) -> bool:
+    """判断解密结果是否像正常明文，兼容历史 key 迁移。"""
+    if not text:
+        return False
+    if text.startswith(('oc_tk_', 'hub_tk_')):
+        return True
+    return all((ch in '\r\n\t') or (ord(ch) >= 32) for ch in text)
+
+
 def _simple_decrypt(encrypted: str) -> str:
     """解密"""
     try:
         data = base64.urlsafe_b64decode(encrypted.encode()).decode()
-        key = _ENCODING_KEY
-        result = []
-        for i, c in enumerate(data):
-            result.append(chr(ord(c) ^ key[i % len(key)]))
-        return ''.join(result)
     except Exception:
         return ''
+
+    fallback = ''
+    for key in (_ENCODING_KEY, *_LEGACY_ENCODING_KEYS):
+        try:
+            result = []
+            for i, c in enumerate(data):
+                result.append(chr(ord(c) ^ key[i % len(key)]))
+            plain = ''.join(result)
+        except Exception:
+            continue
+        if _looks_like_plain_secret(plain):
+            return plain
+        if not fallback:
+            fallback = plain
+    return fallback
 
 
 def generate_api_token():
@@ -143,9 +165,9 @@ class OpenClawInstance(db.Model):
     safe_name = db.Column(db.String(50), default='',
                           comment='部署目录名（首次部署时生成，后续不变）')
     llm_provider = db.Column(db.String(50), default='venus',
-                          comment='Hermes 大模型平台，当前固定 venus')
+                          comment='Hermes 大模型平台：venus / timiai')
     llm_model = db.Column(db.String(100), default='venus',
-                          comment='Hermes 大模型选择：venus/kimi-k2.6/glm-5.1/deepseek-v4-flash/deepseek-v4-pro/hunyuan-v3')
+                          comment='Hermes 大模型选择（随 llm_provider 变化）')
     work_dirs = db.Column(db.JSON, comment='Hermes Agent 额外可写工作目录列表')
 
     project = db.relationship('Project', backref='openclaws')
@@ -903,7 +925,7 @@ class TestCaseLibrary(db.Model):
     updated_at = db.Column(db.DateTime, default=_now,
                           onupdate=_now)
 
-    def to_dict(self, with_cases=False):
+    def to_dict(self, with_cases=False, with_mindmap=True):
         data = {
             'id': self.id,
             'name': self.name,
@@ -918,11 +940,12 @@ class TestCaseLibrary(db.Model):
                                  if self.review_status_at else None),
             'created_by': self.created_by or self.owner or '',
             'updated_by': self.updated_by or '',
-            'mindmap': self.mindmap,
             'case_count': self.cases.count(),
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
+        if with_mindmap:
+            data['mindmap'] = self.mindmap
         if with_cases:
             data['cases'] = [c.to_dict() for c in self.cases]
         return data
@@ -1048,6 +1071,155 @@ class TestCaseSnapshot(db.Model):
             except Exception:
                 d['cases_data'] = []
         return d
+
+
+class TestCasePanoramaLink(db.Model):
+    """用例库/目录/用例 与功能全景模块的正式关联。"""
+    __tablename__ = 'testcase_panorama_links'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True, index=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('panorama_workspaces.id'), nullable=True, index=True)
+    module_id = db.Column(db.Integer, db.ForeignKey('game_module_panorama.id'), nullable=False, index=True)
+    library_id = db.Column(db.Integer, db.ForeignKey('test_case_libraries.id'), nullable=False, index=True)
+    module_path = db.Column(db.String(500), default='', comment='用例目录路径；库级关联为空')
+    case_pk = db.Column(db.Integer, db.ForeignKey('test_cases.id'), nullable=True, index=True)
+    link_level = db.Column(db.String(20), default='library',
+                           comment='library/directory/case')
+    case_count = db.Column(db.Integer, default=0, comment='当前关联范围内用例数缓存')
+    source = db.Column(db.String(50), default='manual',
+                       comment='manual/agent/migration')
+    confidence = db.Column(db.Float, default=1.0)
+    created_by = db.Column(db.String(120))
+    updated_by = db.Column(db.String(120))
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+    last_verified_at = db.Column(db.DateTime)
+
+    module = db.relationship('GameModulePanorama', backref='testcase_links')
+    library = db.relationship('TestCaseLibrary', backref='panorama_links')
+    case = db.relationship('TestCase')
+
+    __table_args__ = (
+        db.UniqueConstraint('workspace_id', 'module_id', 'library_id',
+                            'module_path', 'case_pk', 'link_level',
+                            name='uq_testcase_panorama_link'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'workspace_id': self.workspace_id,
+            'module_id': self.module_id,
+            'module_name': self.module.name if self.module else None,
+            'module_path': self.module_path or '',
+            'panorama_module_path': self.module.path if self.module else None,
+            'library_id': self.library_id,
+            'library_name': self.library.name if self.library else None,
+            'case_pk': self.case_pk,
+            'link_level': self.link_level or 'library',
+            'case_count': self.case_count or 0,
+            'source': self.source or 'manual',
+            'confidence': self.confidence if self.confidence is not None else 1.0,
+            'created_by': self.created_by or '',
+            'updated_by': self.updated_by or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+            'last_verified_at': str(self.last_verified_at) if self.last_verified_at else None,
+        }
+
+
+class PanoramaModuleTestMetric(db.Model):
+    """功能全景模块的测试覆盖与 bug 风险聚合指标。"""
+    __tablename__ = 'panorama_module_test_metrics'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    module_id = db.Column(db.Integer, db.ForeignKey('game_module_panorama.id'),
+                          nullable=False, unique=True, index=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True, index=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('panorama_workspaces.id'), nullable=True, index=True)
+    direct_case_count = db.Column(db.Integer, default=0)
+    subtree_case_count = db.Column(db.Integer, default=0)
+    linked_library_count = db.Column(db.Integer, default=0)
+    linked_directory_count = db.Column(db.Integer, default=0)
+    bug_count = db.Column(db.Integer, default=0)
+    bug_risk_score = db.Column(db.Integer, default=0)
+    bug_risk_level = db.Column(db.String(20), default='low',
+                               comment='low/normal/high/critical')
+    metrics_payload = db.Column(db.JSON)
+    source = db.Column(db.String(50), default='sync')
+    updated_by = db.Column(db.String(120))
+    synced_at = db.Column(db.DateTime, default=_now)
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    module = db.relationship('GameModulePanorama', backref=db.backref('test_metric', uselist=False))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'module_id': self.module_id,
+            'project_id': self.project_id,
+            'workspace_id': self.workspace_id,
+            'direct_case_count': self.direct_case_count or 0,
+            'subtree_case_count': self.subtree_case_count or 0,
+            'linked_library_count': self.linked_library_count or 0,
+            'linked_directory_count': self.linked_directory_count or 0,
+            'bug_count': self.bug_count or 0,
+            'bug_risk_score': self.bug_risk_score or 0,
+            'bug_risk_level': self.bug_risk_level or 'low',
+            'metrics_payload': self.metrics_payload or {},
+            'source': self.source or 'sync',
+            'updated_by': self.updated_by or '',
+            'synced_at': str(self.synced_at) if self.synced_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class TestCaseChangeLog(db.Model):
+    """用例增量变更日志，用于按时间段快速评审/测试。"""
+    __tablename__ = 'test_case_change_logs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    library_id = db.Column(db.Integer, db.ForeignKey('test_case_libraries.id'),
+                           nullable=False, index=True)
+    case_pk = db.Column(db.Integer, index=True)
+    case_id = db.Column(db.String(100), default='')
+    case_title = db.Column(db.String(255), default='')
+    module_path = db.Column(db.String(500), default='', index=True)
+    change_type = db.Column(db.String(30), nullable=False,
+                            comment='created/updated/deleted/moved/batch_created/batch_deleted')
+    changed_fields = db.Column(db.JSON)
+    old_snapshot = db.Column(db.JSON)
+    new_snapshot = db.Column(db.JSON)
+    operation_id = db.Column(db.String(80), default='', index=True)
+    linked_panorama_modules = db.Column(db.JSON)
+    changed_by = db.Column(db.String(120), default='')
+    changed_at = db.Column(db.DateTime, default=_now, index=True)
+    source = db.Column(db.String(50), default='web')
+
+    library = db.relationship('TestCaseLibrary', backref='change_logs')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'library_id': self.library_id,
+            'case_pk': self.case_pk,
+            'case_id': self.case_id or '',
+            'case_title': self.case_title or '',
+            'module_path': self.module_path or '',
+            'change_type': self.change_type,
+            'changed_fields': self.changed_fields or [],
+            'old_snapshot': self.old_snapshot or {},
+            'new_snapshot': self.new_snapshot or {},
+            'operation_id': self.operation_id or '',
+            'linked_panorama_modules': self.linked_panorama_modules or [],
+            'changed_by': self.changed_by or '',
+            'changed_at': str(self.changed_at) if self.changed_at else None,
+            'source': self.source or 'web',
+        }
 
 
 # ============== 系统配置 KV 表 ==============
@@ -1322,6 +1494,26 @@ class ClawTodo(db.Model):
             if cycle_start:
                 data['created_at'] = str(cycle_start)
             data['is_today_instance'] = (stype != 'once')
+
+        if with_today_status:
+            try:
+                from app.services.experience_trigger_service import build_task_operating_context
+                ctx = build_task_operating_context(
+                    self.title or '',
+                    self.description,
+                    claw=self.openclaw,
+                )
+                data['pitfall_notice'] = ctx.get('pitfall_notice') or ''
+                data['primary_skill'] = ctx.get('primary_skill') or 'agent-operating-protocol'
+                data['trigger_terms'] = ctx.get('trigger_terms') or []
+                data['matched_pitfall_ids'] = ctx.get('matched_pitfall_ids') or []
+                data['operating_protocol_skill'] = 'agent-operating-protocol'
+            except Exception:
+                data['pitfall_notice'] = ''
+                data['primary_skill'] = 'agent-operating-protocol'
+                data['trigger_terms'] = []
+                data['matched_pitfall_ids'] = []
+                data['operating_protocol_skill'] = 'agent-operating-protocol'
         return data
 
     @staticmethod
@@ -4396,12 +4588,48 @@ class TestReport(db.Model):
 
 # ============== 游戏功能模块全景视图 ==============
 
+class PanoramaWorkspace(db.Model):
+    """功能全景工作区：一个项目下的一个唯一标题即一份功能全景。"""
+    __tablename__ = 'panorama_workspaces'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True, index=True)
+    title = db.Column(db.String(180), nullable=False, comment='功能全景标题，如 程序功能/配置模块')
+    description = db.Column(db.Text)
+    is_default = db.Column(db.Boolean, default=False, index=True)
+    created_by = db.Column(db.String(120))
+    updated_by = db.Column(db.String(120))
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    project = db.relationship('Project', backref='panorama_workspaces')
+
+    __table_args__ = (
+        db.UniqueConstraint('project_id', 'title', name='uq_panorama_workspace_title'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'project_name': self.project.name if self.project else None,
+            'title': self.title,
+            'description': self.description or '',
+            'is_default': bool(self.is_default),
+            'created_by': self.created_by,
+            'updated_by': self.updated_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
 class GameModulePanorama(db.Model):
     """游戏功能模块全景节点 — 由 Agent 建立和维护的功能模块树"""
     __tablename__ = 'game_module_panorama'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('panorama_workspaces.id'), nullable=True, index=True)
     parent_id = db.Column(db.Integer, db.ForeignKey('game_module_panorama.id'), nullable=True,
                           comment='父节点 ID，NULL 为顶层模块')
     name = db.Column(db.String(200), nullable=False, comment='模块名称，如"漂移系统"')
@@ -4425,11 +4653,13 @@ class GameModulePanorama(db.Model):
     updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
 
     children = db.relationship('GameModulePanorama', backref=db.backref('parent', remote_side='GameModulePanorama.id'), lazy='dynamic')
+    workspace = db.relationship('PanoramaWorkspace', backref='modules')
 
     def to_dict(self, include_children=False):
         d = {
             'id': self.id,
             'project_id': self.project_id,
+            'workspace_id': self.workspace_id,
             'parent_id': self.parent_id,
             'name': self.name,
             'path': self.path,
@@ -4450,9 +4680,265 @@ class GameModulePanorama(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
+        metric = getattr(self, 'test_metric', None)
+        if metric:
+            d['test_metrics'] = metric.to_dict()
         if include_children:
             d['children'] = [c.to_dict(include_children=True) for c in self.children]
         return d
+
+
+class GameModuleRelation(db.Model):
+    """功能模块关系边 — 功能全景拓扑的正式边模型"""
+    __tablename__ = 'game_module_relations'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True, index=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('panorama_workspaces.id'), nullable=True, index=True)
+    source_module_id = db.Column(db.Integer, db.ForeignKey('game_module_panorama.id'),
+                                 nullable=False, index=True)
+    target_module_id = db.Column(db.Integer, db.ForeignKey('game_module_panorama.id'),
+                                 nullable=False, index=True)
+    relation_type = db.Column(db.String(40), nullable=False, default='depends_on',
+                              comment='child/depends_on/affects/shared_resource/api_flow/data_flow/test_overlap')
+    confidence = db.Column(db.Float, default=1.0, comment='关系置信度 0-1')
+    evidence = db.Column(db.JSON, comment='关系证据：reason/files/symbols/resources/case_library_ids')
+    source = db.Column(db.String(50), default='manual', comment='manual/agent/code_index/migration')
+    created_by = db.Column(db.String(120))
+    updated_by = db.Column(db.String(120))
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    source_module = db.relationship(
+        'GameModulePanorama',
+        foreign_keys=[source_module_id],
+        backref='outgoing_relations',
+    )
+    target_module = db.relationship(
+        'GameModulePanorama',
+        foreign_keys=[target_module_id],
+        backref='incoming_relations',
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint('workspace_id', 'source_module_id', 'target_module_id',
+                            'relation_type', name='uq_game_module_relation'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'workspace_id': self.workspace_id,
+            'source_module_id': self.source_module_id,
+            'source_module_name': self.source_module.name if self.source_module else None,
+            'target_module_id': self.target_module_id,
+            'target_module_name': self.target_module.name if self.target_module else None,
+            'relation_type': self.relation_type or 'depends_on',
+            'confidence': float(self.confidence if self.confidence is not None else 1.0),
+            'evidence': self.evidence or {},
+            'source': self.source or 'manual',
+            'created_by': self.created_by,
+            'updated_by': self.updated_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class PanoramaCodeEntity(db.Model):
+    """功能全景轻量代码实体索引"""
+    __tablename__ = 'panorama_code_entities'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True, index=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('panorama_workspaces.id'), nullable=True, index=True)
+    repo_key = db.Column(db.String(120), default='default', index=True)
+    file_path = db.Column(db.String(1000), nullable=False, index=True)
+    entity_type = db.Column(db.String(30), nullable=False, default='file',
+                            comment='file/function/class/import/test/resource')
+    symbol_name = db.Column(db.String(300), default='')
+    language = db.Column(db.String(50), default='')
+    start_line = db.Column(db.Integer, default=0)
+    end_line = db.Column(db.Integer, default=0)
+    content_hash = db.Column(db.String(120), default='')
+    extra = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        db.UniqueConstraint('workspace_id', 'repo_key', 'file_path', 'entity_type',
+                            'symbol_name', 'start_line', name='uq_panorama_code_entity'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'workspace_id': self.workspace_id,
+            'repo_key': self.repo_key or 'default',
+            'file_path': self.file_path,
+            'entity_type': self.entity_type or 'file',
+            'symbol_name': self.symbol_name or '',
+            'language': self.language or '',
+            'start_line': self.start_line or 0,
+            'end_line': self.end_line or 0,
+            'content_hash': self.content_hash or '',
+            'extra': self.extra or {},
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class PanoramaModuleCodeLink(db.Model):
+    """功能模块与代码实体的关联"""
+    __tablename__ = 'panorama_module_code_links'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True, index=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('panorama_workspaces.id'), nullable=True, index=True)
+    module_id = db.Column(db.Integer, db.ForeignKey('game_module_panorama.id'),
+                          nullable=False, index=True)
+    entity_id = db.Column(db.Integer, db.ForeignKey('panorama_code_entities.id'),
+                          nullable=False, index=True)
+    link_type = db.Column(db.String(30), nullable=False, default='owns',
+                          comment='owns/uses/tests/configures/resource')
+    confidence = db.Column(db.Float, default=1.0)
+    evidence = db.Column(db.JSON)
+    source = db.Column(db.String(50), default='agent')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    module = db.relationship('GameModulePanorama', backref='code_links')
+    entity = db.relationship('PanoramaCodeEntity', backref='module_links')
+
+    __table_args__ = (
+        db.UniqueConstraint('module_id', 'entity_id', 'link_type',
+                            name='uq_panorama_module_code_link'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'workspace_id': self.workspace_id,
+            'module_id': self.module_id,
+            'module_name': self.module.name if self.module else None,
+            'entity_id': self.entity_id,
+            'entity': self.entity.to_dict() if self.entity else None,
+            'link_type': self.link_type or 'owns',
+            'confidence': float(self.confidence if self.confidence is not None else 1.0),
+            'evidence': self.evidence or {},
+            'source': self.source or 'agent',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class PanoramaImpactAnalysis(db.Model):
+    """一次功能全景变更影响分析结果"""
+    __tablename__ = 'panorama_impact_analyses'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True, index=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('panorama_workspaces.id'), nullable=True, index=True)
+    input_type = db.Column(db.String(30), default='changed_files')
+    input_payload = db.Column(db.JSON)
+    affected_modules = db.Column(db.JSON)
+    affected_relations = db.Column(db.JSON)
+    recommended_case_libraries = db.Column(db.JSON)
+    risk_score = db.Column(db.Integer, default=0)
+    risk_level = db.Column(db.String(20), default='low')
+    test_context = db.Column(db.JSON)
+    token_savings = db.Column(db.JSON)
+    summary = db.Column(db.Text)
+    created_by = db.Column(db.String(120))
+    created_at = db.Column(db.DateTime, default=_now)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'workspace_id': self.workspace_id,
+            'input_type': self.input_type or 'changed_files',
+            'input_payload': self.input_payload or {},
+            'affected_modules': self.affected_modules or [],
+            'affected_relations': self.affected_relations or [],
+            'recommended_case_libraries': self.recommended_case_libraries or [],
+            'risk_score': self.risk_score or 0,
+            'risk_level': self.risk_level or 'low',
+            'test_context': self.test_context or {},
+            'token_savings': self.token_savings or {},
+            'summary': self.summary or '',
+            'created_by': self.created_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class PanoramaSnapshot(db.Model):
+    """功能全景快照元信息"""
+    __tablename__ = 'panorama_snapshots'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True, index=True)
+    workspace_id = db.Column(db.Integer, db.ForeignKey('panorama_workspaces.id'), nullable=True, index=True)
+    name = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text)
+    module_count = db.Column(db.Integer, default=0)
+    relation_count = db.Column(db.Integer, default=0)
+    code_entity_count = db.Column(db.Integer, default=0)
+    created_by = db.Column(db.String(120))
+    created_at = db.Column(db.DateTime, default=_now)
+
+    items = db.relationship(
+        'PanoramaSnapshotItem',
+        backref='snapshot',
+        lazy='dynamic',
+        cascade='all, delete-orphan',
+    )
+    workspace = db.relationship('PanoramaWorkspace', backref='snapshots')
+
+    def to_dict(self, *, include_items=False):
+        d = {
+            'id': self.id,
+            'project_id': self.project_id,
+            'workspace_id': self.workspace_id,
+            'workspace_title': self.workspace.title if self.workspace else None,
+            'name': self.name,
+            'description': self.description,
+            'module_count': self.module_count or 0,
+            'relation_count': self.relation_count or 0,
+            'code_entity_count': self.code_entity_count or 0,
+            'created_by': self.created_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+        if include_items:
+            d['items'] = [item.to_dict() for item in self.items.order_by(PanoramaSnapshotItem.id).all()]
+        return d
+
+
+class PanoramaSnapshotItem(db.Model):
+    """功能全景快照明细"""
+    __tablename__ = 'panorama_snapshot_items'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    snapshot_id = db.Column(db.Integer, db.ForeignKey('panorama_snapshots.id'),
+                           nullable=False, index=True)
+    item_type = db.Column(db.String(30), nullable=False, comment='module/relation')
+    item_key = db.Column(db.String(500), nullable=False)
+    payload = db.Column(db.JSON)
+
+    __table_args__ = (
+        db.UniqueConstraint('snapshot_id', 'item_key', name='uq_panorama_snapshot_item'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'snapshot_id': self.snapshot_id,
+            'item_type': self.item_type,
+            'item_key': self.item_key,
+            'payload': self.payload or {},
+        }
 
 
 class GameModuleChangeLog(db.Model):
@@ -4546,10 +5032,13 @@ class ExamPaper(db.Model):
                                comment='时长分钟，0 表示不限时')
     applicable_skill_ids = db.Column(db.JSON,
                                      comment='[skill_id, ...] 关联的考核能力点')
+    remark = db.Column(db.Text, comment='试卷备注')
     status = db.Column(db.String(20), default='draft',
                        comment='draft/published/archived')
     is_deleted = db.Column(db.Boolean, default=False)
     created_by = db.Column(db.String(120))
+    created_by_user_id = db.Column(db.Integer, comment='创建用户 ID')
+    created_by_claw_id = db.Column(db.Integer, comment='创建 Agent ID')
     created_at = db.Column(db.DateTime, default=_now)
     updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
 
@@ -4564,9 +5053,12 @@ class ExamPaper(db.Model):
             'pass_score': self.pass_score,
             'time_limit_min': self.time_limit_min,
             'applicable_skill_ids': self.applicable_skill_ids or [],
+            'remark': self.remark or '',
             'status': self.status,
             'is_deleted': bool(self.is_deleted),
             'created_by': self.created_by,
+            'created_by_user_id': self.created_by_user_id,
+            'created_by_claw_id': self.created_by_claw_id,
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
             'question_count': ExamQuestion.query.filter_by(
@@ -4577,6 +5069,67 @@ class ExamPaper(db.Model):
                 .order_by(ExamQuestion.order_index, ExamQuestion.id).all()
             d['questions'] = [q.to_dict(hide_answer=hide_answer) for q in qs]
         return d
+
+
+class ExamCampaign(db.Model):
+    """一次考试发起活动：指定试卷、范围和起止日期。"""
+    __tablename__ = 'exam_campaigns'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    paper_id = db.Column(db.Integer, db.ForeignKey('exam_papers.id'),
+                         nullable=False, index=True)
+    name = db.Column(db.String(200), nullable=False, comment='考试名称')
+    scope = db.Column(db.String(20), nullable=False,
+                      comment='global/project/personal')
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           comment='项目级考试所属项目')
+    target_claw_ids = db.Column(db.JSON,
+                                comment='个人考试目标 Agent ID 列表')
+    starts_at = db.Column(db.DateTime, comment='开始时间')
+    ends_at = db.Column(db.DateTime, nullable=False, comment='截止时间')
+    status = db.Column(db.String(20), default='scheduled',
+                       comment='scheduled/active/ended/cancelled')
+    remark = db.Column(db.Text, comment='考试备注')
+    launched_by_user_id = db.Column(db.Integer, comment='发起用户 ID')
+    launched_by_claw_id = db.Column(db.Integer, comment='发起 Agent ID')
+    launched_by_display = db.Column(db.String(120), comment='发起人展示名')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    paper = db.relationship('ExamPaper', backref=db.backref('campaigns', lazy='dynamic'))
+    project = db.relationship('Project')
+
+    def to_dict(self):
+        now = _now()
+        computed_status = self.status or 'scheduled'
+        if computed_status not in ('cancelled', 'ended'):
+            if self.ends_at and now > self.ends_at:
+                computed_status = 'ended'
+            elif self.starts_at and now < self.starts_at:
+                computed_status = 'scheduled'
+            else:
+                computed_status = 'active'
+        return {
+            'id': self.id,
+            'paper_id': self.paper_id,
+            'paper_name': self.paper.name if self.paper else None,
+            'name': self.name,
+            'scope': self.scope,
+            'project_id': self.project_id,
+            'project_name': self.project.name if self.project else None,
+            'target_claw_ids': self.target_claw_ids or [],
+            'starts_at': str(self.starts_at) if self.starts_at else None,
+            'ends_at': str(self.ends_at) if self.ends_at else None,
+            'status': computed_status,
+            'remark': self.remark or '',
+            'launched_by_user_id': self.launched_by_user_id,
+            'launched_by_claw_id': self.launched_by_claw_id,
+            'launched_by_display': self.launched_by_display or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+            'session_count': ExamSession.query.filter_by(
+                campaign_id=self.id).count(),
+        }
 
 
 class ExamQuestion(db.Model):
@@ -4635,6 +5188,8 @@ class ExamSession(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     paper_id = db.Column(db.Integer, db.ForeignKey('exam_papers.id'),
                          nullable=False, index=True)
+    campaign_id = db.Column(db.Integer, db.ForeignKey('exam_campaigns.id'),
+                            comment='所属考试场次；历史数据可为空')
     examinee_claw_id = db.Column(db.Integer, comment='应考的 OpenClaw id')
     examinee_user_id = db.Column(db.Integer, comment='应考的 User id（人考）')
     examinee_display = db.Column(db.String(120), comment='展示名（冗余）')
@@ -4650,11 +5205,14 @@ class ExamSession(db.Model):
     summary = db.Column(db.Text, comment='结果摘要/评语')
 
     paper = db.relationship('ExamPaper', backref=db.backref('sessions', lazy='dynamic'))
+    campaign = db.relationship('ExamCampaign', backref=db.backref('sessions', lazy='dynamic'))
 
     def to_dict(self, include_answers=False):
         d = {
             'id': self.id,
             'paper_id': self.paper_id,
+            'campaign_id': self.campaign_id,
+            'campaign_name': self.campaign.name if self.campaign else None,
             'paper_name': self.paper.name if self.paper else None,
             'examinee_claw_id': self.examinee_claw_id,
             'examinee_user_id': self.examinee_user_id,

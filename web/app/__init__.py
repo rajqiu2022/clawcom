@@ -1723,9 +1723,27 @@ def create_app(config_name=None):
 
                     # ===== 游戏功能模块全景视图表 =====
                     conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS panorama_workspaces (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            project_id INT DEFAULT NULL,
+                            title VARCHAR(180) NOT NULL,
+                            description TEXT DEFAULT NULL,
+                            is_default TINYINT(1) DEFAULT 0,
+                            created_by VARCHAR(120) DEFAULT NULL,
+                            updated_by VARCHAR(120) DEFAULT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            UNIQUE KEY uq_panorama_workspace_title (project_id, title),
+                            INDEX idx_project_id (project_id),
+                            INDEX idx_is_default (is_default)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
                         CREATE TABLE IF NOT EXISTS game_module_panorama (
                             id INT AUTO_INCREMENT PRIMARY KEY,
                             project_id INT DEFAULT NULL,
+                            workspace_id INT DEFAULT NULL,
                             parent_id INT DEFAULT NULL,
                             name VARCHAR(200) NOT NULL,
                             path VARCHAR(500) DEFAULT NULL,
@@ -1744,6 +1762,7 @@ def create_app(config_name=None):
                             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                             FOREIGN KEY (project_id) REFERENCES projects(id),
+                            FOREIGN KEY (workspace_id) REFERENCES panorama_workspaces(id),
                             FOREIGN KEY (parent_id) REFERENCES game_module_panorama(id)
                         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """))
@@ -1765,7 +1784,330 @@ def create_app(config_name=None):
                             INDEX idx_created_at (created_at)
                         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """))
-                    logger.info('game_module_panorama / game_module_change_logs 表已就绪')
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS game_module_relations (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            project_id INT DEFAULT NULL,
+                            workspace_id INT DEFAULT NULL,
+                            source_module_id INT NOT NULL,
+                            target_module_id INT NOT NULL,
+                            relation_type VARCHAR(40) NOT NULL DEFAULT 'depends_on',
+                            confidence FLOAT DEFAULT 1.0,
+                            evidence LONGTEXT DEFAULT NULL,
+                            source VARCHAR(50) DEFAULT 'manual',
+                            created_by VARCHAR(120) DEFAULT NULL,
+                            updated_by VARCHAR(120) DEFAULT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            FOREIGN KEY (workspace_id) REFERENCES panorama_workspaces(id),
+                            FOREIGN KEY (source_module_id) REFERENCES game_module_panorama(id),
+                            FOREIGN KEY (target_module_id) REFERENCES game_module_panorama(id),
+                            UNIQUE KEY uq_game_module_relation (
+                                workspace_id, source_module_id, target_module_id, relation_type
+                            ),
+                            INDEX idx_project_id (project_id),
+                            INDEX idx_workspace_id (workspace_id),
+                            INDEX idx_source_module_id (source_module_id),
+                            INDEX idx_target_module_id (target_module_id),
+                            INDEX idx_relation_type (relation_type)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS panorama_code_entities (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            project_id INT DEFAULT NULL,
+                            workspace_id INT DEFAULT NULL,
+                            repo_key VARCHAR(120) DEFAULT 'default',
+                            file_path VARCHAR(1000) NOT NULL,
+                            entity_type VARCHAR(30) NOT NULL DEFAULT 'file',
+                            symbol_name VARCHAR(300) DEFAULT '',
+                            language VARCHAR(50) DEFAULT '',
+                            start_line INT DEFAULT 0,
+                            end_line INT DEFAULT 0,
+                            content_hash VARCHAR(120) DEFAULT '',
+                            extra LONGTEXT DEFAULT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            FOREIGN KEY (workspace_id) REFERENCES panorama_workspaces(id),
+                            UNIQUE KEY uq_panorama_code_entity (
+                                workspace_id, repo_key, file_path(191), entity_type, symbol_name(100), start_line
+                            ),
+                            INDEX idx_project_id (project_id),
+                            INDEX idx_workspace_id (workspace_id),
+                            INDEX idx_repo_key (repo_key),
+                            INDEX idx_file_path (file_path(255))
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS panorama_module_code_links (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            project_id INT DEFAULT NULL,
+                            workspace_id INT DEFAULT NULL,
+                            module_id INT NOT NULL,
+                            entity_id INT NOT NULL,
+                            link_type VARCHAR(30) NOT NULL DEFAULT 'owns',
+                            confidence FLOAT DEFAULT 1.0,
+                            evidence LONGTEXT DEFAULT NULL,
+                            source VARCHAR(50) DEFAULT 'agent',
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            FOREIGN KEY (workspace_id) REFERENCES panorama_workspaces(id),
+                            FOREIGN KEY (module_id) REFERENCES game_module_panorama(id),
+                            FOREIGN KEY (entity_id) REFERENCES panorama_code_entities(id),
+                            UNIQUE KEY uq_panorama_module_code_link (module_id, entity_id, link_type),
+                            INDEX idx_project_id (project_id),
+                            INDEX idx_workspace_id (workspace_id),
+                            INDEX idx_module_id (module_id),
+                            INDEX idx_entity_id (entity_id)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS panorama_impact_analyses (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            project_id INT DEFAULT NULL,
+                            workspace_id INT DEFAULT NULL,
+                            input_type VARCHAR(30) DEFAULT 'changed_files',
+                            input_payload LONGTEXT DEFAULT NULL,
+                            affected_modules LONGTEXT DEFAULT NULL,
+                            affected_relations LONGTEXT DEFAULT NULL,
+                            recommended_case_libraries LONGTEXT DEFAULT NULL,
+                            risk_score INT DEFAULT 0,
+                            risk_level VARCHAR(20) DEFAULT 'low',
+                            test_context LONGTEXT DEFAULT NULL,
+                            token_savings LONGTEXT DEFAULT NULL,
+                            summary TEXT DEFAULT NULL,
+                            created_by VARCHAR(120) DEFAULT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            FOREIGN KEY (workspace_id) REFERENCES panorama_workspaces(id),
+                            INDEX idx_project_id (project_id),
+                            INDEX idx_workspace_id (workspace_id),
+                            INDEX idx_created_at (created_at),
+                            INDEX idx_risk_level (risk_level)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS panorama_snapshots (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            project_id INT DEFAULT NULL,
+                            workspace_id INT DEFAULT NULL,
+                            name VARCHAR(200) NOT NULL,
+                            description TEXT DEFAULT NULL,
+                            module_count INT DEFAULT 0,
+                            relation_count INT DEFAULT 0,
+                            code_entity_count INT DEFAULT 0,
+                            created_by VARCHAR(120) DEFAULT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            FOREIGN KEY (workspace_id) REFERENCES panorama_workspaces(id),
+                            INDEX idx_project_id (project_id),
+                            INDEX idx_workspace_id (workspace_id),
+                            INDEX idx_created_at (created_at)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS panorama_snapshot_items (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            snapshot_id INT NOT NULL,
+                            item_type VARCHAR(30) NOT NULL,
+                            item_key VARCHAR(500) NOT NULL,
+                            payload LONGTEXT DEFAULT NULL,
+                            FOREIGN KEY (snapshot_id) REFERENCES panorama_snapshots(id),
+                            UNIQUE KEY uq_panorama_snapshot_item (snapshot_id, item_key(191)),
+                            INDEX idx_snapshot_id (snapshot_id),
+                            INDEX idx_item_type (item_type)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS testcase_panorama_links (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            project_id INT DEFAULT NULL,
+                            workspace_id INT DEFAULT NULL,
+                            module_id INT NOT NULL,
+                            library_id INT NOT NULL,
+                            module_path VARCHAR(500) DEFAULT '',
+                            case_pk INT DEFAULT NULL,
+                            link_level VARCHAR(20) DEFAULT 'library',
+                            case_count INT DEFAULT 0,
+                            source VARCHAR(50) DEFAULT 'manual',
+                            confidence FLOAT DEFAULT 1.0,
+                            created_by VARCHAR(120) DEFAULT NULL,
+                            updated_by VARCHAR(120) DEFAULT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            last_verified_at DATETIME DEFAULT NULL,
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            FOREIGN KEY (workspace_id) REFERENCES panorama_workspaces(id),
+                            FOREIGN KEY (module_id) REFERENCES game_module_panorama(id),
+                            FOREIGN KEY (library_id) REFERENCES test_case_libraries(id),
+                            FOREIGN KEY (case_pk) REFERENCES test_cases(id),
+                            UNIQUE KEY uq_testcase_panorama_link (
+                                workspace_id, module_id, library_id, module_path(191), case_pk, link_level
+                            ),
+                            INDEX idx_project_id (project_id),
+                            INDEX idx_workspace_id (workspace_id),
+                            INDEX idx_module_id (module_id),
+                            INDEX idx_library_id (library_id),
+                            INDEX idx_case_pk (case_pk),
+                            INDEX idx_link_level (link_level)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS panorama_module_test_metrics (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            module_id INT NOT NULL,
+                            project_id INT DEFAULT NULL,
+                            workspace_id INT DEFAULT NULL,
+                            direct_case_count INT DEFAULT 0,
+                            subtree_case_count INT DEFAULT 0,
+                            linked_library_count INT DEFAULT 0,
+                            linked_directory_count INT DEFAULT 0,
+                            bug_count INT DEFAULT 0,
+                            bug_risk_score INT DEFAULT 0,
+                            bug_risk_level VARCHAR(20) DEFAULT 'low',
+                            metrics_payload LONGTEXT DEFAULT NULL,
+                            source VARCHAR(50) DEFAULT 'sync',
+                            updated_by VARCHAR(120) DEFAULT NULL,
+                            synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            FOREIGN KEY (module_id) REFERENCES game_module_panorama(id),
+                            FOREIGN KEY (project_id) REFERENCES projects(id),
+                            FOREIGN KEY (workspace_id) REFERENCES panorama_workspaces(id),
+                            UNIQUE KEY uq_panorama_module_test_metric (module_id),
+                            INDEX idx_project_id (project_id),
+                            INDEX idx_workspace_id (workspace_id),
+                            INDEX idx_bug_risk_level (bug_risk_level)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS test_case_change_logs (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            library_id INT NOT NULL,
+                            case_pk INT DEFAULT NULL,
+                            case_id VARCHAR(100) DEFAULT '',
+                            case_title VARCHAR(255) DEFAULT '',
+                            module_path VARCHAR(500) DEFAULT '',
+                            change_type VARCHAR(30) NOT NULL,
+                            changed_fields LONGTEXT DEFAULT NULL,
+                            old_snapshot LONGTEXT DEFAULT NULL,
+                            new_snapshot LONGTEXT DEFAULT NULL,
+                            operation_id VARCHAR(80) DEFAULT '',
+                            linked_panorama_modules LONGTEXT DEFAULT NULL,
+                            changed_by VARCHAR(120) DEFAULT '',
+                            changed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            source VARCHAR(50) DEFAULT 'web',
+                            FOREIGN KEY (library_id) REFERENCES test_case_libraries(id),
+                            INDEX idx_library_id (library_id),
+                            INDEX idx_case_pk (case_pk),
+                            INDEX idx_module_path (module_path(191)),
+                            INDEX idx_change_type (change_type),
+                            INDEX idx_operation_id (operation_id),
+                            INDEX idx_changed_at (changed_at)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    logger.info('功能全景模块/关系/代码实体/影响分析/快照/用例关联表已就绪')
+
+                    # 增量迁移：功能全景 workspace_id
+                    for table in (
+                        'game_module_panorama',
+                        'game_module_relations',
+                        'panorama_code_entities',
+                        'panorama_module_code_links',
+                        'panorama_impact_analyses',
+                        'panorama_snapshots',
+                    ):
+                        try:
+                            conn.execute(text(
+                                f"ALTER TABLE {table} ADD COLUMN workspace_id INT DEFAULT NULL "
+                                "COMMENT '功能全景标题/工作区 ID'"
+                            ))
+                            logger.info(f'{table}.workspace_id 已添加')
+                        except Exception:
+                            pass
+                        try:
+                            conn.execute(text(
+                                f"ALTER TABLE {table} ADD INDEX idx_workspace_id (workspace_id)"
+                            ))
+                        except Exception:
+                            pass
+
+                    # 旧索引按 project_id 去重会阻止同项目多标题写入相同代码路径。
+                    try:
+                        conn.execute(text("ALTER TABLE game_module_relations DROP INDEX uq_game_module_relation"))
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute(text("""
+                            ALTER TABLE game_module_relations
+                            ADD UNIQUE KEY uq_game_module_relation (
+                                workspace_id, source_module_id, target_module_id, relation_type
+                            )
+                        """))
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute(text("ALTER TABLE panorama_code_entities DROP INDEX uq_panorama_code_entity"))
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute(text("""
+                            ALTER TABLE panorama_code_entities
+                            ADD UNIQUE KEY uq_panorama_code_entity (
+                                workspace_id, repo_key, file_path(191),
+                                entity_type, symbol_name(100), start_line
+                            )
+                        """))
+                    except Exception:
+                        pass
+
+                    # 为所有已有项目/全局全景创建默认工作区。
+                    try:
+                        conn.execute(text("""
+                            INSERT INTO panorama_workspaces
+                                (project_id, title, description, is_default, created_by, updated_by)
+                            SELECT DISTINCT src.project_id, '项目功能全景图',
+                                   '历史数据自动迁移生成的默认功能全景', 1, 'system', 'system'
+                            FROM (
+                                SELECT project_id FROM game_module_panorama
+                                UNION SELECT project_id FROM game_module_relations
+                                UNION SELECT project_id FROM panorama_code_entities
+                                UNION SELECT project_id FROM panorama_impact_analyses
+                                UNION SELECT project_id FROM panorama_snapshots
+                            ) src
+                            LEFT JOIN panorama_workspaces w
+                              ON ((w.project_id = src.project_id)
+                                  OR (w.project_id IS NULL AND src.project_id IS NULL))
+                             AND w.is_default = 1
+                            WHERE w.id IS NULL
+                        """))
+                    except Exception as e:
+                        logger.info(f'panorama 默认工作区创建跳过: {e}')
+
+                    # 回填 workspace_id：按 project_id 绑定默认工作区。
+                    for table in (
+                        'game_module_panorama',
+                        'game_module_relations',
+                        'panorama_code_entities',
+                        'panorama_module_code_links',
+                        'panorama_impact_analyses',
+                        'panorama_snapshots',
+                    ):
+                        try:
+                            conn.execute(text(f"""
+                                UPDATE {table} t
+                                JOIN panorama_workspaces w
+                                  ON ((w.project_id = t.project_id)
+                                      OR (w.project_id IS NULL AND t.project_id IS NULL))
+                                 AND w.is_default = 1
+                                SET t.workspace_id = w.id
+                                WHERE t.workspace_id IS NULL
+                            """))
+                        except Exception as e:
+                            logger.info(f'{table}.workspace_id 回填跳过: {e}')
 
                     # 增量迁移: game_module_panorama 添加 is_new 列
                     try:
@@ -1793,13 +2135,51 @@ def create_app(config_name=None):
                             pass_score INT DEFAULT 60,
                             time_limit_min INT DEFAULT 60,
                             applicable_skill_ids LONGTEXT DEFAULT NULL,
+                            remark TEXT DEFAULT NULL,
                             status VARCHAR(20) DEFAULT 'draft',
                             is_deleted TINYINT(1) DEFAULT 0,
                             created_by VARCHAR(120) DEFAULT NULL,
+                            created_by_user_id INT DEFAULT NULL,
+                            created_by_claw_id INT DEFAULT NULL,
                             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                             INDEX idx_status (status),
                             INDEX idx_category (category)
+                        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """))
+                    for col, ddl in (
+                        ('remark', "ALTER TABLE exam_papers ADD COLUMN remark TEXT DEFAULT NULL COMMENT '试卷备注'"),
+                        ('created_by_user_id', "ALTER TABLE exam_papers ADD COLUMN created_by_user_id INT DEFAULT NULL COMMENT '创建用户 ID'"),
+                        ('created_by_claw_id', "ALTER TABLE exam_papers ADD COLUMN created_by_claw_id INT DEFAULT NULL COMMENT '创建 Agent ID'"),
+                    ):
+                        try:
+                            conn.execute(text(ddl))
+                            logger.info('exam_papers 添加 %s 列成功', col)
+                        except Exception:
+                            pass
+                    conn.execute(text("""
+                        CREATE TABLE IF NOT EXISTS exam_campaigns (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            paper_id INT NOT NULL,
+                            name VARCHAR(200) NOT NULL,
+                            scope VARCHAR(20) NOT NULL,
+                            project_id INT DEFAULT NULL,
+                            target_claw_ids LONGTEXT DEFAULT NULL,
+                            starts_at DATETIME DEFAULT NULL,
+                            ends_at DATETIME NOT NULL,
+                            status VARCHAR(20) DEFAULT 'scheduled',
+                            remark TEXT DEFAULT NULL,
+                            launched_by_user_id INT DEFAULT NULL,
+                            launched_by_claw_id INT DEFAULT NULL,
+                            launched_by_display VARCHAR(120) DEFAULT NULL,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            INDEX idx_paper (paper_id),
+                            INDEX idx_scope (scope),
+                            INDEX idx_project (project_id),
+                            INDEX idx_ends_at (ends_at),
+                            FOREIGN KEY (paper_id) REFERENCES exam_papers(id),
+                            FOREIGN KEY (project_id) REFERENCES projects(id)
                         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """))
                     conn.execute(text("""
@@ -1827,6 +2207,7 @@ def create_app(config_name=None):
                         CREATE TABLE IF NOT EXISTS exam_sessions (
                             id INT AUTO_INCREMENT PRIMARY KEY,
                             paper_id INT NOT NULL,
+                            campaign_id INT DEFAULT NULL,
                             examinee_claw_id INT DEFAULT NULL,
                             examinee_user_id INT DEFAULT NULL,
                             examinee_display VARCHAR(120) DEFAULT NULL,
@@ -1840,11 +2221,19 @@ def create_app(config_name=None):
                             passed TINYINT(1) DEFAULT 0,
                             summary TEXT DEFAULT NULL,
                             INDEX idx_paper (paper_id),
+                            INDEX idx_campaign (campaign_id),
                             INDEX idx_examinee_claw (examinee_claw_id),
                             INDEX idx_status (status),
-                            FOREIGN KEY (paper_id) REFERENCES exam_papers(id)
+                            FOREIGN KEY (paper_id) REFERENCES exam_papers(id),
+                            FOREIGN KEY (campaign_id) REFERENCES exam_campaigns(id)
                         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                     """))
+                    try:
+                        conn.execute(text("ALTER TABLE exam_sessions ADD COLUMN campaign_id INT DEFAULT NULL COMMENT '所属考试场次'"))
+                        conn.execute(text("ALTER TABLE exam_sessions ADD INDEX idx_campaign (campaign_id)"))
+                        logger.info('exam_sessions 添加 campaign_id 列成功')
+                    except Exception:
+                        pass
                     conn.execute(text("""
                         CREATE TABLE IF NOT EXISTS exam_answers (
                             id INT AUTO_INCREMENT PRIMARY KEY,

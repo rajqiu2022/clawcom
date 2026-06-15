@@ -12,9 +12,11 @@ from app import db
 from app.models import (
     TestCaseLibrary, TestCase, Project, OpenClawInstance, User,
     TestCaseLibraryShare, TestCaseLibraryReview, Topic, CaseReviewRound, _now,
+    TestCaseChangeLog, TestCasePanoramaLink,
 )
 from app.api import api_bp
 from app.api.audit import log_action
+from app.services.testcase_panorama_links import changed_fields, snapshot_case
 
 
 def _get_current_user():
@@ -27,6 +29,60 @@ def _operator():
     if not user:
         return 'system'
     return getattr(user, '_claw_name', None) or user.username or 'system'
+
+
+def _directory_matches(case_path, link_path):
+    case_path = (case_path or '').strip()
+    link_path = (link_path or '').strip()
+    if not link_path:
+        return case_path == ''
+    return case_path == link_path or case_path.startswith(link_path + '/')
+
+
+def _linked_panorama_modules_for_case(case):
+    links = TestCasePanoramaLink.query.filter_by(library_id=case.library_id).all()
+    result = []
+    for link in links:
+        level = link.link_level or 'library'
+        if level == 'case' and link.case_pk != case.id:
+            continue
+        if level == 'directory' and not _directory_matches(case.module_path, link.module_path):
+            continue
+        module = link.module
+        result.append({
+            'module_id': link.module_id,
+            'module_name': module.name if module else '',
+            'module_path': module.path if module else '',
+            'link_level': level,
+            'library_id': link.library_id,
+            'directory_path': link.module_path or '',
+        })
+    return result
+
+
+def _record_case_change(case, change_type, old_snapshot=None, new_snapshot=None,
+                        operation_id='', source='web', changed_fields_override=None):
+    old_snapshot = old_snapshot or {}
+    new_snapshot = new_snapshot or {}
+    current = new_snapshot or old_snapshot or snapshot_case(case)
+    log = TestCaseChangeLog(
+        library_id=case.library_id,
+        case_pk=case.id,
+        case_id=current.get('case_id') or case.case_id or '',
+        case_title=current.get('title') or case.title or '',
+        module_path=current.get('module_path') or case.module_path or '',
+        change_type=change_type,
+        changed_fields=changed_fields_override if changed_fields_override is not None
+        else changed_fields(old_snapshot, new_snapshot),
+        old_snapshot=old_snapshot,
+        new_snapshot=new_snapshot,
+        operation_id=operation_id or '',
+        linked_panorama_modules=_linked_panorama_modules_for_case(case),
+        changed_by=_operator(),
+        source=source,
+    )
+    db.session.add(log)
+    return log
 
 
 def _collect_user_project_ids(user):
@@ -52,6 +108,16 @@ def _library_project_id(library):
         return None
     p = Project.query.filter_by(name=pname).first()
     return p.id if p else None
+
+
+def _normalize_project_name(raw):
+    """校验并规范化 project_name；返回 (name, error_message)。"""
+    pname = (raw or '').strip()
+    if not pname:
+        return None, 'project_name 为必填项'
+    if not Project.query.filter_by(name=pname).first():
+        return None, f'项目不存在: {pname}'
+    return pname, None
 
 
 # ====================================================================
@@ -199,6 +265,23 @@ def generate_mindmap_node_id():
     return f"node_{uuid.uuid4().hex[:8]}"
 
 
+def _slim_mindmap_for_storage(mindmap):
+    """持久化脑图时去掉叶子节点上的 case 全量 data，避免 TEXT 上限截断 JSON。"""
+    if not isinstance(mindmap, dict):
+        return mindmap
+
+    def _walk(node):
+        if not isinstance(node, dict):
+            return node
+        slim = {k: v for k, v in node.items() if k != 'data'}
+        children = slim.get('children')
+        if children:
+            slim['children'] = [_walk(c) for c in children]
+        return slim
+
+    return _walk(mindmap)
+
+
 def build_mindmap_from_cases(cases):
     """
     从用例列表构建脑图结构
@@ -301,7 +384,7 @@ def list_testcase_libraries():
 
     out = []
     for lib in libraries:
-        d = lib.to_dict()
+        d = lib.to_dict(with_mindmap=False)
         d['shared_with_me'] = lib.id in share_grants
         d['my_share_permission'] = share_grants.get(lib.id) if lib.id in share_grants else None
         d['can_manage'] = _can_manage_library(user, lib)
@@ -392,6 +475,11 @@ def get_testcase_library(library_id):
     data['can_manage'] = _can_manage_library(user, library)
     data['can_share'] = _can_share_library(user, library)
     data['can_review'] = _can_review_library(user, library, share_grants)
+    links = (TestCasePanoramaLink.query
+             .filter_by(library_id=library.id)
+             .order_by(TestCasePanoramaLink.module_path, TestCasePanoramaLink.id)
+             .all())
+    data['panorama_links'] = [link.to_dict() for link in links]
     return jsonify(data)
 
 
@@ -403,6 +491,13 @@ def update_testcase_library(library_id):
     if not _can_manage_library(user, library):
         return jsonify({'error': '无权修改该用例库'}), 403
     data = request.get_json()
+
+    if 'project_name' in data:
+        project_name, perr = _normalize_project_name(data.get('project_name'))
+        if perr:
+            return jsonify({'error': perr}), 400
+        data = dict(data)
+        data['project_name'] = project_name
 
     updatable_fields = ['name', 'description', 'project_name', 'module_name', 'owner', 'status']
     for field in updatable_fields:
@@ -431,7 +526,14 @@ def delete_testcase_library(library_id):
     auto_snapshot(library_id, f'删除用例库 "{library.name}" 前', 'auto')
     db.session.flush()
 
+    affected_module_ids = [
+        link.module_id for link in TestCasePanoramaLink.query.filter_by(library_id=library_id).all()
+    ]
+    TestCasePanoramaLink.query.filter_by(library_id=library_id).delete(synchronize_session=False)
     db.session.delete(library)
+    if affected_module_ids:
+        from app.api.testcase_panorama_links import recalc_module_test_metrics
+        recalc_module_test_metrics(module_ids=affected_module_ids)
     db.session.commit()
     return jsonify({'message': f'用例库 "{library.name}" 已删除'})
 
@@ -701,7 +803,7 @@ def update_library_mindmap(library_id):
     if 'mindmap' not in data:
         return jsonify({'error': 'mindmap 为必填项'}), 400
 
-    library.mindmap = data['mindmap']
+    library.mindmap = _slim_mindmap_for_storage(data['mindmap'])
     db.session.commit()
 
     return jsonify({'message': '脑图已更新'})
@@ -784,6 +886,9 @@ def create_case(library_id):
         updated_by=(data.get('created_by') or getattr(user, '_claw_name', None) or user.username),
     )
     db.session.add(case)
+    db.session.flush()
+    _record_case_change(case, 'created', new_snapshot=snapshot_case(case),
+                        changed_fields_override=['case'])
 
     # 保留同路径占位用例作为目录元信息载体，不再因真实用例创建而删除。
     library.updated_by = _operator()
@@ -813,6 +918,7 @@ def update_case(library_id, case_id):
         return err
     case = TestCase.query.filter_by(library_id=library_id, id=case_id).first_or_404()
     data = request.get_json()
+    old_snapshot = snapshot_case(case)
 
     updatable_fields = ['title', 'priority', 'type', 'content', 'tags', 'module_path', 'created_by',
                         'tapd_story_url', 'tapd_story_title']
@@ -822,6 +928,12 @@ def update_case(library_id, case_id):
 
     case.updated_by = _operator()
     library.updated_by = _operator()
+    new_snapshot = snapshot_case(case)
+    fields = changed_fields(old_snapshot, new_snapshot)
+    if fields:
+        _record_case_change(case, 'updated', old_snapshot=old_snapshot,
+                            new_snapshot=new_snapshot,
+                            changed_fields_override=fields)
 
     db.session.commit()
     return jsonify(case.to_dict())
@@ -835,8 +947,18 @@ def delete_case(library_id, case_id):
     if err:
         return err
     case = TestCase.query.filter_by(library_id=library_id, id=case_id).first_or_404()
+    old_snapshot = snapshot_case(case)
+    _record_case_change(case, 'deleted', old_snapshot=old_snapshot,
+                        changed_fields_override=['case'])
+    affected_module_ids = [link.module_id for link in TestCasePanoramaLink.query.filter_by(
+        library_id=library_id, case_pk=case.id, link_level='case').all()]
+    TestCasePanoramaLink.query.filter_by(
+        library_id=library_id, case_pk=case.id, link_level='case').delete(synchronize_session=False)
     db.session.delete(case)
     library.updated_by = _operator()
+    if affected_module_ids:
+        from app.api.testcase_panorama_links import recalc_module_test_metrics
+        recalc_module_test_metrics(module_ids=affected_module_ids)
     db.session.commit()
     return jsonify({'message': f'用例 "{case.title}" 已删除'})
 
@@ -867,6 +989,7 @@ def batch_create_cases(library_id):
 
     created_cases = []
     base_count = library.cases.filter(TestCase.is_placeholder != True).count()
+    operation_id = data.get('operation_id') or str(uuid.uuid4())
 
     for i, case_data in enumerate(data['cases']):
         case = TestCase(
@@ -885,6 +1008,11 @@ def batch_create_cases(library_id):
             updated_by=(case_data.get('created_by') or getattr(user, '_claw_name', None) or user.username),
         )
         db.session.add(case)
+        db.session.flush()
+        _record_case_change(case, 'batch_created',
+                            new_snapshot=snapshot_case(case),
+                            operation_id=operation_id,
+                            changed_fields_override=['case'])
         created_cases.append(case)
 
     library.updated_by = _operator()
@@ -919,12 +1047,34 @@ def batch_delete_cases(library_id):
     from app.api.snapshots import auto_snapshot
     auto_snapshot(library_id, f'批量删除 {len(data["case_ids"])} 条用例前', 'auto')
 
+    operation_id = data.get('operation_id') or str(uuid.uuid4())
+    cases_to_delete = TestCase.query.filter(
+        TestCase.library_id == library_id,
+        TestCase.id.in_(data['case_ids'])
+    ).all()
+    affected_module_ids = []
+    for case in cases_to_delete:
+        _record_case_change(case, 'batch_deleted',
+                            old_snapshot=snapshot_case(case),
+                            operation_id=operation_id,
+                            changed_fields_override=['case'])
+        case_links = TestCasePanoramaLink.query.filter_by(
+            library_id=library_id, case_pk=case.id, link_level='case').all()
+        affected_module_ids.extend([link.module_id for link in case_links])
+    TestCasePanoramaLink.query.filter(
+        TestCasePanoramaLink.library_id == library_id,
+        TestCasePanoramaLink.case_pk.in_(data['case_ids']),
+        TestCasePanoramaLink.link_level == 'case',
+    ).delete(synchronize_session=False)
     deleted_count = TestCase.query.filter(
         TestCase.library_id == library_id,
         TestCase.id.in_(data['case_ids'])
     ).delete(synchronize_session=False)
 
     library.updated_by = _operator()
+    if affected_module_ids:
+        from app.api.testcase_panorama_links import recalc_module_test_metrics
+        recalc_module_test_metrics(module_ids=affected_module_ids)
     db.session.commit()
 
     return jsonify({'message': f'成功删除 {deleted_count} 个用例'})

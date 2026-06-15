@@ -463,7 +463,7 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
             <div class="form-group"><label class="form-label">用例库名称 *</label><input class="form-input" id="lib-name-input" required></div>
             <div class="form-group"><label class="form-label">描述</label><textarea class="form-textarea" id="lib-desc-input" style="min-height:60px"></textarea></div>
             <div style="display:flex;gap:10px">
-                <div class="form-group" style="flex:1"><label class="form-label">所属项目</label><select class="form-select" id="lib-project-input"><option value="">无</option></select></div>
+                <div class="form-group" style="flex:1"><label class="form-label">所属项目 *</label><select class="form-select" id="lib-project-input" required><option value="">请选择项目</option></select></div>
                 <div class="form-group" style="flex:1"><label class="form-label">负责人</label><input class="form-input" id="lib-owner-input" placeholder="负责人"></div>
             </div>
             <div class="modal-actions">
@@ -650,8 +650,8 @@ let allLibraries = [];
 let selectedLibId = null;
 let selectedPath = null;  // null=全部, 'xxx/yyy'=某目录
 let casesCache = {};      // libId → cases[]
-let collapsedDirs = new Set(); // 存储折叠的目录路径 "libId:path"
-let collapsedLibs = new Set(); // 存储折叠的用例库 ID
+let expandedDirs = new Set(); // 用户手动展开的目录 "libId:path"，默认全部收起
+let expandedLibs = new Set(); // 用户手动展开的用例库 ID，默认全部收起
 let openTabs = [];        // [{id, title, type:'case', caseData}]
 const MAX_TABS = 5;
 
@@ -680,12 +680,14 @@ function dirCases(cases, path, includePlaceholders = true) {
 
 function calcNodeInfo(lib, path) {
     const cases = casesCache[lib.id] || [];
+    const projectName = (lib.project_name || '').trim();
     if (path === null) {
         const real = realCasesOf(cases);
         return {
             type: 'library',
             name: lib.name || `用例库 #${lib.id}`,
             path: '',
+            projectName,
             creator: lib.created_by || lib.owner || '-',
             createdAt: lib.created_at,
             updater: lib.updated_by || '-',
@@ -705,6 +707,7 @@ function calcNodeInfo(lib, path) {
         type: 'module',
         name: path === '' ? '未分类' : path.split('/').pop(),
         path,
+        projectName,
         creator: createdSource.created_by || lib.created_by || lib.owner || '-',
         createdAt: createdSource.created_at || lib.created_at,
         updater: updatedSource.updated_by || updatedSource.created_by || lib.updated_by || '-',
@@ -863,7 +866,7 @@ function renderTree() {
 
         if (search && !lib.name.toLowerCase().includes(search)) return;
 
-        const libCollapsed = collapsedLibs.has(lib.id);
+        const libCollapsed = !expandedLibs.has(lib.id);
 
         const reviewBadge = libReviewBadgeHtml(lib);
         const sharedBadge = libSharedBadgeHtml(lib);
@@ -894,7 +897,7 @@ function renderTree() {
                 const indent = 28 + depth * 14;
                 const hasKids = Object.keys(node._children).length > 0;
                 const collapsedKey = lib.id + ':' + path;
-                const isCollapsed = collapsedDirs.has(collapsedKey);
+                const isCollapsed = !expandedDirs.has(collapsedKey);
                 if (search && !name.toLowerCase().includes(search)) continue;
                 const info = calcNodeInfo(lib, path);
                 const showCreator = info.creator && info.creator !== '-' && info.creator !== inheritedCreator;
@@ -924,14 +927,14 @@ function renderTree() {
 }
 
 function toggleDir(key) {
-    if (collapsedDirs.has(key)) collapsedDirs.delete(key);
-    else collapsedDirs.add(key);
+    if (expandedDirs.has(key)) expandedDirs.delete(key);
+    else expandedDirs.add(key);
     renderTree();
 }
 
 function toggleLib(libId) {
-    if (collapsedLibs.has(libId)) collapsedLibs.delete(libId);
-    else collapsedLibs.add(libId);
+    if (expandedLibs.has(libId)) expandedLibs.delete(libId);
+    else expandedLibs.add(libId);
     renderTree();
 }
 
@@ -1418,7 +1421,10 @@ function openCreateLibraryModal() {
     $('#lib-edit-id').value = '';
     $('#lib-modal-title').textContent = '新建用例库';
     $('#library-form').reset();
-    fillLibProjects();
+    fillLibProjects().then(() => {
+        const cur = $('#project-filter').value;
+        if (cur) $('#lib-project-input').value = cur;
+    });
     $('#library-modal').classList.add('active');
 }
 function closeLibraryModal() { $('#library-modal').classList.remove('active'); }
@@ -1432,10 +1438,15 @@ async function fillLibProjects() {
 
 $('#library-form').addEventListener('submit', async e => {
     e.preventDefault();
+    const projectName = $('#lib-project-input').value.trim();
+    if (!projectName) {
+        showToast('请选择所属项目', 'error');
+        return;
+    }
     const payload = {
         name: $('#lib-name-input').value.trim(),
         description: $('#lib-desc-input').value.trim(),
-        project_name: $('#lib-project-input').value || null,
+        project_name: projectName,
         owner: $('#lib-owner-input').value.trim() || null,
     };
     try {
@@ -1640,15 +1651,36 @@ async function openTestcaseInfoModal(libId, path) {
     document.getElementById('tc-info-modal').classList.add('active');
 
     try {
-        const res = await API.request('GET', `/testcase-libraries/${libId}/reviews`);
+        const [res, links, changes] = await Promise.all([
+            API.request('GET', `/testcase-libraries/${libId}/reviews`),
+            API.request('GET', `/testcase-libraries/${libId}/panorama-links`),
+            API.request('GET', `/testcase-libraries/${libId}/changes?limit=20`),
+        ]);
         const related = filterRelatedReviews(res.reviews || [], path).slice(0, 8);
-        body.innerHTML = renderInfoBody(info, related);
+        body.innerHTML = renderInfoBody(info, related, '', filterPanoramaLinks(links || [], path), filterRecentChanges(changes || [], path));
     } catch (e) {
         body.innerHTML = renderInfoBody(info, [], '评审记录加载失败：' + (e.message || ''));
     }
 }
 
-function renderInfoBody(info, reviews, reviewError = '') {
+function filterPanoramaLinks(links, path) {
+    if (path === null) return links || [];
+    return (links || []).filter(l => {
+        const mp = (l.module_path || '').trim();
+        if (!mp) return true;
+        return mp === path || mp.startsWith(path + '/') || path.startsWith(mp + '/');
+    });
+}
+
+function filterRecentChanges(changes, path) {
+    if (path === null) return changes || [];
+    return (changes || []).filter(c => {
+        const mp = (c.module_path || '').trim();
+        return mp === path || mp.startsWith(path + '/');
+    });
+}
+
+function renderInfoBody(info, reviews, reviewError = '', panoramaLinks = [], recentChanges = []) {
     const scopeText = info.type === 'library'
         ? '整个用例库'
         : (info.path ? `目录：${info.path}` : '未分类目录');
@@ -1656,9 +1688,30 @@ function renderInfoBody(info, reviews, reviewError = '') {
         ? `<div style="color:#ef4444;font-size:0.82rem">${escHtml(reviewError)}</div>`
         : (reviews.length ? reviews.map(renderInfoReviewRow).join('') :
             '<div style="color:var(--text-muted);font-size:0.82rem;padding:8px 0">暂无相关评审记录</div>');
+    const linkHtml = panoramaLinks.length ? panoramaLinks.map(l => `
+        <div class="tc-review-row">
+            <div style="font-weight:600">${escHtml(l.module_name || l.panorama_module_path || '功能模块')}</div>
+            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:3px">
+                ${escHtml(l.panorama_module_path || '')}
+                ${l.module_path ? ` · 目录：${escHtml(l.module_path)}` : ''}
+                · ${l.case_count || 0} 条用例
+            </div>
+        </div>`).join('') : '<div style="color:var(--text-muted);font-size:0.82rem;padding:8px 0">暂无关联功能全景模块</div>';
+    const changeHtml = recentChanges.length ? recentChanges.slice(0, 8).map(c => `
+        <div class="tc-review-row">
+            <div style="display:flex;justify-content:space-between;gap:8px">
+                <strong>${escHtml(c.case_id || '')} ${escHtml(c.case_title || '')}</strong>
+                <span style="font-size:0.76rem;color:var(--text-muted)">${escHtml((c.changed_at || '').slice(0,16))}</span>
+            </div>
+            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:3px">
+                ${escHtml(c.change_type || '')} · ${escHtml(c.changed_by || '')}
+                ${c.module_path ? ` · ${escHtml(c.module_path)}` : ''}
+            </div>
+        </div>`).join('') : '<div style="color:var(--text-muted);font-size:0.82rem;padding:8px 0">暂无最近变更记录</div>';
     return `
         <div class="tc-info-grid">
             <div class="tc-info-label">范围</div><div class="tc-info-value">${escHtml(scopeText)}</div>
+            <div class="tc-info-label">所属项目</div><div class="tc-info-value">${escHtml(info.projectName || '未指定')}</div>
             <div class="tc-info-label">创建者</div><div class="tc-info-value">${escHtml(actorLabel(info.creator))}</div>
             <div class="tc-info-label">创建时间</div><div class="tc-info-value">${escHtml(fmtMetaTime(info.createdAt))}</div>
             <div class="tc-info-label">修改者</div><div class="tc-info-value">${escHtml(actorLabel(info.updater))}</div>
@@ -1666,6 +1719,10 @@ function renderInfoBody(info, reviews, reviewError = '') {
             <div class="tc-info-label">用例数</div><div class="tc-info-value">${info.caseCount || 0} 条</div>
             <div class="tc-info-label">子目录数</div><div class="tc-info-value">${info.dirCount || 0} 个</div>
         </div>
+        <div class="tc-info-section-title">关联功能全景</div>
+        <div>${linkHtml}</div>
+        <div class="tc-info-section-title">最近变更</div>
+        <div>${changeHtml}</div>
         <div class="tc-info-section-title">相关评审记录</div>
         <div>${reviewHtml}</div>
     `;
