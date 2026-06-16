@@ -1403,19 +1403,52 @@ function drawGraph(canvas, W, H) {
         const label = n.label.length > maxChars ? n.label.substring(0, maxChars - 1) + '…' : n.label;
         ctx.fillText(label, n.x, n.y);
 
-        // Child count badge
-        if (n.childCount > 0 && !dimmed) {
-            const bx = n.x + n.radius * 0.65, by = n.y - n.radius * 0.65;
-            ctx.beginPath();
-            ctx.arc(bx, by, 9, 0, Math.PI * 2);
-            ctx.fillStyle = '#3b82f6';
-            ctx.fill();
-            ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 1.5;
-            ctx.stroke();
-            ctx.fillStyle = '#fff';
-            ctx.font = '600 8px "JetBrains Mono", monospace';
-            ctx.fillText(n.childCount, bx, by + 0.5);
+        // Top-right badges: structure mode shows child count; test mode shows case count + risk score.
+        if (!dimmed) {
+            if (topoMetricMode === 'test') {
+                const metric = n.testMetrics || {};
+                const caseCount = Number(metric.subtree_case_count ?? 0);
+                const riskScore = Number(metric.bug_risk_score ?? metric.bug_count ?? 0);
+                const by = n.y - n.radius * 0.7;
+                const gap = 4;
+                const badgeH = 16;
+                const padX = 6;
+                const badges = [
+                    { text: String(caseCount), color: '#2563eb' },
+                    { text: String(riskScore), color: riskScore >= 80 ? '#dc2626' : '#f97316' },
+                ];
+                ctx.font = '700 8px "JetBrains Mono", monospace';
+                const widths = badges.map(b => Math.max(16, ctx.measureText(b.text).width + padX * 2));
+                const totalW = widths[0] + widths[1] + gap;
+                let bx = n.x + n.radius * 0.75 - totalW / 2;
+                badges.forEach((badge, i) => {
+                    const w = widths[i];
+                    ctx.beginPath();
+                    ctx.roundRect(bx, by - badgeH / 2, w, badgeH, 8);
+                    ctx.fillStyle = badge.color;
+                    ctx.fill();
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 1.2;
+                    ctx.stroke();
+                    ctx.fillStyle = '#fff';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(badge.text, bx + w / 2, by + 0.5);
+                    bx += w + gap;
+                });
+            } else if (n.childCount > 0) {
+                const bx = n.x + n.radius * 0.65, by = n.y - n.radius * 0.65;
+                ctx.beginPath();
+                ctx.arc(bx, by, 9, 0, Math.PI * 2);
+                ctx.fillStyle = '#3b82f6';
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+                ctx.fillStyle = '#fff';
+                ctx.font = '600 8px "JetBrains Mono", monospace';
+                ctx.fillText(n.childCount, bx, by + 0.5);
+            }
         }
 
         // NEW badge for recently created modules

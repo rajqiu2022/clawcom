@@ -19,6 +19,9 @@
     </select>
     <input type="text" id="search-input" class="form-input" style="width:180px"
            placeholder="🔍 标题/备注/版本..." oninput="debounceSearch()">
+    <input type="text" id="filter-custom-category" class="form-input" list="custom-category-options"
+           style="width:180px" placeholder="自定义类别（可空）" oninput="debounceSearch()">
+    <datalist id="custom-category-options"></datalist>
     <button class="btn btn-primary" onclick="showCreateModal()">+ 新建报告</button>
 </div>
 {% endblock %}
@@ -69,6 +72,53 @@
         transition: transform 0.15s, box-shadow 0.15s;
     }
     .markdown-body img:hover { transform: scale(1.04); box-shadow: 0 4px 16px rgba(0,0,0,0.22); }
+    /* HTML 报告查看器 */
+    .html-report-viewer {
+        display: flex; flex-direction: column; gap: 8px;
+        min-height: 62vh;
+    }
+    .html-report-viewer iframe {
+        width: 100%; flex: 1; min-height: 58vh;
+        border: 1px solid var(--border, #e2e8f0);
+        border-radius: 8px; background: #fff;
+    }
+    .html-att-preview iframe {
+        width: 100%; height: 52vh; min-height: 360px;
+        border: 1px solid var(--border, #e2e8f0);
+        border-radius: 8px; background: #fff; margin-top: 8px;
+    }
+    #detail-modal .modal {
+        display: flex; flex-direction: column;
+        max-height: 92vh; overflow: hidden;
+    }
+    #detail-modal #detail-body {
+        flex: 1; min-height: 0; overflow: auto;
+    }
+    #detail-modal #detail-body.detail-html-mode {
+        display: flex; flex-direction: column; overflow: hidden;
+    }
+    #detail-modal #detail-body.detail-html-mode .detail-html-top {
+        flex-shrink: 0;
+    }
+    #detail-modal.detail-html-modal .modal {
+        width: min(1200px, 96vw);
+        height: min(92vh, calc(100vh - 32px));
+    }
+    #detail-modal #detail-body.detail-html-mode .detail-html-content {
+        flex: 1; min-height: 0; display: flex; flex-direction: column;
+        border-top: 1px solid var(--border, #e2e8f0); padding-top: 12px;
+    }
+    #detail-modal #detail-body.detail-html-mode .detail-html-content .html-report-viewer {
+        flex: 1; min-height: 0; height: auto;
+    }
+    #detail-modal #detail-body.detail-html-mode .detail-html-content .html-report-viewer iframe {
+        min-height: 0; height: 100%; flex: 1;
+    }
+    #detail-modal #detail-body.detail-html-mode .detail-html-footer {
+        flex-shrink: 0; margin-top: 10px; padding-top: 10px;
+        border-top: 1px solid var(--border, #e2e8f0);
+        max-height: 22vh; overflow: auto;
+    }
     /* 全屏模式 */
     .modal-overlay.fullscreen .modal {
         max-width: 100vw !important; max-height: 100vh !important;
@@ -76,6 +126,12 @@
         border-radius: 0; margin: 0;
     }
     .modal-overlay.fullscreen { padding: 0; }
+    .modal-overlay.fullscreen #detail-body.detail-html-mode .detail-html-footer {
+        max-height: 18vh;
+    }
+    .modal-overlay.fullscreen #detail-body.detail-html-mode .detail-html-content .html-report-viewer iframe {
+        min-height: calc(100vh - 240px);
+    }
     /* Toast 提示 */
     .tr-toast {
         position: fixed; top: 24px; left: 50%; transform: translateX(-50%);
@@ -135,6 +191,12 @@
                     <select class="form-input" id="edit-type" required></select>
                 </div>
                 <div class="form-group">
+                    <label class="form-label">自定义类别（可空，标题唯一）</label>
+                    <input class="form-input" id="edit-custom-category" maxlength="120"
+                           list="custom-category-options"
+                           placeholder="如：每日代码分析报告">
+                </div>
+                <div class="form-group">
                     <label class="form-label">项目 *</label>
                     <select class="form-input" id="edit-project" required></select>
                 </div>
@@ -192,7 +254,7 @@
 
 <!-- 详情 弹窗 -->
 <div class="modal-overlay" id="detail-modal">
-    <div class="modal" style="max-width:980px;max-height:92vh;overflow:auto">
+    <div class="modal" style="max-width:980px">
         <div id="detail-body">
             <div class="loading"><span class="spinner"></span> 加载中...</div>
         </div>
@@ -235,6 +297,7 @@ const HUB = (window.HUB_WEB_URL || window.HUB_PUBLIC_URL || location.origin).rep
 let META = { types: [], risk_levels: [], statuses: [], max_attachment_size: 10485760 };
 let PROJECTS = [];
 let ITERATIONS = [];
+let CUSTOM_CATEGORIES = [];
 let currentPage = 1;
 let pageSize = 20;
 
@@ -287,18 +350,44 @@ function openModal(id) {
 }
 function closeModal(id) {
     const el = document.getElementById(id);
-    if (el) { el.classList.remove('active'); el.classList.remove('fullscreen'); }
+    if (el) {
+        el.classList.remove('active');
+        el.classList.remove('fullscreen');
+        el.classList.remove('detail-html-modal');
+    }
+    if (id === 'detail-modal') {
+        const body = document.getElementById('detail-body');
+        if (body) body.classList.remove('detail-html-mode');
+    }
+}
+
+function buildHtmlReportViewer(reportId, previewUrl) {
+    const src = previewUrl || ('/api/v1/test-reports/' + reportId + '/html-preview');
+    return `<div class="html-report-viewer">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" onclick="window.open('${src}','_blank')">↗ 新窗口打开</button>
+            <span style="color:var(--text-secondary);font-size:12px">HTML 报告在下方全宽展示，可点全屏或新窗口查看</span>
+        </div>
+        <iframe sandbox="allow-scripts allow-same-origin allow-popups" src="${src}" title="HTML 测试报告"></iframe>
+    </div>`;
+}
+
+function isHtmlAttachment(filename) {
+    return (filename || '').toLowerCase().endsWith('.html') || (filename || '').toLowerCase().endsWith('.htm');
 }
 
 async function bootstrapMeta() {
-    const [types, projects, iters] = await Promise.all([
+    const [types, projects, iters, categories] = await Promise.all([
         fetch('/api/v1/test-reports/types').then(r => r.json()),
         fetch('/api/v1/projects').then(r => r.json()).catch(() => []),
         fetch('/api/v1/test-iterations').then(r => r.json()).catch(() => []),
+        fetch('/api/v1/test-reports/custom-categories').then(r => r.json()).catch(() => []),
     ]);
     META = types;
     PROJECTS = Array.isArray(projects) ? projects : (projects.items || []);
     ITERATIONS = Array.isArray(iters) ? iters : (iters.items || []);
+    CUSTOM_CATEGORIES = Array.isArray(categories) ? categories : [];
+    renderCustomCategoryOptions();
 
     const tabs = document.getElementById('type-tabs');
     let tabsHtml = `<div class="type-tab active" data-type="" onclick="selectTypeTab(this, '')">全部类型</div>`;
@@ -320,6 +409,7 @@ async function bootstrapMeta() {
     const fp = document.getElementById('filter-project');
     PROJECTS.forEach(p => fp.insertAdjacentHTML('beforeend',
         `<option value="${p.id}">${escapeHtml(p.name)}</option>`));
+    initProjectIdFilter(fp, PROJECTS, () => loadReports(1));
     const fi = document.getElementById('filter-iteration');
     ITERATIONS.forEach(i => fi.insertAdjacentHTML('beforeend',
         `<option value="${i.id}">${escapeHtml(i.name)}${i.version_name ? ' (' + escapeHtml(i.version_name) + ')' : ''}</option>`));
@@ -347,6 +437,14 @@ async function bootstrapMeta() {
     });
 }
 
+function renderCustomCategoryOptions() {
+    const dl = document.getElementById('custom-category-options');
+    if (!dl) return;
+    dl.innerHTML = CUSTOM_CATEGORIES.map(c =>
+        `<option value="${escapeHtml(c.key || c.title)}">${escapeHtml(c.description || '')}</option>`
+    ).join('');
+}
+
 function selectTypeTab(el, typeKey) {
     document.querySelectorAll('#type-tabs .type-tab').forEach(t => t.classList.remove('active'));
     el.classList.add('active');
@@ -369,12 +467,14 @@ async function loadReports(page) {
     const ft = window._currentTypeKey || '';
     const fr = document.getElementById('filter-risk').value;
     const fs = document.getElementById('filter-status').value;
+    const fc = document.getElementById('filter-custom-category').value.trim();
     const search = document.getElementById('search-input').value.trim();
     if (fp) params.set('project_id', fp);
     if (fi) params.set('iteration_id', fi);
     if (ft) params.set('report_type', ft);
     if (fr) params.set('risk_level', fr);
     if (fs) params.set('status', fs);
+    if (fc) params.set('custom_category_key', fc);
     if (search) params.set('search', search);
     params.set('page', currentPage);
     params.set('page_size', pageSize);
@@ -409,6 +509,7 @@ function renderCard(r) {
                 <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
                     <span style="color:var(--text-secondary);font-size:12px;font-family:monospace;opacity:0.6">#${r.id}</span>
                     ${typeBadge(r.report_type, r.report_type_label)}
+                    ${r.custom_category_key ? `<span style="display:inline-block;padding:2px 8px;border-radius:10px;background:#0ea5e922;color:#0284c7;font-size:12px;border:1px solid #0ea5e966">${escapeHtml(r.custom_category_key)}</span>` : ''}
                     ${riskBadge(r.risk_level, r.risk_level_label)}
                     ${statusBadge(r.status, r.status_label)}
                     <span style="font-weight:600;font-size:15px">${escapeHtml(r.title)}</span>
@@ -449,6 +550,7 @@ function showCreateModal() {
     document.getElementById('edit-remark').value = '';
     document.getElementById('edit-version').value = '';
     document.getElementById('edit-content').value = '';
+    document.getElementById('edit-custom-category').value = document.getElementById('filter-custom-category').value.trim();
     document.getElementById('edit-type').value =
         (window._currentTypeKey) || (META.types[0] || {}).key || 'other_specialized';
     document.getElementById('edit-risk').value = 'tbd';
@@ -468,6 +570,7 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
     const payload = {
         title: document.getElementById('edit-title').value.trim(),
         report_type: document.getElementById('edit-type').value,
+        custom_category_key: document.getElementById('edit-custom-category').value.trim(),
         project_id: parseInt(document.getElementById('edit-project').value) || null,
         iteration_id: parseInt(document.getElementById('edit-iteration').value) || null,
         version_name: document.getElementById('edit-version').value.trim(),
@@ -488,6 +591,7 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
     const data = await r.json();
     if (!r.ok) { showToast('保存失败：' + (data.error || r.status), 'error'); return; }
     closeEditModal();
+    await bootstrapMeta();
     loadReports(currentPage);
     if (!id && data.id) openDetail(data.id);
 });
@@ -495,21 +599,23 @@ document.getElementById('edit-form').addEventListener('submit', async (e) => {
 async function openDetail(id) {
     const modal = document.getElementById('detail-modal');
     modal.classList.remove('fullscreen');
+    modal.classList.remove('detail-html-modal');
     openModal('detail-modal');
     const body = document.getElementById('detail-body');
+    body.classList.remove('detail-html-mode');
     body.innerHTML = '<div class="loading"><span class="spinner"></span> 加载中...</div>';
-    const r = await fetch('/api/v1/test-reports/' + id);
-    const d = await r.json();
-    if (!r.ok) { body.innerHTML = '<div class="empty">加载失败：' + escapeHtml(d.error || r.status) + '</div>'; return; }
-    // 构建附件ID→下载URL映射，用于将正文中"附件#N"替换为内联图片
+    const metaR = await fetch('/api/v1/test-reports/' + id + '?include_content=0');
+    const d = await metaR.json();
+    if (!metaR.ok) { body.innerHTML = '<div class="empty">加载失败：' + escapeHtml(d.error || metaR.status) + '</div>'; return; }
     const attMap = {};
     const imgExts = ['png','jpg','jpeg','gif','webp','bmp','svg'];
-    (d.attachments || []).forEach(a => {
-        attMap[a.id] = a;
-    });
-    // 渲染正文——如果是 markdown，先替换"附件#N"引用为内联图片
-    let contentText = d.content || '';
+    (d.attachments || []).forEach(a => { attMap[a.id] = a; });
+    let contentText = '';
     if (d.format !== 'html') {
+        const fullR = await fetch('/api/v1/test-reports/' + id);
+        const full = await fullR.json();
+        if (!fullR.ok) { body.innerHTML = '<div class="empty">加载正文失败</div>'; return; }
+        contentText = full.content || '';
         contentText = contentText.replace(/附件#(\d+)[\s:：]*[^|\n]*/g, (match, attId) => {
             const a = attMap[parseInt(attId)];
             if (a && imgExts.some(ext => a.filename.toLowerCase().endsWith('.' + ext))) {
@@ -518,20 +624,37 @@ async function openDetail(id) {
             return match;
         });
     }
-    const rendered = (d.format === 'html')
-        ? `<iframe sandbox="" style="width:100%;height:55vh;border:0;background:#fff;border-radius:6px" srcdoc="${escapeHtml(d.content || '')}"></iframe>`
+    const isHtmlReport = d.format === 'html';
+    if (isHtmlReport) {
+        body.classList.add('detail-html-mode');
+        modal.classList.add('detail-html-modal');
+    }
+    const rendered = isHtmlReport
+        ? buildHtmlReportViewer(d.id)
         : renderMd(contentText);
-    // 附件列表——图片类型显示缩略图预览
     const attachments = (d.attachments || []).map(a => {
         const isImg = imgExts.some(ext => a.filename.toLowerCase().endsWith('.' + ext));
-        const previewHtml = isImg
-            ? `<img src="${a.download_url}" style="max-width:120px;max-height:80px;border-radius:4px;cursor:pointer;object-fit:cover" onclick="window.open('${a.download_url}','_blank')" title="点击查看大图">`
-            : '';
-        return `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;margin-top:6px;background:var(--bg-secondary)">
-            ${previewHtml}
-            <span style="flex:1">#${a.id} ${escapeHtml(a.filename)} <span style="color:var(--text-secondary)">(${fmtBytes(a.size_bytes)})</span></span>
-            <a class="btn btn-ghost" href="${a.download_url}" target="_blank">下载</a>
-            ${d.can_edit ? `<button class="btn btn-danger" onclick="deleteAtt(${d.id}, ${a.id})">删除</button>` : ''}
+        const isHtmlAtt = isHtmlAttachment(a.filename);
+        const inlineUrl = a.download_url + (a.download_url.includes('?') ? '&' : '?') + 'inline=1';
+        let previewHtml = '';
+        if (isImg) {
+            previewHtml = `<img src="${a.download_url}" style="max-width:120px;max-height:80px;border-radius:4px;cursor:pointer;object-fit:cover" onclick="window.open('${a.download_url}','_blank')" title="点击查看大图">`;
+        } else if (isHtmlAtt) {
+            previewHtml = `<div class="html-att-preview" style="width:100%">
+                <div style="display:flex;gap:8px;margin-top:6px">
+                    <button class="btn btn-ghost btn-sm" onclick="window.open('${inlineUrl}','_blank')">↗ 新窗口打开</button>
+                </div>
+                <iframe sandbox="allow-scripts allow-same-origin allow-popups" src="${inlineUrl}" title="${escapeHtml(a.filename)}"></iframe>
+            </div>`;
+        }
+        return `<div style="display:flex;flex-direction:column;gap:6px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-top:6px;background:var(--bg-secondary)">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                ${isImg ? `<img src="${a.download_url}" style="max-width:120px;max-height:80px;border-radius:4px;cursor:pointer;object-fit:cover" onclick="window.open('${a.download_url}','_blank')" title="点击查看大图">` : ''}
+                <span style="flex:1">#${a.id} ${escapeHtml(a.filename)} <span style="color:var(--text-secondary)">(${fmtBytes(a.size_bytes)})</span></span>
+                <a class="btn btn-ghost" href="${a.download_url}" target="_blank">下载</a>
+                ${d.can_edit ? `<button class="btn btn-danger" onclick="deleteAtt(${d.id}, ${a.id})">删除</button>` : ''}
+            </div>
+            ${previewHtml && !isImg ? previewHtml : ''}
         </div>`;
     }).join('');
 
@@ -547,22 +670,23 @@ async function openDetail(id) {
         </div>` : '';
 
     const shareSection = d.can_edit ? `
-        <div style="margin-top:14px;padding:10px;border:1px dashed var(--border-light);border-radius:8px;background:var(--bg-secondary)">
+        <div style="padding:10px;border:1px dashed var(--border-light);border-radius:8px;background:var(--bg-secondary)">
             <div style="font-weight:600;margin-bottom:6px">分享外链（项目外可见，匿名只读）</div>
             ${d.is_shared
                 ? `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
                        <input class="form-input" readonly id="share-url-${d.id}"
                               value="${HUB}/r/${d.share_token}" style="flex:1;min-width:240px">
-                       <button class="btn btn-success" onclick="copyShare(${d.id})">复制</button>
+                       <button class="btn btn-success" onclick="openShare(${d.id})">打开</button>
                        <button class="btn btn-info" onclick="enableShare(${d.id}, true)">重新生成</button>
                        <button class="btn btn-danger" onclick="revokeShare(${d.id})">撤销分享</button>
                    </div>`
                 : `<button class="btn btn-primary" onclick="enableShare(${d.id}, false)">生成分享链接</button>`}
-        </div>` : (d.is_shared ? `<div style="margin-top:14px;color:#10b981">🔗 此报告已分享：<a href="${HUB}/r/${d.share_token}" target="_blank">${HUB}/r/${d.share_token}</a></div>` : '');
+        </div>` : (d.is_shared ? `<div style="color:#10b981">🔗 此报告已分享：<a href="${HUB}/r/${d.share_token}" target="_blank">${HUB}/r/${d.share_token}</a></div>` : '');
 
-    body.innerHTML = `
+    const headerBlock = `
         <div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;margin-bottom:8px">
             ${typeBadge(d.report_type, d.report_type_label)}
+            ${d.custom_category_key ? `<span style="padding:2px 8px;border-radius:10px;font-size:12px;background:#0ea5e922;color:#0284c7;border:1px solid #0ea5e966">${escapeHtml(d.custom_category_key)}</span>` : ''}
             ${riskBadge(d.risk_level, d.risk_level_label)}
             ${statusBadge(d.status, d.status_label)}
             ${d.is_hidden ? '<span style="padding:2px 8px;border-radius:10px;font-size:12px;background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b66">隐藏</span>' : ''}
@@ -580,7 +704,24 @@ async function openDetail(id) {
             ${d.updated_at && d.updated_at !== d.created_at ? ' · 修改：' + escapeHtml(d.updated_at.slice(0, 16)) : ''}
         </div>
         ${statusSwitchHtml}
-        ${d.remark ? `<div style="padding:8px 10px;background:var(--bg-secondary);border-left:3px solid var(--accent);border-radius:4px;margin-bottom:10px;color:var(--text-secondary)">${escapeHtml(d.remark)}</div>` : ''}
+        ${d.remark ? `<div style="padding:8px 10px;background:var(--bg-secondary);border-left:3px solid var(--accent);border-radius:4px;margin-bottom:10px;color:var(--text-secondary)">${escapeHtml(d.remark)}</div>` : ''}`;
+
+    if (isHtmlReport) {
+        const footerParts = [];
+        if (attachments) {
+            footerParts.push(`<div><div style="font-weight:600;margin-bottom:6px">附件</div>${attachments}</div>`);
+        }
+        if (shareSection) footerParts.push(shareSection);
+        body.innerHTML = `
+            <div class="detail-html-top">${headerBlock}</div>
+            <div class="detail-html-content">${rendered}</div>
+            ${footerParts.length ? `<div class="detail-html-footer">${footerParts.join('')}</div>` : ''}
+        `;
+        return;
+    }
+
+    body.innerHTML = `
+        ${headerBlock}
         <div class="markdown-body" style="border-top:1px solid var(--border);padding-top:12px">${rendered}</div>
         <div style="margin-top:14px">
             <div style="font-weight:600;margin-bottom:6px">附件</div>
@@ -592,7 +733,7 @@ async function openDetail(id) {
                     <span style="color:var(--text-secondary);font-size:12px;opacity:0.7">单个 ≤ 10MB，超出请联系管理员</span>
                 </div>` : ''}
         </div>
-        ${shareSection}
+        ${shareSection ? `<div style="margin-top:14px">${shareSection}</div>` : ''}
     `;
 }
 
@@ -615,6 +756,7 @@ async function editReport(id) {
     document.getElementById('edit-report-id').value = d.id;
     document.getElementById('edit-title').value = d.title || '';
     document.getElementById('edit-type').value = d.report_type;
+    document.getElementById('edit-custom-category').value = d.custom_category_key || '';
     document.getElementById('edit-project').value = d.project_id || '';
     document.getElementById('edit-iteration').value = d.iteration_id || '';
     document.getElementById('edit-version').value = d.version_name || '';
@@ -650,12 +792,10 @@ async function revokeShare(id) {
     openDetail(id);
 }
 
-function copyShare(id) {
+function openShare(id) {
     const el = document.getElementById('share-url-' + id);
-    if (!el) return;
-    el.select();
-    document.execCommand('copy');
-    showToast('已复制到剪贴板', 'success');
+    if (!el || !el.value) return;
+    window.open(el.value, '_blank', 'noopener');
 }
 
 async function uploadAtt(reportId) {

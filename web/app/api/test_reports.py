@@ -13,6 +13,8 @@
   GET    /api/v1/test-reports/<id>/attachments/<aid>/download  下载附件（登录态）
   DELETE /api/v1/test-reports/<id>/attachments/<aid>        删除附件
   GET    /api/v1/test-reports/shared/<token>                公开匿名只读（PUBLIC_PATHS 放行）
+  GET    /api/v1/test-reports/<id>/html-preview             HTML 正文独立预览（iframe 用）
+  GET    /api/v1/test-reports/shared/<token>/html-preview   分享页 HTML 预览
 
 权限模型：
   - 列表/详情：项目成员可见；admin/super_admin 全部可见
@@ -31,7 +33,7 @@ from urllib.parse import quote
 
 from flask import (
     request, jsonify, session as flask_session,
-    send_from_directory, current_app, abort,
+    send_from_directory, current_app, abort, Response,
 )
 from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
@@ -41,6 +43,7 @@ from app import db
 from app.models import (
     TestReport,
     TestReportAttachment,
+    TestReportCustomCategory,
     TEST_REPORT_TYPES,
     TEST_REPORT_RISK_LEVELS,
     TEST_REPORT_SOURCE_REF_TYPES,
@@ -52,6 +55,11 @@ from app.models import (
     _now,
 )
 from app.api import api_bp
+from app.services.test_report_categories import (
+    build_report_link,
+    normalize_custom_category_key,
+    parse_report_time_range,
+)
 
 
 # ============================================================
@@ -241,6 +249,97 @@ def list_test_report_types():
     })
 
 
+@api_bp.route('/test-reports/custom-categories', methods=['GET'])
+def list_test_report_custom_categories():
+    """列出自定义报告类别；标题就是 key，与固定 report_type 分开存储。"""
+    rows = (TestReportCustomCategory.query
+            .order_by(TestReportCustomCategory.updated_at.desc(),
+                      TestReportCustomCategory.id.desc())
+            .all())
+    return jsonify([r.to_dict() for r in rows])
+
+
+@api_bp.route('/test-reports/custom-categories', methods=['POST'])
+def create_test_report_custom_category():
+    caller = _get_caller()
+    if not caller:
+        return jsonify({'error': '未认证'}), 401
+    data = request.get_json(silent=True) or {}
+    try:
+        key = normalize_custom_category_key(data.get('title') or data.get('key'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    existed = TestReportCustomCategory.query.filter_by(title=key).first()
+    if existed:
+        return jsonify({'error': '自定义类别标题已存在', 'category': existed.to_dict()}), 409
+    row = TestReportCustomCategory(
+        title=key,
+        description=(data.get('description') or '').strip()[:500],
+        created_by=_operator_name(caller),
+    )
+    db.session.add(row)
+    db.session.commit()
+    return jsonify(row.to_dict()), 201
+
+
+@api_bp.route('/test-reports/custom-category-reports', methods=['GET'])
+def list_reports_by_custom_category():
+    """按自定义类别取轻量报告列表。
+
+    参数：
+      category/custom_category_key/title：类别标题 key
+      limit：默认 10；传 all=1 时不限制
+      since/until：创建时间范围
+    """
+    caller = _get_caller()
+    if not caller:
+        return jsonify({'error': '未认证'}), 401
+    try:
+        key = normalize_custom_category_key(
+            request.args.get('category')
+            or request.args.get('custom_category_key')
+            or request.args.get('title')
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
+        since, until = parse_report_time_range(
+            request.args.get('since') or request.args.get('start_date'),
+            request.args.get('until') or request.args.get('end_date'),
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    q = TestReport.query.filter_by(
+        is_deleted=False,
+        custom_category_key=key,
+    )
+    if since:
+        q = q.filter(TestReport.created_at >= since)
+    if until:
+        q = q.filter(TestReport.created_at <= until)
+    q = q.order_by(TestReport.created_at.desc(), TestReport.id.desc())
+    if request.args.get('all') != '1':
+        limit = min(max(_parse_int(request.args.get('limit'), 10), 1), 500)
+        q = q.limit(limit)
+    reports = [r for r in q.all() if _can_view(caller, r)]
+    hub = _hub_web_base()
+    return jsonify({
+        'category': key,
+        'count': len(reports),
+        'items': [{
+            'id': r.id,
+            'title': r.title,
+            'created_at': str(r.created_at) if r.created_at else None,
+            'created_task': {
+                'source_ref_type': r.source_ref_type or 'manual',
+                'source_ref_id': r.source_ref_id,
+            },
+            'report_link': build_report_link(hub, r.id),
+        } for r in reports],
+    })
+
+
 # ============================================================
 # 列表 / 创建
 # ============================================================
@@ -249,6 +348,43 @@ def _parse_int(v, default=None):
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+def _hub_web_base() -> str:
+    return (os.environ.get('HUB_WEB_URL')
+            or os.environ.get('HUB_PUBLIC_URL')
+            or 'https://clawteam.woa.com:18800').rstrip('/')
+
+
+def _operator_name(caller: dict | None) -> str:
+    if not caller:
+        return 'system'
+    return caller.get('name') or caller.get('username') or 'system'
+
+
+def _normalize_custom_category_from_payload(data: dict):
+    raw = data.get('custom_category_key')
+    if raw is None:
+        raw = data.get('custom_category')
+    if raw is None:
+        raw = data.get('custom_category_title')
+    if raw is None or str(raw).strip() == '':
+        return ''
+    return normalize_custom_category_key(raw)
+
+
+def _ensure_custom_category(key: str, caller: dict | None):
+    if not key:
+        return None
+    category = TestReportCustomCategory.query.filter_by(title=key).first()
+    if category:
+        return category
+    category = TestReportCustomCategory(
+        title=key,
+        created_by=_operator_name(caller),
+    )
+    db.session.add(category)
+    return category
 
 
 @api_bp.route('/test-reports', methods=['GET'])
@@ -287,6 +423,11 @@ def list_test_reports():
     report_type = (request.args.get('report_type') or '').strip()
     if report_type:
         q = q.filter(TestReport.report_type == report_type)
+    custom_category_key = (request.args.get('custom_category_key')
+                           or request.args.get('custom_category')
+                           or '').strip()
+    if custom_category_key:
+        q = q.filter(TestReport.custom_category_key == custom_category_key)
     risk_level = (request.args.get('risk_level') or '').strip()
     if risk_level:
         q = q.filter(TestReport.risk_level == risk_level)
@@ -377,10 +518,15 @@ def create_test_report():
     status = (data.get('status') or 'draft').strip()
     if status not in TEST_REPORT_STATUSES:
         status = 'draft'
+    try:
+        custom_category_key = _normalize_custom_category_from_payload(data)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
     report = TestReport(
         title=title,
         report_type=report_type,
+        custom_category_key=custom_category_key,
         remark=(data.get('remark') or '').strip()[:500],
         project_id=project_id,
         iteration_id=iteration_id,
@@ -399,6 +545,7 @@ def create_test_report():
         submitter_name=caller['name'],
         is_hidden=bool(data.get('is_hidden', False)),
     )
+    _ensure_custom_category(custom_category_key, caller)
     db.session.add(report)
     try:
         db.session.commit()
@@ -419,9 +566,47 @@ def get_test_report(report_id):
         return jsonify({'error': '报告已删除'}), 404
     if not _can_view(caller, report):
         return jsonify({'error': '无权查看'}), 403
-    data = report.to_dict(include_content=True)
+    include_content = request.args.get('include_content', '1').lower() not in ('0', 'false', 'no')
+    data = report.to_dict(include_content=include_content)
     data['can_edit'] = _can_edit(caller, report)
     return jsonify(data)
+
+
+def _html_preview_response(report: TestReport) -> Response:
+    """返回 HTML 报告正文，供 iframe / 新窗口直接渲染。"""
+    body = report.content or ''
+    if not body.strip():
+        body = '<!doctype html><html><body style="font-family:sans-serif;padding:24px;color:#64748b">（无 HTML 正文）</body></html>'
+    return Response(body, mimetype='text/html; charset=utf-8')
+
+
+@api_bp.route('/test-reports/<int:report_id>/html-preview', methods=['GET'])
+def html_preview_report(report_id):
+    """HTML 格式报告正文预览（避免详情 JSON 塞 4MB+ 进 srcdoc）。"""
+    caller = _get_caller()
+    report = TestReport.query.get_or_404(report_id)
+    if report.is_deleted:
+        return jsonify({'error': '报告已删除'}), 404
+    if not _can_view(caller, report):
+        return jsonify({'error': '无权查看'}), 403
+    if (report.format or 'markdown') != 'html':
+        return jsonify({'error': '该报告不是 HTML 格式'}), 400
+    return _html_preview_response(report)
+
+
+@api_bp.route('/test-reports/shared/<token>/html-preview', methods=['GET'])
+def html_preview_shared_report(token):
+    """分享外链 HTML 预览（PUBLIC_PATHS 已放行 /api/v1/test-reports/shared/）。"""
+    if not token or len(token) < 8:
+        return jsonify({'error': 'token 非法'}), 404
+    report = TestReport.query.filter_by(
+        share_token=token, is_shared=True, is_deleted=False,
+    ).first()
+    if not report:
+        return jsonify({'error': '分享链接无效或已撤销'}), 404
+    if (report.format or 'markdown') != 'html':
+        return jsonify({'error': '该报告不是 HTML 格式'}), 400
+    return _html_preview_response(report)
 
 
 @api_bp.route('/test-reports/<int:report_id>', methods=['PUT'])
@@ -447,6 +632,12 @@ def update_test_report(report_id):
             return jsonify({'error': 'report_type 非法'}), 400
         if rt:
             report.report_type = rt
+    if any(k in data for k in ('custom_category_key', 'custom_category', 'custom_category_title')):
+        try:
+            report.custom_category_key = _normalize_custom_category_from_payload(data)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+        _ensure_custom_category(report.custom_category_key, caller)
     if 'remark' in data:
         report.remark = (data['remark'] or '').strip()[:500]
     if 'content' in data:
@@ -696,20 +887,24 @@ def download_attachment(report_id, att_id):
     full_path = os.path.join(target_dir, att.stored_name)
     if not os.path.exists(full_path):
         return jsonify({'error': '附件文件已丢失'}), 410
-    # send_from_directory 支持原文件名下载头
+    inline = request.args.get('inline', '').lower() in ('1', 'true', 'yes')
+    as_attachment = not inline
     resp = send_from_directory(
         target_dir, att.stored_name,
-        as_attachment=True,
+        as_attachment=as_attachment,
         download_name=att.filename,
     )
     # 中文文件名兼容
     try:
         encoded = quote(att.filename)
+        disp = 'inline' if inline else 'attachment'
         resp.headers['Content-Disposition'] = (
-            f"attachment; filename*=UTF-8''{encoded}"
+            f"{disp}; filename*=UTF-8''{encoded}"
         )
     except Exception:
         pass
+    if inline and (att.filename or '').lower().endswith('.html'):
+        resp.headers['Content-Type'] = 'text/html; charset=utf-8'
     return resp
 
 

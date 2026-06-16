@@ -14,6 +14,7 @@
 - **附件**：10MB 上限，超限提示找管理员
 - **分享外链**：匿名只读 `/r/<token>`，可随时撤销
 - **来源追溯**：source_ref_type/_id 反向关联到测试计划/任务/需求迭代/工程批次
+- **自定义类别**：`custom_category_key` 使用类别标题作为唯一 key，可按类别获取最新/全部/时间段报告列表
 
 ---
 
@@ -43,6 +44,7 @@ Content-Type: application/json
   "title": "v3.2 发布前功能回归测试报告",
   "report_type": "feature_test",
   "report_type_label": "功能需求测试",
+  "custom_category_key": "",
   "remark": "100% 用例已执行，3 个 P2 遗留，可发布",
   "risk_level": "medium",
   "risk_level_label": "中",
@@ -85,6 +87,7 @@ Content-Type: application/json
 | `format` | `markdown`/`html` | 正文格式 |
 | `source_ref_type` | `manual`/`test_plan`/`test_task`/`requirement_iteration`/`engineering_batch` | 来源追溯 |
 | `is_hidden` | `true`/`false`（默认 false） | 隐藏报告：Web 列表不显示，但 Agent 正常可见、分享链接仍有效 |
+| `custom_category_key` | string（可空） | 自定义类别标题；为空时保持 6 类固定 `report_type` 视图，不冲突 |
 
 ---
 
@@ -120,6 +123,7 @@ GET /api/v1/test-reports/types
 ```
 GET /api/v1/test-reports?project_id=1&report_type=feature_test&risk_level=medium
     &iteration_id=8&source_ref_type=test_plan&source_ref_id=15
+    &custom_category_key=每日代码分析报告
     &search=v3.2&page=1&page_size=20
 ```
 
@@ -161,6 +165,7 @@ POST /api/v1/test-reports
   "remark": "100% 用例已执行，3个P2遗留",   // 可选，≤500
   "risk_level": "medium",                 // 可选，默认 tbd
   "format": "markdown",                   // 可选，默认 markdown
+  "custom_category_key": "每日代码分析报告", // 可选；为空时不归入自定义类别
   "content": "# 报告\n\n## 测试概况\n...",  // 可选
   "source_ref_type": "test_plan",         // 可选，标注来源
   "source_ref_id": 15,                    // 可选
@@ -195,7 +200,79 @@ DELETE /api/v1/test-reports/{REPORT_ID}
 
 ---
 
-## 二、附件管理
+## 二、自定义类别
+
+自定义类别与固定 `report_type` 分开存储，不会改变 6 类报告类型。类别标题就是 key，不能重复；报告不传 `custom_category_key` 或传空字符串时，保持原有展示和查询行为。
+
+### 7. 获取自定义类别列表
+
+```
+GET /api/v1/test-reports/custom-categories
+```
+
+响应：
+
+```json
+[
+  {"id": 1, "title": "每日代码分析报告", "key": "每日代码分析报告", "description": ""}
+]
+```
+
+### 8. 创建自定义类别
+
+```
+POST /api/v1/test-reports/custom-categories
+
+{
+  "title": "每日代码分析报告",
+  "description": "Agent 每日工程扫描/代码分析产物"
+}
+```
+
+标题重复返回 409。创建报告时直接传新的 `custom_category_key` 也会自动创建对应类别记录。
+
+### 9. 按自定义类别查询报告列表
+
+```bash
+# 最新 10 份（默认）
+GET /api/v1/test-reports/custom-category-reports?category=每日代码分析报告
+
+# 最新 N 份
+GET /api/v1/test-reports/custom-category-reports?category=每日代码分析报告&limit=20
+
+# 全部
+GET /api/v1/test-reports/custom-category-reports?category=每日代码分析报告&all=1
+
+# 时间段
+GET /api/v1/test-reports/custom-category-reports?category=每日代码分析报告&since=2026-06-01&until=2026-06-16T23:59
+```
+
+返回：
+
+```json
+{
+  "category": "每日代码分析报告",
+  "count": 10,
+  "items": [
+    {
+      "id": 42,
+      "title": "每日代码分析报告-2026-06-16",
+      "created_at": "2026-06-16 21:30:00",
+      "created_task": {
+        "source_ref_type": "engineering_batch",
+        "source_ref_id": 188
+      },
+      "report_link": "https://clawteam.woa.com/test-reports/42"
+    }
+  ]
+}
+```
+
+Agent 收到“取某类报告最新 10 份 / 全部 / 某时间段”时，优先用 `custom-category-reports`，不要自己拉全量报告再过滤。
+
+---
+
+## 三、附件管理
 
 ### 7. 上传附件（≤10MB）
 

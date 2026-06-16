@@ -4444,6 +4444,8 @@ class TestReport(db.Model):
                             comment='version_plan/feature_test/specialized_test/'
                                     'requirement_analysis/engineering_analysis/'
                                     'other_specialized')
+    custom_category_key = db.Column(db.String(120), default='', index=True,
+                                    comment='自定义报告类别 key；为空保持固定 report_type 视图')
     remark = db.Column(db.String(500), default='', comment='简短备注/说明（一句话）')
 
     # 关联
@@ -4547,6 +4549,7 @@ class TestReport(db.Model):
             'title': self.title,
             'report_type': self.report_type,
             'report_type_label': type_label,
+            'custom_category_key': self.custom_category_key or '',
             'remark': self.remark or '',
             'risk_level': self.risk_level or 'tbd',
             'risk_level_label': risk_label,
@@ -4975,6 +4978,30 @@ class GameModuleChangeLog(db.Model):
             'source': self.source,
             'created_by': self.created_by,
             'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class TestReportCustomCategory(db.Model):
+    """测试报告自定义类别；标题本身作为唯一 key。"""
+    __tablename__ = 'test_report_custom_categories'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    title = db.Column(db.String(120), nullable=False, unique=True, index=True,
+                      comment='类别标题，也是 API 查询 key')
+    description = db.Column(db.String(500), default='')
+    created_by = db.Column(db.String(120), default='')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'title': self.title,
+            'key': self.title,
+            'description': self.description or '',
+            'created_by': self.created_by or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
         }
 
 

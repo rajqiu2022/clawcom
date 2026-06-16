@@ -1537,6 +1537,7 @@ def create_app(config_name=None):
                                 id INTEGER PRIMARY KEY AUTO_INCREMENT,
                                 title VARCHAR(200) NOT NULL,
                                 report_type VARCHAR(40) NOT NULL DEFAULT 'other_specialized',
+                                custom_category_key VARCHAR(120) DEFAULT '',
                                 remark VARCHAR(500) DEFAULT '',
                                 project_id INTEGER NOT NULL,
                                 iteration_id INTEGER DEFAULT NULL,
@@ -1563,6 +1564,7 @@ def create_app(config_name=None):
                                 FOREIGN KEY (submitter_user_id) REFERENCES users(id),
                                 FOREIGN KEY (submitter_claw_id) REFERENCES openclaw_instances(id),
                                 INDEX ix_test_reports_proj_type (project_id, report_type),
+                                INDEX ix_test_reports_custom_category (custom_category_key),
                                 INDEX ix_test_reports_proj_iter (project_id, iteration_id),
                                 INDEX ix_test_reports_source (source_ref_type, source_ref_id),
                                 INDEX ix_test_reports_deleted (is_deleted)
@@ -1571,6 +1573,39 @@ def create_app(config_name=None):
                         logger.info('test_reports 表已创建')
                     except Exception as e:
                         logger.info(f'test_reports 表创建跳过: {e}')
+
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS test_report_custom_categories (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                title VARCHAR(120) NOT NULL UNIQUE,
+                                description VARCHAR(500) DEFAULT '',
+                                created_by VARCHAR(120) DEFAULT '',
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                                INDEX ix_test_report_custom_categories_title (title)
+                            )
+                        """))
+                        logger.info('test_report_custom_categories 表已创建')
+                    except Exception as e:
+                        logger.info(f'test_report_custom_categories 表创建跳过: {e}')
+
+                    try:
+                        conn.execute(text(
+                            "ALTER TABLE test_reports "
+                            "ADD COLUMN custom_category_key VARCHAR(120) DEFAULT '' "
+                            "COMMENT '自定义报告类别 key'"
+                        ))
+                        logger.info('test_reports.custom_category_key 已添加')
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute(text(
+                            "ALTER TABLE test_reports "
+                            "ADD INDEX ix_test_reports_custom_category (custom_category_key)"
+                        ))
+                    except Exception:
+                        pass
 
                     try:
                         conn.execute(text("""
