@@ -187,6 +187,20 @@
     border-radius: 8px;
     background: rgba(224,168,0,.06);
 }
+.kn-share-quick {
+    border: 1px solid rgba(16,185,129,.45);
+    border-radius: 999px;
+    padding: 2px 9px;
+    background: rgba(16,185,129,.1);
+    color: #10b981;
+    cursor: pointer;
+    font-size: .75rem;
+    font-weight: 600;
+}
+.kn-share-quick:hover {
+    background: rgba(16,185,129,.2);
+    border-color: #10b981;
+}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/vditor@3.10.8/dist/index.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
@@ -438,6 +452,11 @@ function renderEntry(e) {
                 <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
                 ${e.project_name ? `<span class="tag tag-blue">${escapeHtml(e.project_name)}</span>` : ''}
                 ${e.is_shared ? '<span class="tag tag-yellow">🔗 已分享</span>' : ''}
+                ${e.can_manage_share ? `
+                    <button class="kn-share-quick"
+                            onclick="event.stopPropagation();${e.is_shared ? `openKnowledgeShare(${e.id})` : `manageKnowledgeShare(${e.id}, 'enable')`}">
+                        ${e.is_shared ? '↗ 打开分享' : '🔗 分享'}
+                    </button>` : ''}
             </div>
             <div class="kn-card-footer">
                 ${submitter ? `
@@ -571,6 +590,7 @@ async function showDetail(id) {
                     <input class="form-input" id="share-url-${e.id}" readonly
                            value="${escapeHtml(shareUrl)}" style="flex:1;min-width:260px">
                     <button class="btn btn-sm btn-success" onclick="openKnowledgeShare(${e.id})">独立窗口打开</button>
+                    <button class="btn btn-sm btn-ghost" onclick="copyKnowledgeShare(${e.id})">复制链接</button>
                     <button class="btn btn-sm btn-info" onclick="manageKnowledgeShare(${e.id}, 'refresh')">重新生成</button>
                     <button class="btn btn-sm btn-danger" onclick="manageKnowledgeShare(${e.id}, 'revoke')">撤销分享</button>
                 </div>
@@ -681,6 +701,22 @@ function openKnowledgeShare(id) {
         return;
     }
     window.open(url, '_blank', 'noopener');
+}
+
+async function copyKnowledgeShare(id) {
+    const input = document.getElementById('share-url-' + id);
+    if (!input || !input.value) {
+        showToast('请先生成分享链接', 'error');
+        return;
+    }
+    try {
+        await navigator.clipboard.writeText(input.value);
+        showToast('分享链接已复制', 'success');
+    } catch (_) {
+        input.select();
+        document.execCommand('copy');
+        showToast('分享链接已复制', 'success');
+    }
 }
 
 // 全屏查看知识详情

@@ -18,6 +18,8 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
         self.assertIn('window.open(', text)
         self.assertIn('share-url-', text)
         self.assertIn('分享外链（匿名只读）', text)
+        self.assertIn('kn-share-quick', text)
+        self.assertIn('复制链接', text)
         self.assertIn('/export.md', text)
         self.assertIn('仅收藏', text)
 
