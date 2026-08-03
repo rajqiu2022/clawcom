@@ -8,6 +8,7 @@ import json
 from datetime import datetime
 from flask import request, jsonify
 from sqlalchemy import desc, or_
+from sqlalchemy.orm import defer
 from app import db
 from app.models import (
     TestCaseLibrary, TestCase, Project, OpenClawInstance, User,
@@ -17,6 +18,10 @@ from app.models import (
 from app.api import api_bp
 from app.api.audit import log_action
 from app.services.testcase_panorama_links import changed_fields, snapshot_case
+from app.services.test_case_delete import (
+    cleanup_test_case_dependencies,
+    cleanup_test_case_library_dependencies,
+)
 
 
 def _get_current_user():
@@ -223,9 +228,14 @@ def _ensure_library_access(library, write=False, share_grants=None):
     if not user:
         return None, (jsonify({'error': '未登录'}), 401)
     if write:
-        if not _can_manage_library(user, library):
-            return user, (jsonify({'error': '无权操作该用例库'}), 403)
-        return user, None
+        if _can_manage_library(user, library):
+            return user, None
+        # 显式共享为 editor 的用户/claw 可编辑内容（用例/脑图/目录/导入）
+        if share_grants is None:
+            share_grants = _list_active_library_share_grants(user)
+        if share_grants.get(library.id) == 'editor':
+            return user, None
+        return user, (jsonify({'error': '无权操作该用例库'}), 403)
 
     if user.role == 'super_admin':
         return user, None
@@ -362,7 +372,7 @@ def list_testcase_libraries():
             )
         )
 
-    libraries = query.order_by(TestCaseLibrary.updated_at.desc()).all()
+    libraries = query.options(defer(TestCaseLibrary.mindmap)).order_by(TestCaseLibrary.updated_at.desc()).all()
     share_grants = {} if user.role == 'super_admin' else _list_active_library_share_grants(user)
     if user.role != 'super_admin':
         user_projects = _collect_user_project_ids(user)
@@ -521,15 +531,13 @@ def delete_testcase_library(library_id):
     if not _can_manage_library(user, library):
         return jsonify({'error': '无权删除该用例库'}), 403
 
-    # 自动快照：删库前保存（最后的安全网）
-    from app.api.snapshots import auto_snapshot
-    auto_snapshot(library_id, f'删除用例库 "{library.name}" 前', 'auto')
-    db.session.flush()
-
-    affected_module_ids = [
-        link.module_id for link in TestCasePanoramaLink.query.filter_by(library_id=library_id).all()
+    case_ids = [
+        row[0] for row in db.session.query(TestCase.id)
+        .filter_by(library_id=library_id).all()
     ]
-    TestCasePanoramaLink.query.filter_by(library_id=library_id).delete(synchronize_session=False)
+    affected_module_ids = cleanup_test_case_library_dependencies(
+        library_id, case_ids,
+    )
     db.session.delete(library)
     if affected_module_ids:
         from app.api.testcase_panorama_links import recalc_module_test_metrics
@@ -538,7 +546,9 @@ def delete_testcase_library(library_id):
     return jsonify({'message': f'用例库 "{library.name}" 已删除'})
 
 
-# ==================== 目录树 API ====================
+
+
+
 
 @api_bp.route('/testcase-libraries/<int:library_id>/modules', methods=['GET'])
 def get_library_modules(library_id):
@@ -782,7 +792,7 @@ def get_library_mindmap(library_id):
     mindmap = build_mindmap_from_cases(cases)
 
     # 更新脑图结构到数据库
-    library.mindmap = mindmap
+    library.mindmap = _slim_mindmap_for_storage(mindmap)
     db.session.commit()
 
     return jsonify(mindmap)
@@ -807,6 +817,53 @@ def update_library_mindmap(library_id):
     db.session.commit()
 
     return jsonify({'message': '脑图已更新'})
+
+
+@api_bp.route('/testcase-libraries/<int:library_id>/directory-mindmap',
+              methods=['GET'])
+def get_library_directory_mindmap(library_id):
+    """按目录层级返回脑图，可从任意目录开始。
+
+    查询参数：
+        module_path  起始目录，缺省=整库；空串 `?module_path=` 表示"(未分类)"根目录
+        max_nodes    **用例叶子**上限（默认 2000，上限 5000），超限返回 truncated=true。
+                     只限叶子：目录树与各目录 case_count 始终完整准确。
+
+    鉴权走**用例库权限**。评审场景（评审人可能没有用例库权限）请用
+    `GET /topics/<id>/review-mindmap`，那条走课题可见性。
+    本接口不返回评审标记，保持用例库视图与评审镜像层隔离。
+    """
+    from app.services.case_mindmap import (DEFAULT_MAX_LEAVES,
+                                           build_directory_mindmap)
+
+    library = TestCaseLibrary.query.get_or_404(library_id)
+    _, err = _ensure_library_access(library, write=False)
+    if err:
+        return err
+
+    raw_path = request.args.get('module_path')
+    scope_type = 'library' if raw_path is None else 'module'
+    module_path = (raw_path or '').strip().strip('/')
+
+    try:
+        max_nodes = int(request.args.get('max_nodes', DEFAULT_MAX_LEAVES))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'max_nodes 必须是整数'}), 400
+    max_nodes = max(50, min(max_nodes, 5000))
+
+    cases = _scope_case_filter(library_id, scope_type, module_path,
+                               include_placeholders=True).all()
+
+    root_text = (module_path.split('/')[-1] if module_path
+                 else (library.name or '用例库#%d' % library_id))
+    if scope_type == 'module' and not module_path:
+        root_text = '(未分类)'
+
+    mindmap = build_directory_mindmap(
+        root_text, cases, root_module_path=module_path, max_nodes=max_nodes)
+    mindmap['library_id'] = library_id
+    mindmap['library_name'] = library.name
+    return jsonify(mindmap)
 
 
 # ==================== 用例 CRUD ====================
@@ -852,7 +909,15 @@ def list_library_cases(library_id):
     if search:
         query = query.filter(TestCase.title.ilike(f'%{search}%'))
 
-    cases = query.order_by(TestCase.created_at.desc()).all()
+    query = query.order_by(TestCase.created_at.desc())
+    page = request.args.get('page', type=int)
+    page_size = request.args.get('page_size', type=int)
+    if page is not None or page_size is not None:
+        page = max(page or 1, 1)
+        page_size = min(max(page_size or 50, 1), 200)
+        query = query.offset((page - 1) * page_size).limit(page_size)
+
+    cases = query.all()
     return jsonify([c.to_dict() for c in cases])
 
 
@@ -950,10 +1015,7 @@ def delete_case(library_id, case_id):
     old_snapshot = snapshot_case(case)
     _record_case_change(case, 'deleted', old_snapshot=old_snapshot,
                         changed_fields_override=['case'])
-    affected_module_ids = [link.module_id for link in TestCasePanoramaLink.query.filter_by(
-        library_id=library_id, case_pk=case.id, link_level='case').all()]
-    TestCasePanoramaLink.query.filter_by(
-        library_id=library_id, case_pk=case.id, link_level='case').delete(synchronize_session=False)
+    affected_module_ids = cleanup_test_case_dependencies([case.id])
     db.session.delete(case)
     library.updated_by = _operator()
     if affected_module_ids:
@@ -1052,20 +1114,13 @@ def batch_delete_cases(library_id):
         TestCase.library_id == library_id,
         TestCase.id.in_(data['case_ids'])
     ).all()
-    affected_module_ids = []
+    case_pk_list = [case.id for case in cases_to_delete]
     for case in cases_to_delete:
         _record_case_change(case, 'batch_deleted',
                             old_snapshot=snapshot_case(case),
                             operation_id=operation_id,
                             changed_fields_override=['case'])
-        case_links = TestCasePanoramaLink.query.filter_by(
-            library_id=library_id, case_pk=case.id, link_level='case').all()
-        affected_module_ids.extend([link.module_id for link in case_links])
-    TestCasePanoramaLink.query.filter(
-        TestCasePanoramaLink.library_id == library_id,
-        TestCasePanoramaLink.case_pk.in_(data['case_ids']),
-        TestCasePanoramaLink.link_level == 'case',
-    ).delete(synchronize_session=False)
+    affected_module_ids = cleanup_test_case_dependencies(case_pk_list)
     deleted_count = TestCase.query.filter(
         TestCase.library_id == library_id,
         TestCase.id.in_(data['case_ids'])
@@ -1643,6 +1698,52 @@ def _sync_topic_review_round(review, new_round_status):
         topic.review_status = 'closed'
 
 
+def _scope_case_filter(library_id, scope_type, scope_module_path,
+                       include_placeholders=False):
+    """构造评审范围内的用例查询。
+
+    目录范围按前缀匹配整棵子树，与 `get_library_cases` 的 module_path 过滤保持一致。
+    """
+    query = TestCase.query.filter_by(library_id=library_id)
+    if not include_placeholders:
+        query = query.filter(db.or_(
+            TestCase.is_placeholder.is_(False),
+            TestCase.is_placeholder.is_(None),
+        ))
+    if scope_type == 'module':
+        path = (scope_module_path or '').strip()
+        if path:
+            query = query.filter(db.or_(
+                TestCase.module_path == path,
+                TestCase.module_path.like(path + '/%'),
+            ))
+        else:
+            # 空路径代表"(未分类)"根目录
+            query = query.filter(db.or_(
+                TestCase.module_path == '',
+                TestCase.module_path.is_(None),
+            ))
+    return query
+
+
+def _normalize_review_scope(data):
+    """解析评审范围入参，返回 (scope_type, scope_module_path, error_message)。"""
+    scope_type = (data.get('scope_type') or 'library').strip()
+    if scope_type not in ('library', 'module'):
+        return None, None, 'scope_type 只支持 library 或 module'
+
+    if scope_type == 'library':
+        return 'library', '', None
+
+    # module 范围允许空字符串（代表"(未分类)"根目录），但字段必须显式出现
+    if 'scope_module_path' not in data:
+        return None, None, 'scope_type=module 时必须提供 scope_module_path'
+    path = str(data.get('scope_module_path') or '').strip().strip('/')
+    if len(path) > 500:
+        return None, None, 'scope_module_path 超长（上限 500 字符）'
+    return 'module', path, None
+
+
 @api_bp.route('/testcase-libraries/<int:library_id>/reviews', methods=['GET'])
 def list_library_reviews(library_id):
     """列出某用例库的全部评审记录（含历史）。"""
@@ -1667,6 +1768,10 @@ def submit_library_review(library_id):
     """发起一次评审请求。
     请求体（全部可选）：
     {
+      "scope_type": "module",                     # library=整库(默认) / module=某目录子树
+      "scope_module_path": "登录模块/手机号登录",   # scope_type=module 时必填（空串=未分类根目录）
+      "visibility": "public_all",                 # 课题可见范围四档，默认 public
+      "grants": [{"type":"user","id":12}],        # visibility=assigned 时必填
       "submit_note": "本次重点评审登录与支付模块",
       "scope_summary": "登录 / 支付",
       "invited_reviewers": [{"type":"user","id":12,"name":"alice"}, ...],
@@ -1674,6 +1779,9 @@ def submit_library_review(library_id):
     }
     权限：作者 / 项目 admin / super_admin。
     """
+    from app.api.topics import _sync_topic_grants
+    from app.services.review_visibility import normalize_visibility
+
     library = TestCaseLibrary.query.get_or_404(library_id)
     user = _get_current_user()
     if not user:
@@ -1681,17 +1789,48 @@ def submit_library_review(library_id):
     if not _can_manage_library(user, library):
         return jsonify({'error': '无权对该用例库发起评审：仅作者/项目管理员/super_admin'}), 403
 
-    if (library.review_status or 'draft') == 'pending_review':
-        cur = library.current_review_id
+    data = request.get_json() or {}
+    scope_type, scope_module_path, scope_err = _normalize_review_scope(data)
+    if scope_err:
+        return jsonify({'error': scope_err}), 400
+
+    # 目录范围必须真实存在（含占位用例），否则等于评审一个空范围
+    if scope_type == 'module':
+        exists = _scope_case_filter(library_id, 'module', scope_module_path,
+                                    include_placeholders=True).count()
+        if not exists:
+            return jsonify({
+                'error': '目录不存在或为空：%s' % (scope_module_path or '(未分类)'),
+            }), 400
+
+    # 防重复下沉到"库 + 范围"：不同目录可以并行评审，同一目录不行
+    dup = TestCaseLibraryReview.query.filter_by(
+        library_id=library_id,
+        status='submitted',
+        scope_type=scope_type,
+        scope_module_path=scope_module_path,
+    ).first()
+    if dup:
         return jsonify({
-            'error': '当前已有进行中的评审，请先撤回或等待审批',
-            'current_review_id': cur,
+            'error': '该范围已有进行中的评审（#%d），请先撤回或等待审批' % dup.id,
+            'current_review_id': dup.id,
+            'related_topic_id': dup.related_topic_id,
         }), 409
 
-    data = request.get_json() or {}
+    visibility = normalize_visibility(data.get('visibility'))
+    grants = data.get('grants')
+    if visibility == 'assigned' and not grants:
+        return jsonify({'error': '指定范围的评审必须至少指定一个用户或 Agent'}), 400
+
     op_name = _operator()
     submit_note = (data.get('submit_note') or '').strip()
     scope_summary = (data.get('scope_summary') or '').strip()[:500]
+    if not scope_summary:
+        scope_summary = ('目录：%s' % (scope_module_path or '(未分类)')
+                         if scope_type == 'module' else '整库评审')
+
+    case_count = _scope_case_filter(library_id, scope_type,
+                                    scope_module_path).count()
 
     review = TestCaseLibraryReview(
         library_id=library_id,
@@ -1700,6 +1839,9 @@ def submit_library_review(library_id):
         submitted_at=_now(),
         submit_note=submit_note,
         scope_summary=scope_summary,
+        scope_type=scope_type,
+        scope_module_path=scope_module_path,
+        scope_case_count=case_count,
         invited_reviewers=data.get('invited_reviewers') or [],
         related_topic_id=data.get('related_topic_id'),
     )
@@ -1708,21 +1850,38 @@ def submit_library_review(library_id):
 
     # --- 自动创建 case_review 课题（如果没有 related_topic_id）---
     if not review.related_topic_id:
-        topic_title = '用例评审：%s' % (library.name or '用例库#%d' % library_id)
-        topic_content = submit_note or scope_summary or '发起用例库整库评审'
+        lib_label = library.name or '用例库#%d' % library_id
+        if scope_type == 'module':
+            topic_title = '用例评审：%s / %s' % (
+                lib_label, scope_module_path or '(未分类)')
+        else:
+            topic_title = '用例评审：%s' % lib_label
+        topic_content = submit_note or scope_summary
         topic = Topic(
-            title=topic_title,
+            title=topic_title[:200],
             content=topic_content,
             board='case_review',
             author_claw_id=getattr(user, 'bound_claw_id', None),
             author_user_id=getattr(user, 'id', None),
             author_name=op_name,
+            project_name=library.project_name,
+            visibility=visibility,
             review_library_id=library_id,
+            review_module_paths=([scope_module_path]
+                                 if scope_type == 'module' else None),
             review_status='reviewing',
         )
         db.session.add(topic)
         db.session.flush()
         review.related_topic_id = topic.id
+
+        if visibility == 'assigned':
+            added, _skipped = _sync_topic_grants(topic, grants, op_name)
+            if not added:
+                db.session.rollback()
+                return jsonify({
+                    'error': '指定的用户或 Agent 均无效，请重新选择',
+                }), 400
 
     _set_library_review_status(library, 'pending_review',
                                current_review_id=review.id)
@@ -1750,7 +1909,8 @@ def submit_library_review(library_id):
 
     log_action('submit_review', 'test_case_library', library_id, library.name,
                operator=op_name,
-               detail=(f'review#{review.id} scope={scope_summary[:60]} '
+               detail=(f'review#{review.id} scope={scope_type}:{scope_module_path} '
+                       f'cases={case_count} visibility={visibility} '
                        f'invited={len(review.invited_reviewers or [])} '
                        f'topic={review.related_topic_id}'))
     return jsonify(review.to_dict()), 201

@@ -1,0 +1,524 @@
+{% extends "base.html" %}
+{% block title %}考试中心 - OpenClaw{% endblock %}
+{% block page_title %}Agent 考试中心{% endblock %}
+{% block nav_exams %}active{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:10px;align-items:center">
+    <select class="form-select" id="filter-category" onchange="loadPapers()" style="min-width:140px">
+        <option value="">全部分类</option>
+        <option value="hub_ops">Hub 操作</option>
+        <option value="testcase">用例编写</option>
+        <option value="review">评审能力</option>
+        <option value="specialty">专项测试</option>
+        <option value="risk">风险评估</option>
+        <option value="general">综合</option>
+    </select>
+    <button class="btn btn-primary" id="btn-new-paper" onclick="openCreatePaper()" style="display:none">+ 新建试卷</button>
+</div>
+{% endblock %}
+
+{% block head %}
+<style>
+.exam-tabs { display:flex; gap:10px; margin-bottom:20px; border-bottom:1px solid var(--border); }
+.exam-tab {
+    padding:10px 20px; cursor:pointer; border-bottom:2px solid transparent;
+    color:var(--text-secondary); font-weight:500;
+    border-radius:8px 8px 0 0;
+    transition:background .16s ease,color .16s ease,border-color .16s ease;
+}
+.exam-tab:hover { background:var(--bg-hover); color:var(--text-primary); }
+.exam-tab.active { color:var(--accent); border-bottom-color:var(--accent); background:var(--accent-dim); }
+.exam-stats { display:grid; grid-template-columns:repeat(5, 1fr); gap:14px; margin-bottom:20px; }
+.exam-stats .stat-card {
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--bg-card) 96%, var(--accent) 4%), var(--bg-card));
+    border:1px solid var(--border);
+    border-radius:12px;
+    padding:14px 18px;
+    box-shadow:var(--shadow-sm);
+}
+.exam-stats .stat-num { font-size:1.6rem; font-weight:700; color:var(--text-primary); }
+.exam-stats .stat-label { font-size:0.78rem; color:var(--text-secondary); margin-top:4px; }
+.papers-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:16px; }
+.paper-card {
+    background:var(--bg-card); border:1px solid var(--border); border-radius:10px;
+    padding:18px; transition:all 0.2s; cursor:pointer;
+    box-shadow:var(--shadow-sm);
+}
+.paper-card:hover { border-color:var(--accent); box-shadow:var(--shadow); }
+.paper-name { font-size:1.05rem; font-weight:600; margin-bottom:6px; }
+.paper-desc { color:var(--text-secondary); font-size:0.85rem; margin-bottom:12px; min-height:40px; }
+.paper-meta { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+.tag { font-size:0.72rem; padding:2px 8px; border-radius:4px; }
+.tag-cat { background:#dbeafe; color:#1e40af; }
+.tag-diff-easy { background:#dcfce7; color:#166534; }
+.tag-diff-normal { background:#fef3c7; color:#854d0e; }
+.tag-diff-hard { background:#fee2e2; color:#991b1b; }
+.tag-diff-expert { background:#ede9fe; color:#5b21b6; }
+.tag-status-draft { background:var(--bg-secondary); color:var(--text-secondary); border:1px solid var(--border); }
+.tag-status-published { background:#dcfce7; color:#166534; }
+.tag-status-archived { background:var(--bg-hover); color:var(--text-secondary); border:1px solid var(--border); }
+.tag-neutral { background:var(--bg-secondary); color:var(--text-secondary); border:1px solid var(--border); }
+.paper-actions { display:flex; gap:8px; }
+.paper-actions button { font-size:0.82rem; padding:6px 12px; }
+
+.sessions-table {
+    width:100%;
+    background:var(--bg-card);
+    border:1px solid var(--border);
+    border-radius:10px;
+    border-collapse:separate;
+    border-spacing:0;
+    overflow:hidden;
+}
+.sessions-table th, .sessions-table td { padding:10px 12px; border-bottom:1px solid var(--border); font-size:0.88rem; color:var(--text-primary); }
+.sessions-table th { background:var(--bg-secondary); text-align:left; color:var(--text-secondary); font-weight:600; }
+.sessions-table tr { cursor:pointer; }
+.sessions-table tr:hover { background:var(--bg-hover); }
+.passed-yes { color:var(--green); font-weight:600; }
+.passed-no { color:var(--red); }
+
+#tab-content > div { display:none; }
+#tab-content > div.active { display:block; }
+
+/* Modal */
+.modal-overlay { position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); display:none; align-items:center; justify-content:center; z-index:1000; }
+.modal-overlay.show { display:flex; }
+.modal-box { background:var(--bg-card); color:var(--text-primary); border:1px solid var(--border); border-radius:10px; padding:24px; width:520px; max-width:90vw; max-height:90vh; overflow:auto; }
+.modal-title { font-size:1.1rem; font-weight:600; margin-bottom:16px; }
+.modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:20px; }
+.modal-close { float:right; cursor:pointer; color:var(--text-secondary); font-size:1.2rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="exam-stats" id="exam-stats"></div>
+
+<div class="exam-tabs">
+    <div class="exam-tab active" data-tab="papers" onclick="switchTab('papers')">试卷列表</div>
+    <div class="exam-tab" data-tab="campaigns" onclick="switchTab('campaigns')">考试场次</div>
+    <div class="exam-tab" data-tab="sessions" onclick="switchTab('sessions')">我的考试记录</div>
+    <div class="exam-tab" data-tab="all-sessions" id="tab-btn-all-sessions" onclick="switchTab('all-sessions')" style="display:none">全部考试记录（管理员）</div>
+</div>
+
+<div id="tab-content">
+    <div id="tab-papers" class="active">
+        <div class="papers-grid" id="papers-grid"></div>
+        <div id="papers-empty" style="text-align:center;color:#9ca3af;padding:40px;display:none">暂无试卷</div>
+    </div>
+    <div id="tab-campaigns">
+        <table class="sessions-table" id="campaigns-table">
+            <thead>
+                <tr>
+                    <th>考试</th><th>试卷</th><th>范围</th><th>截止时间</th><th>状态</th><th>发起人</th><th>操作</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+    <div id="tab-sessions">
+        <table class="sessions-table" id="my-sessions-table">
+            <thead>
+                <tr>
+                    <th>试卷</th><th>开始时间</th><th>提交时间</th><th>状态</th><th>得分</th><th>是否通过</th><th>操作</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+    <div id="tab-all-sessions">
+        <table class="sessions-table" id="all-sessions-table">
+            <thead>
+                <tr>
+                    <th>试卷</th><th>考生</th><th>开始时间</th><th>提交时间</th><th>状态</th><th>得分</th><th>是否通过</th><th>操作</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 发起考试弹窗 -->
+<div class="modal-overlay" id="modal-launch-campaign">
+    <div class="modal-box">
+        <div class="modal-title">发起考试 <span class="modal-close" onclick="closeModal('modal-launch-campaign')">×</span></div>
+        <input type="hidden" id="lc-paper-id">
+        <div class="form-group">
+            <label class="form-label">考试名称 *</label>
+            <input class="form-input" id="lc-name" placeholder="如：用例库管理能力考核">
+        </div>
+        <div class="form-group">
+            <label class="form-label">范围</label>
+            <select class="form-select" id="lc-scope" onchange="onCampaignScopeChange()">
+                <option value="personal">个人（名下 Agents）</option>
+                <option value="project">项目</option>
+                <option value="global">全局</option>
+            </select>
+        </div>
+        <div class="form-group" id="lc-project-wrap" style="display:none">
+            <label class="form-label">所属项目</label>
+            <select class="form-select" id="lc-project"></select>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div class="form-group">
+                <label class="form-label">开始时间</label>
+                <input type="datetime-local" class="form-input" id="lc-starts-at">
+            </div>
+            <div class="form-group">
+                <label class="form-label">截止时间 *</label>
+                <input type="datetime-local" class="form-input" id="lc-ends-at">
+            </div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">备注</label>
+            <textarea class="form-input" id="lc-remark" rows="2"></textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn" onclick="closeModal('modal-launch-campaign')">关闭</button>
+            <button class="btn btn-primary" onclick="submitLaunchCampaign()">确认发起</button>
+        </div>
+    </div>
+</div>
+
+<!-- 创建试卷弹窗 -->
+<div class="modal-overlay" id="modal-create-paper">
+    <div class="modal-box">
+        <div class="modal-title">新建试卷 <span class="modal-close" onclick="closeModal('modal-create-paper')">×</span></div>
+        <div class="form-group">
+            <label class="form-label">试卷名称 *</label>
+            <input class="form-input" id="cp-name" placeholder="如：Hub API 操作基础考核">
+        </div>
+        <div class="form-group">
+            <label class="form-label">描述</label>
+            <textarea class="form-input" id="cp-desc" rows="2"></textarea>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div class="form-group">
+                <label class="form-label">分类</label>
+                <select class="form-select" id="cp-category">
+                    <option value="general">综合</option>
+                    <option value="hub_ops">Hub 操作</option>
+                    <option value="testcase">用例编写</option>
+                    <option value="review">评审能力</option>
+                    <option value="specialty">专项测试</option>
+                    <option value="risk">风险评估</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">难度</label>
+                <select class="form-select" id="cp-difficulty">
+                    <option value="easy">简单</option>
+                    <option value="normal" selected>普通</option>
+                    <option value="hard">困难</option>
+                    <option value="expert">专家</option>
+                </select>
+            </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+            <div class="form-group">
+                <label class="form-label">总分</label>
+                <input type="number" class="form-input" id="cp-total" value="100">
+            </div>
+            <div class="form-group">
+                <label class="form-label">及格分</label>
+                <input type="number" class="form-input" id="cp-pass" value="60">
+            </div>
+            <div class="form-group">
+                <label class="form-label">时长（分钟）</label>
+                <input type="number" class="form-input" id="cp-time" value="60">
+            </div>
+        </div>
+        <div class="modal-actions">
+            <button class="btn" onclick="closeModal('modal-create-paper')">关闭</button>
+            <button class="btn btn-primary" onclick="submitCreatePaper()">确认创建</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let examUser = null;
+let papers = [];
+let campaigns = [];
+let launchProjects = [];
+
+(async function init() {
+    try {
+        examUser = await API.get('/auth/me');
+    } catch(e){}
+    if (examUser && examUser.role === 'super_admin') {
+        document.getElementById('btn-new-paper').style.display = '';
+        document.getElementById('tab-btn-all-sessions').style.display = '';
+    }
+    await Promise.all([loadPapers(), loadCampaigns(), loadStats(), loadMySessions(), loadLaunchProjects()]);
+})();
+
+function switchTab(tab) {
+    document.querySelectorAll('.exam-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+    document.querySelectorAll('#tab-content > div').forEach(d => d.classList.remove('active'));
+    document.getElementById('tab-' + tab).classList.add('active');
+    if (tab === 'campaigns') loadCampaigns();
+    if (tab === 'all-sessions') loadAllSessions();
+}
+
+async function loadStats() {
+    try {
+        const s = await API.get('/exams/stats');
+        const isAdmin = examUser && examUser.role === 'super_admin';
+        document.getElementById('exam-stats').innerHTML = `
+            <div class="stat-card"><div class="stat-num">${s.paper_count}</div><div class="stat-label">试卷总数</div></div>
+            <div class="stat-card"><div class="stat-num">${s.published_count}</div><div class="stat-label">已发布</div></div>
+            <div class="stat-card"><div class="stat-num">${s.session_total}</div><div class="stat-label">${isAdmin?'考试总次数':'我的考试'}</div></div>
+            <div class="stat-card"><div class="stat-num">${s.session_completed}</div><div class="stat-label">已完成</div></div>
+            <div class="stat-card"><div class="stat-num">${s.pass_rate}%</div><div class="stat-label">通过率</div></div>
+        `;
+    } catch(e){}
+}
+
+async function loadPapers() {
+    const cat = document.getElementById('filter-category').value;
+    let url = '/exams/papers';
+    if (cat) url += '?category=' + encodeURIComponent(cat);
+    try {
+        papers = await API.get(url);
+    } catch(e) { papers = []; }
+    renderPapers();
+}
+
+function renderPapers() {
+    const grid = document.getElementById('papers-grid');
+    const isAdmin = examUser && examUser.role === 'super_admin';
+    if (papers.length === 0) {
+        grid.innerHTML = '';
+        document.getElementById('papers-empty').style.display = '';
+        return;
+    }
+    document.getElementById('papers-empty').style.display = 'none';
+    grid.innerHTML = papers.map(p => {
+        const diffLabel = {easy:'简单',normal:'普通',hard:'困难',expert:'专家'}[p.difficulty] || p.difficulty;
+        const catLabel = {hub_ops:'Hub操作',testcase:'用例编写',review:'评审',specialty:'专项',risk:'风险评估',general:'综合'}[p.category] || p.category;
+        const statusLabel = {draft:'草稿',published:'已发布',archived:'已归档'}[p.status] || p.status;
+        const adminBtns = isAdmin ? `
+            <button class="btn btn-secondary" onclick="event.stopPropagation();editPaper(${p.id})">编辑</button>
+            ${p.status==='draft'?`<button class="btn btn-success" onclick="event.stopPropagation();publishPaper(${p.id})">发布</button>`:''}
+            <button class="btn btn-danger" onclick="event.stopPropagation();deletePaper(${p.id})">删除</button>
+        ` : '';
+        const startBtn = p.status === 'published'
+            ? `<button class="btn btn-primary" onclick="event.stopPropagation();openLaunchCampaign(${p.id})">发起考试</button>` : '';
+        return `<div class="paper-card" onclick="viewPaper(${p.id})">
+            <div class="paper-name">${esc(p.name)}</div>
+            <div class="paper-desc">${esc(p.description || '（无描述）')}</div>
+            <div class="paper-meta">
+                <span class="tag tag-cat">${catLabel}</span>
+                <span class="tag tag-diff-${p.difficulty}">${diffLabel}</span>
+                <span class="tag tag-status-${p.status}">${statusLabel}</span>
+                <span class="tag tag-neutral">${p.question_count}题</span>
+                <span class="tag tag-neutral">${p.total_score}分</span>
+                <span class="tag tag-neutral">${p.time_limit_min||'∞'}分钟</span>
+            </div>
+            <div class="paper-actions">${startBtn}${adminBtns}</div>
+        </div>`;
+    }).join('');
+}
+
+function viewPaper(id) {
+    if (examUser && examUser.role === 'super_admin') {
+        window.location.href = '/exams/papers/' + id + '/edit';
+    } else {
+        openLaunchCampaign(id);
+    }
+}
+
+async function startCampaignExam(campaignId) {
+    try {
+        const sess = await API.post('/exams/campaigns/' + campaignId + '/start', {});
+        window.location.href = '/exams/sessions/' + sess.id;
+    } catch(e) {
+        alert(e?.message || '开考失败：' + e);
+    }
+}
+
+async function loadCampaigns() {
+    try {
+        campaigns = await API.get('/exams/campaigns');
+    } catch(e) { campaigns = []; }
+    renderCampaigns();
+}
+
+function renderCampaigns() {
+    const tbody = document.querySelector('#campaigns-table tbody');
+    if (!campaigns || campaigns.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#9ca3af;padding:30px">暂无考试场次</td></tr>';
+        return;
+    }
+    const scopeLabel = {global:'全局',project:'项目',personal:'个人'};
+    const statusLabel = {scheduled:'未开始',active:'进行中',ended:'已结束',cancelled:'已取消'};
+    tbody.innerHTML = campaigns.map(c => {
+        const canStart = c.status === 'active';
+        const actions = [
+            canStart ? `<button class="btn btn-primary" onclick="event.stopPropagation();startCampaignExam(${c.id})">开始考试</button>` : '',
+            c.status !== 'cancelled' && c.status !== 'ended' ? `<button class="btn btn-danger" onclick="event.stopPropagation();cancelCampaign(${c.id})">取消</button>` : '',
+        ].join('');
+        return `<tr onclick="window.location.href='/exams/campaigns/${c.id}'" style="cursor:pointer">
+            <td>${esc(c.name || '')}</td>
+            <td>${esc(c.paper_name || '')}</td>
+            <td>${scopeLabel[c.scope] || c.scope}${c.project_name ? ' · ' + esc(c.project_name) : ''}</td>
+            <td>${c.ends_at?.slice(0,16) || ''}</td>
+            <td>${statusLabel[c.status] || c.status}</td>
+            <td>${esc(c.launched_by_display || '')}</td>
+            <td onclick="event.stopPropagation()">${actions}</td>
+        </tr>`;
+    }).join('');
+}
+
+async function loadLaunchProjects() {
+    try {
+        launchProjects = await API.listProjects();
+    } catch(e) { launchProjects = []; }
+    const sel = document.getElementById('lc-project');
+    if (sel) sel.innerHTML = launchProjects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+}
+
+function openLaunchCampaign(paperId) {
+    const p = papers.find(x => x.id === paperId);
+    document.getElementById('lc-paper-id').value = paperId;
+    document.getElementById('lc-name').value = p ? `${p.name} 考试` : '';
+    document.getElementById('lc-scope').value = 'personal';
+    document.getElementById('lc-starts-at').value = '';
+    const end = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    end.setMinutes(end.getMinutes() - end.getTimezoneOffset());
+    document.getElementById('lc-ends-at').value = end.toISOString().slice(0,16);
+    document.getElementById('lc-remark').value = '';
+    onCampaignScopeChange();
+    document.getElementById('modal-launch-campaign').classList.add('show');
+}
+
+function onCampaignScopeChange() {
+    const scope = document.getElementById('lc-scope').value;
+    document.getElementById('lc-project-wrap').style.display = scope === 'project' ? '' : 'none';
+}
+
+async function submitLaunchCampaign() {
+    const paperId = parseInt(document.getElementById('lc-paper-id').value);
+    const scope = document.getElementById('lc-scope').value;
+    const endsAt = document.getElementById('lc-ends-at').value;
+    if (!endsAt) { alert('截止时间必填'); return; }
+    const body = {
+        paper_id: paperId,
+        name: document.getElementById('lc-name').value.trim(),
+        scope,
+        starts_at: document.getElementById('lc-starts-at').value || null,
+        ends_at: endsAt,
+        remark: document.getElementById('lc-remark').value,
+    };
+    if (scope === 'project') body.project_id = parseInt(document.getElementById('lc-project').value);
+    try {
+        await API.post('/exams/campaigns', body);
+        closeModal('modal-launch-campaign');
+        await loadCampaigns();
+        switchTab('campaigns');
+    } catch(e) { alert('发起失败：' + (e?.message || e)); }
+}
+
+async function cancelCampaign(id) {
+    if (!confirm('确认取消这场考试？取消后不能再参加')) return;
+    try {
+        await API.post('/exams/campaigns/' + id + '/cancel', {});
+        loadCampaigns();
+    } catch(e) { alert('取消失败：' + (e?.message || e)); }
+}
+
+function openCreatePaper() {
+    document.getElementById('modal-create-paper').classList.add('show');
+}
+function closeModal(id) {
+    document.getElementById(id).classList.remove('show');
+}
+
+async function submitCreatePaper() {
+    const name = document.getElementById('cp-name').value.trim();
+    if (!name) { alert('试卷名称必填'); return; }
+    const body = {
+        name,
+        description: document.getElementById('cp-desc').value,
+        category: document.getElementById('cp-category').value,
+        difficulty: document.getElementById('cp-difficulty').value,
+        total_score: parseInt(document.getElementById('cp-total').value) || 100,
+        pass_score: parseInt(document.getElementById('cp-pass').value) || 60,
+        time_limit_min: parseInt(document.getElementById('cp-time').value) || 60,
+    };
+    try {
+        const p = await API.post('/exams/papers', body);
+        closeModal('modal-create-paper');
+        window.location.href = '/exams/papers/' + p.id + '/edit';
+    } catch(e) {
+        alert('创建失败：' + (e?.message || e));
+    }
+}
+
+function editPaper(id) {
+    window.location.href = '/exams/papers/' + id + '/edit';
+}
+async function publishPaper(id) {
+    if (!confirm('确认发布？发布后考生可以应考')) return;
+    try {
+        await API.post('/exams/papers/' + id + '/publish', {});
+        loadPapers();
+    } catch(e) { alert('发布失败：' + (e?.message || e)); }
+}
+async function deletePaper(id) {
+    if (!confirm('确认删除（软删）此试卷？')) return;
+    try {
+        await API.del('/exams/papers/' + id);
+        loadPapers();
+    } catch(e) { alert('删除失败：' + (e?.message || e)); }
+}
+
+async function loadMySessions() {
+    try {
+        const ss = await API.get('/exams/sessions?mine=1');
+        renderSessions(ss, 'my-sessions-table', false);
+    } catch(e){}
+}
+async function loadAllSessions() {
+    try {
+        const ss = await API.get('/exams/sessions');
+        renderSessions(ss, 'all-sessions-table', true);
+    } catch(e){}
+}
+
+function renderSessions(list, tableId, showExaminee) {
+    const tbody = document.querySelector('#' + tableId + ' tbody');
+    if (!list || list.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="${showExaminee?8:7}" style="text-align:center;color:#9ca3af;padding:30px">暂无记录</td></tr>`;
+        return;
+    }
+    const statusLabel = {in_progress:'进行中',submitted:'已交卷',grading:'判分中',completed:'已完成',expired:'已超时'};
+    tbody.innerHTML = list.map(s => {
+        const exa = showExaminee ? `<td>${esc(s.examinee_display || '')}</td>` : '';
+        return `<tr onclick="window.location.href='/exams/sessions/${s.id}'">
+            <td>${esc(s.paper_name || '')}</td>
+            ${exa}
+            <td>${s.started_at?.slice(0,16) || ''}</td>
+            <td>${s.submitted_at?.slice(0,16) || '-'}</td>
+            <td>${statusLabel[s.status] || s.status}</td>
+            <td>${s.total_score}</td>
+            <td class="${s.passed?'passed-yes':'passed-no'}">${s.passed?'通过':'未通过'}</td>
+            <td><button class="btn btn-danger" onclick="event.stopPropagation();deleteSession(${s.id})">删除记录</button></td>
+        </tr>`;
+    }).join('');
+}
+
+async function deleteSession(id) {
+    if (!confirm('确认删除这次提交记录？删除后该 Agent 可以重新参加本场考试')) return;
+    try {
+        await API.del('/exams/sessions/' + id);
+        await Promise.all([loadMySessions(), loadAllSessions(), loadCampaigns(), loadStats()]);
+    } catch(e) { alert('删除失败：' + (e?.message || e)); }
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+</script>
+{% endblock %}

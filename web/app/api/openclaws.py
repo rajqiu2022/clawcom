@@ -1101,6 +1101,7 @@ def heartbeat(claw_id, claw=None):
     todos_pending = 0       # 今日待完成总数
     todos_done = 0
     init_pending = 0        # 初始化任务未完成
+    pending_titles = []     # 今日待完成标题（用于分层记忆注入）
 
     for t in all_todos:
         log = today_logs.get(t.id)
@@ -1122,6 +1123,8 @@ def heartbeat(claw_id, claw=None):
                 todos_done += 1
             else:
                 todos_pending += 1
+                if t.title:
+                    pending_titles.append(t.title)
                 if t.task_category == 'init':
                     init_pending += 1
                 if t.urgency_level == 'interrupt' and t.schedule_time:
@@ -1130,6 +1133,16 @@ def heartbeat(claw_id, claw=None):
                         'title': t.title,
                         'time': t.schedule_time,
                     })
+
+    # 分层记忆注入（P2）：按今日待办标题聚合命中的公共经验，心跳时提醒
+    memory_inject = {'pitfall_alerts': [], 'unread_pitfall_count': 0}
+    if pending_titles:
+        try:
+            from app.services.task_context import build_heartbeat_memory_inject
+            memory_inject = build_heartbeat_memory_inject(
+                pending_titles[:20], claw=claw, limit=3)
+        except Exception:
+            pass
 
     return jsonify({
         'status': 'ok',
@@ -1141,6 +1154,7 @@ def heartbeat(claw_id, claw=None):
             'init_pending': init_pending,
             'interrupt': interrupt_pending,
         },
+        'memory_inject': memory_inject,
         'server_time': datetime.now().isoformat(),
     })
 
@@ -1235,6 +1249,160 @@ def get_assigned_skills(claw_id, claw=None):
                 'trigger_phrase': s.skill.trigger_phrase,
             })
     return jsonify({'skills': skills})
+
+
+def _skill_delivery_task_ref():
+    ref_type = request.args.get('ref_type')
+    raw_ref_id = request.args.get('ref_id')
+    if (ref_type is None) != (raw_ref_id is None):
+        from app.services.skill_delivery import SkillDeliveryError
+        raise SkillDeliveryError(
+            'invalid_task_ref',
+            'ref_type 与 ref_id 必须同时提供',
+            400,
+        )
+    if raw_ref_id is None:
+        return None, None
+    try:
+        return ref_type, int(raw_ref_id)
+    except (TypeError, ValueError):
+        from app.services.skill_delivery import SkillDeliveryError
+        raise SkillDeliveryError(
+            'invalid_ref_id',
+            'ref_id 必须是整数',
+            400,
+        )
+
+
+def _skill_delivery_error(exc):
+    return jsonify({'error': exc.message, 'code': exc.code}), exc.status_code
+
+
+def _skill_download_headers(sha256, content_version):
+    return {
+        'ETag': f'"{sha256}"',
+        'X-Skill-Content-Version': content_version,
+        'Cache-Control': 'private, max-age=60',
+    }
+
+
+@api_bp.route('/openclaws/<int:claw_id>/skill-manifest', methods=['GET'])
+@require_claw_token
+def get_skill_manifest(claw_id, claw=None):
+    from app.services.skill_delivery import (
+        SkillDeliveryError,
+        build_skill_manifest,
+    )
+    try:
+        ref_type, ref_id = _skill_delivery_task_ref()
+        return jsonify(build_skill_manifest(
+            claw,
+            ref_type=ref_type,
+            ref_id=ref_id,
+        ))
+    except SkillDeliveryError as exc:
+        return _skill_delivery_error(exc)
+
+
+@api_bp.route(
+    '/openclaws/<int:claw_id>/skills/<int:skill_id>/files/<path:filename>',
+    methods=['GET'],
+)
+@require_claw_token
+def download_claw_skill_file(claw_id, skill_id, filename, claw=None):
+    from flask import Response
+    from app.services.skill_delivery import (
+        SkillDeliveryError,
+        get_authorized_skill_bundle,
+    )
+    try:
+        ref_type, ref_id = _skill_delivery_task_ref()
+        bundle = get_authorized_skill_bundle(
+            claw,
+            skill_id,
+            ref_type=ref_type,
+            ref_id=ref_id,
+        )
+    except SkillDeliveryError as exc:
+        return _skill_delivery_error(exc)
+
+    normalized = str(filename or '').replace('\\', '/').lstrip('/')
+    item = next(
+        (value for value in bundle['files'] if value['path'] == normalized),
+        None,
+    )
+    if item is None:
+        return jsonify({
+            'error': f'文件 {filename} 不存在',
+            'code': 'skill_file_not_found',
+        }), 404
+
+    headers = _skill_download_headers(
+        item['sha256'],
+        bundle['content_version'],
+    )
+    if request.if_none_match.contains(item['sha256']):
+        return Response(status=304, headers=headers)
+    suffix = item['path'].lower()
+    if suffix.endswith('.md'):
+        content_type = 'text/markdown; charset=utf-8'
+    elif suffix.endswith('.json'):
+        content_type = 'application/json; charset=utf-8'
+    else:
+        content_type = 'text/plain; charset=utf-8'
+    return Response(
+        item['content'],
+        content_type=content_type,
+        headers=headers,
+    )
+
+
+@api_bp.route(
+    '/openclaws/<int:claw_id>/skills/<int:skill_id>/pack',
+    methods=['GET'],
+)
+@require_claw_token
+def download_claw_skill_pack(claw_id, skill_id, claw=None):
+    import io
+    import zipfile
+    from flask import Response
+    from werkzeug.utils import secure_filename
+    from app.services.skill_delivery import (
+        SkillDeliveryError,
+        get_authorized_skill_bundle,
+    )
+    try:
+        ref_type, ref_id = _skill_delivery_task_ref()
+        bundle = get_authorized_skill_bundle(
+            claw,
+            skill_id,
+            ref_type=ref_type,
+            ref_id=ref_id,
+        )
+    except SkillDeliveryError as exc:
+        return _skill_delivery_error(exc)
+
+    headers = _skill_download_headers(
+        bundle['sha256'],
+        bundle['content_version'],
+    )
+    if request.if_none_match.contains(bundle['sha256']):
+        return Response(status=304, headers=headers)
+
+    skill = bundle['skill']
+    root = secure_filename(skill.name) or f'skill-{skill.id}'
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for item in bundle['files']:
+            archive.writestr(f"{root}/{item['path']}", item['content'])
+    headers['Content-Disposition'] = (
+        f'attachment; filename="{root}.zip"'
+    )
+    return Response(
+        buffer.getvalue(),
+        content_type='application/zip',
+        headers=headers,
+    )
 
 
 @api_bp.route('/openclaws/<int:claw_id>/assigned-rules', methods=['GET'])

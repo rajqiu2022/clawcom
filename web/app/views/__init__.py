@@ -235,6 +235,10 @@ def check_login():
     if request.path.startswith('/r/') or request.path.startswith('/test-reports/share/'):
         return None
 
+    # 知识库匿名分享页：只读正文，并支持通过公开 API 下载 Markdown。
+    if request.path.startswith('/k/') or request.path.startswith('/knowledge/share/'):
+        return None
+
     uid = session.get('user_id')
     if not uid:
         return redirect('/login')
@@ -377,6 +381,13 @@ def skills_market():
 @views_bp.route('/knowledge')
 def knowledge_base():
     return render_template('knowledge.html')
+
+
+@views_bp.route('/k/<token>')
+@views_bp.route('/knowledge/share/<token>')
+def knowledge_share_page(token):
+    """知识库匿名只读分享页。"""
+    return render_template('knowledge_share.html', share_token=token)
 
 
 @views_bp.route('/settings')

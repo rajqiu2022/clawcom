@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}请开通项目 - ClawTeam{% endblock %}
+{% block page_title %}项目未开通{% endblock %}
+
+{% block content %}
+<style>
+.project-required-wrap {
+    min-height: calc(100vh - 180px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.project-required-card {
+    width: min(560px, 100%);
+    padding: 36px;
+    border: 1px solid var(--border-color);
+    border-radius: 24px;
+    background: var(--bg-card);
+    box-shadow: var(--shadow-lg);
+    text-align: center;
+}
+.project-required-icon {
+    width: 64px;
+    height: 64px;
+    margin: 0 auto 18px;
+    border-radius: 20px;
+    display: grid;
+    place-items: center;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.project-required-icon svg {
+    width: 32px;
+    height: 32px;
+}
+.project-required-card h2 {
+    margin: 0 0 12px;
+    color: var(--text-primary);
+    font-size: 24px;
+}
+.project-required-card p {
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.8;
+}
+.project-required-actions {
+    margin-top: 24px;
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+</style>
+
+<div class="project-required-wrap">
+    <section class="project-required-card">
+        <div class="project-required-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/>
+                <path d="M12 11v4"/>
+                <path d="M12 17h.01"/>
+            </svg>
+        </div>
+        <h2>请开通项目后再使用</h2>
+        <p>
+            系统已尝试按你的 OA 英文账号匹配 TAPD 项目权限，但暂未找到可开通的项目。
+            请确认你已加入对应 TAPD workspace，或联系管理员在 ClawTeam 中为你分配项目。
+        </p>
+        <div class="project-required-actions">
+            <a class="btn btn-primary" href="/">返回 Dashboard</a>
+            <a class="btn btn-ghost" href="/logout">重新登录</a>
+        </div>
+    </section>
+</div>
+{% endblock %}

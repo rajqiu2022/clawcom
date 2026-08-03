@@ -42,8 +42,10 @@ from werkzeug.utils import secure_filename
 from app import db
 from app.models import (
     TestReport,
+    TestReportFavorite,
     TestReportAttachment,
     TestReportCustomCategory,
+    WorkflowArtifact,
     TEST_REPORT_TYPES,
     TEST_REPORT_RISK_LEVELS,
     TEST_REPORT_SOURCE_REF_TYPES,
@@ -60,6 +62,10 @@ from app.services.test_report_categories import (
     normalize_custom_category_key,
     parse_report_time_range,
 )
+from app.services.test_report_inline_images import extract_inline_report_images
+from app.services.test_report_projects import resolve_report_is_hidden, resolve_report_project_id
+from app.services.test_report_visibility import can_view_hidden_report
+from app.services.test_report_favorites import favorite_owner_from_caller
 
 
 # ============================================================
@@ -207,6 +213,21 @@ def _can_edit(caller: dict | None, report: TestReport) -> bool:
     return False
 
 
+_SAME_PROJECT_VIEWABLE_STATUSES = ('draft', 'revised')
+
+
+def _is_same_project_member(caller: dict | None, report: TestReport) -> bool:
+    """调用方是否属于报告所在项目。
+
+    openclaw 的 managed_projects 已被 _get_caller 置为 {claw.project_id}；
+    user 的 managed_projects 为其 TAPD 工作区成员项目（见 project_access）。
+    统一用 report.project_id in managed_projects 判定。
+    """
+    if not caller or not report.project_id:
+        return False
+    return report.project_id in (caller.get('managed_projects') or set())
+
+
 def _can_view(caller: dict | None, report: TestReport) -> bool:
     """可见性受 status 影响（MEMORY #134.C）：
        - published：项目内所有人可见（最宽松："项目内可见可读"原始语义）
@@ -215,6 +236,11 @@ def _can_view(caller: dict | None, report: TestReport) -> bool:
     if not caller:
         return False
     status = report.status or 'draft'
+    # 同项目成员对 draft/revised 的 ID 直查放行（含 hidden；abandoned 不放开）
+    same_project_ok = (status in _SAME_PROJECT_VIEWABLE_STATUSES
+                       and _is_same_project_member(caller, report))
+    if not _can_view_hidden(caller, report) and not same_project_ok:
+        return False
     if status == 'published':
         # 项目内可见——这里取最宽松的口径：登录态用户/已认证 claw 默认可见
         # 严格按项目过滤的话，改成判断 managed_projects/claw.project_id 即可
@@ -226,8 +252,126 @@ def _can_view(caller: dict | None, report: TestReport) -> bool:
         if caller['type'] == 'user':
             return True
         return False
-    # 草稿/修改中/已废弃：受限可见，等于编辑名单
-    return _can_edit(caller, report)
+    # 草稿/修改中：编辑名单 + 同项目成员（draft/revised）；已废弃仅编辑名单
+    if _can_edit(caller, report):
+        return True
+    if same_project_ok:
+        return True
+    return False
+
+
+def _caller_owned_claw_ids(caller: dict | None) -> set:
+    if not caller:
+        return set()
+    if caller.get('type') == 'openclaw' and caller.get('claw_id'):
+        return {int(caller['claw_id'])}
+    if caller.get('type') != 'user':
+        return set()
+    ids = set()
+    if caller.get('claw_id'):
+        ids.add(int(caller['claw_id']))
+    username = caller.get('username')
+    if username:
+        rows = (OpenClawInstance.query
+                .filter(OpenClawInstance.owner == username,
+                        OpenClawInstance.status != 'deleted')
+                .with_entities(OpenClawInstance.id)
+                .all())
+        ids.update(int(r[0]) for r in rows)
+    return ids
+
+
+def _can_view_hidden(caller: dict | None, report: TestReport) -> bool:
+    if _can_view_workflow_report_from_context(caller, report):
+        return True
+    return can_view_hidden_report(caller, report, _caller_owned_claw_ids(caller))
+
+
+def _can_view_workflow_report_from_context(caller: dict | None, report: TestReport) -> bool:
+    """Allow hidden workflow reports when opened from the owning workflow step."""
+    if not caller or not report or report.report_type != 'workflow' or not report.is_hidden:
+        return False
+    run_id = _parse_int(request.args.get('workflow_run_id'))
+    step_id = (request.args.get('workflow_step_id') or '').strip()
+    if not run_id or not step_id:
+        return False
+    artifact = WorkflowArtifact.query.filter_by(
+        run_id=run_id,
+        step_id=step_id,
+        artifact_type='workflow_report',
+        test_report_id=report.id,
+    ).first()
+    # The report remains undiscoverable from the report center; this contextual
+    # read path is used only by the Workflow node detail button.
+    return bool(artifact)
+
+
+def _hidden_reports_filter(caller: dict | None, include_hidden: bool):
+    visible_non_hidden = db.or_(
+        TestReport.is_hidden == False,  # noqa: E712
+        TestReport.report_type != 'workflow',
+    )
+    if not include_hidden or not caller:
+        return db.and_(
+            TestReport.is_hidden == False,  # noqa: E712
+            visible_non_hidden,
+        )
+    owned_claw_ids = _caller_owned_claw_ids(caller)
+    conditions = [db.and_(
+        TestReport.is_hidden == False,  # noqa: E712
+        visible_non_hidden,
+    )]
+    if caller.get('type') == 'user' and caller.get('user_id'):
+        conditions.append(db.and_(
+            TestReport.is_hidden == True,  # noqa: E712
+            TestReport.report_type != 'workflow',
+            TestReport.submitter_type == 'user',
+            TestReport.submitter_user_id == caller.get('user_id'),
+        ))
+    if owned_claw_ids:
+        conditions.append(db.and_(
+            TestReport.is_hidden == True,  # noqa: E712
+            TestReport.report_type != 'workflow',
+            TestReport.submitter_type == 'openclaw',
+            TestReport.submitter_claw_id.in_(list(owned_claw_ids)),
+        ))
+    return or_(*conditions)
+
+
+def _favorite_query_filter(caller: dict | None):
+    owner = favorite_owner_from_caller(caller)
+    if owner['user_id'] is not None:
+        return TestReportFavorite.user_id == owner['user_id']
+    return TestReportFavorite.claw_id == owner['claw_id']
+
+
+def _favorite_for_report(caller: dict | None, report_id: int) -> TestReportFavorite | None:
+    owner = favorite_owner_from_caller(caller)
+    q = TestReportFavorite.query.filter_by(report_id=report_id)
+    if owner['user_id'] is not None:
+        q = q.filter_by(user_id=owner['user_id'])
+    else:
+        q = q.filter_by(claw_id=owner['claw_id'])
+    return q.first()
+
+
+def _favorite_ids_for_reports(caller: dict | None, report_ids: list[int]) -> set[int]:
+    if not caller or not report_ids:
+        return set()
+    try:
+        q = TestReportFavorite.query.filter(
+            TestReportFavorite.report_id.in_(report_ids),
+            _favorite_query_filter(caller),
+        )
+    except ValueError:
+        return set()
+    return {int(r.report_id) for r in q.all()}
+
+
+def _report_payload(report: TestReport, caller: dict | None, **kwargs):
+    data = report.to_dict(**kwargs)
+    data['is_favorite'] = report.id in _favorite_ids_for_reports(caller, [report.id])
+    return data
 
 
 # ============================================================
@@ -373,6 +517,12 @@ def _normalize_custom_category_from_payload(data: dict):
     return normalize_custom_category_key(raw)
 
 
+def _looks_like_html_document(content: str) -> bool:
+    """完整 HTML 报告必须走 iframe 隔离，不能作为 markdown 注入页面。"""
+    head = (content or '').lstrip()[:512].lower()
+    return head.startswith('<!doctype html') or head.startswith('<html')
+
+
 def _ensure_custom_category(key: str, caller: dict | None):
     if not key:
         return None
@@ -400,18 +550,18 @@ def list_test_reports():
     caller = _get_caller()
     q = TestReport.query.filter_by(is_deleted=False)
 
-    # 隐藏的报告：Web 普通用户默认不显示
-    # Agent（Bearer Token）、admin、super_admin 默认可见隐藏报告
-    # Web 用户可传 show_hidden=1 强制查看（实际也只有 admin 会用）
+    # 隐藏报告：默认不显示；show_hidden=1 时也只额外显示自己/自己名下 Agent 提交的隐藏报告。
     show_hidden = request.args.get('show_hidden') == '1'
-    if not show_hidden:
-        is_privileged = (caller and (
-            caller['type'] == 'openclaw'
-            or caller.get('is_admin')
-            or caller.get('is_super_admin')
-        ))
-        if not is_privileged:
-            q = q.filter(TestReport.is_hidden == False)
+    q = q.filter(_hidden_reports_filter(caller, show_hidden))
+
+    favorite_only = request.args.get('favorite') == '1'
+    if favorite_only:
+        if not caller:
+            return jsonify({'error': '未认证'}), 401
+        try:
+            q = q.join(TestReportFavorite).filter(_favorite_query_filter(caller))
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 401
 
     project_id = _parse_int(request.args.get('project_id'))
     if project_id is not None:
@@ -460,8 +610,14 @@ def list_test_reports():
              .all())
     # 项目过滤（普通用户场景看不到的资源直接 filter 掉，避免计数与可见性不一致）
     visible = [r for r in items if _can_view(caller, r)]
+    favorite_ids = _favorite_ids_for_reports(caller, [r.id for r in visible])
+    payloads = []
+    for r in visible:
+        data = r.to_dict(include_content=False)
+        data['is_favorite'] = r.id in favorite_ids
+        payloads.append(data)
     return jsonify({
-        'items': [r.to_dict(include_content=False) for r in visible],
+        'items': payloads,
         'total': total,
         'page': page,
         'page_size': page_size,
@@ -481,7 +637,8 @@ def create_test_report():
     if len(title) > 200:
         return jsonify({'error': 'title 长度不能超过 200'}), 400
 
-    project_id = _parse_int(data.get('project_id'))
+    requested_project_id = _parse_int(data.get('project_id'))
+    project_id = resolve_report_project_id(caller, requested_project_id)
     if not project_id:
         return jsonify({'error': 'project_id 必填'}), 400
     project = Project.query.get(project_id)
@@ -501,6 +658,9 @@ def create_test_report():
     fmt = (data.get('format') or 'markdown').lower()
     if fmt not in ('markdown', 'html'):
         return jsonify({'error': 'format 仅支持 markdown/html'}), 400
+    content = data.get('content') or ''
+    if fmt == 'markdown' and _looks_like_html_document(content):
+        fmt = 'html'
 
     iteration_id = _parse_int(data.get('iteration_id'))
     iteration = None
@@ -533,7 +693,7 @@ def create_test_report():
         version_name=(data.get('version_name')
                       or (iteration.version_name if iteration else '')
                       or '').strip()[:100],
-        content=(data.get('content') or ''),
+        content=content,
         format=fmt,
         risk_level=risk_level,
         status=status,
@@ -543,14 +703,22 @@ def create_test_report():
         submitter_user_id=caller['user_id'] if caller['type'] == 'user' else None,
         submitter_claw_id=caller['claw_id'] if caller['type'] == 'openclaw' else None,
         submitter_name=caller['name'],
-        is_hidden=bool(data.get('is_hidden', False)),
+        is_hidden=resolve_report_is_hidden(caller, status, data),
     )
     _ensure_custom_category(custom_category_key, caller)
     db.session.add(report)
+    written_paths = []
     try:
+        db.session.flush()
+        report.content = _normalize_inline_images(report, caller, written_paths)
         db.session.commit()
+    except ValueError as e:
+        db.session.rollback()
+        _cleanup_files(written_paths)
+        return jsonify({'error': str(e)}), 400
     except SQLAlchemyError as e:
         db.session.rollback()
+        _cleanup_files(written_paths)
         return jsonify({'error': f'保存失败: {e}'}), 500
     return jsonify(report.to_dict(include_content=True)), 201
 
@@ -567,9 +735,49 @@ def get_test_report(report_id):
     if not _can_view(caller, report):
         return jsonify({'error': '无权查看'}), 403
     include_content = request.args.get('include_content', '1').lower() not in ('0', 'false', 'no')
-    data = report.to_dict(include_content=include_content)
+    data = _report_payload(report, caller, include_content=include_content)
     data['can_edit'] = _can_edit(caller, report)
     return jsonify(data)
+
+
+@api_bp.route('/test-reports/<int:report_id>/favorite', methods=['POST'])
+def favorite_test_report(report_id):
+    caller = _get_caller()
+    if not caller:
+        return jsonify({'error': '未认证'}), 401
+    report = TestReport.query.get_or_404(report_id)
+    if report.is_deleted:
+        return jsonify({'error': '报告已删除'}), 404
+    if not _can_view(caller, report):
+        return jsonify({'error': '无权查看'}), 403
+    owner = favorite_owner_from_caller(caller)
+    fav = _favorite_for_report(caller, report_id)
+    if not fav:
+        fav = TestReportFavorite(
+            report_id=report_id,
+            user_id=owner['user_id'],
+            claw_id=owner['claw_id'],
+        )
+        db.session.add(fav)
+        db.session.commit()
+    return jsonify({'ok': True, 'is_favorite': True, 'favorite': fav.to_dict()})
+
+
+@api_bp.route('/test-reports/<int:report_id>/favorite', methods=['DELETE'])
+def unfavorite_test_report(report_id):
+    caller = _get_caller()
+    if not caller:
+        return jsonify({'error': '未认证'}), 401
+    report = TestReport.query.get_or_404(report_id)
+    if report.is_deleted:
+        return jsonify({'error': '报告已删除'}), 404
+    if not _can_view(caller, report):
+        return jsonify({'error': '无权查看'}), 403
+    fav = _favorite_for_report(caller, report_id)
+    if fav:
+        db.session.delete(fav)
+        db.session.commit()
+    return jsonify({'ok': True, 'is_favorite': False})
 
 
 def _html_preview_response(report: TestReport) -> Response:
@@ -647,6 +855,8 @@ def update_test_report(report_id):
         if f not in ('markdown', 'html'):
             return jsonify({'error': 'format 仅支持 markdown/html'}), 400
         report.format = f
+    if _looks_like_html_document(report.content):
+        report.format = 'html'
     if 'risk_level' in data:
         rl = (data['risk_level'] or 'tbd').strip()
         report.risk_level = rl if rl in TEST_REPORT_RISK_LEVELS else 'tbd'
@@ -676,10 +886,17 @@ def update_test_report(report_id):
             if not Project.query.get(pid):
                 return jsonify({'error': '项目不存在'}), 404
             report.project_id = pid
+    written_paths = []
     try:
+        report.content = _normalize_inline_images(report, caller, written_paths)
         db.session.commit()
+    except ValueError as e:
+        db.session.rollback()
+        _cleanup_files(written_paths)
+        return jsonify({'error': str(e)}), 400
     except SQLAlchemyError as e:
         db.session.rollback()
+        _cleanup_files(written_paths)
         return jsonify({'error': f'保存失败: {e}'}), 500
     return jsonify(report.to_dict(include_content=True))
 
@@ -789,6 +1006,64 @@ def _safe_filename(name: str) -> str:
     if not name:
         name = 'unnamed'
     return name[:200]
+
+
+def _cleanup_files(paths):
+    for path in paths or []:
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def _inline_image_content_type(ext: str) -> str:
+    if ext == 'jpg':
+        return 'image/jpeg'
+    return f'image/{ext}'
+
+
+def _save_inline_image_attachment(report, caller: dict, raw: bytes, ext: str,
+                                  label: str, written_paths: list) -> dict:
+    safe_label = _safe_filename(label or '截图')
+    filename = f'{safe_label}.{ext}'
+    stored_name = f'{int(datetime.now().timestamp())}_{secrets.token_hex(4)}.{ext}'
+    target_dir = _report_dir(report.id)
+    target_path = os.path.join(target_dir, stored_name)
+    with open(target_path, 'wb') as out:
+        out.write(raw)
+    written_paths.append(target_path)
+
+    att = TestReportAttachment(
+        report_id=report.id,
+        filename=filename,
+        stored_name=stored_name,
+        size_bytes=len(raw),
+        content_type=_inline_image_content_type(ext),
+        uploaded_by=caller['name'],
+        uploaded_by_user_id=caller.get('user_id'),
+        uploaded_by_claw_id=caller.get('claw_id'),
+    )
+    db.session.add(att)
+    db.session.flush()
+    return {
+        'id': att.id,
+        'filename': att.filename,
+        'download_url': f'/api/v1/test-reports/{report.id}/attachments/{att.id}/download',
+    }
+
+
+def _normalize_inline_images(report, caller: dict, written_paths: list) -> str:
+    """把正文中的 base64 截图转存为报告附件，避免正文过大或被 XSS 过滤破坏。"""
+    content, _count = extract_inline_report_images(
+        report.content or '',
+        report.format or 'markdown',
+        lambda raw, ext, alt: _save_inline_image_attachment(
+            report, caller, raw, ext, alt, written_paths,
+        ),
+        max_bytes=MAX_ATTACHMENT_SIZE,
+    )
+    return content
 
 
 @api_bp.route('/test-reports/<int:report_id>/attachments', methods=['POST'])

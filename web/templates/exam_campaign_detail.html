@@ -1,0 +1,366 @@
+{% extends "base.html" %}
+{% block title %}考试场次详情 - 考试中心{% endblock %}
+{% block page_title %}
+<a href="/exams" style="display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:50%;background:var(--bg-hover);border:1px solid var(--border);color:var(--text-muted);text-decoration:none;font-size:1rem;margin-right:10px;vertical-align:middle" title="返回考试中心">⬅</a>
+<span id="page-title">考试场次详情</span>
+{% endblock %}
+{% block nav_exams %}active{% endblock %}
+
+{% block head %}
+<style>
+.campaign-header {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+}
+.campaign-title { font-size: 1.25rem; font-weight: 700; margin-bottom: 8px; }
+.campaign-meta { display: flex; flex-wrap: wrap; gap: 14px 24px; color: var(--text-secondary); font-size: 0.88rem; }
+.campaign-meta strong { color: var(--text-primary); }
+
+.stats-row {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+}
+.stat-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    text-align: center;
+}
+.stat-box .num { font-size: 1.5rem; font-weight: 700; color: var(--text-primary); }
+.stat-box .lbl { font-size: 0.76rem; color: var(--text-secondary); margin-top: 4px; }
+
+.detail-tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border); margin-bottom: 16px; }
+.detail-tab {
+    padding: 10px 20px; border: none; background: none; cursor: pointer;
+    color: var(--text-secondary); font-weight: 600; font-size: 0.9rem;
+    border-bottom: 2px solid transparent; margin-bottom: -2px;
+}
+.detail-tab:hover { color: var(--text-primary); }
+.detail-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.examinee-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-bottom: 14px;
+}
+.examinee-head {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.examinee-avatar {
+    width: 38px; height: 38px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-weight: 700; color: #fff; flex-shrink: 0;
+}
+.examinee-name { font-weight: 700; font-size: 1rem; }
+.examinee-score { font-size: 1.1rem; font-weight: 700; color: var(--accent); margin-left: auto; }
+.examinee-meta { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.82rem; color: var(--text-secondary); margin-top: 8px; }
+.tag-pill { font-size: 0.72rem; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+.tag-pass { background: #dcfce7; color: #166534; }
+.tag-fail { background: #fee2e2; color: #991b1b; }
+.tag-status { background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border); }
+
+.examinee-answers { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border); display: none; }
+.examinee-answers.open { display: block; }
+.q-answer-row { margin-bottom: 12px; padding: 10px 12px; background: var(--bg-secondary); border-radius: 8px; }
+.q-answer-row .q-label { font-size: 0.82rem; color: var(--text-secondary); margin-bottom: 4px; }
+.q-answer-row .q-content { font-size: 0.9rem; white-space: pre-wrap; word-break: break-word; }
+.q-answer-row .q-score { font-size: 0.82rem; margin-top: 4px; }
+.q-answer-row.correct { border-left: 3px solid var(--green); }
+.q-answer-row.wrong { border-left: 3px solid var(--red); }
+.q-answer-row.pending { border-left: 3px solid #6366f1; }
+
+.question-compare-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-bottom: 14px;
+}
+.question-compare-title { font-weight: 600; margin-bottom: 10px; }
+.compare-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+.compare-table th, .compare-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+.compare-table th { background: var(--bg-secondary); color: var(--text-secondary); font-weight: 600; }
+.compare-table tr:hover { background: var(--bg-hover); }
+
+#tab-by-question { display: none; }
+#tab-by-question.active, #tab-by-examinee.active { display: block; }
+#tab-by-examinee { display: block; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div id="loading-area"><div class="loading"><span class="spinner"></span> 加载中...</div></div>
+<div id="main-area" style="display:none">
+    <div class="campaign-header" id="campaign-header"></div>
+    <div class="stats-row" id="stats-row"></div>
+
+    <div class="detail-tabs">
+        <button class="detail-tab active" data-tab="by-examinee" onclick="switchDetailTab('by-examinee')">按考生</button>
+        <button class="detail-tab" data-tab="by-question" onclick="switchDetailTab('by-question')">按题目对比</button>
+    </div>
+
+    <div id="tab-by-examinee"></div>
+    <div id="tab-by-question"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CAMPAIGN_ID = {{ campaign_id }};
+let campaignData = null;
+let currentUser = null;
+let answersLoaded = false;
+
+(async function init() {
+    try {
+        currentUser = await API.get('/auth/me');
+    } catch(e) {}
+    await loadCampaign();
+})();
+
+async function loadCampaign() {
+    try {
+        campaignData = await API.get('/exams/campaigns/' + CAMPAIGN_ID);
+        document.getElementById('loading-area').style.display = 'none';
+        document.getElementById('main-area').style.display = '';
+        document.getElementById('page-title').textContent = campaignData.name || '考试场次详情';
+        renderHeader();
+        renderStats();
+        renderByExaminee();
+    } catch(e) {
+        document.getElementById('loading-area').innerHTML =
+            '<div style="color:var(--red);padding:20px">加载失败：' + esc(e?.message || e) + '</div>';
+    }
+}
+
+function renderHeader() {
+    const c = campaignData;
+    const scopeLabel = {global:'全局', project:'项目', personal:'个人'};
+    const statusLabel = {scheduled:'未开始', active:'进行中', ended:'已结束', cancelled:'已取消'};
+    const p = c.paper || {};
+    document.getElementById('campaign-header').innerHTML = `
+        <div class="campaign-title">${esc(c.name || '')}</div>
+        <div class="campaign-meta">
+            <div><strong>试卷：</strong>${esc(c.paper_name || p.name || '')}</div>
+            <div><strong>范围：</strong>${scopeLabel[c.scope] || c.scope}${c.project_name ? ' · ' + esc(c.project_name) : ''}</div>
+            <div><strong>状态：</strong>${statusLabel[c.status] || c.status}</div>
+            <div><strong>开始：</strong>${(c.starts_at || '').slice(0, 16) || '不限'}</div>
+            <div><strong>截止：</strong>${(c.ends_at || '').slice(0, 16)}</div>
+            <div><strong>发起人：</strong>${esc(c.launched_by_display || '')}</div>
+            <div><strong>题量：</strong>${p.question_count || (p.questions || []).length} 题 · ${p.total_score || 0} 分 · 及格 ${p.pass_score || 0}</div>
+        </div>
+        ${c.remark ? `<div style="margin-top:10px;color:var(--text-secondary);font-size:0.88rem">${esc(c.remark)}</div>` : ''}
+    `;
+}
+
+function renderStats() {
+    const s = campaignData.stats || {};
+    document.getElementById('stats-row').innerHTML = `
+        <div class="stat-box"><div class="num">${s.participant_count || 0}</div><div class="lbl">参与人数</div></div>
+        <div class="stat-box"><div class="num">${s.submitted_count || 0}</div><div class="lbl">已交卷</div></div>
+        <div class="stat-box"><div class="num">${s.in_progress_count || 0}</div><div class="lbl">进行中</div></div>
+        <div class="stat-box"><div class="num">${s.pass_rate || 0}%</div><div class="lbl">通过率</div></div>
+        <div class="stat-box"><div class="num">${s.avg_score || 0}</div><div class="lbl">平均分</div></div>
+    `;
+}
+
+function renderByExaminee() {
+    const sessions = campaignData.sessions || [];
+    const area = document.getElementById('tab-by-examinee');
+    if (!sessions.length) {
+        area.innerHTML = '<div style="text-align:center;color:var(--text-secondary);padding:40px">暂无考生作答记录</div>';
+        return;
+    }
+    const statusLabel = {in_progress:'进行中', submitted:'已交卷', grading:'判分中', completed:'已完成', expired:'已超时'};
+    area.innerHTML = sessions.map(s => {
+        const color = avatarColor(s.examinee_display);
+        const label = avatarLabel(s.examinee_display);
+        const duration = formatDuration(s.duration_seconds);
+        const passTag = s.status === 'in_progress'
+            ? ''
+            : `<span class="tag-pill ${s.passed ? 'tag-pass' : 'tag-fail'}">${s.passed ? '通过' : '未通过'}</span>`;
+        const scoreText = s.status === 'in_progress' ? '—' : `${s.total_score} 分`;
+        return `<div class="examinee-card" id="card-${s.id}">
+            <div class="examinee-head">
+                <span class="examinee-avatar" style="background:${color}">${label}</span>
+                <span class="examinee-name">${esc(s.examinee_display || '未知')}</span>
+                ${passTag}
+                <span class="tag-pill tag-status">${statusLabel[s.status] || s.status}</span>
+                <span class="examinee-score">${scoreText}</span>
+            </div>
+            <div class="examinee-meta">
+                <span>开始：${(s.started_at || '').slice(0, 16)}</span>
+                <span>提交：${s.submitted_at ? s.submitted_at.slice(0, 16) : '—'}</span>
+                <span>用时：${duration}</span>
+                <span>已答：${s.answer_count || 0} 题</span>
+            </div>
+            <div style="margin-top:10px;display:flex;gap:8px">
+                <button class="btn btn-sm btn-ghost" onclick="toggleAnswers(${s.id})" id="btn-toggle-${s.id}">▾ 展开答案</button>
+                <a class="btn btn-sm btn-primary" href="/exams/sessions/${s.id}">查看完整答卷</a>
+            </div>
+            <div class="examinee-answers" id="answers-${s.id}"></div>
+        </div>`;
+    }).join('');
+}
+
+async function toggleAnswers(sessionId) {
+    const box = document.getElementById('answers-' + sessionId);
+    const btn = document.getElementById('btn-toggle-' + sessionId);
+    if (box.classList.contains('open')) {
+        box.classList.remove('open');
+        btn.textContent = '▾ 展开答案';
+        return;
+    }
+    if (box.dataset.loaded === '1') {
+        box.classList.add('open');
+        btn.textContent = '▴ 收起答案';
+        return;
+    }
+    btn.textContent = '加载中...';
+    try {
+        const sess = await API.get('/exams/sessions/' + sessionId);
+        const qmap = {};
+        ((sess.paper && sess.paper.questions) || []).forEach(q => { qmap[q.id] = q; });
+        const answers = sess.answers || [];
+        if (!answers.length) {
+            box.innerHTML = '<div style="color:var(--text-secondary);font-size:0.88rem">暂无作答</div>';
+        } else {
+            box.innerHTML = answers.map((a, idx) => {
+                const q = qmap[a.question_id] || {};
+                const parsed = parseAnswer(a.answer_content);
+                const auto = a.auto_score;
+                let css = 'pending';
+                if (auto !== null && auto !== undefined) {
+                    css = auto >= (q.points || 0) ? 'correct' : (auto > 0 ? 'pending' : 'wrong');
+                }
+                return `<div class="q-answer-row ${css}">
+                    <div class="q-label">第 ${idx + 1} 题 · ${q.points || 0} 分 · ${typeLabel(q.type)}</div>
+                    <div style="font-weight:600;margin-bottom:4px">${esc(q.title || a.question_title || '')}</div>
+                    <div class="q-content">${esc(formatAnswer(parsed, q)) || '<span style="color:var(--text-secondary)">未作答</span>'}</div>
+                    <div class="q-score">得分：<strong>${a.final_score ?? 0}</strong> / ${q.points || 0}</div>
+                </div>`;
+            }).join('');
+        }
+        box.dataset.loaded = '1';
+        box.classList.add('open');
+        btn.textContent = '▴ 收起答案';
+    } catch(e) {
+        btn.textContent = '▾ 展开答案';
+        alert('加载答案失败：' + (e?.message || e));
+    }
+}
+
+function switchDetailTab(tab) {
+    document.querySelectorAll('.detail-tab').forEach(t =>
+        t.classList.toggle('active', t.dataset.tab === tab));
+    document.getElementById('tab-by-examinee').style.display = tab === 'by-examinee' ? 'block' : 'none';
+    document.getElementById('tab-by-question').style.display = tab === 'by-question' ? 'block' : 'none';
+    if (tab === 'by-question') loadByQuestion();
+}
+
+async function loadByQuestion() {
+    const area = document.getElementById('tab-by-question');
+    if (answersLoaded) return;
+    area.innerHTML = '<div class="loading"><span class="spinner"></span> 加载对比数据...</div>';
+    try {
+        if (!(campaignData.sessions || []).some(s => s.answers)) {
+            const full = await API.get('/exams/campaigns/' + CAMPAIGN_ID + '?include_answers=1');
+            campaignData.sessions = full.sessions || [];
+        }
+        answersLoaded = true;
+        renderByQuestion();
+    } catch(e) {
+        area.innerHTML = '<div style="color:var(--red);padding:20px">加载失败：' + esc(e?.message || e) + '</div>';
+    }
+}
+
+function renderByQuestion() {
+    const questions = (campaignData.paper && campaignData.paper.questions) || [];
+    const sessions = (campaignData.sessions || []).filter(s => s.status !== 'in_progress');
+    const area = document.getElementById('tab-by-question');
+    if (!questions.length) {
+        area.innerHTML = '<div style="text-align:center;color:var(--text-secondary);padding:40px">暂无题目</div>';
+        return;
+    }
+    if (!sessions.length) {
+        area.innerHTML = '<div style="text-align:center;color:var(--text-secondary);padding:40px">暂无已交卷记录，无法对比</div>';
+        return;
+    }
+    area.innerHTML = questions.map((q, idx) => {
+        const rows = sessions.map(s => {
+            const ans = (s.answers || []).find(a => a.question_id === q.id);
+            const content = ans ? formatAnswer(parseAnswer(ans.answer_content), q) : '—';
+            const score = ans ? (ans.final_score ?? 0) : '—';
+            return `<tr>
+                <td>${esc(s.examinee_display || '')}</td>
+                <td style="max-width:360px;word-break:break-word">${esc(content)}</td>
+                <td>${score}</td>
+                <td><a href="/exams/sessions/${s.id}" style="font-size:0.82rem">详情</a></td>
+            </tr>`;
+        }).join('');
+        return `<div class="question-compare-card">
+            <div class="question-compare-title">第 ${idx + 1} 题 · ${q.points} 分 · ${typeLabel(q.type)} — ${esc(q.title)}</div>
+            ${q.description ? `<div style="color:var(--text-secondary);font-size:0.86rem;margin-bottom:10px">${esc(q.description)}</div>` : ''}
+            <table class="compare-table">
+                <thead><tr><th>考生</th><th>答案</th><th>得分</th><th></th></tr></thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>`;
+    }).join('');
+}
+
+function typeLabel(t) {
+    return {single:'单选', multiple:'多选', judge:'判断', fill:'填空', essay:'简答',
+        case_design:'用例编写', api_op:'API操作', scenario:'场景题'}[t] || t || '';
+}
+
+function parseAnswer(s) {
+    if (s === undefined || s === null || s === '') return null;
+    try { return JSON.parse(s); } catch(e) { return s; }
+}
+
+function formatAnswer(a, q) {
+    if (a === null || a === undefined || a === '') return '';
+    if (Array.isArray(a)) return a.join(', ');
+    if (typeof a === 'boolean') return a ? '对' : '错';
+    return String(a);
+}
+
+function formatDuration(sec) {
+    if (sec === null || sec === undefined) return '—';
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    if (m >= 60) {
+        const h = Math.floor(m / 60);
+        return `${h}小时${m % 60}分`;
+    }
+    return m > 0 ? `${m}分${s}秒` : `${s}秒`;
+}
+
+function avatarColor(name) {
+    const colors = ['#3b82f6','#10b981','#f59e0b','#8b5cf6','#ef4444','#06b6d4','#ec4899'];
+    let h = 0;
+    for (let i = 0; i < (name || '').length; i++) h = (h * 31 + name.charCodeAt(i)) % colors.length;
+    return colors[h];
+}
+
+function avatarLabel(name) {
+    const n = (name || '?').trim();
+    return n.length <= 2 ? n : n.slice(-2);
+}
+
+function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+}
+</script>
+{% endblock %}

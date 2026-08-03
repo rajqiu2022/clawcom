@@ -13,7 +13,41 @@ OpenClaw 的经验存储分三层（与 Rule #15 对齐）：
 | **Memos 层** | **外部 Memos**（`http://your-hub-host:5230`），Hub 代写；每条笔记带 `#claw-{Claw名}` 隔离空间 + `#openclaw/{tag}/{scope}`；**visibility=PROTECTED**（勿用 PRIVATE，Memos 0.24 List API 不返回 PRIVATE） | `POST /api/v1/memos/upsert`、`POST /api/v1/memos/deposit`；查自己的：`GET /api/v1/memos/search?claw_only=true`；按 uid 直读：`GET /api/v1/memos/memo/{uid}` | 每日零碎、待验证经验、碎片观察（**不会出现在 Hub 知识库列表**） |
 | **MySQL 层（Hub 正式知识库）** | `KnowledgeEntry` 表（draft → pending_review → approved） | `POST /api/v1/knowledge`、`PUT /api/v1/knowledge/{id}` 改 status | 已验证长期知识、SOP、FAQ、模板、可复用项目经验、结构化问题/风险/进展 |
 
-**触发词**：知识库、经验沉淀、知识搜索、Memos、知识审核、知识共享、沉淀知识、升级经验、知识分层、规则#15
+**触发词**：知识库、经验沉淀、知识搜索、Memos、知识审核、知识共享、沉淀知识、升级经验、知识分层、规则#15、任务上下文包、preflight
+
+---
+
+## 任务上下文包（执行前必读的检索路径）
+
+> 设计依据：`docs/superpowers/specs/2026-07-09-agent-memory-routing-design.md`（课题 #41 落地）。
+> 核心原则：**不靠"记得去查"，Hub 在任务里把该带的经验喂到嘴边**。
+
+领到任务（todo / agent_task / workflow_step）后，**执行前**先取上下文包：
+
+```bash
+GET /api/v1/tasks/{ref_type}/{ref_id}/context
+# ref_type ∈ todo | agent_task | workflow_step
+```
+
+返回字段与用法：
+
+| 字段 | 含义 | 你要做的动作 |
+|---|---|---|
+| `required_skills` | 本任务必须加载的 Skill（含通用壳 `basic-operations-preflight`） | 动手前逐个加载，未加载不得执行写操作 |
+| `primary_skill` | 推断的主 Skill | 优先阅读 |
+| `top_pitfalls` | 命中的线上知识库公共经验（≤3 条，跨 Agent 共享） | 逐条对照，避免重复踩别的 Agent 的坑 |
+| `preflight_checklist` | 5 条通用铁律自检项 | 提交前逐条复述确认 |
+| `references` | 关联知识库条目 `{type,id,title}` | 需要时按 id 查原文 |
+
+`top_pitfalls` 来源已从"本地 seed 文件"升级为**线上知识库**（`category='pitfall'`、`status='approved'`）：任何 Agent 把坑沉淀进知识库，命中关键词的任务就会自动带出，实现"一人踩坑、全员免疫"。
+
+### 5 条通用铁律（写操作前必过）
+
+1. **身份校验**：确认当前 `claw_id` 与 token 前缀一致。
+2. **读写分离**：验证只用 GET，禁止用 POST/PATCH/DELETE 做验证。
+3. **提交后回读**：写操作后用独立 GET 确认真实落库（不信返回体）。
+4. **查证再填**：枚举/ID 字段必须从 API options 取，禁止凭记忆手打。
+5. **配置校验**：配置变更后比对 hash，防止配置漂移。
 
 ---
 
@@ -144,9 +178,17 @@ GET /api/v1/knowledge
   status=approved        状态：draft / pending_review / approved / rejected
   source_type=openclaw   来源：openclaw / openspace / manual
   search=关键词           全文搜索（标题 + 内容）
+  group_profile=1        分组模式：把「项目基本信息」单独返回（见下）
 
-返回：知识条目数组（最多 200 条）
+返回：
+  - 默认：知识条目数组（最多 200 条），每条含 is_project_profile 布尔
+  - group_profile=1：{ project_profile, has_project_profile, target_project, entries, count }
+    · project_profile = 当前项目的《项目基本信息》条目（category=project_profile），无则 null
+    · target_project 未显式传 project 时按 Bearer Token 的项目自动推断
+    · has_project_profile=false ⇒ 该项目尚未完成接入第一步（缺项目基本信息）
 ```
+
+> 📌 **项目基本信息（特别标识）**：每个项目接入 Hub 的必备身份卡，用保留分类 `category=project_profile`、`scope=project` 标识。Agent 拉知识库列表建议带 `?group_profile=1`，即可拿到单独的 `project_profile`（含 TAPD / 前后端仓库 / 分支 / 协作平台），其余知识走汇总 `entries`。
 
 ### 2. 创建知识
 

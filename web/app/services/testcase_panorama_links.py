@@ -126,6 +126,17 @@ def aggregate_module_test_metrics(modules, links):
     return metrics
 
 
+def agent_test_metric_payload(existing, payload):
+    """Keep system-derived testcase counts while accepting agent risk metrics."""
+    result = dict(payload or {})
+    current = existing or {}
+    for key in (
+            'direct_case_count', 'subtree_case_count',
+            'linked_library_count', 'linked_directory_count'):
+        result[key] = int(_value(current, key, 0) or 0)
+    return result
+
+
 def detect_orphan_links(links, module_ids, library_ids, cases):
     """Return links whose module/library/directory/case target is stale."""
     orphans = []

@@ -1,0 +1,1326 @@
+{% extends "base.html" %}
+{% block title %}Workflow 编排 - OpenClaw 管理系统{% endblock %}
+{% block nav_workflows %}active{% endblock %}
+{% block page_title %}Workflow 自动化编排{% endblock %}
+
+{% block top_actions %}
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <button class="btn btn-primary" onclick="startDefaultRun()">启动 RacingGO QA Run</button>
+    <button class="btn btn-ghost" onclick="loadAll()">刷新</button>
+</div>
+{% endblock %}
+
+{% block content %}
+<style>
+.wf-layout { display:grid;grid-template-columns:320px 1fr;gap:16px;align-items:start; }
+.wf-panel { background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px; }
+.wf-title { font-weight:700;margin-bottom:10px; }
+.wf-item { border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px;cursor:pointer;background:var(--bg-secondary); }
+.wf-item:hover { border-color:var(--accent); }
+.wf-item.active { border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim); }
+.wf-meta { color:var(--text-muted);font-size:0.78rem;line-height:1.5; }
+.wf-status { display:inline-flex;align-items:center;border-radius:999px;padding:2px 8px;font-size:0.74rem;font-weight:700;border:1px solid transparent; }
+.wf-status-pending { color:#64748b;background:#64748b22;border-color:#64748b66; }
+.wf-status-running,.wf-status-retrying { color:#3b82f6;background:#3b82f622;border-color:#3b82f666; }
+.wf-status-waiting_approval { color:#f59e0b;background:#f59e0b22;border-color:#f59e0b66; }
+.wf-status-blocked,.wf-status-failed { color:#ef4444;background:#ef444422;border-color:#ef444466; }
+.wf-status-passed,.wf-status-succeeded { color:#22c55e;background:#22c55e22;border-color:#22c55e66; }
+.wf-status-skipped,.wf-status-cancelled { color:#94a3b8;background:#94a3b822;border-color:#94a3b866; }
+.wf-steps { display:flex;flex-direction:column;gap:8px; }
+.wf-step { border:1px solid var(--border);border-radius:10px;padding:10px;background:var(--bg-secondary); }
+.wf-step-head { display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px; }
+.wf-step-name { font-weight:700;flex:1;min-width:180px; }
+.wf-code { font-family:monospace;font-size:0.78rem;background:rgba(148,163,184,.12);border-radius:6px;padding:2px 5px; }
+.wf-artifact { display:inline-block;margin:4px 6px 0 0;color:var(--accent);font-size:0.8rem; }
+.wf-report-pill { display:inline-flex;align-items:center;gap:4px;border:1px solid #8b5cf666;background:#8b5cf622;color:#7c3aed;border-radius:999px;padding:3px 8px;font-size:.76rem;font-weight:700; }
+.wf-report-dot { position:absolute;right:10px;top:10px;border:1px solid #8b5cf666;background:var(--bg-card);color:#7c3aed;border-radius:999px;padding:2px 7px;font-size:.78rem;font-weight:800;box-shadow:0 8px 18px rgba(124,58,237,.12); }
+.wf-report-modal-backdrop { display:none;position:fixed;inset:0;z-index:10030;background:rgba(15,23,42,.62);padding:24px; }
+.wf-report-modal-backdrop.active { display:flex;align-items:stretch;justify-content:center; }
+.wf-report-modal { width:min(1180px,96vw);height:min(860px,92vh);background:var(--bg-card);border:1px solid var(--border);border-radius:16px;box-shadow:0 24px 80px rgba(15,23,42,.35);display:flex;flex-direction:column;overflow:hidden; }
+.wf-report-modal-head { display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--border); }
+.wf-report-modal-head strong { flex:1; }
+.wf-report-modal iframe { flex:1;border:0;width:100%;background:#fff; }
+.wf-empty { padding:36px;text-align:center;color:var(--text-muted);border:1px dashed var(--border);border-radius:12px; }
+.wf-node-type { display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:2px 8px;font-size:0.74rem;font-weight:700;border:1px solid transparent; }
+.wf-node-worker_task { color:#2563eb;background:#3b82f622;border-color:#3b82f666; }
+.wf-node-agent_task { color:#7c3aed;background:#8b5cf622;border-color:#8b5cf666; }
+.wf-node-llm_call { color:#0891b2;background:#06b6d422;border-color:#06b6d466; }
+.wf-node-approval { color:#d97706;background:#f59e0b22;border-color:#f59e0b66; }
+.wf-node-gate { color:#16a34a;background:#22c55e22;border-color:#22c55e66; }
+.wf-node-notification { color:#db2777;background:#ec489922;border-color:#ec489966; }
+.wf-node-file_read { color:#475569;background:#64748b22;border-color:#64748b66; }
+.wf-template-steps { display:flex;flex-direction:column;gap:8px;margin-top:12px; }
+.wf-template-step { border:1px solid var(--border);border-radius:10px;padding:10px;background:var(--bg-secondary); }
+.wf-template-step-head { display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px; }
+.wf-template-step-name { font-weight:700;flex:1;min-width:180px; }
+.wf-mini-grid { display:grid;grid-template-columns:90px 1fr;gap:4px 10px;font-size:0.8rem; }
+.wf-mini-grid b { color:var(--text-muted);font-weight:600; }
+.wf-template-workspace {
+    display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:14px;align-items:stretch;
+}
+.wf-flow-canvas {
+    position:relative;min-height:430px;overflow:auto;border:1px solid var(--border);
+    border-radius:16px;padding:22px;background:
+        radial-gradient(circle at 20px 20px, rgba(148,163,184,.24) 1px, transparent 1.5px),
+        linear-gradient(135deg, rgba(59,130,246,.06), rgba(20,184,166,.04));
+    background-size:22px 22px, 100% 100%;
+}
+.wf-flow-row { display:flex;align-items:center;gap:12px;flex-wrap:wrap; }
+.wf-flow-node {
+    position:relative;width:188px;min-height:112px;border:1px solid var(--border);
+    border-radius:16px;background:color-mix(in srgb, var(--bg-card) 92%, transparent);
+    box-shadow:0 10px 24px rgba(15,23,42,.08);padding:12px;cursor:pointer;
+    transition:transform .16s ease,border-color .16s ease,box-shadow .16s ease;
+}
+.wf-flow-node:hover { transform:translateY(-3px);border-color:var(--accent);box-shadow:0 16px 34px rgba(59,130,246,.15); }
+.wf-flow-node.active { border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim),0 16px 34px rgba(59,130,246,.15); }
+.wf-flow-node-title { font-weight:800;line-height:1.35;margin:8px 0 6px; }
+.wf-flow-node-sub { color:var(--text-muted);font-family:monospace;font-size:.72rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+.wf-flow-node-status { margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap; }
+.wf-progress-line { margin-top:8px;font-size:.72rem;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+.wf-progress-bar { width:100%;height:5px;border-radius:999px;background:var(--border);overflow:hidden;margin-top:6px; }
+.wf-progress-bar > span { display:block;height:100%;background:linear-gradient(90deg,#22c55e,#3b82f6);border-radius:inherit; }
+.wf-health-dot {
+    width:10px;height:10px;border-radius:50%;display:inline-block;flex:0 0 auto;
+    box-shadow:0 0 0 0 currentColor;animation:wfHealthPulse 1.2s ease-in-out infinite;
+}
+.wf-health-healthy { color:#22c55e;background:#22c55e; }
+.wf-health-stale { color:#f59e0b;background:#f59e0b; }
+.wf-health-failed { color:#ef4444;background:#ef4444; }
+.wf-health-idle { color:#94a3b8;background:#94a3b8;animation:none;opacity:.55; }
+@keyframes wfHealthPulse {
+    0% { box-shadow:0 0 0 0 color-mix(in srgb, currentColor 45%, transparent); }
+    70% { box-shadow:0 0 0 7px transparent; }
+    100% { box-shadow:0 0 0 0 transparent; }
+}
+.wf-flow-port {
+    position:absolute;top:50%;width:10px;height:10px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 3px var(--accent-dim);transform:translateY(-50%);
+}
+.wf-flow-port.in { left:-5px; }
+.wf-flow-port.out { right:-5px; }
+.wf-flow-connector {
+    width:48px;height:2px;background:linear-gradient(90deg,var(--border),var(--accent));
+    position:relative;flex:0 0 48px;
+}
+.wf-flow-connector::after {
+    content:'';position:absolute;right:-1px;top:50%;width:7px;height:7px;
+    border-top:2px solid var(--accent);border-right:2px solid var(--accent);
+    transform:translateY(-50%) rotate(45deg);
+}
+.wf-flow-break { flex-basis:100%;height:18px; }
+.wf-flow-row-bridge {
+    flex-basis:100%;height:64px;position:relative;margin:-4px 0 -2px;
+}
+.wf-flow-row-bridge svg {
+    display:block;width:1010px;max-width:100%;height:64px;overflow:visible;
+}
+.wf-flow-row-bridge path {
+    fill:none;stroke:var(--accent);stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;
+    filter:drop-shadow(0 0 4px var(--accent-dim));
+}
+.wf-inspector {
+    border:1px solid var(--border);border-radius:16px;background:var(--bg-secondary);
+    padding:14px;min-height:430px;position:sticky;top:12px;
+}
+.wf-inspector-title { display:flex;align-items:center;gap:8px;margin-bottom:10px; }
+.wf-inspector-title h3 { margin:0;font-size:1rem;line-height:1.35; }
+.wf-inspector-section { border-top:1px solid var(--border);padding-top:10px;margin-top:10px; }
+.wf-inspector-section-title { color:var(--text-muted);font-size:.76rem;font-weight:700;margin-bottom:6px; }
+.wf-chip-row { display:flex;gap:6px;flex-wrap:wrap; }
+.wf-gate-list { display:flex;flex-direction:column;gap:6px; }
+.wf-gate-item { padding:7px 8px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);font-size:.78rem; }
+.wf-side-tabs { display:flex;gap:6px;margin-bottom:12px;border-bottom:1px solid var(--border);padding-bottom:8px; }
+.wf-side-tab { flex:1;border:1px solid var(--border);background:var(--bg-secondary);color:var(--text);border-radius:999px;padding:6px 8px;cursor:pointer;font-size:.82rem;font-weight:700; }
+.wf-side-tab.active { border-color:var(--accent);background:var(--accent-dim);color:var(--accent); }
+.wf-side-pane { display:none; }
+.wf-side-pane.active { display:block; }
+.wf-fav-btn { border:1px solid var(--border);background:var(--bg-card);color:#f59e0b;border-radius:999px;padding:2px 8px;cursor:pointer;font-size:.78rem;font-weight:700; }
+.wf-pagination {
+    display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+    margin-top:10px;padding-top:10px;border-top:1px solid var(--border);
+    color:var(--text-muted);font-size:.78rem;
+}
+.wf-pagination-actions { display:flex;align-items:center;gap:6px; }
+.wf-page-size {
+    border:1px solid var(--border);border-radius:8px;background:var(--bg-card);
+    color:var(--text);padding:4px 6px;font-size:.78rem;
+}
+.wf-start-grid { display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px;text-align:left; }
+.wf-start-field { display:flex;flex-direction:column;gap:6px; }
+.wf-start-field label { font-size:.78rem;font-weight:700;color:var(--text-muted); }
+.wf-start-select { min-height:132px; }
+.wf-start-mode { display:flex;gap:8px;flex-wrap:wrap;margin:10px 0; }
+.wf-start-mode label { display:inline-flex;align-items:center;gap:6px;border:1px solid var(--border);border-radius:999px;padding:6px 10px;cursor:pointer;background:var(--bg-secondary);font-size:.86rem; }
+.wf-start-hint { color:var(--text-muted);font-size:.78rem;line-height:1.5;text-align:left; }
+.wf-checkdrop { position:relative; }
+.wf-checkdrop-btn {
+    width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;
+    border:1px solid var(--border);border-radius:10px;background:var(--bg-card);color:var(--text);
+    padding:9px 10px;cursor:pointer;text-align:left;font-size:.86rem;
+}
+.wf-checkdrop-summary {
+    flex:1;min-width:0;display:flex;align-items:center;gap:4px;flex-wrap:wrap;
+    overflow:hidden;max-height:56px;
+}
+.wf-checkdrop-placeholder { color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.wf-checkdrop-chip {
+    display:inline-block;max-width:168px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    border:1px solid var(--border);border-radius:999px;padding:2px 8px;font-size:.78rem;
+    background:var(--bg-secondary);color:var(--text);
+}
+.wf-checkdrop-chip.wf-checkdrop-more { max-width:none;color:var(--text-muted);background:transparent;border-style:dashed; }
+.wf-checkdrop-arrow { color:var(--text-muted);font-size:.8rem;flex:0 0 auto; }
+.wf-checkdrop-menu {
+    display:none;position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:10020;
+    max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:12px;
+    background:var(--bg-card);box-shadow:0 18px 40px rgba(15,23,42,.18);padding:6px;
+}
+.wf-checkdrop.open .wf-checkdrop-menu { display:block; }
+.wf-checkdrop-item {
+    display:flex;align-items:flex-start;gap:8px;padding:8px;border-radius:8px;
+    cursor:pointer;font-size:.84rem;line-height:1.35;min-width:0;
+}
+.wf-checkdrop-item:hover { background:var(--bg-secondary); }
+.wf-checkdrop-item input { margin-top:2px;flex:0 0 auto; }
+.wf-checkdrop-item > span {
+    flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.wf-checkdrop-empty { padding:12px;color:var(--text-muted);font-size:.82rem; }
+@media (max-width: 720px) { .wf-start-grid { grid-template-columns:1fr; } }
+@media (max-width: 1160px) { .wf-template-workspace { grid-template-columns:1fr; } .wf-inspector { position:static;min-height:0; } }
+@media (max-width: 980px) { .wf-layout { grid-template-columns:1fr; } }
+</style>
+
+<div class="wf-layout">
+    <div class="wf-panel">
+        <div class="wf-side-tabs">
+            <button class="wf-side-tab active" id="wf-tab-definitions" onclick="showSidebarTab('definitions')">模板</button>
+            <button class="wf-side-tab" id="wf-tab-runs" onclick="showSidebarTab('runs')">运行</button>
+            <button class="wf-side-tab" id="wf-tab-favorites" onclick="showSidebarTab('favorites')">收藏</button>
+        </div>
+        <div class="wf-side-pane active" id="wf-pane-definitions">
+            <div class="wf-title">模板</div>
+            <div id="definition-list"><div class="loading"><span class="spinner"></span></div></div>
+        </div>
+        <div class="wf-side-pane" id="wf-pane-runs">
+            <div class="wf-title">运行过的工作流</div>
+            <div id="run-list"><div class="loading"><span class="spinner"></span></div></div>
+        </div>
+        <div class="wf-side-pane" id="wf-pane-favorites">
+            <div class="wf-title">收藏模板</div>
+            <div id="favorite-list"><div class="loading"><span class="spinner"></span></div></div>
+        </div>
+    </div>
+    <div class="wf-panel">
+        <div id="run-detail" class="wf-empty">选择一次 Workflow Run 查看详情</div>
+    </div>
+</div>
+
+<div class="wf-report-modal-backdrop" id="wf-report-modal" onclick="closeWorkflowReport(event)">
+    <div class="wf-report-modal">
+        <div class="wf-report-modal-head">
+            <strong id="wf-report-modal-title">Workflow 报告</strong>
+            <button class="btn btn-ghost btn-sm" onclick="openWorkflowReportStandalone()">新窗口打开</button>
+            <button class="btn btn-ghost btn-sm" onclick="closeWorkflowReport()">关闭</button>
+        </div>
+        <iframe id="wf-report-frame" title="Workflow 测试报告"></iframe>
+    </div>
+</div>
+
+<script>
+let definitions = [];
+let favoriteDefinitions = [];
+let runs = [];
+let activeSidebarTab = 'definitions';
+let currentRunId = null;
+let currentDefinitionId = null;
+let currentDefinitionData = null;
+let currentTemplateStepId = null;
+let currentRunData = null;
+let currentRunStepId = null;
+let currentRunStepArtifacts = {};
+let currentWorkflowReportUrl = '';
+const workflowListPaging = {
+    definitions: {page: 1, per_page: 10, total: 0, pages: 1},
+    runs: {page: 1, per_page: 10, total: 0, pages: 1},
+    favorites: {page: 1, per_page: 10, total: 0, pages: 1},
+};
+
+function esc(v) {
+    if (v === null || v === undefined) return '';
+    return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function jsArg(v) {
+    return JSON.stringify(String(v === null || v === undefined ? '' : v));
+}
+function parseJsonObject(raw, label) {
+    const text = (raw || '').trim();
+    if (!text) return {};
+    let parsed = null;
+    try {
+        parsed = JSON.parse(text);
+    } catch (e) {
+        throw new Error(`${label} 必须是合法 JSON 对象`);
+    }
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+        throw new Error(`${label} 必须是 JSON 对象，不能是数组或普通文本`);
+    }
+    return parsed;
+}
+function statusBadge(status) {
+    const s = status || 'pending';
+    return `<span class="wf-status wf-status-${esc(s)}">${esc(statusLabel(s))}</span>`;
+}
+function statusLabel(s) {
+    return ({
+        pending:'待执行', running:'执行中', retrying:'重试中',
+        waiting_approval:'待审批', blocked:'已阻断', failed:'失败',
+        passed:'通过', skipped:'跳过', succeeded:'已完成', cancelled:'已终止'
+    })[s] || s;
+}
+function displayStateLabel(s) {
+    return ({todo:'待开始', running:'执行中', blocked:'阻断', done:'结束'})[s] || s || '待开始';
+}
+function stepDisplayState(step) {
+    return step.display_state || ({
+        pending:'todo',
+        running:'running',
+        retrying:'running',
+        waiting_approval:'running',
+        blocked:'blocked',
+        failed:'blocked',
+        passed:'done',
+        skipped:'done',
+        succeeded:'done',
+    })[(step && step.status) || 'pending'] || 'todo';
+}
+function stepDisplayStateBadge(step) {
+    const state = stepDisplayState(step);
+    const cls = {
+        todo: 'pending',
+        running: 'running',
+        blocked: 'blocked',
+        done: 'passed',
+    }[state] || 'pending';
+    return `<span class="wf-status wf-status-${esc(cls)}">${esc(displayStateLabel(state))}</span>`;
+}
+function healthLabel(status) {
+    return ({
+        healthy:'执行方有响应',
+        stale:'等待响应/响应延迟',
+        failed:'已自动阻断',
+        idle:'未运行',
+    })[status || 'idle'] || status || '未运行';
+}
+function renderHealthDot(step) {
+    const health = step.health_status || 'idle';
+    if (!['running','retrying','blocked','failed'].includes(step.status || '') && health === 'idle') return '';
+    const tip = [
+        healthLabel(health),
+        step.heartbeat_at ? `最近响应：${step.heartbeat_at}` : '最近响应：暂无',
+        step.heartbeat_by ? `上报者：${step.heartbeat_by}` : '',
+        `未响应计数：${step.missed_heartbeat_count || 0}`,
+    ].filter(Boolean).join('\n');
+    return `<span class="wf-health-dot wf-health-${esc(health)}" title="${esc(tip)}"></span>`;
+}
+function progressPercent(step) {
+    if (['passed','skipped','succeeded'].includes(step.status || '')) return 100;
+    const value = Number(step.progress_percent);
+    if (!Number.isFinite(value)) return null;
+    return Math.max(0, Math.min(100, Math.round(value)));
+}
+function progressLabel(step) {
+    const parts = [];
+    if (step.progress_phase) parts.push(step.progress_phase);
+    else if (['passed','skipped','succeeded'].includes(step.status || '')) parts.push('completed');
+    const percent = progressPercent(step);
+    if (percent !== null) parts.push(`${percent}%`);
+    if (step.progress_message) parts.push(step.progress_message);
+    else if (['passed','skipped','succeeded'].includes(step.status || '')) parts.push('节点已完成');
+    return parts.join(' · ');
+}
+function progressPhaseLabel(step) {
+    if (step.progress_phase) return step.progress_phase;
+    return ['passed','skipped','succeeded'].includes(step.status || '') ? 'completed' : '-';
+}
+function progressMessageLabel(step) {
+    if (step.progress_message) return step.progress_message;
+    return ['passed','skipped','succeeded'].includes(step.status || '') ? '节点已完成' : '-';
+}
+function renderProgressLine(step) {
+    const label = progressLabel(step);
+    if (!label) return '';
+    const percent = progressPercent(step);
+    const title = [
+        label,
+        step.progress_at ? `最近进度：${step.progress_at}` : '',
+        step.progress_by ? `上报者：${step.progress_by}` : '',
+    ].filter(Boolean).join('\n');
+    return `<div class="wf-progress-line" title="${esc(title)}">${esc(label)}</div>${
+        percent !== null ? `<div class="wf-progress-bar" title="${esc(percent + '%')}"><span style="width:${percent}%"></span></div>` : ''
+    }`;
+}
+function nodeTypeMeta(step) {
+    const type = step.type || step.step_type || 'worker_task';
+    const runner = step.runner || '';
+    const lowerRunner = runner.toLowerCase();
+    if (type === 'agent_task') return {key:type, label:'Agent 操作', icon:'🤖'};
+    if (type === 'llm_call') return {key:type, label:'大模型调用', icon:'✨'};
+    if (type === 'approval') return {key:type, label:'人工审批', icon:'✅'};
+    if (type === 'gate') return {key:type, label:'门禁判断', icon:'🚦'};
+    if (type === 'notification') return {key:type, label:'通知/推送', icon:'📣'};
+    if (lowerRunner.includes('read') || lowerRunner.includes('file') || lowerRunner.includes('report')) {
+        return {key:'file_read', label:'文件/报告读取', icon:'📄'};
+    }
+    return {key:type, label:'执行脚本', icon:'⚙️'};
+}
+function nodeTypeBadge(step) {
+    const meta = nodeTypeMeta(step || {});
+    return `<span class="wf-node-type wf-node-${esc(meta.key)}">${esc(meta.icon)} ${esc(meta.label)}</span>`;
+}
+function creatorLabel(row) {
+    if (!row) return '-';
+    if (row.created_by) return row.created_by;
+    if (row.owner_type && row.owner_id) return `${row.owner_type}:${row.owner_id}`;
+    return '-';
+}
+function visibilityLabel(row) {
+    return (row && row.visibility_scope === 'private') ? '个人可见' : '项目共享';
+}
+function showSidebarTab(tab) {
+    activeSidebarTab = tab;
+    ['definitions','runs','favorites'].forEach(key => {
+        const btn = document.getElementById(`wf-tab-${key}`);
+        const pane = document.getElementById(`wf-pane-${key}`);
+        if (btn) btn.classList.toggle('active', key === tab);
+        if (pane) pane.classList.toggle('active', key === tab);
+    });
+}
+async function api(path, opts) {
+    const res = await fetch('/api/v1' + path, Object.assign({
+        headers: {'Content-Type':'application/json'}
+    }, opts || {}));
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.status);
+    return data;
+}
+function pagedPath(path, state, extra) {
+    const params = new URLSearchParams(extra || {});
+    params.set('page', state.page || 1);
+    params.set('per_page', state.per_page || 10);
+    return `${path}?${params.toString()}`;
+}
+function normalizePagedResponse(data, fallbackState) {
+    if (Array.isArray(data)) {
+        return {
+            items: data,
+            pagination: {
+                page: 1,
+                per_page: fallbackState.per_page || 10,
+                total: data.length,
+                pages: 1,
+                has_prev: false,
+                has_next: false,
+            },
+        };
+    }
+    return {
+        items: data.items || [],
+        pagination: data.pagination || {
+            page: 1,
+            per_page: fallbackState.per_page || 10,
+            total: 0,
+            pages: 1,
+            has_prev: false,
+            has_next: false,
+        },
+    };
+}
+function renderPagination(kind) {
+    const p = workflowListPaging[kind] || {page:1, per_page:10, total:0, pages:1};
+    const safePage = p.page || 1;
+    const safePages = p.pages || 1;
+    return `<div class="wf-pagination">
+        <span>共 ${esc(p.total || 0)} 条 · 第 ${esc(safePage)} / ${esc(safePages)} 页</span>
+        <div class="wf-pagination-actions">
+            <select class="wf-page-size" onchange="changeWorkflowPageSize('${esc(kind)}', this.value)">
+                ${[10,20,50].map(size => `<option value="${size}" ${Number(p.per_page) === size ? 'selected' : ''}>${size}/页</option>`).join('')}
+            </select>
+            <button class="btn btn-ghost btn-sm" ${p.has_prev ? '' : 'disabled'} onclick="changeWorkflowPage('${esc(kind)}', -1)">上一页</button>
+            <button class="btn btn-ghost btn-sm" ${p.has_next ? '' : 'disabled'} onclick="changeWorkflowPage('${esc(kind)}', 1)">下一页</button>
+        </div>
+    </div>`;
+}
+async function changeWorkflowPage(kind, delta) {
+    const p = workflowListPaging[kind];
+    if (!p) return;
+    p.page = Math.max(1, Math.min((p.pages || 1), (p.page || 1) + Number(delta || 0)));
+    if (kind === 'definitions') await loadDefinitions();
+    if (kind === 'favorites') await loadFavoriteDefinitions();
+    if (kind === 'runs') await loadRuns();
+}
+async function changeWorkflowPageSize(kind, value) {
+    const p = workflowListPaging[kind];
+    if (!p) return;
+    p.per_page = [10,20,50].includes(Number(value)) ? Number(value) : 10;
+    p.page = 1;
+    if (kind === 'definitions') await loadDefinitions();
+    if (kind === 'favorites') await loadFavoriteDefinitions();
+    if (kind === 'runs') await loadRuns();
+}
+function selectedNumbers(selectEl) {
+    return Array.from(selectEl?.selectedOptions || [])
+        .map(o => Number(o.value))
+        .filter(v => Number.isFinite(v) && v > 0);
+}
+function renderStartOptionsSelect(items, kind) {
+    if (!items || !items.length) {
+        return `<option disabled>暂无可选${kind === 'agent' ? 'Agent' : 'owner'}</option>`;
+    }
+    return items.map(item => {
+        if (kind === 'agent') {
+            const state = item.status ? ` · ${item.status}` : '';
+            const tag = item.claw_tag || item.safe_name || '';
+            return `<option value="${esc(item.id)}">${esc(item.name)} (#${esc(item.id)}${state}${tag ? ' · ' + esc(tag) : ''})</option>`;
+        }
+        return `<option value="${esc(item.id)}">${esc(item.display_name || item.username)} (#${esc(item.id)}${item.bound_claw_id ? ' · 绑定Claw#' + esc(item.bound_claw_id) : ''})</option>`;
+    }).join('');
+}
+function checkboxOptionLabel(item, kind) {
+    if (kind === 'agent') {
+        const state = item.status ? ` · ${item.status}` : '';
+        const tag = item.claw_tag || item.safe_name || '';
+        return `${item.name} (#${item.id}${state}${tag ? ' · ' + tag : ''})`;
+    }
+    return `${item.display_name || item.username} (#${item.id}${item.bound_claw_id ? ' · 绑定Claw#' + item.bound_claw_id : ''})`;
+}
+function renderCheckboxDropdown(id, title, items, kind, selectedSet) {
+    const options = (items || []).map(item => {
+        const label = checkboxOptionLabel(item, kind);
+        const checked = selectedSet && selectedSet.has(Number(item.id)) ? 'checked' : '';
+        return `<label class="wf-checkdrop-item" title="${esc(label)}">
+            <input type="checkbox" name="${esc(id)}" value="${esc(item.id)}" data-label="${esc(label)}" ${checked}>
+            <span title="${esc(label)}">${esc(label)}</span>
+        </label>`;
+    }).join('') || `<div class="wf-checkdrop-empty">暂无可选${kind === 'agent' ? ' Agent' : ' owner'}</div>`;
+    return `<div class="wf-checkdrop" id="${esc(id)}">
+        <button type="button" class="wf-checkdrop-btn" data-placeholder="${esc(title)}">
+            <span class="wf-checkdrop-summary"><span class="wf-checkdrop-placeholder">${esc(title)}</span></span>
+            <span class="wf-checkdrop-arrow">▼</span>
+        </button>
+        <div class="wf-checkdrop-menu">${options}</div>
+    </div>`;
+}
+function renderCheckdropSummary(checked, placeholder) {
+    if (!checked.length) {
+        return `<span class="wf-checkdrop-placeholder">${esc(placeholder)}</span>`;
+    }
+    const labels = checked.map(x => x.dataset.label || x.value);
+    const chips = checked.slice(0, 2).map((input, idx) => {
+        const label = labels[idx] || input.value;
+        return `<span class="wf-checkdrop-chip" title="${esc(label)}">${esc(label)}</span>`;
+    }).join('');
+    if (checked.length > 2) {
+        return `${chips}<span class="wf-checkdrop-chip wf-checkdrop-more" title="${esc(labels.join('\n'))}">等 ${checked.length} 项</span>`;
+    }
+    return chips;
+}
+function bindCheckboxDropdown(overlay, id) {
+    const root = overlay.querySelector('#' + id);
+    if (!root) return;
+    const btn = root.querySelector('.wf-checkdrop-btn');
+    const summary = btn.querySelector('.wf-checkdrop-summary');
+    const placeholder = btn.dataset.placeholder || '请选择';
+    const update = () => {
+        const checked = Array.from(root.querySelectorAll('input[type="checkbox"]:checked'));
+        summary.innerHTML = renderCheckdropSummary(checked, placeholder);
+        btn.title = checked.length ? checked.map(x => x.dataset.label || x.value).join('\n') : '';
+    };
+    btn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        root.classList.toggle('open');
+    });
+    root.querySelectorAll('input[type="checkbox"]').forEach(input => input.addEventListener('change', update));
+    document.addEventListener('click', function closeDropdown(e) {
+        if (!root.isConnected) {
+            document.removeEventListener('click', closeDropdown);
+            return;
+        }
+        if (!root.contains(e.target)) root.classList.remove('open');
+    });
+    update();
+}
+function checkedNumbers(overlay, name) {
+    return Array.from(overlay.querySelectorAll(`input[name="${name}"]:checked`))
+        .map(x => Number(x.value))
+        .filter(v => Number.isFinite(v) && v > 0);
+}
+async function openWorkflowStartDialog(definitionRef) {
+    let d = null;
+    if (typeof definitionRef === 'number') {
+        d = await api(`/workflow-definitions/${definitionRef}/start-options`);
+    } else {
+        d = definitionRef || {};
+    }
+    const opts = d.start_options || {};
+    const startAgents = Array.isArray(opts.agents) ? opts.agents.filter(a => a && a.id) : [];
+    return new Promise(resolve => {
+        const html = `<div class="modal" style="max-width:760px">
+            <div class="modal-icon info">${_SVG.info}</div>
+            <div class="modal-title">启动 Workflow Run</div>
+            <div class="modal-desc" style="text-align:left;white-space:normal">
+                <div><b>${esc(d.name || 'RacingGO QA Run')}</b></div>
+                <div class="wf-start-hint">模板：<span class="wf-code">${esc(d.workflow_key || d.key || '-')}</span> · 项目：${esc((opts && opts.project_name) || d.project_name || '-')}</div>
+            </div>
+            <div class="wf-start-mode">
+                <label><input type="radio" name="_wf_start_mode" value="immediate" checked> 立即启动</label>
+                <label><input type="radio" name="_wf_start_mode" value="scheduled"> 定时启动（cron）</label>
+            </div>
+            <div class="wf-start-field" id="_wf_cron_wrap" style="display:none;text-align:left">
+                <label>cron 表达式</label>
+                <input id="_wf_schedule_cron" class="form-input" placeholder="例如：*/30 * * * * 或 0 10 * * 1-5">
+                <div class="wf-start-hint">说明：当前会把 cron 参数写入本次 Run 上下文，供调度器/后续自动触发读取。</div>
+            </div>
+            ${startAgents.length ? `<div class="wf-start-field" style="text-align:left;margin-top:10px">
+                <label>执行 Agent（可选）</label>
+                ${renderCheckboxDropdown('_wf_executor_claw_ids', '不指定，使用模板默认 Agent', startAgents, 'agent', new Set())}
+                <div class="wf-start-hint">选择后会覆盖本次 Run 的 Agent 节点目标，并写入 <span class="wf-code">start_vars.agent_ids</span> / <span class="wf-code">start_vars.agent_id</span>。</div>
+            </div>` : ''}
+            <div class="wf-start-field" style="text-align:left;margin-top:10px">
+                <label>启动参数变量（JSON 对象）</label>
+                <textarea id="_wf_start_vars" class="form-input" rows="5" placeholder='例如：{"branch":"qa_auto_test","device_pool":"android_smoke"}'></textarea>
+                <div class="wf-start-hint">整个 Flow 期间可读：节点可用 <span class="wf-code">start_vars.branch</span> 或 <span class="wf-code">context.start_vars.branch</span> 引用。</div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" id="_wf_start_cancel">取消</button>
+                <button class="btn btn-primary" id="_wf_start_ok">确认启动</button>
+            </div>
+        </div>`;
+        const overlay = _buildOverlay(html);
+        overlay.querySelectorAll('input[name="_wf_start_mode"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                const mode = overlay.querySelector('input[name="_wf_start_mode"]:checked')?.value || 'immediate';
+                overlay.querySelector('#_wf_cron_wrap').style.display = mode === 'scheduled' ? 'flex' : 'none';
+            });
+        });
+        bindCheckboxDropdown(overlay, '_wf_executor_claw_ids');
+        overlay.querySelector('#_wf_start_cancel').onclick = () => _closeOverlay(overlay, () => resolve(null));
+        overlay.querySelector('#_wf_start_ok').onclick = () => {
+            const mode = overlay.querySelector('input[name="_wf_start_mode"]:checked')?.value || 'immediate';
+            const cron = overlay.querySelector('#_wf_schedule_cron')?.value.trim() || '';
+            if (mode === 'scheduled' && !cron) {
+                showToast('请选择定时启动时，需要填写 cron 表达式', 'warning');
+                return;
+            }
+            let startVars = {};
+            try {
+                startVars = parseJsonObject(overlay.querySelector('#_wf_start_vars')?.value || '', '启动参数变量');
+            } catch (e) {
+                showToast(e.message, 'warning');
+                return;
+            }
+            const executorClawIds = checkedNumbers(overlay, '_wf_executor_claw_ids');
+            if (executorClawIds.length) {
+                startVars.agent_ids = executorClawIds;
+                startVars.agent_id = executorClawIds[0];
+            }
+            const payload = {
+                start_mode: mode,
+                schedule_cron: cron,
+                start_vars: startVars,
+            };
+            if (executorClawIds.length) payload.executor_claw_ids = executorClawIds;
+            _closeOverlay(overlay, () => resolve(payload));
+        };
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) _closeOverlay(overlay, () => resolve(null));
+        });
+    });
+}
+function renderDefinitionList(rows, emptyText) {
+    return rows.length ? rows.map(d => `
+        <div class="wf-item ${d.id === currentDefinitionId ? 'active' : ''}" data-definition-id="${d.id}" onclick="openDefinition(${d.id})">
+            <div style="display:flex;gap:6px;align-items:center">
+                <button class="wf-fav-btn" title="${d.is_favorite ? '取消收藏' : '收藏模板'}" onclick="event.stopPropagation(); toggleDefinitionFavorite(${d.id}, ${d.is_favorite ? 'true' : 'false'})">${d.is_favorite ? '★' : '☆'}</button>
+                <span style="font-weight:700;flex:1">${esc(d.name)}</span>
+                ${d.can_delete ? `<button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteDefinition(${d.id})">删除</button>` : ''}
+            </div>
+            <div class="wf-meta">ID：${esc(d.id)} · <span class="wf-code">${esc(d.workflow_key)}</span> · v${esc(d.version)} · ${esc(visibilityLabel(d))} · 项目：${esc(d.project_name || '-')} · 创建：${esc(creatorLabel(d))} · 点击查看节点</div>
+        </div>
+    `).join('') : `<div class="wf-empty">${esc(emptyText)}</div>`;
+}
+async function loadDefinitions() {
+    const state = workflowListPaging.definitions;
+    const data = await api(pagedPath('/workflow-definitions', state));
+    const page = normalizePagedResponse(data, state);
+    definitions = page.items;
+    Object.assign(state, page.pagination);
+    const el = document.getElementById('definition-list');
+    el.innerHTML = renderDefinitionList(definitions, '暂无模板') + renderPagination('definitions');
+}
+async function loadFavoriteDefinitions() {
+    const state = workflowListPaging.favorites;
+    const data = await api(pagedPath('/workflow-definitions', state, {favorite: '1'}));
+    const page = normalizePagedResponse(data, state);
+    favoriteDefinitions = page.items;
+    Object.assign(state, page.pagination);
+    const el = document.getElementById('favorite-list');
+    el.innerHTML = renderDefinitionList(favoriteDefinitions, '暂无收藏模板') + renderPagination('favorites');
+}
+async function openDefinition(id) {
+    currentDefinitionId = id;
+    currentRunId = null;
+    currentRunData = null;
+    currentRunStepId = null;
+    const d = await api('/workflow-definitions/' + id);
+    currentDefinitionData = d;
+    const steps = (d.definition && d.definition.steps) || [];
+    currentTemplateStepId = steps.length ? steps[0].id : null;
+    document.querySelectorAll('#definition-list .wf-item').forEach(x => {
+        x.classList.toggle('active', Number(x.dataset.definitionId) === id);
+    });
+    document.querySelectorAll('#favorite-list .wf-item').forEach(x => {
+        x.classList.toggle('active', Number(x.dataset.definitionId) === id);
+    });
+    document.getElementById('run-detail').innerHTML = `
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+            <h2 style="margin:0;flex:1">${esc(d.name)}</h2>
+            <span class="wf-code">${esc(d.workflow_key)}</span>
+        </div>
+        <div class="wf-meta" style="margin-bottom:12px">
+            模板ID：${esc(d.id)} · 版本：v${esc(d.version)} · 状态：${esc(d.status)} · 创建：${esc(creatorLabel(d))} · 节点数：${steps.length}
+            · ${esc(visibilityLabel(d))} · 项目：${esc(d.project_name || '-')} · ${d.can_execute ? '可启动' : '无启动权限'} · ${d.can_manage ? '可授权' : '不可授权'}
+            ${d.description ? ' · ' + esc(d.description) : ''}
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" onclick="toggleDefinitionFavorite(${d.id}, ${d.is_favorite ? 'true' : 'false'})">${d.is_favorite ? '★ 已收藏' : '☆ 收藏模板'}</button>
+            ${d.can_execute ? `<button class="btn btn-primary btn-sm" onclick="startRunFromDefinition(${d.id})">基于此模板启动 Run</button>` : ''}
+            ${d.can_manage ? `<button class="btn btn-ghost btn-sm" onclick="addDefinitionExecutor(${d.id})">添加执行者</button>` : ''}
+            ${d.can_change_visibility ? `<button class="btn btn-ghost btn-sm" onclick="toggleDefinitionVisibility(${d.id}, '${esc(d.visibility_scope === 'private' ? 'project' : 'private')}')">${d.visibility_scope === 'private' ? '设为项目共享' : '设为个人可见'}</button>` : ''}
+            ${d.can_delete ? `<button class="btn btn-danger btn-sm" onclick="deleteDefinition(${d.id})">删除模板</button>` : ''}
+        </div>
+        <div class="wf-template-workspace">
+            <div class="wf-flow-canvas">
+                ${renderDefinitionFlow(steps)}
+            </div>
+            <div class="wf-inspector" id="wf-template-inspector">
+                ${renderDefinitionInspector(steps.find(s => s.id === currentTemplateStepId) || steps[0])}
+            </div>
+        </div>
+    `;
+}
+function renderDefinitionFlow(steps) {
+    if (!steps.length) return '<div class="wf-empty">该模板暂无节点</div>';
+    return `<div class="wf-flow-row">${steps.map((step, idx) => `
+        ${idx > 0 ? (idx % 4 === 0 ? renderRowBridge() : '<div class="wf-flow-connector"></div>') : ''}
+        ${renderFlowNode(step, idx)}
+    `).join('')}</div>`;
+}
+function renderRowBridge() {
+    return `<div class="wf-flow-row-bridge" aria-hidden="true">
+        <svg viewBox="0 0 1010 64" preserveAspectRatio="none">
+            <defs>
+                <marker id="wf-arrow-head" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+                    <path d="M0,0 L8,4 L0,8 Z" fill="var(--accent)"></path>
+                </marker>
+            </defs>
+            <path d="M 968 2 C 1038 2 1038 58 12 58" marker-end="url(#wf-arrow-head)"></path>
+        </svg>
+    </div>`;
+}
+function renderFlowNode(step, idx) {
+    const active = step.id === currentTemplateStepId;
+    const meta = nodeTypeMeta(step);
+    return `<div class="wf-flow-node ${active ? 'active' : ''}" data-step-id="${esc(step.id)}" onclick="selectTemplateStep('${esc(step.id)}')">
+        ${idx > 0 ? '<span class="wf-flow-port in"></span>' : ''}
+        ${idx < ((currentDefinitionData?.definition?.steps || []).length - 1) ? '<span class="wf-flow-port out"></span>' : ''}
+        ${nodeTypeBadge(step)}
+        <div class="wf-flow-node-title">${idx + 1}. ${esc(step.name || step.id)}</div>
+        <div class="wf-flow-node-sub">${esc(step.runner || step.id)}</div>
+        <div class="wf-meta" style="margin-top:8px">${meta.label}${step.approval_required ? ' · 需审批' : ''}</div>
+    </div>`;
+}
+function selectTemplateStep(stepId) {
+    currentTemplateStepId = stepId;
+    document.querySelectorAll('.wf-flow-node').forEach(n => n.classList.toggle('active', n.dataset.stepId === stepId));
+    const steps = (currentDefinitionData && currentDefinitionData.definition && currentDefinitionData.definition.steps) || [];
+    const step = steps.find(s => s.id === stepId);
+    const panel = document.getElementById('wf-template-inspector');
+    if (panel) panel.innerHTML = renderDefinitionInspector(step);
+}
+function renderDefinitionInspector(step) {
+    if (!step) return '<div class="wf-empty">点击节点查看详情</div>';
+    const deps = step.depends_on && step.depends_on.length ? step.depends_on.join(', ') : '-';
+    const gates = step.gates && step.gates.length
+        ? step.gates.map(g => `<div class="wf-gate-item"><span class="wf-code">${esc(g.expression || '')}</span><br><span class="wf-meta">失败处理：${esc(g.on_fail || 'blocked')}</span></div>`).join('')
+        : '<div class="wf-meta">无门禁规则</div>';
+    const branches = step.branches && step.branches.length
+        ? step.branches.map(b => `<div class="wf-gate-item"><span class="wf-code">if ${esc(b.if || b.expression || '')}</span><br><span class="wf-meta">then：${esc((b.then || []).join(', ') || '-')} · else：${esc((b.else || []).join(', ') || '-')}</span></div>`).join('')
+        : '<div class="wf-meta">无分支规则</div>';
+    return `<div>
+        <div class="wf-inspector-title">
+            ${nodeTypeBadge(step)}
+            <h3>${esc(step.name || step.id)}</h3>
+        </div>
+        <div class="wf-chip-row">
+            <span class="wf-code">${esc(step.id)}</span>
+            ${step.approval_required ? '<span class="wf-status wf-status-waiting_approval">需审批</span>' : ''}
+        </div>
+        <div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">基础信息</div>
+        <div class="wf-mini-grid">
+            <b>Runner</b><span>${esc(step.runner || '-')}</span>
+            <b>依赖</b><span>${esc(deps)}</span>
+            <b>目标 Agent</b><span>${esc(step.target_agent || step.target_claw_id || '-')}</span>
+        </div>
+        </div>
+        <div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">门禁规则</div>
+            <div class="wf-gate-list">${gates}</div>
+        </div>
+        ${step.prompt ? `<div class="wf-inspector-section"><div class="wf-inspector-section-title">Prompt</div><div style="white-space:pre-wrap;font-size:.82rem">${esc(step.prompt)}</div></div>` : ''}
+        ${step.inputs && Object.keys(step.inputs).length ? `<div class="wf-inspector-section"><div class="wf-inspector-section-title">输入参数</div><pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(step.inputs, null, 2))}</pre></div>` : ''}
+        ${step.input_vars && Object.keys(step.input_vars).length ? `<div class="wf-inspector-section"><div class="wf-inspector-section-title">输入变量</div><pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(step.input_vars, null, 2))}</pre></div>` : ''}
+        ${step.outputs && step.outputs.length ? `<div class="wf-inspector-section"><div class="wf-inspector-section-title">输出变量</div><div class="wf-chip-row">${step.outputs.map(x => `<span class="wf-code">${esc(x)}</span>`).join('')}</div></div>` : ''}
+        <div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">分支规则</div>
+            <div class="wf-gate-list">${branches}</div>
+        </div>
+    </div>`;
+}
+async function loadRuns(selectId) {
+    const state = workflowListPaging.runs;
+    if (selectId) state.page = 1;
+    const data = await api(pagedPath('/workflow-runs', state));
+    const page = normalizePagedResponse(data, state);
+    runs = page.items;
+    Object.assign(state, page.pagination);
+    const el = document.getElementById('run-list');
+    el.innerHTML = runs.length ? runs.map(r => `
+        <div class="wf-item ${r.id === currentRunId ? 'active' : ''}" data-run-id="${r.id}" onclick="openRun(${r.id})">
+            <div style="display:flex;gap:6px;align-items:center">
+                <span style="font-weight:700;flex:1">#${r.id} ${esc(r.run_name || r.workflow_name)}</span>
+                ${statusBadge(r.status)}
+                ${r.can_delete ? `<button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteRun(${r.id})">删除</button>` : ''}
+            </div>
+            <div class="wf-meta">${esc(r.workflow_name)} · 当前：${esc(r.current_step_id || '-')}</div>
+        </div>
+    `).join('') : '<div class="wf-empty">暂无运行记录</div>';
+    el.innerHTML += renderPagination('runs');
+    if (selectId) openRun(selectId);
+}
+async function loadAll() {
+    try {
+        await loadDefinitions();
+        await loadFavoriteDefinitions();
+        await loadRuns();
+        if (currentRunId) await openRun(currentRunId);
+    } catch (e) {
+        await customAlert('加载失败：' + e.message, 'error');
+    }
+}
+async function startDefaultRun() {
+    try {
+        const defaultDef = definitions.find(d => d.workflow_key === 'racinggo_qa_auto_test');
+        const startPayload = await openWorkflowStartDialog(defaultDef ? defaultDef.id : {
+            name: 'RacingGO QA Run',
+            workflow_key: 'racinggo_qa_auto_test',
+            start_options: {agents: [], owners: []}
+        });
+        if (!startPayload) return;
+        const run = await api('/workflow-runs', {
+            method:'POST',
+            body: JSON.stringify(Object.assign({workflow_key:'racinggo_qa_auto_test'}, startPayload))
+        });
+        currentRunId = run.id;
+        currentDefinitionId = null;
+        showSidebarTab('runs');
+        await loadRuns(run.id);
+    } catch (e) {
+        await customAlert('启动失败：' + e.message, 'error');
+    }
+}
+async function startRunFromDefinition(definitionId) {
+    try {
+        const startPayload = await openWorkflowStartDialog(definitionId);
+        if (!startPayload) return;
+        const run = await api('/workflow-runs', {
+            method:'POST',
+            body: JSON.stringify(Object.assign({definition_id: definitionId}, startPayload))
+        });
+        currentRunId = run.id;
+        currentDefinitionId = null;
+        showSidebarTab('runs');
+        await loadRuns(run.id);
+    } catch (e) {
+        await customAlert('启动失败：' + e.message, 'error');
+    }
+}
+async function addDefinitionExecutor(definitionId) {
+    try {
+        const d = await api(`/workflow-definitions/${definitionId}/start-options`);
+        const opts = d.start_options || {agents: [], owners: []};
+        const acl = d.executor_acl || {};
+        const currentClaws = new Set((acl.claw_ids || []).map(x => Number(x)));
+        const currentUsers = new Set((acl.user_ids || []).map(x => Number(x)));
+        const result = await new Promise(resolve => {
+            const html = `<div class="modal" style="max-width:760px">
+                <div class="modal-icon info">${_SVG.edit}</div>
+                <div class="modal-title">添加 Workflow 执行者</div>
+                <div class="modal-desc" style="text-align:left;white-space:normal">
+                    <div><b>${esc(d.name || '')}</b></div>
+                    <div class="wf-start-hint">从项目 Agent 和 owner 列表中选择，可多选。已授权的执行者会默认选中。</div>
+                </div>
+                <div class="wf-start-grid">
+                    <div class="wf-start-field">
+                        <label>Agent 执行者（可多选）</label>
+                        ${renderCheckboxDropdown('_wf_acl_agents', '请选择 Agent 执行者', opts.agents || [], 'agent', currentClaws)}
+                    </div>
+                    <div class="wf-start-field">
+                        <label>Owner / 用户执行者（可多选）</label>
+                        ${renderCheckboxDropdown('_wf_acl_users', '请选择 owner / 用户', opts.owners || [], 'owner', currentUsers)}
+                    </div>
+                </div>
+                <div class="wf-start-hint" style="margin-top:10px">提示：这是模板级“可启动/可执行”授权，不是本次启动的临时执行人。确认后会追加到模板 ACL。</div>
+                <div class="modal-actions">
+                    <button class="btn btn-ghost" id="_wf_acl_cancel">取消</button>
+                    <button class="btn btn-primary" id="_wf_acl_ok">确认添加</button>
+                </div>
+            </div>`;
+            const overlay = _buildOverlay(html);
+            bindCheckboxDropdown(overlay, '_wf_acl_agents');
+            bindCheckboxDropdown(overlay, '_wf_acl_users');
+            overlay.querySelector('#_wf_acl_cancel').onclick = () => _closeOverlay(overlay, () => resolve(null));
+            overlay.querySelector('#_wf_acl_ok').onclick = () => {
+                const payload = {
+                    claw_ids: checkedNumbers(overlay, '_wf_acl_agents'),
+                    user_ids: checkedNumbers(overlay, '_wf_acl_users'),
+                };
+                _closeOverlay(overlay, () => resolve(payload));
+            };
+            overlay.addEventListener('click', e => {
+                if (e.target === overlay) _closeOverlay(overlay, () => resolve(null));
+            });
+        });
+        if (!result) return;
+        if (!result.claw_ids.length && !result.user_ids.length) {
+            await customAlert('请至少选择一个 Agent 或 owner', 'warning');
+            return;
+        }
+        await api(`/workflow-definitions/${definitionId}/executors`, {
+            method:'POST',
+            body: JSON.stringify(result)
+        });
+        await openDefinition(definitionId);
+        await loadDefinitions();
+        await loadFavoriteDefinitions();
+    } catch (e) {
+        await customAlert('添加执行者失败：' + e.message, 'error');
+    }
+}
+async function toggleDefinitionFavorite(definitionId, isFavorite) {
+    try {
+        await api(`/workflow-definitions/${definitionId}/favorite`, {
+            method: isFavorite ? 'DELETE' : 'POST'
+        });
+        await loadDefinitions();
+        await loadFavoriteDefinitions();
+        if (currentDefinitionId === definitionId) await openDefinition(definitionId);
+    } catch (e) {
+        await customAlert((isFavorite ? '取消收藏失败：' : '收藏失败：') + e.message, 'error');
+    }
+}
+async function toggleDefinitionVisibility(definitionId, nextScope) {
+    const label = nextScope === 'private' ? '个人可见' : '项目共享';
+    if (!await customConfirm({
+        title: '修改模板可见性',
+        msg: `确认将此模板设为「${label}」？\n\n项目共享：项目成员可看到，但不能删除或修改；启动权限仍由创建者授权。\n个人可见：只有创建者可看到。`,
+        okText: '确认修改'
+    })) return;
+    try {
+        await api(`/workflow-definitions/${definitionId}/visibility`, {
+            method:'PATCH',
+            body: JSON.stringify({visibility_scope: nextScope})
+        });
+        await loadDefinitions();
+        await loadFavoriteDefinitions();
+        await openDefinition(definitionId);
+    } catch (e) {
+        await customAlert('修改可见性失败：' + e.message, 'error');
+    }
+}
+async function deleteDefinition(definitionId) {
+    if (!await customConfirm({
+        title: '删除 Workflow 模板',
+        msg: '确认删除此 Workflow 模板？\n\n已有运行记录不会被删除，模板会从列表隐藏。',
+        type: 'danger',
+        okText: '删除'
+    })) return;
+    try {
+        await api(`/workflow-definitions/${definitionId}`, {method:'DELETE'});
+        currentDefinitionId = null;
+        currentDefinitionData = null;
+        document.getElementById('run-detail').innerHTML = '<div class="wf-empty">选择一次 Workflow Run 查看详情</div>';
+        await loadDefinitions();
+        await loadFavoriteDefinitions();
+    } catch (e) {
+        await customAlert('删除模板失败：' + e.message, 'error');
+    }
+}
+function renderArtifacts(artifacts) {
+    const visible = (artifacts || []).filter(a => a.type !== 'workflow_report');
+    if (!visible.length) return '';
+    return `<div style="margin-top:8px">${visible.map(a => {
+        const href = a.url || '';
+        const label = a.name || a.type || 'artifact';
+        if (href) return `<a class="wf-artifact" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`;
+        return `<span class="wf-artifact">${esc(label)}：${esc(a.local_path || '')}</span>`;
+    }).join('')}</div>`;
+}
+function workflowReportForStep(stepId) {
+    const artifacts = currentRunStepArtifacts[stepId] || [];
+    return artifacts.find(a => a.type === 'workflow_report' && a.test_report_id);
+}
+function renderWorkflowReportDot(stepId) {
+    const report = workflowReportForStep(stepId);
+    return report ? `<span class="wf-report-dot" title="该节点有 Workflow 报告">📄</span>` : '';
+}
+function renderWorkflowReportButton(step) {
+    if (!step) return '';
+    const report = workflowReportForStep(step.step_id);
+    if (!report) return '';
+    return `<button class="btn btn-ghost btn-sm wf-report-pill" onclick="openWorkflowReport(${report.test_report_id}, ${currentRunData.id}, ${esc(jsArg(step.step_id))}, ${esc(jsArg(report.name || 'Workflow 报告'))})">📄 查看报告</button>`;
+}
+function openWorkflowReport(reportId, runId, stepId, title) {
+    const params = new URLSearchParams({
+        workflow_run_id: String(runId),
+        workflow_step_id: stepId,
+        report_id: String(reportId),
+    });
+    currentWorkflowReportUrl = `/test-reports/${reportId}?${params.toString()}`;
+    document.getElementById('wf-report-modal-title').textContent = title || 'Workflow 报告';
+    document.getElementById('wf-report-frame').src = currentWorkflowReportUrl;
+    document.getElementById('wf-report-modal').classList.add('active');
+}
+function closeWorkflowReport(event) {
+    if (event && event.target && event.target.id !== 'wf-report-modal') return;
+    const modal = document.getElementById('wf-report-modal');
+    if (modal) modal.classList.remove('active');
+}
+function openWorkflowReportStandalone() {
+    if (currentWorkflowReportUrl) window.open(currentWorkflowReportUrl, '_blank', 'noopener');
+}
+async function openRun(id) {
+    currentRunId = id;
+    currentDefinitionId = null;
+    showSidebarTab('runs');
+    const run = await api('/workflow-runs/' + id);
+    currentRunData = run;
+    document.querySelectorAll('#run-list .wf-item').forEach(x => {
+        x.classList.toggle('active', Number(x.dataset.runId) === id);
+    });
+    const stepArtifacts = {};
+    (run.artifacts || []).forEach(a => {
+        const key = a.step_id || '';
+        if (!stepArtifacts[key]) stepArtifacts[key] = [];
+        stepArtifacts[key].push(a);
+    });
+    currentRunStepArtifacts = stepArtifacts;
+    const steps = run.steps || [];
+    const preferredStep = run.current_step_id || (steps.find(s => ['blocked','failed','running','retrying','waiting_approval'].includes(s.status || '')) || {}).step_id;
+    currentRunStepId = preferredStep || (steps[0] && steps[0].step_id) || null;
+    const startVars = run.context && run.context.start_vars && Object.keys(run.context.start_vars).length
+        ? `<div class="wf-inspector-section" style="margin-bottom:12px"><div class="wf-inspector-section-title">启动参数变量</div><pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(run.context.start_vars, null, 2))}</pre></div>`
+        : '';
+    document.getElementById('run-detail').innerHTML = `
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+            <h2 style="margin:0;flex:1">#${run.id} ${esc(run.run_name || run.workflow_name)}</h2>
+            ${statusBadge(run.status)}
+            <button class="btn btn-ghost btn-sm" onclick="openRun(${run.id})">刷新</button>
+            <button class="btn btn-danger btn-sm" onclick="cancelRun(${run.id})">终止</button>
+            ${run.can_delete ? `<button class="btn btn-danger btn-sm" onclick="deleteRun(${run.id})">删除</button>` : ''}
+        </div>
+        <div class="wf-meta" style="margin-bottom:12px">
+            模板：${esc(run.workflow_name)} · 触发：${esc(run.triggered_by || '-')} · 创建：${esc(run.created_at || '')}
+        </div>
+        ${startVars}
+        ${(run.blocker && run.blocker.message) ? `<div style="padding:10px;border-left:3px solid #ef4444;background:#ef444422;border-radius:8px;margin-bottom:12px">${esc(run.blocker.message)}</div>` : ''}
+        ${renderApprovals(run)}
+        <div class="wf-template-workspace">
+            <div class="wf-flow-canvas">
+                ${renderRunFlow(steps)}
+            </div>
+            <div class="wf-inspector" id="wf-run-inspector">
+                ${renderRunStepInspector(steps.find(s => s.step_id === currentRunStepId) || steps[0])}
+            </div>
+        </div>
+    `;
+}
+function renderRunFlow(steps) {
+    if (!steps.length) return '<div class="wf-empty">该 Run 暂无节点</div>';
+    return `<div class="wf-flow-row">${steps.map((step, idx) => `
+        ${idx > 0 ? (idx % 4 === 0 ? renderRowBridge() : '<div class="wf-flow-connector"></div>') : ''}
+        ${renderRunFlowNode(step, idx, steps.length)}
+    `).join('')}</div>`;
+}
+function renderRunFlowNode(step, idx, total) {
+    const active = step.step_id === currentRunStepId;
+    const meta = nodeTypeMeta(step);
+    return `<div class="wf-flow-node ${active ? 'active' : ''}" data-run-step-id="${esc(step.step_id)}" onclick="selectRunStep('${esc(step.step_id)}')">
+        ${renderWorkflowReportDot(step.step_id)}
+        ${idx > 0 ? '<span class="wf-flow-port in"></span>' : ''}
+        ${idx < total - 1 ? '<span class="wf-flow-port out"></span>' : ''}
+        ${nodeTypeBadge(step)}
+        <div class="wf-flow-node-title">${idx + 1}. ${esc(step.name || step.step_id)}</div>
+        <div class="wf-flow-node-sub">${esc(step.runner || step.step_id)}</div>
+        <div class="wf-flow-node-status">
+            ${renderHealthDot(step)}
+            ${stepDisplayStateBadge(step)}
+            <span class="wf-meta">${meta.label}${step.attempt_no ? ' · #' + esc(step.attempt_no) : ''}</span>
+        </div>
+        ${renderProgressLine(step)}
+    </div>`;
+}
+function selectRunStep(stepId) {
+    currentRunStepId = stepId;
+    document.querySelectorAll('.wf-flow-node').forEach(n => n.classList.toggle('active', n.dataset.runStepId === stepId));
+    const steps = (currentRunData && currentRunData.steps) || [];
+    const step = steps.find(s => s.step_id === stepId);
+    const panel = document.getElementById('wf-run-inspector');
+    if (panel) panel.innerHTML = renderRunStepInspector(step);
+}
+function renderRunStepInspector(step) {
+    if (!step || !currentRunData) return '<div class="wf-empty">点击节点查看运行详情</div>';
+    const artifacts = currentRunStepArtifacts[step.step_id] || [];
+    const blocker = step.blocker && (step.blocker.message || step.blocker.suggested_action)
+        ? `<div style="color:#ef4444;margin-top:6px">${esc(step.blocker.message || '')}${step.blocker.suggested_action ? ' · 建议：' + esc(step.blocker.suggested_action) : ''}</div>` : '';
+    const metrics = step.metrics && Object.keys(step.metrics).length
+        ? `<pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(step.metrics, null, 2))}</pre>`
+        : '<div class="wf-meta">暂无 metrics</div>';
+    const outputs = step.outputs && Object.keys(step.outputs).length
+        ? `<pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(step.outputs, null, 2))}</pre>`
+        : '<div class="wf-meta">暂无 outputs</div>';
+    const branchResult = step.branch_result && Object.keys(step.branch_result).length
+        ? `<pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(step.branch_result, null, 2))}</pre>`
+        : '<div class="wf-meta">暂无分支结果</div>';
+    const evidence = step.evidence && Object.keys(step.evidence).length
+        ? `<pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(step.evidence, null, 2))}</pre>`
+        : '<div class="wf-meta">暂无 evidence</div>';
+    const heartbeat = `<div class="wf-mini-grid">
+        <b>健康</b><span>${renderHealthDot(step)} ${esc(healthLabel(step.health_status || 'idle'))}</span>
+        <b>最近响应</b><span>${esc(step.heartbeat_at || '-')}</span>
+        <b>上报者</b><span>${esc(step.heartbeat_by || '-')}</span>
+        <b>响应次数</b><span>${esc(step.heartbeat_count || 0)}</span>
+        <b>未响应计数</b><span>${esc(step.missed_heartbeat_count || 0)}</span>
+        <b>检查时间</b><span>${esc(step.health_checked_at || '-')}</span>
+    </div>`;
+    const progressDetail = step.progress && Object.keys(step.progress).length
+        ? `<pre style="white-space:pre-wrap;margin:6px 0 0;font-size:.78rem">${esc(JSON.stringify(step.progress, null, 2))}</pre>`
+        : '';
+    const progress = `<div class="wf-mini-grid">
+        <b>阶段</b><span>${esc(progressPhaseLabel(step))}</span>
+        <b>进度</b><span>${esc(progressPercent(step) !== null ? progressPercent(step) + '%' : '-')}</span>
+        <b>说明</b><span>${esc(progressMessageLabel(step))}</span>
+        <b>最近进度</b><span>${esc(step.progress_at || '-')}</span>
+        <b>上报者</b><span>${esc(step.progress_by || '-')}</span>
+    </div>${progressDetail}`;
+    const refs = (step.config && step.config.references) || [];
+    return `<div>
+        <div class="wf-inspector-title">
+            ${nodeTypeBadge(step)}
+            <h3>${esc(step.name || step.step_id)}</h3>
+        </div>
+        <div class="wf-chip-row">
+            ${stepDisplayStateBadge(step)}
+            <span class="wf-code">${esc(step.step_id)}</span>
+            ${renderWorkflowReportButton(step)}
+            ${renderStepStateActions(step)}
+            ${['blocked','failed'].includes(step.status) ? `<button class="btn btn-ghost btn-sm" onclick="retryStep(${currentRunData.id}, '${esc(step.step_id)}')">重试</button>` : ''}
+        </div>
+        <div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">执行信息</div>
+            <div class="wf-mini-grid">
+                <b>Runner</b><span>${esc(step.runner || '-')}</span>
+                <b>Attempt</b><span>${esc(step.attempt_no || 0)}</span>
+                <b>开始</b><span>${esc(step.started_at || '-')}</span>
+                <b>结束</b><span>${esc(step.finished_at || '-')}</span>
+            </div>
+        </div>
+        ${step.summary ? `<div class="wf-inspector-section"><div class="wf-inspector-section-title">摘要</div><div>${esc(step.summary)}</div>${blocker}</div>` : blocker ? `<div class="wf-inspector-section">${blocker}</div>` : ''}
+        <div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">参考内容</div>
+            ${renderStepReferences(refs)}
+        </div>
+        <div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">响应状态</div>
+            ${heartbeat}
+        </div>
+        <div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">执行进度</div>
+            ${progress}
+        </div>
+        <div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">Metrics</div>
+            ${metrics}
+        </div>
+        <div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">Outputs</div>
+            ${outputs}
+        </div>
+        <div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">分支结果</div>
+            ${branchResult}
+        </div>
+        <div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">Evidence</div>
+            ${evidence}
+            ${renderArtifacts(artifacts)}
+        </div>
+    </div>`;
+}
+function renderStepStateActions(step) {
+    const state = stepDisplayState(step);
+    const stepArg = esc(jsArg(step.step_id));
+    const buttons = [];
+    if (state !== 'running') buttons.push(`<button class="btn btn-primary btn-sm" onclick="changeStepState(${currentRunData.id}, ${stepArg}, 'running')">设为执行中</button>`);
+    if (state !== 'blocked') buttons.push(`<button class="btn btn-ghost btn-sm" onclick="changeStepState(${currentRunData.id}, ${stepArg}, 'blocked')">标记阻断</button>`);
+    if (state !== 'done') buttons.push(`<button class="btn btn-ghost btn-sm" onclick="changeStepState(${currentRunData.id}, ${stepArg}, 'done')">标记结束</button>`);
+    return buttons.join('');
+}
+function renderStepReferences(refs) {
+    if (!refs || !refs.length) return '<div class="wf-meta">暂无参考内容</div>';
+    return refs.map(ref => {
+        const title = ref.title || ref.url || ref.path || ref.id || '-';
+        const href = safeWorkflowReferenceUrl(ref.url || '');
+        const label = `${ref.type || 'ref'}：${title}`;
+        return href
+            ? `<a class="wf-artifact" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`
+            : `<span class="wf-artifact">${esc(label)}</span>`;
+    }).join('');
+}
+function safeWorkflowReferenceUrl(url) {
+    const value = String(url || '').trim();
+    if (!value) return '';
+    return (value.startsWith('http://') || value.startsWith('https://') || (value.startsWith('/') && !value.startsWith('//'))) ? value : '';
+}
+async function changeStepState(runId, stepId, displayState) {
+    const label = displayStateLabel(displayState);
+    const summary = await customPrompt({
+        title: `将节点设为${label}`,
+        msg: '请输入本次状态变更说明',
+        placeholder: '例如：环境已恢复，继续执行',
+        defaultVal: '',
+        multiline: true
+    });
+    if (summary === null) return;
+    try {
+        await api(`/workflow-runs/${runId}/steps/${encodeURIComponent(stepId)}/status`, {
+            method: 'POST',
+            body: JSON.stringify({display_state: displayState, summary})
+        });
+        await openRun(runId);
+    } catch (e) {
+        await customAlert('状态变更失败：' + e.message, 'error');
+    }
+}
+function renderApprovals(run) {
+    const approvals = (run.approvals || []).filter(a => a.status === 'pending');
+    if (!approvals.length) return '';
+    return `<div style="padding:10px;border:1px dashed #f59e0b;border-radius:10px;margin-bottom:12px">
+        <div style="font-weight:700;margin-bottom:6px">待审批</div>
+        ${approvals.map(a => `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <span class="wf-code">${esc(a.step_id)}</span>
+            <button class="btn btn-primary btn-sm" onclick="approveRun(${run.id}, ${a.id})">批准继续</button>
+        </div>`).join('')}
+    </div>`;
+}
+function renderStep(run, s, artifacts) {
+    const blocker = s.blocker && (s.blocker.message || s.blocker.suggested_action)
+        ? `<div style="color:#ef4444;margin-top:6px">${esc(s.blocker.message || '')}${s.blocker.suggested_action ? ' · 建议：' + esc(s.blocker.suggested_action) : ''}</div>` : '';
+    return `<div class="wf-step">
+        <div class="wf-step-head">
+            <span class="wf-step-name">${s.position + 1}. ${esc(s.name)}</span>
+            ${statusBadge(s.status)}
+            <span class="wf-code">${esc(s.step_id)}</span>
+            ${renderWorkflowReportButton(s)}
+            ${['blocked','failed'].includes(s.status) ? `<button class="btn btn-ghost btn-sm" onclick="retryStep(${run.id}, '${esc(s.step_id)}')">重试</button>` : ''}
+        </div>
+        <div class="wf-meta">runner: ${esc(s.runner || '-')} · ${nodeTypeBadge(s)} · attempt: ${esc(s.attempt_no)}</div>
+        ${s.summary ? `<div style="margin-top:6px">${esc(s.summary)}</div>` : ''}
+        ${blocker}
+        ${renderArtifacts(artifacts)}
+    </div>`;
+}
+async function approveRun(runId, approvalId) {
+    const comment = await customPrompt({
+        title: 'Workflow 审批',
+        msg: '请输入审批备注（可空）：',
+        placeholder: '例如：Editor 全绿，允许继续推群/构包',
+        defaultVal: ''
+    });
+    if (comment === null) return;
+    try {
+        await api(`/workflow-runs/${runId}/approvals/${approvalId}/approve`, {
+            method:'POST',
+            body: JSON.stringify({comment})
+        });
+        await openRun(runId);
+        await loadRuns();
+    } catch (e) {
+        await customAlert('审批失败：' + e.message, 'error');
+    }
+}
+async function retryStep(runId, stepId) {
+    if (!await customConfirm({
+        title: '重试 Workflow 步骤',
+        msg: '确认重试步骤 ' + stepId + '？\n\nHub 会清理该步骤的阻断状态并重新派发。',
+        type: 'warning',
+        okText: '重试'
+    })) return;
+    try {
+        await api(`/workflow-runs/${runId}/steps/${stepId}/retry`, {method:'POST', body:'{}'});
+        await openRun(runId);
+        await loadRuns();
+    } catch (e) {
+        await customAlert('重试失败：' + e.message, 'error');
+    }
+}
+async function cancelRun(runId) {
+    if (!await customConfirm({
+        title: '终止 Workflow Run',
+        msg: '确认终止此 Workflow Run？\n\n终止后当前运行会进入 cancelled 状态，不会继续派发后续节点。',
+        type: 'danger',
+        okText: '终止'
+    })) return;
+    try {
+        await api(`/workflow-runs/${runId}/cancel`, {method:'POST', body:JSON.stringify({summary:'用户在页面终止'})});
+        await openRun(runId);
+        await loadRuns();
+    } catch (e) {
+        await customAlert('终止失败：' + e.message, 'error');
+    }
+}
+async function deleteRun(runId) {
+    if (!await customConfirm({
+        title: '删除 Workflow Run',
+        msg: '确认删除此运行记录？\n\n该 Run 的步骤、审批和证据索引会一并删除。',
+        type: 'danger',
+        okText: '删除'
+    })) return;
+    try {
+        await api(`/workflow-runs/${runId}`, {method:'DELETE'});
+        if (currentRunId === runId) {
+            currentRunId = null;
+            currentRunData = null;
+            document.getElementById('run-detail').innerHTML = '<div class="wf-empty">选择一次 Workflow Run 查看详情</div>';
+        }
+        await loadRuns();
+    } catch (e) {
+        await customAlert('删除 Run 失败：' + e.message, 'error');
+    }
+}
+loadAll();
+</script>
+{% endblock %}

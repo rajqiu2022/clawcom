@@ -118,6 +118,7 @@
                         <option value="外围系统">外围系统</option>
                         <option value="核心单局">核心单局</option>
                         <option value="商业化">商业化</option>
+                        <option value="版本管理">版本管理</option>
                         <option value="客户端性能">客户端性能</option>
                         <option value="服务器专项">服务器专项</option>
                         <option value="其他专项">其他专项</option>
@@ -143,23 +144,48 @@
                 </label>
                 <div style="font-size:0.78rem;color:var(--text-muted);margin-top:6px;padding-left:24px;line-height:1.6">
                     勾选后 Hub 会先建 OpenClaw、生成 Token，再自动部署一个 per-claw Hermes（目录 / unit 名按 claw id 隔离，不会和别的 claw 互相覆盖）。<br>
-                    Venus API Key 使用 Hub 服务端预置密钥，页面不展示也不提交。该操作仅 <strong>超级管理员</strong> 可执行。
+                    Venus / TimiAI API Key 使用 Hub 服务端预置密钥，页面不展示也不提交。该操作仅 <strong>超级管理员</strong> 可执行。
                 </div>
             </div>
             <div id="create-agent-fields" style="display:none;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">
                 <input type="hidden" name="deploy_method" value="systemd">
                 <div class="form-group" style="margin-bottom:10px">
-                    <label class="form-label">大模型 *</label>
-                    <select class="form-input" name="llm_model" id="create-llm-model">
-                        <option value="venus" selected>Venus（默认）</option>
-                        <option value="kimi-k2.6">Kimi 2.6</option>
-                        <option value="glm-5.1">GLM 5.1</option>
-                        <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
-                        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
-                        <option value="hunyuan-v3">Hunyuan V3</option>
+                    <label class="form-label">大模型平台 *</label>
+                    <select class="form-input" name="llm_provider" id="create-llm-provider" onchange="onCreateLlmProviderChange()">
+                        <option value="venus" selected>Venus</option>
+                        <option value="timiai">TimiAI</option>
+                    </select>
+                </div>
+                <div class="form-group" id="create-timiai-project-group" style="margin-bottom:10px;display:none">
+                    <label class="form-label">TimiAI 项目 *</label>
+                    <select class="form-input" name="timiai_project" id="create-timiai-project" onchange="onCreateTimiaiProjectChange()">
+                        <option value="gbt" selected>GBT</option>
+                        <option value="qqspeed_pc">QQ飞车端游</option>
+                        <option value="contra">魂斗罗</option>
                     </select>
                     <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
-                        当前统一走 Venus 平台；选择会写入 Hermes <code>config.yaml</code>，卡片上也可后续修改。
+                        TimiAI API Key 按项目隔离；默认使用 GBT。
+                    </div>
+                </div>
+                <div class="form-group" style="margin-bottom:10px">
+                    <label class="form-label">大模型 *</label>
+                    <select class="form-input" name="llm_model" id="create-llm-model"></select>
+                    <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
+                        Venus 走 <code>chat_completions</code>；TimiAI 走 <code>codex_responses</code>。选择会写入 Hermes <code>config.yaml</code>，卡片上也可后续修改。
+                    </div>
+                </div>
+                <div class="form-group" style="margin-bottom:10px">
+                    <label class="form-label">企微 Bot ID / Key</label>
+                    <input class="form-input" name="wecom_bot_id" id="create-wecom-bot-id"
+                           placeholder="可选：填写后随 Hermes Agent 一次性部署">
+                </div>
+                <div class="form-group" style="margin-bottom:10px">
+                    <label class="form-label">企微 Secret</label>
+                    <input class="form-input" name="wecom_bot_secret" id="create-wecom-secret" type="password"
+                           placeholder="可选：与 Bot ID / Key 同时填写">
+                    <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
+                        两项都填写时会加密保存到 OpenClaw，并在本次 Hermes Agent 部署中写入
+                        <code>config.yaml</code> / <code>.env</code>；Secret 不会在页面回显。
                     </div>
                 </div>
                 <input type="hidden" name="hermes_layout" value="split">
@@ -386,6 +412,21 @@
             <button type="button" class="btn btn-sm" id="settings-tab-workdirs" onclick="switchClawSettingsTab('workdirs')" style="display:none">工作目录</button>
         </div>
         <div id="settings-panel-model">
+            <div class="form-group">
+                <label class="form-label">大模型平台</label>
+                <select class="form-input" id="settings-llm-provider-select" onchange="onSettingsLlmProviderChange()">
+                    <option value="venus">Venus</option>
+                    <option value="timiai">TimiAI</option>
+                </select>
+            </div>
+            <div class="form-group" id="settings-timiai-project-group" style="display:none">
+                <label class="form-label">TimiAI 项目</label>
+                <select class="form-input" id="settings-timiai-project-select" onchange="onSettingsTimiaiProjectChange()">
+                    <option value="gbt">GBT</option>
+                    <option value="qqspeed_pc">QQ飞车端游</option>
+                    <option value="contra">魂斗罗</option>
+                </select>
+            </div>
             <div class="form-group">
                 <label class="form-label">大模型</label>
                 <select class="form-input" id="settings-llm-model-select"></select>
@@ -875,14 +916,135 @@ let filteredClaws = [];
 let canViewTokens = false;  // 是否有权限查看 Token
 let isSuperAdmin = false;   // 是否超级管理员（控制"代建 Hermes Agent"开关可见性）
 
-const HERMES_LLM_MODELS = [
-    { value: 'venus', label: 'Venus（默认）' },
-    { value: 'kimi-k2.6', label: 'Kimi 2.6' },
-    { value: 'glm-5.1', label: 'GLM 5.1' },
-    { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
-    { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
-    { value: 'hunyuan-v3', label: 'Hunyuan V3' },
+const HERMES_LLM_PROVIDERS = [
+    { value: 'venus', label: 'Venus' },
+    { value: 'timiai', label: 'TimiAI' },
 ];
+
+const HERMES_LLM_MODELS_BY_PROVIDER = {
+    venus: [
+        { value: 'venus', label: 'Venus（默认 GLM 5.1）' },
+        { value: 'kimi-k2.6', label: 'Kimi 2.6' },
+        { value: 'glm-5.1', label: 'GLM 5.1' },
+        { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+        { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+        { value: 'hunyuan-v3', label: 'Hunyuan V3' },
+    ],
+    timiai: [
+        { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+        { value: 'glm-5.2', label: 'GLM 5.2' },
+        { value: 'glm-5v-turbo', label: 'GLM 5V Turbo' },
+        { value: 'claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
+        { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
+    ],
+};
+
+// TimiAI 可用模型按项目授权隔离；未在此表内的项目沿用 HERMES_LLM_MODELS_BY_PROVIDER.timiai
+const TIMIAI_LLM_MODELS_BY_PROJECT = {
+    gbt: [
+        { value: 'deepseek-v4-pro-r1', label: 'DeepSeek V4 Pro (R1)' },
+        { value: 'claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
+        { value: 'gemini-3.1-pro-preview-stb', label: 'Gemini 3.1 Pro Preview (STB)' },
+        { value: 'deepseek-v4-flash-r1', label: 'DeepSeek V4 Flash (R1)' },
+        { value: 'kimi-k3', label: 'Kimi K3' },
+        { value: 'minimax-m3', label: 'MiniMax M3' },
+    ],
+    qqspeed_pc: [
+        { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+        { value: 'glm-5.2', label: 'GLM 5.2' },
+        { value: 'glm-5v-turbo', label: 'GLM 5V Turbo' },
+        { value: 'claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
+        { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
+        { value: 'kimi-k3', label: 'Kimi K3' },
+        { value: 'minimax-m3', label: 'MiniMax M3' },
+    ],
+    contra: [
+        { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+        { value: 'glm-5.2', label: 'GLM 5.2' },
+        { value: 'glm-5v-turbo', label: 'GLM 5V Turbo' },
+        { value: 'claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
+        { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview' },
+        { value: 'minimax-m3', label: 'MiniMax M3' },
+    ],
+};
+
+const HERMES_TIMIAI_PROJECTS = [
+    { value: 'gbt', label: 'GBT' },
+    { value: 'qqspeed_pc', label: 'QQ飞车端游' },
+    { value: 'contra', label: '魂斗罗' },
+];
+
+// 汇总所有 TimiAI 模型（默认清单 + 各项目专属），用于 provider 推断与 label 展示
+function allTimiaiModels() {
+    const seen = {};
+    const merged = [];
+    (HERMES_LLM_MODELS_BY_PROVIDER.timiai || []).forEach(m => { if (!seen[m.value]) { seen[m.value] = 1; merged.push(m); } });
+    Object.keys(TIMIAI_LLM_MODELS_BY_PROJECT).forEach(proj => {
+        (TIMIAI_LLM_MODELS_BY_PROJECT[proj] || []).forEach(m => { if (!seen[m.value]) { seen[m.value] = 1; merged.push(m); } });
+    });
+    return merged;
+}
+
+// 指定 TimiAI 项目下应展示的模型清单
+function timiaiModelsForProject(project) {
+    return TIMIAI_LLM_MODELS_BY_PROJECT[project] || HERMES_LLM_MODELS_BY_PROVIDER.timiai;
+}
+
+function timiaiProjectLabel(value) {
+    const key = value || 'gbt';
+    const hit = HERMES_TIMIAI_PROJECTS.find(p => p.value === key);
+    return hit ? hit.label : key;
+}
+
+function hermesModelsForProvider(provider) {
+    return HERMES_LLM_MODELS_BY_PROVIDER[provider] || HERMES_LLM_MODELS_BY_PROVIDER.venus;
+}
+
+function renderLlmModelSelect(selectEl, provider, selectedValue, project) {
+    const models = provider === 'timiai'
+        ? timiaiModelsForProject(project || 'gbt')
+        : hermesModelsForProvider(provider);
+    const fallback = models[0] ? models[0].value : 'venus';
+    const hasSelected = selectedValue && models.some(m => m.value === selectedValue);
+    const value = hasSelected ? selectedValue : fallback;
+    selectEl.innerHTML = models.map(m =>
+        `<option value="${m.value}"${m.value === value ? ' selected' : ''}>${m.label}</option>`
+    ).join('');
+}
+
+function onCreateLlmProviderChange() {
+    const provider = document.getElementById('create-llm-provider').value || 'venus';
+    const projectGroup = document.getElementById('create-timiai-project-group');
+    if (projectGroup) projectGroup.style.display = provider === 'timiai' ? '' : 'none';
+    const projectSelect = document.getElementById('create-timiai-project');
+    if (projectSelect && !projectSelect.value) projectSelect.value = 'gbt';
+    const project = projectSelect ? projectSelect.value : 'gbt';
+    renderLlmModelSelect(document.getElementById('create-llm-model'), provider, null, project);
+}
+
+function onCreateTimiaiProjectChange() {
+    const provider = document.getElementById('create-llm-provider').value || 'venus';
+    if (provider !== 'timiai') return;
+    const project = document.getElementById('create-timiai-project').value || 'gbt';
+    renderLlmModelSelect(document.getElementById('create-llm-model'), provider, null, project);
+}
+
+function onSettingsLlmProviderChange() {
+    const provider = document.getElementById('settings-llm-provider-select').value || 'venus';
+    const projectGroup = document.getElementById('settings-timiai-project-group');
+    if (projectGroup) projectGroup.style.display = provider === 'timiai' ? '' : 'none';
+    const projectSelect = document.getElementById('settings-timiai-project-select');
+    if (projectSelect && !projectSelect.value) projectSelect.value = 'gbt';
+    const project = projectSelect ? projectSelect.value : 'gbt';
+    renderLlmModelSelect(document.getElementById('settings-llm-model-select'), provider, null, project);
+}
+
+function onSettingsTimiaiProjectChange() {
+    const provider = document.getElementById('settings-llm-provider-select').value || 'venus';
+    if (provider !== 'timiai') return;
+    const project = document.getElementById('settings-timiai-project-select').value || 'gbt';
+    renderLlmModelSelect(document.getElementById('settings-llm-model-select'), provider, null, project);
+}
 
 const ROLE_LABELS = {
     'admin': { text: '管理员', cls: 'admin' },
@@ -893,10 +1055,29 @@ const ROLE_LABELS = {
     'test_executor': { text: '测试执行', cls: 'test_executor' },
 };
 
-function llmModelLabel(value) {
-    const key = value || 'venus';
-    const hit = HERMES_LLM_MODELS.find(m => m.value === key);
+function llmModelLabel(value, provider) {
+    const prov = provider || inferLlmProvider(value);
+    const key = value || (prov === 'timiai' ? 'deepseek-v4-pro' : 'venus');
+    const pool = prov === 'timiai' ? allTimiaiModels() : hermesModelsForProvider(prov);
+    const hit = pool.find(m => m.value === key);
     return hit ? hit.label : key;
+}
+
+function inferLlmProvider(modelValue) {
+    const key = modelValue || '';
+    if (allTimiaiModels().some(m => m.value === key)) {
+        return 'timiai';
+    }
+    return 'venus';
+}
+
+function llmDisplayLabel(claw) {
+    const provider = claw.llm_provider || inferLlmProvider(claw.llm_model);
+    const providerLabel = (HERMES_LLM_PROVIDERS.find(p => p.value === provider) || {}).label || provider;
+    const projectLabel = provider === 'timiai'
+        ? ` · ${timiaiProjectLabel(claw.timiai_project || 'gbt')}`
+        : '';
+    return `${providerLabel}${projectLabel} · ${llmModelLabel(claw.llm_model, provider)}`;
 }
 
 async function loadClaws() {
@@ -1071,8 +1252,7 @@ function formatRelTime(dtStr) {
 function renderClawCard(c) {
     const roleInfo = ROLE_LABELS[c.role] || { text: '测试成员', cls: 'test_member' };
     const onlineCount = filteredClaws.filter(cl => ['工作','学习','摸鱼','online'].includes(cl.status)).length;
-    const modelValue = c.llm_model || 'venus';
-    const modelLabel = llmModelLabel(modelValue);
+    const modelLabel = llmDisplayLabel(c);
     const hasHermesAgent = !!c.has_hermes_agent;
     const hasWecom = !!(c.wecom_bot_id || c.has_wecom_bot_secret);
     const isDeployingAgent = ['pending', 'in_progress'].includes(c.agent_deployment_status || '');
@@ -1116,7 +1296,7 @@ function renderClawCard(c) {
         <div class="claw-meta-row" style="margin-top:4px">
             <span class="claw-meta-tag" style="color:var(--accent)">📋 ${c.total_todos || 0} 待办</span>
             <span class="claw-meta-tag" style="color:var(--yellow)">📝 ${c.today_submitted || 0} 已提交</span>
-           
+            ${c.registration_awaiting_review ? `<span class="claw-meta-tag" title="龙虾王注册验收待审核" onclick="event.stopPropagation(); location.href='/openclaws/${c.id}?tab=todos&subtab=registration'" style="color:var(--red);cursor:pointer;font-weight:600;border:1px solid rgba(239,68,68,.45)">🦞 注册待审</span>` : ''}
         </div>
         <div class="claw-meta-row" style="margin-top:4px">
             ${hasHermesAgent ? `<span class="claw-meta-tag" title="Hermes 大模型">🧠 ${modelLabel}</span>` : ''}
@@ -1170,11 +1350,17 @@ function openClawSettingsModal(clawId) {
     }
     document.getElementById('claw-settings-subtitle').textContent =
         `${c.name} · 修改后会保存到 OpenClaw，并同步给 sidecar 配置中心。`;
-    const select = document.getElementById('settings-llm-model-select');
-    const value = c.llm_model || 'venus';
-    select.innerHTML = HERMES_LLM_MODELS.map(m =>
-        `<option value="${m.value}"${m.value === value ? ' selected' : ''}>${m.label}</option>`
-    ).join('');
+    const provider = c.llm_provider || inferLlmProvider(c.llm_model);
+    document.getElementById('settings-llm-provider-select').value = provider;
+    const settingsProject = c.timiai_project || 'gbt';
+    document.getElementById('settings-timiai-project-select').value = settingsProject;
+    onSettingsLlmProviderChange();
+    renderLlmModelSelect(
+        document.getElementById('settings-llm-model-select'),
+        provider,
+        c.llm_model || (provider === 'timiai' ? 'deepseek-v4-pro' : 'venus'),
+        settingsProject
+    );
 
     const wecomTab = document.getElementById('settings-tab-wecom');
     wecomTab.style.display = c.has_hermes_agent ? '' : 'none';
@@ -1202,10 +1388,13 @@ async function confirmClawSettings() {
         showToast('只有通过 Hub 创建并部署成功的 Hermes Agent 才支持大模型设置', 'warning');
         return;
     }
-    const value = document.getElementById('settings-llm-model-select').value || 'venus';
+    const provider = document.getElementById('settings-llm-provider-select').value || 'venus';
+    const value = document.getElementById('settings-llm-model-select').value
+        || (provider === 'timiai' ? 'deepseek-v4-pro' : 'venus');
     const payload = {
-        llm_provider: 'venus',
+        llm_provider: provider,
         llm_model: value,
+        timiai_project: document.getElementById('settings-timiai-project-select').value || 'gbt',
     };
     if (c.has_hermes_agent) {
         payload.wecom_bot_id = document.getElementById('settings-wecom-bot-id').value.trim();
@@ -1285,7 +1474,7 @@ async function loadModuleCategoryOptions() {
     if (!input) return;
     input.value = '';
     input.innerHTML = '<option value="">加载中...</option>';
-    const fallbackCategories = ['外围系统', '核心单局', '商业化', '客户端性能', '服务器专项', '其他专项'];
+    const fallbackCategories = ['外围系统', '核心单局', '商业化', '版本管理', '客户端性能', '服务器专项', '其他专项'];
     const renderCategories = (categories) => {
         const esc = v => String(v || '').replace(/[&<>"']/g, ch => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -1414,6 +1603,7 @@ function openCreateModal() {
     document.getElementById('avatar-preview').textContent = '🐱';
     initAvatarPicker();
     loadModuleCategoryOptions();
+    onCreateLlmProviderChange();
     document.getElementById('create-modal').classList.add('active');
 }
 
@@ -1754,6 +1944,7 @@ function onCreateAgentToggle() {
     document.getElementById('create-agent-fields').style.display = on ? '' : 'none';
     if (on) {
         try { onHermesLayoutChange(); } catch (e) { /* */ }
+        onCreateLlmProviderChange();
     }
 }
 
@@ -1862,12 +2053,17 @@ async function redeployHermesAgent(clawId) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 hub_url: window.HUB_PUBLIC_URL || 'https://clawteam.woa.com:18800',
-                deploy: {
-                    deploy_method: 'systemd',
-                    llm_provider: 'venus',
-                    llm_model: 'venus',
-                    hermes_start_mode: 'gateway',
-                }
+                deploy: (() => {
+                    const claw = allClaws.find(x => x.id === clawId) || {};
+                    const provider = claw.llm_provider || inferLlmProvider(claw.llm_model);
+                    return {
+                        deploy_method: 'systemd',
+                        llm_provider: provider,
+                        llm_model: claw.llm_model || (provider === 'timiai' ? 'deepseek-v4-pro' : 'venus'),
+                        timiai_project: claw.timiai_project || 'gbt',
+                        hermes_start_mode: 'gateway',
+                    };
+                })()
             })
         });
         const data = await resp.json();
@@ -1949,10 +2145,20 @@ document.getElementById('create-form').addEventListener('submit', async e => {
     const createAgent = isSuperAdmin && document.getElementById('create-agent-toggle').checked;
     let deployOpts = null;
     if (createAgent) {
+        const wecomBotId = (data.wecom_bot_id || '').trim();
+        const wecomSecret = (data.wecom_bot_secret || '').trim();
+        if ((wecomBotId && !wecomSecret) || (!wecomBotId && wecomSecret)) {
+            showToast('企微 Bot ID / Key 和 Secret 需要同时填写；不绑定企微则两项都留空', 'error');
+            return;
+        }
+        data.wecom_bot_id = wecomBotId;
+        data.wecom_bot_secret = wecomSecret;
+        const llmProvider = data.llm_provider || 'venus';
         deployOpts = {
             deploy_method: 'systemd',
-            llm_provider: 'venus',
-            llm_model: data.llm_model || 'venus',
+            llm_provider: llmProvider,
+            llm_model: data.llm_model || (llmProvider === 'timiai' ? 'deepseek-v4-pro' : 'venus'),
+            timiai_project: data.timiai_project || 'gbt',
             hermes_start_mode: 'gateway',
         };
         data.create_agent = true;

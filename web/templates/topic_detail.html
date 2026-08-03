@@ -41,8 +41,11 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/vditor@3.10.8/dist/index.css" />
 <script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
 <script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/case_mindmap.js') }}?v={{ cache_bust }}"></script>
 <script src="https://cdn.jsdelivr.net/npm/vditor@3.10.8/dist/index.min.js"></script>
 <style>
+/* 评审脑图嵌在课题卡片内，需要固定高度撑出双向滚动区 */
+#review-mindmap-host .cmm-wrap { height: 460px; }
 .topic-header { margin-bottom: 20px; }
 .md-body { font-size: 0.92rem; line-height: 1.7; word-break: break-word; }
 .md-body p { margin: 0 0 10px; }
@@ -368,6 +371,21 @@ async function loadTopic() {
     } catch(e) { showToast('加载失败: ' + e.message, 'error'); }
 }
 
+// 可见范围四档标签。`public` 是历史默认值（Hub 内可见），不额外加标签
+const VIS_TAGS = {
+    public_all: ['🌍 完全公开', '#10b98122', '#10b981'],
+    project: ['📁 项目内', '#f59e0b22', '#f59e0b'],
+    assigned: ['🎯 指定参与者', '#6366f122', '#6366f1'],
+};
+function visibilityTag(t) {
+    const cfg = VIS_TAGS[t.visibility];
+    if (!cfg) return '';
+    const count = t.visibility === 'assigned' && t.grants
+        ? `（${t.grants.length}）` : '';
+    return `<span style="padding:3px 8px;border-radius:10px;font-size:0.75rem;`
+        + `background:${cfg[1]};color:${cfg[2]};font-weight:500">${cfg[0]}${count}</span>`;
+}
+
 function renderTopic() {
     const t = topicData;
     const color = BOARD_COLORS[t.board] || '#6b7280';
@@ -394,17 +412,24 @@ function renderTopic() {
                 <span class="review-badge ${reviewStatusClass}">${reviewStatusLabel}</span>
                 <span style="font-size:0.78rem;color:var(--text-muted)">${(t.review_rounds || []).length} 轮评审</span>
             </div>
-            <div>${libLink}</div>
-            ${modules}
-            ${caseCount}
-            ${knowledge}
+            <div style="display:flex;gap:4px;margin-bottom:8px">
+                <button class="review-type-tab active" data-scope-tab="info" onclick="switchReviewScopeTab('info')">📋 评审范围</button>
+                <button class="review-type-tab" data-scope-tab="mindmap" onclick="switchReviewScopeTab('mindmap')">🧠 目录脑图</button>
+            </div>
+            <div data-scope-panel="info">
+                <div>${libLink}</div>
+                ${modules}
+                ${caseCount}
+                ${knowledge}
+            </div>
+            <div data-scope-panel="mindmap" style="display:none">
+                <div id="review-mindmap-host"><div style="padding:24px;text-align:center;color:var(--text-muted);font-size:0.85rem">脑图加载中…</div></div>
+            </div>
         </div>`;
 
     }
 
-    const visTag = t.visibility === 'project'
-        ? '<span style="padding:3px 8px;border-radius:10px;font-size:0.75rem;background:#f59e0b22;color:#f59e0b;font-weight:500">📁 项目内</span>'
-        : '';
+    const visTag = visibilityTag(t);
 
     $('#topic-area').innerHTML = `
         <div class="card">
@@ -423,6 +448,79 @@ function renderTopic() {
             ${reviewBlock}
             <div class="md-body">${renderMarkdown(t.content || '')}</div>
         </div>`;
+}
+
+// ==================== 评审目录脑图 ====================
+let reviewMindmapView = null;
+let reviewMindmapLoaded = false;
+
+function switchReviewScopeTab(name) {
+    document.querySelectorAll('[data-scope-tab]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.scopeTab === name);
+    });
+    document.querySelectorAll('[data-scope-panel]').forEach(panel => {
+        panel.style.display = panel.dataset.scopePanel === name ? '' : 'none';
+    });
+    if (name === 'mindmap' && !reviewMindmapLoaded) {
+        reviewMindmapLoaded = true;
+        loadReviewMindmap();
+    }
+}
+
+async function loadReviewMindmap() {
+    const host = document.getElementById('review-mindmap-host');
+    if (!host) return;
+    try {
+        const data = await API.request('GET', `/topics/${TOPIC_ID}/review-mindmap`);
+        host.innerHTML = '';
+        reviewMindmapView = CaseMindmap.render(host, data, {
+            canMark: !!data.can_mark,
+            markHint: data.can_mark ? '' : '你没有该课题的评论权限，只能查看标记',
+            onMarkChange: (nodeId, mark) => saveReviewMark(nodeId, mark),
+            onLoadChildren: (node, done) => loadReviewMindmapChildren(data, node, done),
+        });
+    } catch (e) {
+        reviewMindmapLoaded = false;   // 允许再次切换页签时重试
+        const tip = document.createElement('div');
+        tip.style.cssText = 'padding:24px;text-align:center;color:var(--text-muted);font-size:0.85rem';
+        tip.textContent = '脑图加载失败：' + (e.message || e);
+        host.innerHTML = '';
+        host.appendChild(tip);
+    }
+}
+
+/** 展开评审脑图节点时按需补内容。走 /topics 下的接口，外部评审人也能用 */
+async function loadReviewMindmapChildren(mindmapData, node, done) {
+    try {
+        if (node.node_type === CaseMindmap.NODE_CASE) {
+            const c = await API.request('GET',
+                `/topics/${TOPIC_ID}/review-cases/${node.case_id}`);
+            const kids = CaseMindmap.caseDetailChildren(node.id, c);
+            done(kids, kids.length ? null : '该用例没有填写前提/步骤/预期');
+            return;
+        }
+        const qs = '?module_path=' + encodeURIComponent(node.module_path || '');
+        const sub = await API.request('GET',
+            `/topics/${TOPIC_ID}/review-mindmap${qs}`);
+        done(sub.children || []);
+    } catch (e) {
+        done(null, e.message || String(e));
+    }
+}
+
+async function saveReviewMark(nodeId, mark) {
+    try {
+        const resp = await API.request('PUT', `/topics/${TOPIC_ID}/review-marks`, {
+            marks: [{ node_id: nodeId, mark: mark }],
+        });
+        if (resp.skipped && resp.skipped.length) {
+            showToast('标记未生效：' + (resp.skipped[0].reason || '未知原因'), 'error');
+            loadReviewMindmap();
+        }
+    } catch (e) {
+        showToast('标记失败: ' + (e.message || e), 'error');
+        loadReviewMindmap();   // 回滚到服务端真实状态
+    }
 }
 
 function renderReplies() {

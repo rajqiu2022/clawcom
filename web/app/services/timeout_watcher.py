@@ -38,6 +38,7 @@ WATCHER_IDLE_INTERVAL_SEC = 30       # 抢不到锁的 worker 30s 重试一次
 LOCK_TTL_SEC = 90                    # 心跳超过 90s 视为失效，可被抢
 TODO_TIMEOUT_MIN = 5                 # todo submitted 超过 N 分钟没通知就兜底
 MESSAGE_TIMEOUT_MIN = 5              # claw_message pending/processing 超过 N 分钟就告警
+WORKFLOW_TASK_TTL_MIN = 30           # F2：workflow AgentTask 超过 N 分钟仍未结束就失效（防陈旧任务重连即跑）
 
 # 运行开关（存在 system_config 表里，不重启服务就能改）：
 #   timeout_watcher_todo_fallback_enabled  '1'/'0'  默认 '0' 关闭
@@ -216,6 +217,63 @@ def _scan_stuck_claw_messages(db, app):
     return sent
 
 
+def _scan_stale_workflow_agent_tasks(db, app):
+    """F2：清理陈旧/死 run 的 workflow AgentTask，防止离线 agent 重连后执行陈旧任务空转烧算力。
+
+    失效条件（满足其一）：
+      a) 归属的 run/step 已不活跃（run/step 非 running/retrying）—— 不论新旧，立即失效；
+      b) 仍 pending 且 created_at 超过 WORKFLOW_TASK_TTL_MIN —— 从未投递的陈旧任务。
+    注意：仍活跃 step 上正常 running 的任务（有心跳的长任务）不会被误杀，交给 F1 按心跳判定。
+    """
+    import json as _json
+    from app.models import AgentTask, WorkflowRun, WorkflowRunStep
+
+    threshold = _now() - timedelta(minutes=WORKFLOW_TASK_TTL_MIN)
+    rows = (AgentTask.query
+            .filter(AgentTask.task_type == 'workflow_agent_task')
+            .filter(AgentTask.status.in_(['pending', 'running']))
+            .order_by(AgentTask.id.asc())
+            .limit(500)
+            .all())
+    n = 0
+    for t in rows:
+        run_id = step_id = None
+        try:
+            payload = t.payload
+            if isinstance(payload, str):
+                payload = _json.loads(payload) if payload.strip().startswith('{') else {}
+            if isinstance(payload, dict):
+                run_id = payload.get('run_id')
+                step_id = payload.get('step_id')
+        except Exception:
+            run_id = step_id = None
+
+        expire, reason = False, ''
+        if run_id and step_id:
+            step = WorkflowRunStep.query.filter_by(run_id=run_id, step_id=step_id).first()
+            run = WorkflowRun.query.get(run_id)
+            if (not step or step.status not in ('running', 'retrying')
+                    or not run or run.status not in ('running', 'retrying')):
+                expire, reason = True, 'workflow_run_or_step_inactive'
+        if not expire and t.status == 'pending' and t.created_at and t.created_at < threshold:
+            expire, reason = True, 'stale_pending_%dmin' % WORKFLOW_TASK_TTL_MIN
+        if expire:
+            t.status = 'failed'
+            t.error = reason
+            t.completed_at = _now()
+            n += 1
+
+    if n:
+        try:
+            db.session.commit()
+            app.logger.info(f'[timeout_watcher] 失效陈旧 workflow AgentTask {n} 条')
+        except Exception as e:
+            db.session.rollback()
+            app.logger.warning(f'[timeout_watcher] 失效 workflow 任务提交失败: {e}')
+            return 0
+    return n
+
+
 def _watcher_loop(app):
     """主循环：抢锁→扫描→sleep。"""
     from app import db
@@ -233,16 +291,30 @@ def _watcher_loop(app):
             with app.app_context():
                 got_lock = _try_acquire_lock(db, pid_str, logger)
                 if got_lock:
+                    # F1：周期性刷新 workflow step 健康 —— 让无响应硬超时的 step 无需人工查看
+                    # 也能自动重试/阻断（否则健康检查只在访问 workflow API 时触发）。
+                    try:
+                        from app.api.workflows import _refresh_workflow_step_health
+                        _refresh_workflow_step_health(commit=True)
+                    except Exception as e:
+                        logger.warning(f'[timeout_watcher] workflow step 健康刷新异常: {e}')
+                    # F2：过期 workflow 任务清理 —— 始终开启（算力/稳定性兜底，不受下面两个告警开关控制）
+                    try:
+                        wf_n = _scan_stale_workflow_agent_tasks(db, app)
+                    except Exception as e:
+                        wf_n = 0
+                        logger.warning(f'[timeout_watcher] 过期 workflow 任务扫描异常: {e}')
+
                     # 读运行开关（存 system_config，DB 改完立即生效，不用重启）
                     todo_on = _get_switch(db, SWITCH_TODO_FALLBACK, default_on=False)
                     msg_on = _get_switch(db, SWITCH_MESSAGE_ALERT, default_on=False)
 
                     todo_n = _scan_overdue_todo_logs(db, app) if todo_on else 0
                     msg_n = _scan_stuck_claw_messages(db, app) if msg_on else 0
-                    if todo_n or msg_n:
+                    if todo_n or msg_n or wf_n:
                         logger.info(
                             f'[timeout_watcher] 一轮完成 pid={pid_str} '
-                            f'兜底todo={todo_n} 告警msg={msg_n} '
+                            f'兜底todo={todo_n} 告警msg={msg_n} 失效wf任务={wf_n} '
                             f'(switches: todo={todo_on}, msg={msg_on})')
                     sleep_sec = WATCHER_LOOP_INTERVAL_SEC
                 else:

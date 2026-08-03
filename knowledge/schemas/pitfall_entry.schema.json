@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PitfallEntry",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "project",
+    "module",
+    "type",
+    "symptom",
+    "solution",
+    "keywords",
+    "status",
+    "updated_at"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "title": { "type": "string" },
+    "project": { "type": "string" },
+    "module": { "type": "string" },
+    "type": {
+      "type": "string",
+      "enum": ["pitfall", "workaround", "fixed", "api", "deployment", "wecom", "tapd", "hub"]
+    },
+    "symptom": { "type": "string" },
+    "root_cause": { "type": "string" },
+    "solution": { "type": "string" },
+    "verified_steps": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "related_tools": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "keywords": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "workaround", "fixed", "expired"]
+    },
+    "owner": { "type": "string" },
+    "created_at": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "evidence": { "type": "object" }
+  }
+}

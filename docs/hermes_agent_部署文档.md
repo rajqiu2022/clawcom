@@ -223,6 +223,11 @@ python -m hermes_agent
 | `deepseek-v4-pro` | 128K | 推理与代码能力强 | 复杂问题推理、代码分析 |
 | `hunyuan-v3` | 128K | 腾讯混元模型 | 通用对话、内部知识处理 |
 
+> **TimiAI 平台的可用模型按项目授权隔离**（下拉会随所选 TimiAI 项目自动切换）：
+> - **GBT**：`deepseek-v4-pro-r1`、`claude-sonnet-4.6`、`gemini-3.1-pro-preview-stb`、`deepseek-v4-flash-r1`（模型名带 `-r1`/`-stb` 后缀）、`kimi-k3`、`minimax-m3`。
+> - **QQ飞车端游**：`deepseek-v4-pro`、`glm-5.2`、`glm-5v-turbo`、`claude-sonnet-4.6`、`gemini-3.1-pro-preview`、`kimi-k3`、`minimax-m3`。
+> - **魂斗罗**：`deepseek-v4-pro`、`glm-5.2`、`glm-5v-turbo`、`claude-sonnet-4.6`、`gemini-3.1-pro-preview`、`minimax-m3`。
+
 ### 3.2 config.yaml 关键字段说明
 
 ```yaml

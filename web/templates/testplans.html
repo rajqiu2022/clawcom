@@ -24,27 +24,29 @@
 /* ===== 三栏布局 ===== */
 .tp-layout { display: flex; gap: 0; min-height: calc(100vh - 120px); }
 
-/* 左侧迭代列表 */
+/* 左侧迭代选择 */
 .tp-iter-sidebar {
-    width: 280px; min-width: 260px; border-right: 1px solid var(--border);
+    width: 320px; min-width: 280px; border-right: 1px solid var(--border);
     display: flex; flex-direction: column; background: var(--bg-card);
     border-radius: var(--radius) 0 0 var(--radius);
 }
 .tp-iter-header { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
 .tp-iter-header h3 { font-size: 0.88rem; margin: 0; color: var(--text-primary); }
-.tp-iter-list { flex: 1; overflow-y: auto; padding: 8px; }
+.tp-iter-list { padding: 12px 14px; }
 .tp-iter-empty { padding: 40px 16px; text-align: center; color: var(--text-muted); font-size: 0.85rem; }
-
-.tp-iter-card {
-    padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
-    margin-bottom: 6px; cursor: pointer; transition: all 0.15s;
+.tp-iter-select-label { display:block; margin-bottom:6px; color:var(--text-muted); font-size:0.76rem; }
+.tp-iter-select {
+    width: 100%; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg-input, var(--bg-secondary)); color: var(--text-primary); font-size: 0.86rem;
+}
+.tp-iter-select:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 2px rgba(59,130,246,.14); }
+.tp-iter-summary {
+    margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px;
     background: var(--bg-secondary);
 }
-.tp-iter-card:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(108,92,231,0.1); }
-.tp-iter-card.active { border-color: var(--accent); background: var(--accent-dim); }
-.tp-iter-card .tp-iter-name { font-size: 0.86rem; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
-.tp-iter-card .tp-iter-meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 0.72rem; color: var(--text-muted); }
-.tp-iter-card .tp-iter-progress { margin-top: 6px; }
+.tp-iter-summary .tp-iter-name { font-size:0.88rem; font-weight:700; color:var(--text-primary); margin-bottom:8px; line-height:1.35; }
+.tp-iter-summary .tp-iter-meta { display:flex; gap:6px; flex-wrap:wrap; align-items:center; font-size:0.74rem; color:var(--text-muted); }
+.tp-iter-summary .tp-iter-progress { margin-top:10px; }
 
 /* 中间：计划列表 + 右侧详情 */
 .tp-main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
@@ -129,7 +131,7 @@
 .tp-case-panel h4 { font-size: 0.86rem; color: var(--text-primary); margin: 0 0 8px; }
 .tp-case-list { display: flex; flex-direction: column; gap: 4px; }
 .tp-case-row {
-    display: grid; grid-template-columns: 22px 40px 1fr 52px 90px 80px 80px 36px;
+    display: grid; grid-template-columns: 22px 40px 1fr 52px 90px 80px minmax(70px,0.8fr) minmax(90px,0.8fr) 36px;
     align-items: center; gap: 6px; padding: 6px 10px;
     background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px;
     font-size: 0.8rem;
@@ -139,6 +141,24 @@
 .tp-case-row .tp-case-title { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .tp-case-row .tp-case-title:hover { color: var(--accent); text-decoration: underline; }
 .tp-case-pager { display:flex; justify-content:flex-end; align-items:center; gap:8px; margin-top:8px; font-size:0.78rem; color:var(--text-muted); }
+
+/* 用例目录树（按用例库文件夹层级展示） */
+.tp-case-tree-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:12px; }
+.tp-case-tree { display:flex; flex-direction:column; gap:2px; }
+.tp-case-tree .tp-case-list { gap:4px; margin:4px 0; }
+.tp-folder { margin:1px 0; }
+.tp-folder-head {
+    display:flex; align-items:center; gap:8px; padding:7px 10px; cursor:pointer;
+    border-radius:6px; background:var(--bg-secondary); border:1px solid var(--border);
+    font-size:0.82rem; color:var(--text-primary); user-select:none;
+}
+.tp-folder-head:hover { border-color:var(--accent); }
+.tp-folder-arrow { font-size:0.65rem; color:var(--text-muted); transition:transform .15s; width:10px; display:inline-block; }
+.tp-folder.collapsed > .tp-folder-head .tp-folder-arrow { transform:rotate(-90deg); }
+.tp-folder.collapsed > .tp-folder-body { display:none; }
+.tp-folder-body { padding-left:12px; margin-left:9px; border-left:1px solid var(--border); }
+.tp-folder-count { color:var(--text-muted); font-size:0.76rem; }
+.tp-folder-stats { margin-left:auto; display:flex; gap:8px; font-size:0.74rem; font-family:monospace; white-space:nowrap; }
 
 /* 用例展开详情 */
 .tp-case-detail {
@@ -201,6 +221,9 @@
 }
 .modal-overlay.fullscreen { padding: 0; }
 .modal-overlay.fullscreen .tp-report-view { max-height: none; }
+.modal-overlay.fullscreen .json-editor-textarea {
+    min-height: calc(100vh - 180px) !important;
+}
 
 /* 标签样式 */
 .tp-tag {
@@ -233,6 +256,114 @@
 .tp-tag-P1 { background: rgba(249,115,22,0.18); color: #f97316; }
 .tp-tag-P2 { background: rgba(59,130,246,0.12); color: #3b82f6; }
 .tp-tag-P3 { background: rgba(156,163,175,0.12); color: #9ca3af; }
+
+.iter-tab-bar { display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 18px 12px;border-bottom:1px solid var(--border); }
+.iter-tab-btn { border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);border-radius:999px;padding:6px 12px;font-size:0.82rem;cursor:pointer;transition:.15s; }
+.iter-tab-btn:hover { border-color:var(--accent);color:var(--accent); }
+.iter-tab-btn.active { background:var(--accent);border-color:var(--accent);color:#fff;box-shadow:0 6px 16px rgba(59,130,246,.22); }
+.iter-tab-actions { margin-left:auto;display:flex;gap:8px;flex-wrap:wrap; }
+.iter-tab-content { padding:14px 18px 18px; }
+.iter-tab-empty { border:1px dashed var(--border);border-radius:12px;padding:34px;text-align:center;color:var(--text-muted);background:var(--bg-secondary); }
+.dyn-grid-wrap { overflow:auto;border:1px solid var(--border);border-radius:12px;background:var(--bg-card); }
+.dyn-grid { width:100%;border-collapse:collapse;font-size:0.82rem;min-width:720px; }
+.dyn-grid th { position:sticky;top:0;background:var(--bg-secondary);color:var(--text-secondary);font-weight:700;text-align:left;padding:10px;border-bottom:1px solid var(--border);z-index:1; }
+.dyn-grid td { padding:9px 10px;border-bottom:1px solid var(--border);vertical-align:middle;max-width:320px; }
+.dyn-grid tr:last-child td { border-bottom:none; }
+.dyn-cell-text { white-space:pre-wrap;line-height:1.45; }
+.dyn-link { color:var(--accent);text-decoration:none;font-weight:600; }
+.dyn-link:hover { text-decoration:underline; }
+.dyn-status { display:inline-flex;align-items:center;border-radius:999px;padding:3px 9px;font-weight:700;font-size:0.76rem;border:1px solid transparent; }
+.dyn-status-red { background:#ef444422;color:#ef4444;border-color:#ef444466; }
+.dyn-status-orange { background:#f9731622;color:#f97316;border-color:#f9731666; }
+.dyn-status-blue { background:#3b82f622;color:#3b82f6;border-color:#3b82f666; }
+.dyn-status-green { background:#22c55e22;color:#22c55e;border-color:#22c55e66; }
+.dyn-status-gray { background:#9ca3af22;color:#9ca3af;border-color:#9ca3af66; }
+
+/* flow progress */
+.flow-progress-bar { display:flex;align-items:flex-start;gap:0;flex-wrap:wrap;padding:18px 0; }
+.flow-step { display:flex;align-items:center;gap:0;flex-shrink:0; }
+.flow-step:last-child .flow-connector { display:none; }
+.flow-connector { width:36px;height:3px;background:var(--border);flex-shrink:0;margin-top:22px; }
+.flow-lamp-wrap { display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;min-width:64px;max-width:100px;transition:transform .15s; }
+.flow-lamp-wrap:hover { transform:scale(1.08); }
+.flow-lamp {
+    width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-size:1.3rem;box-shadow:0 2px 12px rgba(0,0,0,.12);border:3px solid transparent;transition:.2s;
+}
+.flow-lamp-green  { background:#22c55e;border-color:#16a34a;box-shadow:0 0 14px rgba(34,197,94,.45); }
+.flow-lamp-red    { background:#ef4444;border-color:#dc2626;box-shadow:0 0 14px rgba(239,68,68,.45); }
+.flow-lamp-blue   { background:#3b82f6;border-color:#2563eb;box-shadow:0 0 14px rgba(59,130,246,.45); }
+.flow-lamp-orange { background:#f97316;border-color:#ea580c;box-shadow:0 0 14px rgba(249,115,22,.45); }
+.flow-lamp-gray   { background:#6b7280;border-color:#4b5563; }
+.flow-step-name { font-size:0.74rem;color:var(--text-secondary);text-align:center;line-height:1.3;word-break:break-all; }
+.flow-step-status { font-size:0.68rem;color:var(--text-muted);text-align:center; }
+.flow-detail-overlay { position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:800;display:flex;align-items:center;justify-content:center; }
+.flow-detail-card {
+    background:var(--bg-card);border:1px solid var(--border);border-radius:14px;
+    padding:20px 24px;max-width:480px;width:90%;max-height:70vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.25);
+}
+.flow-detail-header { display:flex;align-items:center;gap:10px;margin-bottom:14px; }
+.flow-detail-lamp { width:28px;height:28px;border-radius:50%;flex-shrink:0; }
+.flow-detail-title { font-size:1rem;font-weight:700;color:var(--text-primary); }
+.flow-detail-meta { font-size:0.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.6; }
+.flow-detail-msg { font-size:0.86rem;color:var(--text-primary);line-height:1.65;white-space:pre-wrap;word-break:break-word; }
+.flow-detail-actions { margin-top:16px;text-align:right; }
+.dyn-select { min-width:110px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary);color:var(--text-primary);padding:5px 8px; }
+.dyn-dropdown { position:relative;display:inline-block;min-width:130px;max-width:260px; }
+.dyn-dropdown-btn {
+    width:100%;border:1px solid var(--border);border-radius:9px;background:var(--bg-secondary);
+    color:var(--text-primary);padding:5px 28px 5px 9px;font-size:0.8rem;line-height:1.35;
+    cursor:pointer;text-align:left;display:flex;align-items:center;gap:6px;position:relative;
+}
+.dyn-dropdown-btn::after { content:'▾';position:absolute;right:9px;top:50%;transform:translateY(-50%);color:var(--text-muted);font-size:0.72rem; }
+.dyn-dropdown.open .dyn-dropdown-btn { border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim); }
+.dyn-dropdown-list {
+    display:none;position:absolute;left:0;top:calc(100% + 4px);z-index:40;min-width:100%;width:max-content;max-width:320px;
+    max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:10px;background:var(--bg-card);
+    box-shadow:0 14px 36px rgba(15,23,42,.28);padding:4px;
+}
+.dyn-dropdown.open .dyn-dropdown-list { display:block; }
+.dyn-dropdown-option {
+    display:flex;align-items:center;gap:7px;padding:7px 10px;border-radius:8px;cursor:pointer;
+    color:var(--text-primary);white-space:nowrap;border-left:3px solid transparent;
+}
+.dyn-dropdown-option:hover { background:var(--bg-secondary); }
+.dyn-dropdown-option.dyn-opt-selected { background:var(--accent-dim);border-left-color:var(--accent);font-weight:700; }
+.dyn-color-dot { width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 auto;background:currentColor;opacity:.9; }
+.dyn-dropdown-label { overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.dyn-checkbox { width:16px;height:16px;accent-color:var(--accent);cursor:pointer; }
+.dyn-grid-footer { display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 2px 0;color:var(--text-muted);font-size:0.78rem; }
+.dyn-page-controls { display:flex;align-items:center;gap:8px;flex-wrap:wrap; }
+.dyn-page-controls select { border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary);color:var(--text-primary);padding:4px 8px;font-size:0.78rem; }
+.dyn-page-btn { border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--text-secondary);padding:4px 8px;cursor:pointer;font-size:0.78rem; }
+.dyn-page-btn:hover:not(:disabled) { border-color:var(--accent);color:var(--accent); }
+.dyn-page-btn:disabled { opacity:.45;cursor:not-allowed; }
+.json-editor-textarea {
+    width: 100%;
+    min-height: 58vh;
+    resize: both;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-input, var(--bg-secondary));
+    color: var(--text-primary);
+    padding: 12px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 0.86rem;
+    line-height: 1.55;
+    tab-size: 2;
+}
+.json-editor-textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.dyn-chart-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;margin-bottom:14px; }
+.dyn-chart-card { border:1px solid var(--border);border-radius:12px;background:var(--bg-card);padding:12px;min-height:210px; }
+.dyn-chart-title { font-weight:700;color:var(--text-primary);font-size:0.9rem;margin-bottom:10px; }
+.dyn-summary { display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px; }
+.dyn-summary-card { border:1px solid var(--border);border-radius:12px;background:var(--bg-card);padding:12px; }
+.dyn-summary-value { font-size:1.5rem;font-weight:800;color:var(--accent); }
+.dyn-summary-label { font-size:0.78rem;color:var(--text-muted);margin-top:3px; }
 
 /* 小按钮 */
 .tp-btn-sm {
@@ -381,7 +512,7 @@
 
 {% block content %}
 <div class="tp-layout">
-    <!-- 左侧：迭代列表 -->
+    <!-- 左侧：迭代选择 -->
     <div class="tp-iter-sidebar">
         <div class="tp-iter-header">
             <h3>🔄 测试迭代</h3>
@@ -394,7 +525,7 @@
 
     <!-- 右侧：计划与任务 -->
     <div class="tp-main" id="main-area">
-        <div class="tp-no-iter-selected">← 选择一个测试迭代查看详情</div>
+        <div class="tp-no-iter-selected">请选择一个测试迭代查看详情</div>
     </div>
 </div>
 {% endblock %}
@@ -407,11 +538,16 @@ let iterations = [];
 let currentIterId = null;
 let currentIterDetail = null;  // 含 plans
 let currentPlanId = null;
+let currentIterTabs = [];
+let currentIterTabKey = 'plans';
+let dynamicTabPages = {};
 let projects = [];
 let claws = [];
 let users = [];
 let libraries = [];
 let taskCasePages = {};
+let isBootstrappingTestplans = true;
+let pendingTestplanDeepLink = parseTestplanDeepLink();
 
 const VERSION_TYPE_MAP = { regular:'常规版本', resource:'资源版本', hotfix:'紧急补丁' };
 const STATUS_MAP = { draft:'草稿', active:'进行中', completed:'已完成', archived:'已归档' };
@@ -419,12 +555,97 @@ const TASK_TYPE_MAP = { functional:'功能测试', automation:'自动化测试',
 const TASK_STATUS_MAP = { assigned:'新分配', pending:'待开始', in_progress:'进行中', completed:'已完成', blocked:'阻塞', skipped:'跳过' };
 const CASE_STATUS_MAP = { pending:'待执行', passed:'通过', failed:'失败', blocked:'阻塞', skipped:'跳过' };
 const PRIORITY_MAP = { P0:'P0-紧急', P1:'P1-高', P2:'P2-中', P3:'P3-低' };
+const DYNAMIC_PAGE_SIZES = [20, 50, 100, 'all'];
+
+function parseTestplanDeepLink() {
+    const params = new URLSearchParams(window.location.search || '');
+    const rawIter = params.get('iteration_id') || params.get('iter_id') || params.get('iteration');
+    const iterationId = rawIter && /^\d+$/.test(rawIter) ? Number(rawIter) : null;
+    const tabKey = (params.get('tab') || params.get('tab_key') || 'plans').trim() || 'plans';
+    return { iterationId, tabKey, applied: false };
+}
+
+function updateTestplanDeepLink(iterId = currentIterId, tabKey = currentIterTabKey, replace = false) {
+    if (!iterId) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set('iteration_id', String(iterId));
+    url.searchParams.set('tab', tabKey || 'plans');
+    url.searchParams.delete('iter_id');
+    url.searchParams.delete('iteration');
+    url.searchParams.delete('tab_key');
+    const method = replace ? 'replaceState' : 'pushState';
+    window.history[method]({ iteration_id: Number(iterId), tab: tabKey || 'plans' }, '', url);
+}
+
+function clearTestplanDeepLink(replace = true) {
+    const url = new URL(window.location.href);
+    ['iteration_id', 'iter_id', 'iteration', 'tab', 'tab_key'].forEach(k => url.searchParams.delete(k));
+    window.history[replace ? 'replaceState' : 'pushState']({}, '', url);
+}
+
+function localToday() {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d;
+}
+
+function parseLocalDate(s) {
+    if (!s) return null;
+    const d = new Date(`${s}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return null;
+    d.setHours(0, 0, 0, 0);
+    return d;
+}
+
+function pickPlanByCurrentDate(plans) {
+    const today = localToday();
+    const candidates = (plans || [])
+        .filter(p => p && p.start_date && p.end_date)
+        .filter(p => p.status !== 'archived')
+        .map(p => ({
+            plan: p,
+            start: parseLocalDate(p.start_date),
+            end: parseLocalDate(p.end_date),
+        }))
+        .filter(x => x.start && x.end);
+    if (!candidates.length) return null;
+
+    const current = candidates
+        .filter(x => x.start <= today && today <= x.end)
+        .sort((a, b) => b.start.getTime() - a.start.getTime());
+    if (current.length) return current[0].plan;
+
+    const future = candidates
+        .filter(x => x.start > today)
+        .sort((a, b) => a.start.getTime() - b.start.getTime());
+    if (future.length) return future[0].plan;
+
+    const past = candidates
+        .filter(x => x.end < today)
+        .sort((a, b) => b.end.getTime() - a.end.getTime());
+    return past.length ? past[0].plan : null;
+}
 
 // ===== 初始化 =====
 (async function init() {
     await Promise.all([loadProjects(), loadClaws(), loadUsers(), loadLibraries()]);
+    await applyInitialTestplanDeepLink();
+    isBootstrappingTestplans = false;
     await loadIterations();
 })();
+
+window.addEventListener('popstate', async () => {
+    pendingTestplanDeepLink = parseTestplanDeepLink();
+    if (!pendingTestplanDeepLink.iterationId) {
+        currentIterId = null;
+        currentPlanId = null;
+        currentIterTabs = [];
+        currentIterTabKey = 'plans';
+        dynamicTabPages = {};
+    }
+    await applyInitialTestplanDeepLink();
+    await loadIterations();
+});
 
 async function loadProjects() {
     try {
@@ -435,7 +656,33 @@ async function loadProjects() {
         projects.forEach(p => {
             sel.innerHTML += `<option value="${p.id}">${p.name}</option>`;
         });
+        initProjectIdFilter(sel, projects, () => {
+            if (!isBootstrappingTestplans) loadIterations();
+        });
     } catch(e) { console.error('加载项目失败', e); }
+}
+
+async function applyInitialTestplanDeepLink() {
+    const link = pendingTestplanDeepLink;
+    if (!link || !link.iterationId) return;
+    try {
+        const iter = await API.get(`/test-iterations/${link.iterationId}`);
+        const sel = document.getElementById('filter-project');
+        if (sel && iter && iter.project_id != null) {
+            const projectValue = String(iter.project_id);
+            if (Array.from(sel.options).some(o => o.value === projectValue)) {
+                sel.value = projectValue;
+                const project = projects.find(p => String(p.id) === projectValue);
+                if (project && typeof _saveProjectChoice === 'function') {
+                    _saveProjectChoice(project.name, projectValue);
+                }
+            }
+        }
+        const statusSel = document.getElementById('filter-status');
+        if (statusSel) statusSel.value = '';
+    } catch(e) {
+        console.warn('解析测试计划深链失败', e);
+    }
 }
 
 async function loadClaws() {
@@ -474,11 +721,119 @@ async function loadIterations() {
     renderIterList();
     document.getElementById('iter-count').textContent = iterations.length;
 
-    if (currentIterId) {
-        const still = iterations.find(it => it.id === currentIterId);
-        if (still) await showIterDetail(currentIterId);
-        else { currentIterId = null; document.getElementById('main-area').innerHTML = '<div class="tp-no-iter-selected">← 选择一个测试迭代查看详情</div>'; }
+    if (pendingTestplanDeepLink && pendingTestplanDeepLink.iterationId && !pendingTestplanDeepLink.applied) {
+        const target = iterations.find(it => Number(it.id) === Number(pendingTestplanDeepLink.iterationId));
+        if (target) {
+            pendingTestplanDeepLink.applied = true;
+            await showIterDetail(target.id, { tabKey: pendingTestplanDeepLink.tabKey, replaceUrl: true });
+            return;
+        }
     }
+
+    if (currentIterId) {
+        const still = iterations.find(it => Number(it.id) === Number(currentIterId));
+        if (still) await showIterDetail(currentIterId, { replaceUrl: true });
+        else {
+            currentIterId = null;
+            currentPlanId = null;
+            currentIterTabs = [];
+            currentIterTabKey = 'plans';
+            dynamicTabPages = {};
+            clearTestplanDeepLink();
+            document.getElementById('main-area').innerHTML = '<div class="tp-no-iter-selected">请选择一个测试迭代查看详情</div>';
+        }
+    } else {
+        const planParams = pid ? [`project_id=${pid}`] : [];
+        await showDefaultPlanByDate(planParams);
+    }
+}
+
+async function showDefaultPlanByDate(filterParams = []) {
+    if (!iterations.length) {
+        document.getElementById('main-area').innerHTML = '<div class="tp-no-iter-selected">暂无测试迭代</div>';
+        return;
+    }
+
+    try {
+        const plans = await API.get('/test-plans' + (filterParams.length ? '?' + filterParams.join('&') : ''));
+        const targetPlan = pickPlanByCurrentDate(Array.isArray(plans) ? plans : []);
+        const targetIterId = targetPlan && targetPlan.iteration_id;
+        const targetIter = targetIterId ? iterations.find(it => Number(it.id) === Number(targetIterId)) : null;
+        if (targetIter) {
+            currentIterId = targetIter.id;
+            currentPlanId = targetPlan.id;
+            await showIterDetail(currentIterId, { replaceUrl: true });
+            return;
+        }
+    } catch(e) {
+        console.warn('选择默认测试计划失败', e);
+    }
+
+    const fallbackIter = pickIterationByCurrentDate(iterations) || iterations[0];
+    if (fallbackIter) await showIterDetail(fallbackIter.id, { replaceUrl: true });
+}
+
+function pickIterationByCurrentDate(list) {
+    const today = localToday();
+    const items = (list || [])
+        .filter(it => it && it.start_date && it.end_date)
+        .filter(it => it.status !== 'archived')
+        .map(it => ({
+            iter: it,
+            start: parseLocalDate(it.start_date),
+            end: parseLocalDate(it.end_date),
+        }))
+        .filter(x => x.start && x.end);
+    if (!items.length) return null;
+    const current = items
+        .filter(x => x.start <= today && today <= x.end)
+        .sort((a, b) => b.start.getTime() - a.start.getTime());
+    if (current.length) return current[0].iter;
+    const future = items
+        .filter(x => x.start > today)
+        .sort((a, b) => a.start.getTime() - b.start.getTime());
+    if (future.length) return future[0].iter;
+    const past = items
+        .filter(x => x.end < today)
+        .sort((a, b) => b.end.getTime() - a.end.getTime());
+    return past.length ? past[0].iter : null;
+}
+
+function formatIterationOption(it) {
+    const bits = [
+        it.name || `迭代 #${it.id}`,
+        it.version_name || '',
+        STATUS_MAP[it.status] || it.status || '',
+    ].filter(Boolean);
+    return bits.join(' · ');
+}
+
+function renderSelectedIterSummary(it) {
+    if (!it) {
+        return '<div class="tp-iter-empty" style="padding:22px 12px">请从上方下拉框选择迭代</div>';
+    }
+    const prog = it.progress || 0;
+    const color = prog >= 100 ? '#22c55e' : prog > 0 ? '#3b82f6' : 'var(--text-muted)';
+    return `
+        <div class="tp-iter-summary">
+            <div class="tp-iter-name">
+                <span class="tp-tag tp-tag-${it.version_type}" style="font-size:0.68rem">${VERSION_TYPE_MAP[it.version_type] || it.version_type || '迭代'}</span>
+                ${esc(it.name || '')}
+            </div>
+            <div class="tp-iter-meta">
+                <span class="tp-tag tp-tag-${it.status}">${STATUS_MAP[it.status] || it.status || '-'}</span>
+                ${it.version_name ? `<span style="color:var(--accent)">${esc(it.version_name)}</span>` : ''}
+                <span>计划 ${it.total_plans || 0}</span>
+            </div>
+            ${it.start_date ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-top:8px">日期：${it.start_date} ~ ${it.end_date || '?'}</div>` : ''}
+            <div class="tp-iter-progress">
+                <div class="tp-progress-bar"><div class="tp-progress-fill" style="width:${prog}%;background:${color}"></div></div>
+                <div style="display:flex;justify-content:space-between;font-size:0.68rem;color:var(--text-muted);margin-top:4px">
+                    <span>${it.completed_tasks || 0}/${it.total_tasks || 0} 任务</span>
+                    <span>${prog}%</span>
+                </div>
+            </div>
+        </div>`;
 }
 
 function renderIterList() {
@@ -487,42 +842,50 @@ function renderIterList() {
         el.innerHTML = '<div class="tp-iter-empty">暂无测试迭代</div>';
         return;
     }
-    el.innerHTML = iterations.map(it => {
-        const prog = it.progress || 0;
-        const color = prog >= 100 ? '#22c55e' : prog > 0 ? '#3b82f6' : 'var(--text-muted)';
-        return `
-        <div class="tp-iter-card ${currentIterId === it.id ? 'active' : ''}" onclick="showIterDetail(${it.id})">
-            <div class="tp-iter-name">
-                <span class="tp-tag tp-tag-${it.version_type}" style="font-size:0.68rem">${VERSION_TYPE_MAP[it.version_type] || it.version_type}</span>
-                ${esc(it.name)}
-            </div>
-            <div class="tp-iter-meta">
-                <span class="tp-tag tp-tag-${it.status}">${STATUS_MAP[it.status] || it.status}</span>
-                ${it.version_name ? `<span style="color:var(--accent)">${esc(it.version_name)}</span>` : ''}
-                <span>📋 ${it.total_plans || 0} 计划</span>
-            </div>
-            ${it.start_date ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-top:3px">📅 ${it.start_date} ~ ${it.end_date || '?'}</div>` : ''}
-            <div class="tp-iter-progress">
-                <div class="tp-progress-bar"><div class="tp-progress-fill" style="width:${prog}%;background:${color}"></div></div>
-                <div style="display:flex;justify-content:space-between;font-size:0.68rem;color:var(--text-muted);margin-top:2px">
-                    <span>${it.completed_tasks || 0}/${it.total_tasks || 0} 任务</span>
-                    <span>${prog}%</span>
-                </div>
-            </div>
-        </div>`;
-    }).join('');
+    const selected = iterations.find(it => Number(it.id) === Number(currentIterId));
+    el.innerHTML = `
+        <label class="tp-iter-select-label" for="iter-select">选择迭代</label>
+        <select class="tp-iter-select" id="iter-select" onchange="onIterationSelect(this.value)">
+            <option value="">请选择测试迭代</option>
+            ${iterations.map(it => `<option value="${it.id}" ${Number(currentIterId) === Number(it.id) ? 'selected' : ''}>${esc(formatIterationOption(it))}</option>`).join('')}
+        </select>
+        ${renderSelectedIterSummary(selected)}
+    `;
+}
+
+function onIterationSelect(value) {
+    if (!value) {
+        currentIterId = null;
+        currentPlanId = null;
+        currentIterTabs = [];
+        currentIterTabKey = 'plans';
+        dynamicTabPages = {};
+        clearTestplanDeepLink();
+        renderIterList();
+        document.getElementById('main-area').innerHTML = '<div class="tp-no-iter-selected">请选择一个测试迭代查看详情</div>';
+        return;
+    }
+    showIterDetail(Number(value));
 }
 
 // ===== 迭代详情（含计划列表） =====
-async function showIterDetail(iterId) {
-    const switchingIter = currentIterId !== iterId;
+async function showIterDetail(iterId, options = {}) {
+    const switchingIter = Number(currentIterId) !== Number(iterId);
     currentIterId = iterId;
-    if (switchingIter) currentPlanId = null;
+    if (switchingIter) {
+        currentPlanId = null;
+        currentIterTabs = [];
+        currentIterTabKey = options.tabKey || 'plans';
+        dynamicTabPages = {};
+    } else if (options.tabKey) {
+        currentIterTabKey = options.tabKey;
+    }
     renderIterList();
 
     try {
         currentIterDetail = await API.get(`/test-iterations/${iterId}`);
         renderIterDetailArea(currentIterDetail);
+        updateTestplanDeepLink(iterId, currentIterTabKey, !!options.replaceUrl);
     } catch(e) {
         showToast('加载迭代详情失败', 'error');
     }
@@ -533,20 +896,10 @@ function renderIterDetailArea(iter) {
     const plans = iter.plans || [];
     if (currentPlanId && !plans.some(p => p.id === currentPlanId)) currentPlanId = null;
 
-    // Auto-select: prefer active plan, then nearest upcoming (draft with closest start_date)
+    // Auto-select by schedule: current date range, then nearest future, then latest past.
     if (!currentPlanId && plans.length) {
-        const activePlan = plans.find(p => p.status === 'active');
-        if (activePlan) {
-            currentPlanId = activePlan.id;
-        } else {
-            const today = new Date().toISOString().slice(0, 10);
-            const upcoming = plans
-                .filter(p => p.status === 'draft' && p.start_date && p.start_date >= today)
-                .sort((a, b) => (a.start_date || '').localeCompare(b.start_date || ''));
-            if (upcoming.length) {
-                currentPlanId = upcoming[0].id;
-            }
-        }
+        const defaultPlan = pickPlanByCurrentDate(plans) || plans[0];
+        currentPlanId = defaultPlan.id;
     }
 
     const prog = iter.progress || 0;
@@ -599,27 +952,634 @@ function renderIterDetailArea(iter) {
             </div>
         </div>
 
-        <!-- 计划选择 -->
-        <div class="tp-plan-header">
-            <h3>📋 测试计划 (${plans.length})</h3>
-            <button class="btn btn-primary" style="font-size:0.82rem;padding:6px 14px" onclick="openPlanModal(0, ${iter.id})">+ 新建计划</button>
-        </div>
-        <div class="tp-plan-selector">
-            <select id="plan-select" onchange="onPlanSelect(this.value)">
-                <option value="">选择测试计划后查看详情和操作</option>
-                ${plans.map(p => `<option value="${p.id}" ${currentPlanId === p.id ? 'selected' : ''}>${esc(p.name)}${p.version_name ? ` · ${esc(p.version_name)}` : ''} · ${STATUS_MAP[p.status] || p.status} · ${p.completed_tasks || 0}/${p.total_tasks || 0}任务</option>`).join('')}
-            </select>
-            <div class="tp-plan-actions" id="plan-actions">
-                ${currentPlanId ? renderPlanActions(currentPlanId) : ''}
+        <div id="iter-tab-bar" class="iter-tab-bar">${renderIterTabBar()}</div>
+
+        <div id="iter-tab-content">
+            <div id="plans-tab-content" style="${currentIterTabKey === 'plans' ? '' : 'display:none'}">
+                <!-- 计划选择 -->
+                <div class="tp-plan-header">
+                    <h3>📋 测试计划 (${plans.length})</h3>
+                    <button class="btn btn-primary" style="font-size:0.82rem;padding:6px 14px" onclick="openPlanModal(0, ${iter.id})">+ 新建计划</button>
+                </div>
+                <div class="tp-plan-selector">
+                    <select id="plan-select" onchange="onPlanSelect(this.value)">
+                        <option value="">选择测试计划后查看详情和操作</option>
+                        ${plans.map(p => `<option value="${p.id}" ${currentPlanId === p.id ? 'selected' : ''}>${esc(p.name)}${p.version_name ? ` · ${esc(p.version_name)}` : ''} · ${STATUS_MAP[p.status] || p.status} · ${p.completed_tasks || 0}/${p.total_tasks || 0}任务</option>`).join('')}
+                    </select>
+                    <div class="tp-plan-actions" id="plan-actions">
+                        ${currentPlanId ? renderPlanActions(currentPlanId) : ''}
+                    </div>
+                </div>
+                <div class="tp-plan-content">
+                    <div id="plan-detail-area">${plans.length ? '<div class="tp-detail-empty">请先从上方下拉框选择一个测试计划</div>' : '<div class="tp-detail-empty" style="height:120px">暂无测试计划，点击上方新建</div>'}</div>
+                </div>
             </div>
-        </div>
-        <div class="tp-plan-content">
-            <div id="plan-detail-area">${plans.length ? '<div class="tp-detail-empty">请先从上方下拉框选择一个测试计划</div>' : '<div class="tp-detail-empty" style="height:120px">暂无测试计划，点击上方新建</div>'}</div>
+            <div id="dynamic-tab-content" class="iter-tab-content" style="${currentIterTabKey === 'plans' ? 'display:none' : ''}"></div>
         </div>
     </div>`;
 
+    loadIterationTabs(iter.id);
     if (currentPlanId) {
         showPlanDetail(currentPlanId);
+    }
+}
+
+function builtInIterationTabs() {
+    return [
+        { tab_key: 'requirements', title: '需求', tab_type: 'requirement', builtin: true },
+        { tab_key: 'bugs', title: 'Bug', tab_type: 'bug', builtin: true },
+    ];
+}
+
+function mergedIterationTabs() {
+    const byKey = {};
+    currentIterTabs.forEach(t => { byKey[t.tab_key] = t; });
+    return builtInIterationTabs().map(t => byKey[t.tab_key] || t)
+        .concat(currentIterTabs.filter(t => !['requirements', 'bugs'].includes(t.tab_key)));
+}
+
+function renderIterTabBar() {
+    const tabs = mergedIterationTabs();
+    return `
+        <button class="iter-tab-btn ${currentIterTabKey === 'plans' ? 'active' : ''}" onclick="switchIterTab('plans')">测试计划</button>
+        ${tabs.map(t => `<button class="iter-tab-btn ${currentIterTabKey === t.tab_key ? 'active' : ''}" onclick="switchIterTab('${esc(t.tab_key).replace(/'/g, "\\'")}')">${esc(t.title || t.tab_key)}</button>`).join('')}
+        <div class="iter-tab-actions">
+            <button class="tp-btn-sm" onclick="openTabJsonEditor()">+ 页签(JSON)</button>
+        </div>`;
+}
+
+async function loadIterationTabs(iterId) {
+    try {
+        currentIterTabs = await API.get(`/test-iterations/${iterId}/tabs`);
+    } catch(e) {
+        currentIterTabs = [];
+        console.warn('加载迭代页签失败', e);
+    }
+    const bar = document.getElementById('iter-tab-bar');
+    if (bar) bar.innerHTML = renderIterTabBar();
+    if (currentIterTabKey !== 'plans') renderCurrentIterationTab();
+}
+
+function switchIterTab(tabKey) {
+    currentIterTabKey = tabKey || 'plans';
+    updateTestplanDeepLink(currentIterId, currentIterTabKey);
+    const bar = document.getElementById('iter-tab-bar');
+    if (bar) bar.innerHTML = renderIterTabBar();
+    const plans = document.getElementById('plans-tab-content');
+    const dynamic = document.getElementById('dynamic-tab-content');
+    if (plans) plans.style.display = currentIterTabKey === 'plans' ? '' : 'none';
+    if (dynamic) dynamic.style.display = currentIterTabKey === 'plans' ? 'none' : '';
+    if (currentIterTabKey !== 'plans') renderCurrentIterationTab();
+}
+
+function findIterationTab(tabKey) {
+    return currentIterTabs.find(t => t.tab_key === tabKey) || builtInIterationTabs().find(t => t.tab_key === tabKey);
+}
+
+function canManageIterationTab(tab) {
+    if (!tab || tab.builtin || !tab.created_by) return true;
+    return true; // 后端做最终权限校验；前端保持编辑入口，失败时提示。
+}
+
+function renderCurrentIterationTab() {
+    const el = document.getElementById('dynamic-tab-content');
+    if (!el) return;
+    const tab = findIterationTab(currentIterTabKey);
+    if (!tab || tab.builtin) {
+        const name = tab ? tab.title : currentIterTabKey;
+        el.innerHTML = `<div class="iter-tab-empty">
+            <div style="font-weight:700;margin-bottom:6px">${esc(name)}页签暂无数据</div>
+            <div>Agent 可通过 Skill 提交表头、行数据和可选图表；也可以用右上角 JSON 入口创建。</div>
+        </div>`;
+        return;
+    }
+    const viewMode = tab.view_mode || ((tab.charts || []).length ? 'table_chart' : 'table');
+    if (viewMode === 'flow_progress') {
+        el.innerHTML = `
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+                <h3 style="margin:0;flex:1">${esc(tab.title || tab.tab_key)}</h3>
+                <span class="tp-tag">流程进度</span>
+                <button class="tp-btn-sm" onclick="openTabJsonEditor('${esc(tab.tab_key).replace(/'/g, "\\'")}')">编辑 JSON</button>
+                <button class="tp-btn-sm danger" onclick="deleteIterationTab('${esc(tab.tab_key).replace(/'/g, "\\'")}')">删除</button>
+            </div>
+            ${renderFlowProgress(tab)}`;
+        return;
+    }
+    const showCharts = viewMode === 'chart' || viewMode === 'table_chart';
+    const showTable = viewMode === 'table' || viewMode === 'table_chart';
+    el.innerHTML = `
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+            <h3 style="margin:0;flex:1">${esc(tab.title || tab.tab_key)}</h3>
+            <span class="tp-tag">${esc(viewMode)}</span>
+            <button class="tp-btn-sm" onclick="openTabJsonEditor('${esc(tab.tab_key).replace(/'/g, "\\'")}')">编辑 JSON</button>
+            <button class="tp-btn-sm danger" onclick="deleteIterationTab('${esc(tab.tab_key).replace(/'/g, "\\'")}')">删除</button>
+        </div>
+        ${showCharts ? renderDynamicCharts(tab) : ''}
+        ${showTable ? renderDynamicTable(tab) : ''}
+        ${!showCharts && !showTable ? '<div class="iter-tab-empty">当前页签没有可展示内容</div>' : ''}`;
+}
+
+const _flowStatusMap = {
+    passed:'green',pass:'green',done:'green',green:'green','通过':'green','完成':'green',
+    failed:'red',fail:'red',error:'red',red:'red','不通过':'red','失败':'red',
+    running:'blue',in_progress:'blue',blue:'blue','进行中':'blue',
+    blocked:'orange',warning:'orange',orange:'orange','异常':'orange','阻塞':'orange',
+    pending:'gray',gray:'gray',grey:'gray','未开始':'gray','待开始':'gray',
+};
+const _flowLampIcon = { green:'✓', red:'✗', blue:'⟳', orange:'!', gray:'—' };
+const _flowStatusLabel = { green:'通过', red:'不通过', blue:'进行中', orange:'异常', gray:'未开始' };
+
+function flowColor(status) {
+    return _flowStatusMap[(status||'').toLowerCase().replace(/[\s-]/g,'_')] || 'gray';
+}
+
+function renderFlowProgress(tab) {
+    const rows = tab.rows || [];
+    if (!rows.length) return '<div class="iter-tab-empty">流程暂无步骤数据</div>';
+    let html = '<div class="flow-progress-bar">';
+    rows.forEach((row, i) => {
+        const c = row.cells || {};
+        const name = c.name || row.id || '步骤';
+        const color = flowColor(c.status);
+        const icon = _flowLampIcon[color] || '—';
+        const label = _flowStatusLabel[color] || c.status || '';
+        html += `<div class="flow-step">
+            <div class="flow-lamp-wrap" onclick="showFlowStepDetail(${JSON.stringify(JSON.stringify(row))})">
+                <div class="flow-lamp flow-lamp-${color}">${icon}</div>
+                <div class="flow-step-name">${esc(name)}</div>
+                <div class="flow-step-status">${esc(label)}</div>
+            </div>`;
+        if (i < rows.length - 1) html += '<div class="flow-connector"></div>';
+        html += '</div>';
+    });
+    html += '</div>';
+    return html;
+}
+
+function showFlowStepDetail(rowJson) {
+    const row = typeof rowJson === 'string' ? JSON.parse(rowJson) : rowJson;
+    const c = row.cells || {};
+    const color = flowColor(c.status);
+    const label = _flowStatusLabel[color] || c.status || '未知';
+    let msgHtml = '';
+    if (c.message) {
+        if (typeof c.message === 'object') {
+            msgHtml = '<pre style="margin:0;white-space:pre-wrap">' + esc(JSON.stringify(c.message, null, 2)) + '</pre>';
+        } else {
+            msgHtml = esc(String(c.message));
+        }
+    } else {
+        msgHtml = '<span style="color:var(--text-muted)">暂无状态信息</span>';
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'flow-detail-overlay';
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+    overlay.innerHTML = `<div class="flow-detail-card">
+        <div class="flow-detail-header">
+            <div class="flow-detail-lamp flow-lamp-${color}"></div>
+            <div class="flow-detail-title">${esc(c.name || row.id || '步骤')}</div>
+        </div>
+        <div class="flow-detail-meta">
+            状态：<strong>${esc(label)}</strong>
+            ${c.updated_by ? '&nbsp;|&nbsp;上报者：' + esc(c.updated_by) : ''}
+            ${c.updated_at ? '&nbsp;|&nbsp;更新：' + esc(c.updated_at) : ''}
+            ${c.link ? '<br><a href="' + esc(c.link) + '" target="_blank" class="dyn-link">查看链接 →</a>' : ''}
+        </div>
+        <div class="flow-detail-msg">${msgHtml}</div>
+        <div class="flow-detail-actions">
+            <button class="tp-btn-sm" onclick="this.closest('.flow-detail-overlay').remove()">关闭</button>
+        </div>
+    </div>`;
+    document.body.appendChild(overlay);
+}
+
+function statusOptionMeta(col, value) {
+    const opts = col.options || [];
+    const found = opts.find(o => String(o.value ?? o) === String(value));
+    if (!found) return { label: value || '-', color: 'gray' };
+    if (typeof found === 'string') return { label: found, color: 'gray' };
+    return { label: found.label || found.value || '-', color: found.color || 'gray' };
+}
+
+function optionValue(opt) {
+    return typeof opt === 'object' ? String(opt.value ?? opt.label ?? '') : String(opt);
+}
+
+function optionLabel(opt) {
+    return typeof opt === 'object' ? String(opt.label ?? opt.value ?? '') : String(opt);
+}
+
+function cellRawValue(value) {
+    if (value && typeof value === 'object') {
+        return value.value ?? value.text ?? value.label ?? value.title ?? value.url ?? '';
+    }
+    return value ?? '';
+}
+
+function cellTextValue(value) {
+    const raw = cellRawValue(value);
+    return raw == null ? '' : String(raw);
+}
+
+function cellBoolValue(value) {
+    const raw = cellRawValue(value);
+    if (typeof raw === 'boolean') return raw;
+    return ['true', '1', 'yes', 'checked', '完成', '是'].includes(String(raw).toLowerCase());
+}
+
+function safeTextColor(color) {
+    const text = String(color || '').trim();
+    const named = {
+        red: '#ef4444',
+        '红': '#ef4444',
+        '红色': '#ef4444',
+        orange: '#f97316',
+        '橙': '#f97316',
+        '橙色': '#f97316',
+        yellow: '#eab308',
+        '黄': '#eab308',
+        '黄色': '#eab308',
+        green: '#22c55e',
+        '绿': '#22c55e',
+        '绿色': '#22c55e',
+        blue: '#3b82f6',
+        '蓝': '#3b82f6',
+        '蓝色': '#3b82f6',
+        purple: '#a855f7',
+        '紫': '#a855f7',
+        '紫色': '#a855f7',
+        gray: '#9ca3af',
+        grey: '#9ca3af',
+        '灰': '#9ca3af',
+        '灰色': '#9ca3af',
+    };
+    if (named[text]) return named[text];
+    if (/^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(text)) return text;
+    if (/^rgb(a)?\([\d\s,%.]+\)$/.test(text)) return text;
+    return '';
+}
+
+function cellTextStyle(col, value) {
+    const cellColor = value && typeof value === 'object' ? (value.text_color || value.color) : '';
+    const color = safeTextColor(cellColor || col.text_color || col.color);
+    return color ? ` style="color:${esc(color)}"` : '';
+}
+
+function inferOptionColor(value, label) {
+    const text = `${value ?? ''} ${label ?? ''}`.toLowerCase();
+    if (/(p0|严重|阻塞|失败|高危|紧急|红)/i.test(text)) return 'red';
+    if (/(p1|风险|评估|待评估|进行|处理中|橙)/i.test(text)) return 'orange';
+    if (/(测试|验证|蓝)/i.test(text)) return 'blue';
+    if (/(完成|通过|已解决|done|pass|green|绿)/i.test(text)) return 'green';
+    if (/(忽略|跳过|关闭|取消|无效|灰)/i.test(text)) return 'gray';
+    if (/(待处理|todo|pending|未开始)/i.test(text)) return 'gray';
+    return 'gray';
+}
+
+function optionMeta(col, value) {
+    const opts = col.options || [];
+    const selected = String(value ?? '');
+    const found = opts.find(o => optionValue(o) === selected);
+    if (!found) return { value: selected, label: selected || '-', color: inferOptionColor(selected, selected) };
+    const label = optionLabel(found);
+    return {
+        value: optionValue(found),
+        label,
+        color: typeof found === 'object' ? (found.color || inferOptionColor(optionValue(found), label)) : inferOptionColor(found, label),
+    };
+}
+
+function renderDynDropdown(tab, row, col, value) {
+    const options = col.options || [];
+    const selected = String(cellRawValue(value));
+    const meta = optionMeta(col, selected);
+    const currentColor = safeTextColor(meta.color) || safeTextColor(col.text_color || col.color) || 'var(--text-primary)';
+    const tabKey = jsQuote(tab.tab_key);
+    const rowId = jsQuote(row.id);
+    const colKey = jsQuote(col.key);
+    const optionHtml = options.map(o => {
+        const ov = optionValue(o);
+        const label = optionLabel(o);
+        const color = safeTextColor(typeof o === 'object' ? (o.color || inferOptionColor(ov, label)) : inferOptionColor(ov, label)) || 'var(--text-muted)';
+        const selectedClass = selected === ov ? ' dyn-opt-selected' : '';
+        return `<div class="dyn-dropdown-option${selectedClass}" style="color:${esc(color)}" onclick="selectDynDropdown(event,'${tabKey}','${rowId}','${colKey}','${jsQuote(ov)}')">
+            <span class="dyn-color-dot"></span><span class="dyn-dropdown-label">${esc(label)}</span>
+        </div>`;
+    }).join('');
+    return `<div class="dyn-dropdown" onclick="event.stopPropagation()">
+        <button type="button" class="dyn-dropdown-btn" style="color:${esc(currentColor)};border-color:${esc(currentColor)};background:${esc(currentColor)}14" onclick="toggleDynDropdown(event)">
+            <span class="dyn-color-dot"></span><span class="dyn-dropdown-label">${esc(meta.label)}</span>
+        </button>
+        <div class="dyn-dropdown-list">${optionHtml || '<div class="dyn-dropdown-option" style="color:var(--text-muted)">暂无选项</div>'}</div>
+    </div>`;
+}
+
+function normalizeDynamicColumns(tab) {
+    return (tab.columns || []).map(c => {
+        if (typeof c === 'string') return { key: c, title: c, type: 'text' };
+        return c || {};
+    });
+}
+
+function normalizeDynamicRows(tab) {
+    return (tab.rows || []).map((r, i) => {
+        if (r && r.cells) return r;
+        const cells = {};
+        Object.entries(r || {}).forEach(([key, value]) => {
+            if (!['id', 'row_id', 'cells'].includes(key)) cells[key] = value;
+        });
+        return { id: (r && (r.id || r.row_id)) || `row_${i + 1}`, cells };
+    });
+}
+
+function renderDynamicCell(tab, row, col) {
+    const cells = row.cells || {};
+    const value = cells[col.key];
+    const type = col.type || 'text';
+    if (type === 'link') {
+        const label = typeof value === 'object' ? (value.label || value.title || value.url) : value;
+        const url = typeof value === 'object' ? value.url : value;
+        return url ? `<a class="dyn-link" href="${esc(url)}" target="_blank" rel="noopener"${cellTextStyle(col, value)}>${esc(label || url)}</a>` : '';
+    }
+    if (type === 'select' || type === 'status') {
+        return renderDynDropdown(tab, row, col, value);
+    }
+    if (type === 'checkbox') {
+        return `<input class="dyn-checkbox" type="checkbox" ${cellBoolValue(value) ? 'checked' : ''} onchange="saveDynamicCell('${esc(tab.tab_key)}','${esc(row.id)}','${esc(col.key)}',this.checked)">`;
+    }
+    return `<div class="dyn-cell-text"${cellTextStyle(col, value)}>${esc(cellTextValue(value))}</div>`;
+}
+
+function closeDynDropdowns(except = null) {
+    document.querySelectorAll('.dyn-dropdown.open').forEach(el => {
+        if (el !== except) el.classList.remove('open');
+    });
+}
+
+function toggleDynDropdown(event) {
+    event.stopPropagation();
+    const dropdown = event.currentTarget.closest('.dyn-dropdown');
+    if (!dropdown) return;
+    const nextOpen = !dropdown.classList.contains('open');
+    closeDynDropdowns(dropdown);
+    dropdown.classList.toggle('open', nextOpen);
+}
+
+async function selectDynDropdown(event, tabKey, rowId, columnKey, value) {
+    event.stopPropagation();
+    closeDynDropdowns();
+    await saveDynamicCell(tabKey, rowId, columnKey, value);
+}
+
+document.addEventListener('click', () => closeDynDropdowns());
+
+function dynamicPageState(tabKey, totalRows) {
+    const state = dynamicTabPages[tabKey] || { pageSize: 20, page: 1 };
+    if (!DYNAMIC_PAGE_SIZES.includes(state.pageSize)) state.pageSize = 20;
+    const pageSize = state.pageSize === 'all' ? totalRows || 1 : Number(state.pageSize || 20);
+    const totalPages = Math.max(1, Math.ceil((totalRows || 0) / pageSize));
+    state.page = Math.min(Math.max(Number(state.page || 1), 1), totalPages);
+    dynamicTabPages[tabKey] = state;
+    return { ...state, pageSize, totalPages };
+}
+
+function setDynamicPageSize(tabKey, value) {
+    const pageSize = value === 'all' ? 'all' : Number(value);
+    dynamicTabPages[tabKey] = { pageSize: DYNAMIC_PAGE_SIZES.includes(pageSize) ? pageSize : 20, page: 1 };
+    renderCurrentIterationTab();
+}
+
+function changeDynamicPage(tabKey, delta) {
+    const state = dynamicTabPages[tabKey] || { pageSize: 20, page: 1 };
+    state.page = Math.max(1, Number(state.page || 1) + delta);
+    dynamicTabPages[tabKey] = state;
+    renderCurrentIterationTab();
+}
+
+function renderDynamicPager(tab, totalRows, state) {
+    if (!totalRows) return '';
+    const pageSizeValue = dynamicTabPages[tab.tab_key]?.pageSize || 20;
+    const start = totalRows ? ((state.page - 1) * state.pageSize + 1) : 0;
+    const end = Math.min(totalRows, state.page * state.pageSize);
+    const tabKey = jsQuote(tab.tab_key);
+    return `<div class="dyn-grid-footer">
+        <span>显示 ${start}-${end} / 共 ${totalRows} 条</span>
+        <div class="dyn-page-controls">
+            <span>每页</span>
+            <select onchange="setDynamicPageSize('${tabKey}', this.value)">
+                ${DYNAMIC_PAGE_SIZES.map(size => `<option value="${size}" ${pageSizeValue === size ? 'selected' : ''}>${size === 'all' ? '全部' : size}</option>`).join('')}
+            </select>
+            <button class="dyn-page-btn" ${state.page <= 1 ? 'disabled' : ''} onclick="changeDynamicPage('${tabKey}', -1)">上一页</button>
+            <span>第 ${state.page} / ${state.totalPages} 页</span>
+            <button class="dyn-page-btn" ${state.page >= state.totalPages ? 'disabled' : ''} onclick="changeDynamicPage('${tabKey}', 1)">下一页</button>
+        </div>
+    </div>`;
+}
+
+function renderDynamicTable(tab) {
+    const cols = normalizeDynamicColumns(tab);
+    const rows = normalizeDynamicRows(tab);
+    if (!cols.length) return '<div class="iter-tab-empty">暂无表头定义</div>';
+    const state = dynamicPageState(tab.tab_key, rows.length);
+    const pageRows = (dynamicTabPages[tab.tab_key]?.pageSize === 'all')
+        ? rows
+        : rows.slice((state.page - 1) * state.pageSize, state.page * state.pageSize);
+    return `<div class="dyn-grid-wrap">
+        <table class="dyn-grid">
+            <thead><tr>${cols.map(c => `<th style="${c.width ? `width:${esc(c.width)}` : ''}">${esc(c.title || c.key)}</th>`).join('')}</tr></thead>
+            <tbody>
+                ${pageRows.length ? pageRows.map(r => `<tr>${cols.map(c => `<td>${renderDynamicCell(tab, r, c)}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-muted);padding:24px">暂无数据</td></tr>`}
+            </tbody>
+        </table>
+    </div>${renderDynamicPager(tab, rows.length, state)}`;
+}
+
+function numericValue(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+}
+
+function renderDynamicCharts(tab) {
+    const charts = tab.charts || [];
+    if (!charts.length) return '';
+    const summaries = charts.filter(c => c.type === 'summary_cards');
+    const normal = charts.filter(c => c.type !== 'summary_cards');
+    return `${summaries.map(c => renderSummaryCards(tab, c)).join('')}
+        ${normal.length ? `<div class="dyn-chart-grid">${normal.map(c => renderOneChart(tab, c)).join('')}</div>` : ''}`;
+}
+
+function renderSummaryCards(tab, chart) {
+    const cards = chart.cards || [];
+    if (!cards.length) return '';
+    return `<div class="dyn-summary">${cards.map(card => {
+        const value = card.value_key ? (sumColumn(tab, card.value_key)) : (card.value ?? '');
+        return `<div class="dyn-summary-card"><div class="dyn-summary-value">${esc(value)}</div><div class="dyn-summary-label">${esc(card.label || card.title || '')}</div></div>`;
+    }).join('')}</div>`;
+}
+
+function sumColumn(tab, key) {
+    return normalizeDynamicRows(tab).reduce((acc, row) => acc + numericValue((row.cells || {})[key]), 0);
+}
+
+function chartPoints(tab, chart) {
+    return normalizeDynamicRows(tab).map(row => {
+        const cells = row.cells || {};
+        return { x: cells[chart.x] ?? row.id, y: numericValue(cells[chart.y || chart.value]) };
+    });
+}
+
+function renderOneChart(tab, chart) {
+    const pts = chartPoints(tab, chart);
+    const max = Math.max(...pts.map(p => p.y), 1);
+    const w = 320, h = 150, pad = 24;
+    let body = '<text x="50%" y="80" text-anchor="middle" fill="var(--text-muted)" font-size="12">暂无图表数据</text>';
+    if (pts.length && chart.type === 'line') {
+        const step = pts.length > 1 ? (w - pad * 2) / (pts.length - 1) : 0;
+        const path = pts.map((p, i) => `${i ? 'L' : 'M'}${pad + i * step},${h - pad - (p.y / max) * (h - pad * 2)}`).join(' ');
+        body = `<path d="${path}" fill="none" stroke="#3b82f6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
+            ${pts.map((p, i) => `<circle cx="${pad + i * step}" cy="${h - pad - (p.y / max) * (h - pad * 2)}" r="3.5" fill="#3b82f6"><title>${esc(p.x)}: ${p.y}</title></circle>`).join('')}`;
+    } else if (pts.length) {
+        const bw = Math.max(8, (w - pad * 2) / pts.length - 8);
+        body = pts.map((p, i) => {
+            const bh = (p.y / max) * (h - pad * 2);
+            const x = pad + i * ((w - pad * 2) / pts.length) + 4;
+            return `<rect x="${x}" y="${h - pad - bh}" width="${bw}" height="${bh}" rx="4" fill="#22c55e"><title>${esc(p.x)}: ${p.y}</title></rect>`;
+        }).join('');
+    }
+    return `<div class="dyn-chart-card">
+        <div class="dyn-chart-title">${esc(chart.title || chart.id || '图表')}</div>
+        <svg viewBox="0 0 ${w} ${h}" width="100%" height="150" role="img">
+            <line x1="${pad}" y1="${h - pad}" x2="${w - pad}" y2="${h - pad}" stroke="var(--border)"></line>
+            <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${h - pad}" stroke="var(--border)"></line>
+            ${body}
+        </svg>
+    </div>`;
+}
+
+async function editDynamicCell(tabKey, rowId, columnKey, currentValue) {
+    const value = await customPrompt('修改单元格值：', currentValue || '');
+    if (value === null) return;
+    await saveDynamicCell(tabKey, rowId, columnKey, value);
+}
+
+async function saveDynamicCell(tabKey, rowId, columnKey, value) {
+    try {
+        const updated = await API.request('PATCH', `/test-iterations/${currentIterId}/tabs/${tabKey}/cells`, {
+            row_id: rowId,
+            column_key: columnKey,
+            value,
+        });
+        const idx = currentIterTabs.findIndex(t => t.tab_key === tabKey);
+        if (idx >= 0) currentIterTabs[idx] = updated;
+        else currentIterTabs.push(updated);
+        renderCurrentIterationTab();
+        showToast('已保存', 'success');
+    } catch(e) {
+        showToast('保存失败: ' + e.message, 'error');
+    }
+}
+
+async function openTabJsonEditor(tabKey = '') {
+    const existing = tabKey ? currentIterTabs.find(t => t.tab_key === tabKey) : null;
+    const seed = existing || {
+        tab_key: 'custom_' + Date.now(),
+        title: '自定义页签',
+        tab_type: 'custom',
+        view_mode: 'table',
+        columns: [{ key: 'name', title: '名称', type: 'text' }, { key: 'status', title: '状态', type: 'select', options: ['待处理', '进行中', '完成'] }],
+        rows: [{ id: 'row_1', cells: { name: '示例', status: '待处理' } }],
+        charts: [],
+    };
+    const text = await openTabJsonEditorModal(JSON.stringify(seed, null, 2));
+    if (text === null) return;
+    try {
+        const payload = JSON.parse(text);
+        const saved = await API.post(`/test-iterations/${currentIterId}/tabs`, payload);
+        const idx = currentIterTabs.findIndex(t => t.tab_key === saved.tab_key);
+        if (idx >= 0) currentIterTabs[idx] = saved;
+        else currentIterTabs.push(saved);
+        currentIterTabKey = saved.tab_key;
+        const bar = document.getElementById('iter-tab-bar');
+        if (bar) bar.innerHTML = renderIterTabBar();
+        switchIterTab(saved.tab_key);
+        showToast('页签已保存', 'success');
+    } catch(e) {
+        showToast('保存失败: ' + e.message, 'error');
+    }
+}
+
+function openTabJsonEditorModal(initialText) {
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay active';
+        overlay.style.zIndex = '10000';
+        overlay.innerHTML = `
+        <div class="modal" style="max-width:1180px;width:min(1180px,96vw);max-height:94vh;display:flex;flex-direction:column">
+            <div class="modal-header" style="display:flex;align-items:center;gap:10px">
+                <h3 style="margin:0;flex:1">编辑页签 JSON</h3>
+                <button class="btn btn-ghost" type="button" onclick="toggleJsonEditorFullscreen(this)">⛶ 全屏</button>
+                <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" data-json-editor-close>✕</span>
+            </div>
+            <div style="padding:0 18px 10px;color:var(--text-muted);font-size:0.82rem">
+                项目内成员可保存完整结构。支持拖拽右下角调整编辑框大小；全屏后可获得最大编辑空间。按 Ctrl+Enter 保存。
+            </div>
+            <div style="padding:0 18px 16px;flex:1;min-height:0">
+                <textarea class="json-editor-textarea" spellcheck="false"></textarea>
+            </div>
+            <div class="modal-footer" style="display:flex;justify-content:flex-end;gap:8px">
+                <button class="btn btn-ghost" type="button" data-json-editor-cancel>取消</button>
+                <button class="btn btn-primary" type="button" data-json-editor-save>保存</button>
+            </div>
+        </div>`;
+        document.body.appendChild(overlay);
+
+        const textarea = overlay.querySelector('textarea');
+        textarea.value = initialText || '';
+        textarea.focus();
+
+        const cleanup = value => {
+            overlay.remove();
+            resolve(value);
+        };
+        overlay.querySelector('[data-json-editor-close]').onclick = () => cleanup(null);
+        overlay.querySelector('[data-json-editor-cancel]').onclick = () => cleanup(null);
+        overlay.querySelector('[data-json-editor-save]').onclick = () => cleanup(textarea.value);
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) cleanup(null);
+        });
+        textarea.addEventListener('keydown', e => {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                cleanup(textarea.value);
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                cleanup(null);
+            }
+        });
+    });
+}
+
+function toggleJsonEditorFullscreen(btn) {
+    toggleReportFullscreen(btn);
+    const overlay = btn.closest('.modal-overlay');
+    if (overlay) {
+        btn.textContent = overlay.classList.contains('fullscreen') ? '⛶ 退出全屏' : '⛶ 全屏';
+        const textarea = overlay.querySelector('.json-editor-textarea');
+        if (textarea) textarea.focus();
+    }
+}
+
+async function deleteIterationTab(tabKey) {
+    if (!await customConfirm('确定删除该页签？')) return;
+    try {
+        await API.del(`/test-iterations/${currentIterId}/tabs/${tabKey}`);
+        currentIterTabs = currentIterTabs.filter(t => t.tab_key !== tabKey);
+        currentIterTabKey = 'plans';
+        switchIterTab('plans');
+        showToast('页签已删除', 'success');
+    } catch(e) {
+        showToast('删除失败: ' + e.message, 'error');
     }
 }
 
@@ -809,113 +1769,312 @@ function toggleCaseDetail(rowEl) {
     if (arrow) arrow.classList.toggle('open', isOpen);
 }
 
+// 任务用例缓存 + 目录展开状态（按 taskId 维护，避免刷新时重拉全量并保留展开）
+const taskCasesCache = {};
+const taskFolderState = {};
+
 async function loadTaskCases(taskId, page = 1) {
     const panel = document.getElementById(`case-panel-${taskId}`);
     if (!panel) return;
-    taskCasePages[taskId] = page;
+    panel.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem;padding:8px">加载中...</div>';
     try {
-        const data = await API.get(`/test-plans/${currentPlanId}/tasks/${taskId}/cases?page=${page}&page_size=50`);
+        // 不带分页参数 → 后端返回全量用例，便于按目录层级完整展示
+        const data = await API.get(`/test-plans/${currentPlanId}/tasks/${taskId}/cases`);
         const cases = Array.isArray(data) ? data : (data.items || []);
-        const total = Array.isArray(data) ? cases.length : (data.total || 0);
-        const pages = Array.isArray(data) ? 1 : (data.pages || 1);
-        if (!cases.length) {
-            panel.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem;padding:8px">未关联用例</div>';
-            return;
-        }
-        panel.innerHTML = `
-        <h4>🧪 用例执行情况 (${total})</h4>
-        <div class="tp-case-list">
-            <div class="tp-case-row" style="background:var(--bg-card);font-weight:600;color:var(--text-secondary)">
-                <span></span><span>ID</span><span>标题</span><span>优先级</span><span>状态</span><span>执行人</span><span>备注</span><span></span>
-            </div>
-            ${cases.map(c => {
-                const ct = c.case_content || {};
-                const steps = Array.isArray(ct.steps) ? ct.steps : [];
-                const results = Array.isArray(ct.expected_results) ? ct.expected_results : [];
-                const precond = ct.preconditions || '';
-                const prio = c.case_priority || '-';
-                const prioCls = {'P0':'prio-p0','P1':'prio-p1','P2':'prio-p2','P3':'prio-p3'}[prio] || '';
-                const caseType = c.case_type || 'functional';
-                const typeLabels = {functional:'功能',interface:'接口',performance:'性能',security:'安全'};
-                const hasDetail = steps.length || results.length || precond;
-                return `
-            <div class="tp-case-item">
-                <div class="tp-case-row" ${hasDetail ? `style="cursor:pointer" onclick="toggleCaseDetail(this)"` : ''}>
-                    <span class="tp-case-expand-btn">${hasDetail ? '▶' : ''}</span>
-                    <span class="tp-case-id">${c.case_id || c.id}</span>
-                    <span class="tp-case-title" title="${esc(c.case_title || '')}">${esc(c.case_title || '-')}</span>
-                    <span><span class="prio-badge ${prioCls}">${prio}</span></span>
-                    <select class="tp-case-status-select" onclick="event.stopPropagation()" onchange="updateCaseStatus(${currentPlanId},${taskId},${c.id},this.value)">
-                        ${Object.entries(CASE_STATUS_MAP).map(([k,v]) => `<option value="${k}" ${c.status===k?'selected':''}>${v}</option>`).join('')}
-                    </select>
-                    <span style="font-size:0.75rem;color:var(--text-muted)">${esc(c.executed_by || '-')}</span>
-                    <span style="font-size:0.75rem;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.note || '')}">${esc(c.note || '-')}</span>
-                    <button class="tp-btn-sm" onclick="event.stopPropagation();addCaseNote(${currentPlanId},${taskId},${c.id})" title="添加备注">📝</button>
-                </div>
-                ${hasDetail ? `
-                <div class="tp-case-detail">
-                    <div class="tp-case-detail-meta">
-                        <span class="meta-tag">优先级: ${prio}</span>
-                        <span class="meta-tag">类型: ${typeLabels[caseType] || caseType}</span>
-                        ${c.case_module_path ? `<span class="meta-tag">目录: ${esc(c.case_module_path)}</span>` : ''}
-                    </div>
-                    ${precond ? `
-                    <div class="tp-case-detail-section">
-                        <div class="tp-case-detail-label">📋 前提条件</div>
-                        <div class="tp-case-detail-body">${esc(precond)}</div>
-                    </div>` : ''}
-                    ${steps.length ? `
-                    <div class="tp-case-detail-section">
-                        <div class="tp-case-detail-label">🔧 操作步骤</div>
-                        <div class="tp-case-detail-body">
-                            <ol>${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>
-                        </div>
-                    </div>` : ''}
-                    ${results.length ? `
-                    <div class="tp-case-detail-section">
-                        <div class="tp-case-detail-label">✅ 预期结果</div>
-                        <div class="tp-case-detail-body">
-                            <ol>${results.map(r => `<li>${esc(r)}</li>`).join('')}</ol>
-                        </div>
-                    </div>` : ''}
-                </div>` : ''}
-            </div>`;
-            }).join('')}
-        </div>
-        <div class="tp-case-pager">
-            <button class="tp-btn-sm" ${page <= 1 ? 'disabled' : ''} onclick="loadTaskCases(${taskId}, ${page - 1})">上一页</button>
-            <span>第 ${page} / ${pages || 1} 页，每页 50 条</span>
-            <button class="tp-btn-sm" ${page >= pages ? 'disabled' : ''} onclick="loadTaskCases(${taskId}, ${page + 1})">下一页</button>
-        </div>`;
+        taskCasesCache[taskId] = cases;
+        renderTaskCasesFromCache(taskId);
     } catch(e) {
         panel.innerHTML = `<div style="color:var(--red);font-size:0.82rem">加载失败: ${e.message}</div>`;
     }
 }
 
+function renderTaskCasesFromCache(taskId) {
+    const panel = document.getElementById(`case-panel-${taskId}`);
+    if (!panel) return;
+    const cases = taskCasesCache[taskId] || [];
+    if (!cases.length) {
+        panel.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem;padding:8px">未关联用例</div>';
+        return;
+    }
+    const tree = buildCaseTree(cases);
+    const root = caseTreeStats(tree);
+    panel.innerHTML = `
+    <div class="tp-case-tree-head">
+        <h4 style="margin:0">🧪 用例执行情况 (${cases.length}) <span class="tp-folder-stats" style="display:inline-flex;margin-left:8px">${folderStatsBadges(root)}</span></h4>
+        <div style="display:flex;gap:6px">
+            <button class="tp-btn-sm" onclick="toggleAllFolders(${taskId}, true)">展开全部</button>
+            <button class="tp-btn-sm" onclick="toggleAllFolders(${taskId}, false)">折叠全部</button>
+        </div>
+    </div>
+    <div class="tp-case-tree" id="case-tree-${taskId}">
+        ${renderCaseTree(tree, taskId)}
+    </div>`;
+}
+
+// 按 case_module_path 构建目录树
+function buildCaseTree(cases) {
+    const root = { name: '', path: '', children: {}, cases: [] };
+    cases.forEach(c => {
+        const raw = (c.case_module_path || '').trim();
+        const parts = raw ? raw.split('/').map(s => s.trim()).filter(Boolean) : [];
+        let node = root;
+        parts.forEach((p, i) => {
+            if (!node.children[p]) {
+                node.children[p] = { name: p, path: parts.slice(0, i + 1).join('/'), children: {}, cases: [] };
+            }
+            node = node.children[p];
+        });
+        node.cases.push(c);
+    });
+    return root;
+}
+
+// 递归统计某节点（含子目录）下各状态用例数
+function caseTreeStats(node) {
+    const st = { total: 0, passed: 0, failed: 0, blocked: 0, skipped: 0, pending: 0 };
+    (node.cases || []).forEach(c => {
+        st.total++;
+        if (st[c.status] !== undefined) st[c.status] += 1;
+    });
+    Object.values(node.children).forEach(ch => {
+        const cs = caseTreeStats(ch);
+        Object.keys(st).forEach(k => { st[k] += cs[k]; });
+    });
+    return st;
+}
+
+function folderStatsBadges(st) {
+    const parts = [];
+    if (st.passed)  parts.push(`<span style="color:var(--green,#2ecc71)">✓${st.passed}</span>`);
+    if (st.failed)  parts.push(`<span style="color:var(--red,#e74c3c)">✗${st.failed}</span>`);
+    if (st.blocked) parts.push(`<span style="color:#e0872f">⊘${st.blocked}</span>`);
+    if (st.skipped) parts.push(`<span style="color:var(--text-muted)">–${st.skipped}</span>`);
+    if (st.pending) parts.push(`<span style="color:var(--text-muted)">○${st.pending}</span>`);
+    return parts.join(' ');
+}
+
+function renderCaseTree(node, taskId) {
+    const childKeys = Object.keys(node.children).sort((a, b) => a.localeCompare(b, 'zh'));
+    let html = '';
+    childKeys.forEach(k => {
+        const child = node.children[k];
+        const st = caseTreeStats(child);
+        const expanded = !!(taskFolderState[taskId] && taskFolderState[taskId].has(child.path));
+        html += `
+        <div class="tp-folder ${expanded ? '' : 'collapsed'}" data-path="${esc(child.path)}">
+            <div class="tp-folder-head" onclick="toggleFolder(this, ${taskId})">
+                <span class="tp-folder-arrow">▼</span>
+                <span>📁 ${esc(child.name)}</span>
+                <span class="tp-folder-count">(${st.total})</span>
+                <span class="tp-folder-stats">${folderStatsBadges(st)}</span>
+            </div>
+            <div class="tp-folder-body">
+                ${renderCaseTree(child, taskId)}
+            </div>
+        </div>`;
+    });
+    if (node.cases && node.cases.length) {
+        html += `<div class="tp-case-list">${node.cases.map(c => renderCaseRow(c, taskId)).join('')}</div>`;
+    }
+    return html;
+}
+
+function renderCaseRow(c, taskId) {
+    const ct = c.case_content || {};
+    const steps = Array.isArray(ct.steps) ? ct.steps : [];
+    const results = Array.isArray(ct.expected_results) ? ct.expected_results : [];
+    const precond = ct.preconditions || '';
+    const prio = c.case_priority || '-';
+    const prioCls = {'P0':'prio-p0','P1':'prio-p1','P2':'prio-p2','P3':'prio-p3'}[prio] || '';
+    const caseType = c.case_type || 'functional';
+    const typeLabels = {functional:'功能',interface:'接口',performance:'性能',security:'安全'};
+    const hasDetail = steps.length || results.length || precond;
+    const bugHtml = renderCaseBugInfo(c, taskId);
+    return `
+    <div class="tp-case-item">
+        <div class="tp-case-row" ${hasDetail ? `style="cursor:pointer" onclick="toggleCaseDetail(this)"` : ''}>
+            <span class="tp-case-expand-btn">${hasDetail ? '▶' : ''}</span>
+            <span class="tp-case-id">${c.case_id || c.id}</span>
+            <span class="tp-case-title" title="${esc(c.case_title || '')}">${esc(c.case_title || '-')}</span>
+            <span><span class="prio-badge ${prioCls}">${prio}</span></span>
+            <select class="tp-case-status-select" onclick="event.stopPropagation()" onchange="updateCaseStatus(${currentPlanId},${taskId},${c.id},this.value)">
+                ${Object.entries(CASE_STATUS_MAP).map(([k,v]) => `<option value="${k}" ${c.status===k?'selected':''}>${v}</option>`).join('')}
+            </select>
+            <span style="font-size:0.75rem;color:var(--text-muted)">${esc(c.executed_by || '-')}</span>
+            <span style="font-size:0.75rem;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.note || '')}">${esc(c.note || '-')}</span>
+            <span style="font-size:0.75rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${bugHtml}</span>
+            <button class="tp-btn-sm" onclick="event.stopPropagation();addCaseNote(${currentPlanId},${taskId},${c.id})" title="添加备注">📝</button>
+        </div>
+        ${hasDetail ? `
+        <div class="tp-case-detail">
+            <div class="tp-case-detail-meta">
+                <span class="meta-tag">优先级: ${prio}</span>
+                <span class="meta-tag">类型: ${typeLabels[caseType] || caseType}</span>
+                ${c.case_module_path ? `<span class="meta-tag">目录: ${esc(c.case_module_path)}</span>` : ''}
+            </div>
+            ${precond ? `
+            <div class="tp-case-detail-section">
+                <div class="tp-case-detail-label">📋 前提条件</div>
+                <div class="tp-case-detail-body">${esc(precond)}</div>
+            </div>` : ''}
+            ${steps.length ? `
+            <div class="tp-case-detail-section">
+                <div class="tp-case-detail-label">🔧 操作步骤</div>
+                <div class="tp-case-detail-body">
+                    <ol>${steps.map(s => `<li>${esc(s)}</li>`).join('')}</ol>
+                </div>
+            </div>` : ''}
+            ${results.length ? `
+            <div class="tp-case-detail-section">
+                <div class="tp-case-detail-label">✅ 预期结果</div>
+                <div class="tp-case-detail-body">
+                    <ol>${results.map(r => `<li>${esc(r)}</li>`).join('')}</ol>
+                </div>
+            </div>` : ''}
+        </div>` : ''}
+    </div>`;
+}
+
+function findTaskCase(taskId, tcId) {
+    const list = taskCasesCache[taskId] || [];
+    return list.find(x => Number(x.id) === Number(tcId));
+}
+
+function renderCaseBugInfo(c, taskId) {
+    const bugUrl = c.tapd_bug_url || '';
+    const bugId = c.tapd_bug_id || '';
+    const status = c.bug_sync_status || 'none';
+    if (!bugUrl && !bugId && status !== 'failed') return '-';
+    const link = bugUrl
+        ? `<a href="${esc(bugUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">🐛 ${esc(bugId || 'Bug')}</a>`
+        : (bugId ? `<span>🐛 ${esc(bugId)}</span>` : '');
+    const sync = status === 'failed'
+        ? `<button class="tp-btn-sm danger" onclick="event.stopPropagation();retryCaseBugSync(${currentPlanId},${taskId},${c.id})" title="${esc(c.bug_sync_error || 'TAPD 同步失败')}">重试同步</button>`
+        : (status === 'synced' ? '<span style="color:#22c55e">已同步</span>' : '');
+    return `${link} ${sync}`;
+}
+
+function toggleFolder(headEl, taskId) {
+    const folder = headEl.closest('.tp-folder');
+    if (!folder) return;
+    const collapsed = folder.classList.toggle('collapsed');
+    if (!taskFolderState[taskId]) taskFolderState[taskId] = new Set();
+    const path = folder.getAttribute('data-path');
+    if (collapsed) taskFolderState[taskId].delete(path);
+    else taskFolderState[taskId].add(path);
+}
+
+function toggleAllFolders(taskId, expand) {
+    if (!taskFolderState[taskId]) taskFolderState[taskId] = new Set();
+    const tree = document.getElementById(`case-tree-${taskId}`);
+    if (!tree) return;
+    tree.querySelectorAll('.tp-folder').forEach(f => {
+        const path = f.getAttribute('data-path');
+        f.classList.toggle('collapsed', !expand);
+        if (expand) taskFolderState[taskId].add(path);
+        else taskFolderState[taskId].delete(path);
+    });
+}
+
 async function updateCaseStatus(planId, taskId, tcId, status) {
+    const item = findTaskCase(taskId, tcId);
+    const oldStatus = item ? item.status : 'pending';
+    const payload = { status };
+    if (status === 'failed' || status === 'blocked') {
+        const input = await openCaseNoteBugModal({ ...(item || {}), status });
+        if (input === null) {
+            const select = document.querySelector(`#case-panel-${taskId} .tp-case-status-select[onchange*=",${tcId},"]`);
+            if (select) select.value = oldStatus;
+            return;
+        }
+        payload.note = input.note;
+        if (input.tapd_bug_url) payload.tapd_bug_url = input.tapd_bug_url;
+    }
     try {
-        await API.put(`/test-plans/${planId}/tasks/${taskId}/cases/${tcId}`, { status });
-        showToast('用例状态已更新', 'success');
-        // 只刷新当前任务的用例列表，不刷新整个页面
-        const panel = document.getElementById(`case-panel-${taskId}`);
-        if (panel && panel.style.display !== 'none') {
-            await loadTaskCases(taskId, taskCasePages[taskId] || 1);
+        const updated = await API.put(`/test-plans/${planId}/tasks/${taskId}/cases/${tcId}`, payload);
+        if (updated.bug_sync_status === 'failed') showToast('本地已保存，TAPD 同步失败: ' + (updated.bug_sync_error || ''), 'error');
+        else showToast('用例状态已更新', 'success');
+        // 更新本地缓存并局部重渲染（保留目录展开状态，无需重拉全量）
+        const list = taskCasesCache[taskId];
+        if (list) {
+            const item = list.find(x => x.id === tcId);
+            if (item) Object.assign(item, updated);
+            renderTaskCasesFromCache(taskId);
         }
     } catch(e) { showToast('更新失败: ' + e.message, 'error'); }
 }
 
 async function addCaseNote(planId, taskId, tcId) {
-    const note = await customPrompt('请输入备注（失败原因等）:');
-    if (note === null) return;
+    const item = findTaskCase(taskId, tcId) || {};
+    const input = await openCaseNoteBugModal(item);
+    if (input === null) return;
+    const payload = { note: input.note };
+    if (input.tapd_bug_url) payload.tapd_bug_url = input.tapd_bug_url;
     try {
-        await API.put(`/test-plans/${planId}/tasks/${taskId}/cases/${tcId}`, { note });
-        showToast('备注已保存', 'success');
-        // 只刷新当前任务的用例列表，不刷新整个页面
-        const panel = document.getElementById(`case-panel-${taskId}`);
-        if (panel && panel.style.display !== 'none') {
-            await loadTaskCases(taskId, taskCasePages[taskId] || 1);
+        const updated = await API.put(`/test-plans/${planId}/tasks/${taskId}/cases/${tcId}`, payload);
+        if (updated.bug_sync_status === 'failed') showToast('本地已保存，TAPD 同步失败: ' + (updated.bug_sync_error || ''), 'error');
+        else showToast('备注已保存', 'success');
+        const list = taskCasesCache[taskId];
+        if (list) {
+            const item = list.find(x => x.id === tcId);
+            if (item) Object.assign(item, updated);
+            renderTaskCasesFromCache(taskId);
         }
     } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
+}
+
+function openCaseNoteBugModal(caseItem) {
+    return new Promise(resolve => {
+        const canLinkBug = caseItem.status === 'failed' || caseItem.status === 'blocked';
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay active';
+        overlay.style.zIndex = '10000';
+        overlay.innerHTML = `
+        <div class="modal" style="max-width:560px;width:min(560px,94vw)">
+            <div class="modal-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                <h3 style="margin:0;font-size:1.05rem">填写执行备注</h3>
+                <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" data-close>✕</span>
+            </div>
+            <div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:10px">
+                当前用例为失败/阻塞时可关联 TAPD Bug；支持完整链接、标题 + 链接、标题 + ID 或纯 ID，保存后会同步 Bug 的“用例信息”字段。
+            </div>
+            <label style="display:block;font-size:0.82rem;color:var(--text-secondary);margin-bottom:6px">备注</label>
+            <textarea class="form-textarea" data-note rows="4" placeholder="请输入备注（失败原因、阻塞原因等）">${esc(caseItem.note || '')}</textarea>
+            ${canLinkBug ? `
+            <label style="display:block;font-size:0.82rem;color:var(--text-secondary);margin:12px 0 6px">关联 Bug 链接或 ID（可选）</label>
+            <input class="form-input" data-bug-url type="text" placeholder="例如：车辆技能异常 1170202650001000001" value="${esc(caseItem.tapd_bug_url || '')}">
+            ${caseItem.bug_sync_status === 'failed' ? `<div style="margin-top:6px;color:#ef4444;font-size:0.78rem">上次同步失败：${esc(caseItem.bug_sync_error || '')}</div>` : ''}
+            ` : ''}
+            <div class="modal-footer" style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+                <button class="btn btn-ghost" type="button" data-cancel>取消</button>
+                <button class="btn btn-primary" type="button" data-save>保存</button>
+            </div>
+        </div>`;
+        document.body.appendChild(overlay);
+        const cleanup = value => { overlay.remove(); resolve(value); };
+        overlay.querySelector('[data-close]').onclick = () => cleanup(null);
+        overlay.querySelector('[data-cancel]').onclick = () => cleanup(null);
+        overlay.querySelector('[data-save]').onclick = () => cleanup({
+            note: overlay.querySelector('[data-note]').value,
+            tapd_bug_url: canLinkBug ? overlay.querySelector('[data-bug-url]').value.trim() : '',
+        });
+        overlay.addEventListener('click', e => { if (e.target === overlay) cleanup(null); });
+        const note = overlay.querySelector('[data-note]');
+        setTimeout(() => note.focus(), 30);
+    });
+}
+
+async function retryCaseBugSync(planId, taskId, tcId) {
+    try {
+        const updated = await API.post(`/test-plans/${planId}/tasks/${taskId}/cases/${tcId}/bug-sync/retry`, {});
+        if (updated.bug_sync_status === 'failed') showToast('TAPD 同步仍失败: ' + (updated.bug_sync_error || ''), 'error');
+        else showToast('TAPD 用例信息已同步', 'success');
+        const item = findTaskCase(taskId, tcId);
+        if (item) Object.assign(item, updated);
+        renderTaskCasesFromCache(taskId);
+    } catch(e) {
+        showToast('重试同步失败: ' + e.message, 'error');
+    }
 }
 
 // ===== 测试报告（多份，列表弹窗）======
@@ -1089,8 +2248,13 @@ async function onProjectChangeForIter() {
         const iters = cache.iterations;
 
         if (!iters.length) {
-            optionsBox.innerHTML = '<div class="tp-multi-empty">该项目未配置 TAPD 或无迭代</div>';
-            setTapdLabel('该项目未配置 TAPD 或无迭代', 0, true);
+            if (cache.workspace_id) {
+                optionsBox.innerHTML = '<div class="tp-multi-empty">已绑定 TAPD（workspace ' + esc(cache.workspace_id) + '），但本地暂无迭代缓存。<br>请到「需求分析」页点“实时刷新”通知 Agent 同步；若刷新后仍为空，多为 TAPD 中心账号无该项目权限（需在 TAPD 侧把该账号加入项目成员）。</div>';
+                setTapdLabel('已绑定 TAPD，暂无迭代缓存（需同步）', 0, true);
+            } else {
+                optionsBox.innerHTML = '<div class="tp-multi-empty">该项目未在 Hub 绑定 TAPD workspace（请到「设置」为项目填写 tapd_workspace_id）</div>';
+                setTapdLabel('该项目未绑定 TAPD workspace', 0, true);
+            }
             return;
         }
 
@@ -1212,7 +2376,7 @@ function openIterationModal(iterId) {
     overlay.className = 'modal-overlay active';
     overlay.style.zIndex = '9999';
     overlay.innerHTML = `
-    <div class="modal" style="max-width:560px">
+    <div class="modal" style="max-width:560px;max-height:90vh;overflow-y:auto">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
             <h3 style="margin:0;font-size:1.05rem">${isEdit ? '编辑测试迭代' : '新建测试迭代'}</h3>
             <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
@@ -1343,7 +2507,8 @@ async function deleteIteration(iterId) {
         showToast('迭代已删除', 'success');
         currentIterId = null;
         currentPlanId = null;
-        document.getElementById('main-area').innerHTML = '<div class="tp-no-iter-selected">← 选择一个测试迭代查看详情</div>';
+        document.getElementById('main-area').innerHTML = '<div class="tp-no-iter-selected">请选择一个测试迭代查看详情</div>';
+        clearTestplanDeepLink();
         await loadIterations();
     } catch(e) { showToast('删除失败: ' + e.message, 'error'); }
 }
@@ -2352,6 +3517,10 @@ function esc(s) {
     const d = document.createElement('div');
     d.textContent = String(s);
     return d.innerHTML;
+}
+
+function jsQuote(s) {
+    return esc(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 </script>
 {% endblock %}

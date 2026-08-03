@@ -287,6 +287,32 @@ def create_app(config_name=None):
                     except Exception:
                         pass
 
+                    # 知识库收藏与匿名分享：建收藏表，并补分享状态和 token。
+                    try:
+                        from app.models import KnowledgeFavorite
+                        KnowledgeFavorite.__table__.create(
+                            bind=conn, checkfirst=True)
+                        logger.info('knowledge_favorites 表已就绪')
+                    except Exception as e:
+                        logger.info(f'knowledge_favorites 表创建跳过: {e}')
+                    for col, coltype in [
+                        ('is_shared', 'BOOLEAN NOT NULL DEFAULT 0'),
+                        ('share_token', 'VARCHAR(64) DEFAULT NULL'),
+                        ('shared_at', 'DATETIME DEFAULT NULL'),
+                    ]:
+                        try:
+                            conn.execute(text(
+                                f'ALTER TABLE knowledge_entries ADD COLUMN {col} {coltype}'))
+                            logger.info(f'已添加 knowledge_entries.{col} 列')
+                        except Exception:
+                            pass
+                    try:
+                        conn.execute(text(
+                            'CREATE UNIQUE INDEX uq_knowledge_share_token '
+                            'ON knowledge_entries (share_token)'))
+                    except Exception:
+                        pass
+
                     # topics 表添加 visibility 和用例评审关联字段
                     for col, coltype in [
                         ('visibility', "VARCHAR(20) DEFAULT 'public'"),
@@ -503,6 +529,11 @@ def create_app(config_name=None):
                                 executed_by VARCHAR(100),
                                 note TEXT,
                                 tapd_bug_id VARCHAR(50),
+                                tapd_bug_url VARCHAR(500),
+                                case_info_snapshot JSON,
+                                bug_sync_status VARCHAR(20) DEFAULT 'none',
+                                bug_sync_error TEXT,
+                                bug_synced_at DATETIME,
                                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                                 FOREIGN KEY (task_id) REFERENCES test_tasks(id),
@@ -513,6 +544,20 @@ def create_app(config_name=None):
                         logger.info('test_task_cases 表已创建')
                     except Exception as e:
                         logger.info(f'test_task_cases 表创建跳过: {e}')
+
+                    for col, coltype in [
+                        ('tapd_bug_url', 'VARCHAR(500)'),
+                        ('case_info_snapshot', 'LONGTEXT'),
+                        ('bug_sync_status', "VARCHAR(20) DEFAULT 'none'"),
+                        ('bug_sync_error', 'TEXT'),
+                        ('bug_synced_at', 'DATETIME'),
+                    ]:
+                        try:
+                            conn.execute(text(
+                                f'ALTER TABLE test_task_cases ADD COLUMN {col} {coltype}'))
+                            logger.info(f'已添加 test_task_cases.{col} 列')
+                        except Exception:
+                            pass
 
                     # 测试计划报告表（支持多份报告）
                     try:
@@ -1328,6 +1373,30 @@ def create_app(config_name=None):
                             logger.info(f'已添加 claw_sidecar_configs.{col} 列')
                         except Exception:
                             pass
+
+                    # 4c) 执行后校验记录表（/ops/verify 从 DB 重读比对，堵"自以为成功"）
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS claw_ops_verifications (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                claw_id INTEGER DEFAULT NULL,
+                                token VARCHAR(100) DEFAULT NULL,
+                                resource_type VARCHAR(50) NOT NULL,
+                                resource_id INTEGER NOT NULL,
+                                expected TEXT,
+                                actual TEXT,
+                                mismatches TEXT,
+                                verified BOOLEAN DEFAULT 0,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                verified_at DATETIME DEFAULT NULL,
+                                INDEX ix_ops_verify_claw (claw_id),
+                                INDEX ix_ops_verify_token (token),
+                                INDEX ix_ops_verify_res (resource_type, resource_id)
+                            )
+                        """))
+                        logger.info('claw_ops_verifications 表已创建')
+                    except Exception as e:
+                        logger.info(f'claw_ops_verifications 表创建跳过: {e}')
 
                     # 5a) claw_todo_logs 加 notified_at / notified_strategy（B+ 5分钟兜底用）
                     for col, coltype in [

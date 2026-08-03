@@ -46,10 +46,24 @@
             </div>
             <div class="form-group">
                 <label class="form-label">可见范围 *</label>
-                <select class="form-input" id="new-visibility">
-                    <option value="public">🌐 公开（全平台可见可参与）</option>
-                    <option value="project">📁 项目（同项目可见可参与）</option>
+                <select class="form-input" id="new-visibility" onchange="onVisibilityChange()">
+                    <option value="public_all">🌍 完全公开（所有人，含无项目权限用户）</option>
+                    <option value="public" selected>🌐 Hub 用户或 Agent（全平台可见可参与）</option>
+                    <option value="project">📁 项目内用户或 Agent（同项目可见可参与）</option>
+                    <option value="assigned">🎯 指定用户或 Agent</option>
                 </select>
+            </div>
+            <div class="form-group" id="new-grants-wrap" style="display:none">
+                <label class="form-label">指定参与者 *</label>
+                <div style="display:flex;gap:8px">
+                    <input class="form-input" id="new-grant-user-ids" style="flex:1"
+                           placeholder="用户 ID，逗号分隔，如 12,15">
+                    <input class="form-input" id="new-grant-claw-ids" style="flex:1"
+                           placeholder="Agent ID，逗号分隔，如 11">
+                </div>
+                <div style="font-size:0.75rem;color:var(--text-muted);margin-top:4px">
+                    授权给用户时，其名下 Agent 自动继承权限
+                </div>
             </div>
             <div class="form-group">
                 <label class="form-label">标题 *</label>
@@ -322,9 +336,7 @@ function renderTopics(items, total) {
     list.innerHTML = items.map(t => {
         const color = BOARD_COLORS[t.board] || '#6b7280';
         const closed = t.status === 'closed';
-        const visTag = t.visibility === 'project'
-            ? '<span class="vis-tag" style="background:#f59e0b22;color:#f59e0b">📁 项目</span>'
-            : '';
+        const visTag = visibilityTag(t.visibility);
         const reviewInfo = t.board === 'case_review' && t.review_library_name
             ? `<span style="font-size:0.75rem;color:var(--accent)">📋 ${t.review_library_name}</span>`
             : '';
@@ -348,6 +360,32 @@ function renderTopics(items, total) {
             </div>
         </div>`;
     }).join('');
+}
+
+// 可见范围四档标签。`public` 是历史默认值（Hub 内可见），不额外加标签避免刷屏
+const VIS_TAGS = {
+    public_all: ['🌍 完全公开', '#10b98122', '#10b981'],
+    project: ['📁 项目', '#f59e0b22', '#f59e0b'],
+    assigned: ['🎯 指定', '#6366f122', '#6366f1'],
+};
+function visibilityTag(visibility) {
+    const cfg = VIS_TAGS[visibility];
+    if (!cfg) return '';
+    return `<span class="vis-tag" style="background:${cfg[1]};color:${cfg[2]}">${cfg[0]}</span>`;
+}
+
+function onVisibilityChange() {
+    const assigned = $('#new-visibility').value === 'assigned';
+    $('#new-grants-wrap').style.display = assigned ? '' : 'none';
+}
+
+function collectGrants() {
+    const parseIds = (raw) => (raw || '').split(/[,，\s]+/)
+        .map(s => parseInt(s, 10)).filter(n => !isNaN(n) && n > 0);
+    const grants = [];
+    parseIds($('#new-grant-user-ids').value).forEach(id => grants.push({type: 'user', id}));
+    parseIds($('#new-grant-claw-ids').value).forEach(id => grants.push({type: 'claw', id}));
+    return grants;
 }
 
 function renderPagination(total, page, perPage) {
@@ -379,6 +417,14 @@ $('#create-form').addEventListener('submit', async e => {
         title: $('#new-title').value.trim(),
         content: $('#new-content').value.trim(),
     };
+
+    if (payload.visibility === 'assigned') {
+        payload.grants = collectGrants();
+        if (!payload.grants.length) {
+            showToast('请至少指定一个用户或 Agent', 'error');
+            return;
+        }
+    }
 
     // 用例评审字段
     if (board === 'case_review') {

@@ -7,12 +7,22 @@ from flask import request, jsonify, session as flask_session
 from sqlalchemy import func
 from sqlalchemy.sql.expression import text
 from app import db
-from app.models import (Topic, TopicReply, TOPIC_BOARDS, ClawMessage,
+from app.models import (Topic, TopicReply, TopicGrant, TOPIC_BOARDS,
+                        TOPIC_VISIBILITIES, ClawMessage,
                         OpenClawInstance, User, Project,
-                        CaseReviewRound, CaseReviewComment,
-                        TestCaseLibrary, TestCaseLibraryReview, _now)
+                        CaseReviewRound, CaseReviewComment, CaseReviewNodeMark,
+                        TestCase, TestCaseLibrary, TestCaseLibraryReview, _now)
 from app.api import api_bp
 from app.api.audit import log_action
+from app.services.review_visibility import (
+    caller_has_any_project,
+    can_comment_topic,
+    can_mark_review_nodes,
+    can_view_topic,
+    granted_topic_ids,
+    normalize_visibility,
+    visible_topic_filter,
+)
 
 
 def _sync_library_review_status(topic, new_lib_status):
@@ -111,6 +121,97 @@ def _topic_project_id(topic):
     return p.id if p else None
 
 
+def _is_topic_granted(caller, topic):
+    """调用者是否命中该课题的定向授权（assigned 可见性用）。"""
+    if not caller or not topic:
+        return False
+    return int(topic.id) in granted_topic_ids(caller)
+
+
+def _ensure_topic_viewable(caller, topic):
+    """统一的查看鉴权，返回 error response 或 None。"""
+    if can_view_topic(
+            caller, topic,
+            topic_project_id=_topic_project_id(topic),
+            granted=_is_topic_granted(caller, topic),
+            caller_has_project_access=caller_has_any_project(caller)):
+        return None
+    if not caller:
+        return jsonify({'error': '该课题需登录查看'}), 401
+    return jsonify({'error': '无权查看该课题'}), 403
+
+
+def _ensure_topic_commentable(caller, topic):
+    """统一的参与鉴权，返回 error response 或 None。"""
+    if can_comment_topic(
+            caller, topic,
+            topic_project_id=_topic_project_id(topic),
+            granted=_is_topic_granted(caller, topic),
+            caller_has_project_access=caller_has_any_project(caller)):
+        return None
+    return jsonify({'error': '无权参与该课题讨论'}), 403
+
+
+def _sync_topic_grants(topic, grants, operator):
+    """按入参重建课题的定向授权列表。
+
+    grants 形如 [{"type": "user", "id": 12}, {"type": "claw", "id": 11}]。
+    返回 (成功条数, 跳过的非法项列表)。
+    """
+    if grants is None:
+        return 0, []
+
+    TopicGrant.query.filter_by(topic_id=topic.id).delete(synchronize_session=False)
+
+    added, skipped = 0, []
+    seen = set()
+    for item in (grants or []):
+        if not isinstance(item, dict):
+            skipped.append(item)
+            continue
+        gtype = str(item.get('type') or '').strip()
+        try:
+            target_id = int(item.get('id'))
+        except (TypeError, ValueError):
+            skipped.append(item)
+            continue
+
+        if gtype == 'user':
+            target = User.query.get(target_id)
+            if not target:
+                skipped.append(item)
+                continue
+            name = target.display_name or target.username
+            grant = TopicGrant(topic_id=topic.id, grant_type='user',
+                               target_user_id=target_id, target_name=name,
+                               granted_by=operator)
+        elif gtype == 'claw':
+            target = OpenClawInstance.query.get(target_id)
+            if not target or target.status == 'deleted':
+                skipped.append(item)
+                continue
+            grant = TopicGrant(topic_id=topic.id, grant_type='claw',
+                               target_claw_id=target_id, target_name=target.name,
+                               granted_by=operator)
+        else:
+            skipped.append(item)
+            continue
+
+        key = (gtype, target_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        db.session.add(grant)
+        added += 1
+
+    return added, skipped
+
+
+def _is_topic_author(caller, topic):
+    return ((caller.get('claw_id') and caller['claw_id'] == topic.author_claw_id)
+            or (caller.get('user_id') and caller['user_id'] == topic.author_user_id))
+
+
 def _notify_topic_participants(topic, event_type, detail, exclude_claw_id=None):
     """通知课题参与者，返回需要 SSE 通知的 claw_id 列表"""
     participant_ids = set()
@@ -166,22 +267,13 @@ def list_topics():
     if search:
         query = query.filter(Topic.title.like(f'%{search}%'))
 
-    # visibility 过滤：project 类型只对同项目用户可见
-    if caller:
-        caller_projects = set(caller.get('project_ids') or [])
-        if caller_projects:
-            project_names = [p.name for p in Project.query.filter(Project.id.in_(list(caller_projects))).all()]
-            query = query.filter(
-                db.or_(
-                    Topic.visibility == 'public',
-                    Topic.project_name.in_(project_names),
-                )
-            )
-        else:
-            query = query.filter(Topic.visibility == 'public')
-    else:
-        # 未登录只能看 public
-        query = query.filter(Topic.visibility == 'public')
+    # visibility 四档过滤（public_all / public / project / assigned），
+    # 列表与板块计数共用同一条件，避免两处逻辑漂移
+    visibility_cond = visible_topic_filter(
+        caller,
+        caller_has_project_access=caller_has_any_project(caller),
+    )
+    query = query.filter(visibility_cond)
 
     total = query.count()
     topics = query.order_by(
@@ -195,22 +287,7 @@ def list_topics():
         count_query = count_query.filter(Topic.status == status)
     else:
         count_query = count_query.filter(Topic.status != 'deleted')
-    # visibility 过滤同上
-    if caller:
-        caller_projects = set(caller.get('project_ids') or [])
-        if caller_projects:
-            project_names = [p.name for p in Project.query.filter(
-                Project.id.in_(list(caller_projects))).all()]
-            count_query = count_query.filter(
-                db.or_(
-                    Topic.visibility == 'public',
-                    Topic.project_name.in_(project_names),
-                )
-            )
-        else:
-            count_query = count_query.filter(Topic.visibility == 'public')
-    else:
-        count_query = count_query.filter(Topic.visibility == 'public')
+    count_query = count_query.filter(visibility_cond)
 
     board_rows = count_query.with_entities(
         Topic.board, func.count(Topic.id)
@@ -224,8 +301,15 @@ def list_topics():
         'page': page,
         'per_page': per_page,
         'boards': TOPIC_BOARDS,
+        'visibilities': TOPIC_VISIBILITIES,
         'board_counts': board_counts,
     })
+
+
+@api_bp.route('/topics/visibilities', methods=['GET'])
+def list_visibilities():
+    """课题可见性四档枚举（发起弹窗与筛选器用）"""
+    return jsonify([{'key': k, 'label': v} for k, v in TOPIC_VISIBILITIES.items()])
 
 
 @api_bp.route('/topics', methods=['POST'])
@@ -275,8 +359,12 @@ def create_topic():
         author_user_id=caller.get('user_id'),
         author_name=caller['username'],
         project_name=topic_project_name,
-        visibility=data.get('visibility', 'public'),
+        visibility=normalize_visibility(data.get('visibility')),
     )
+
+    grants = data.get('grants')
+    if topic.visibility == 'assigned' and not grants:
+        return jsonify({'error': '指定范围的课题必须至少指定一个用户或 Agent'}), 400
 
     # 用例评审关联字段
     if board == 'case_review':
@@ -311,13 +399,27 @@ def create_topic():
                 'existing_topic_id': existing_topic.id
             }), 409
     db.session.add(topic)
+    db.session.flush()
+
+    skipped = []
+    if topic.visibility == 'assigned':
+        added, skipped = _sync_topic_grants(topic, grants, caller['username'])
+        if not added:
+            db.session.rollback()
+            return jsonify({'error': '指定的用户或 Agent 均无效，请重新选择'}), 400
+
     db.session.commit()
 
     log_action('create', 'topic', topic.id, topic.title,
                operator=caller['username'],
-               detail='发起课题「%s」板块: %s' % (topic.title, TOPIC_BOARDS.get(board, board)))
+               detail='发起课题「%s」板块: %s 范围: %s' % (
+                   topic.title, TOPIC_BOARDS.get(board, board),
+                   TOPIC_VISIBILITIES.get(topic.visibility, topic.visibility)))
 
-    return jsonify(topic.to_dict()), 201
+    result = topic.to_dict()
+    if skipped:
+        result['skipped_grants'] = skipped
+    return jsonify(result), 201
 
 
 @api_bp.route('/topics/<int:topic_id>', methods=['GET'])
@@ -327,17 +429,424 @@ def get_topic(topic_id):
     if topic.status == 'deleted':
         return jsonify({'error': '课题已删除'}), 404
 
-    # visibility 权限检查
+    # visibility 四档权限检查
     caller = _get_caller_info()
-    if topic.visibility == 'project':
-        if not caller:
-            return jsonify({'error': '该项目课题需登录查看'}), 401
-        caller_projects = set(caller.get('project_ids') or [])
-        topic_pid = _topic_project_id(topic)
-        if topic_pid and topic_pid not in caller_projects:
-            return jsonify({'error': '仅同项目成员可查看'}), 403
+    err = _ensure_topic_viewable(caller, topic)
+    if err:
+        return err
 
-    return jsonify(topic.to_dict(with_replies=True))
+    data = topic.to_dict(with_replies=True)
+    if topic.visibility == 'assigned':
+        data['grants'] = [g.to_dict() for g in
+                          TopicGrant.query.filter_by(topic_id=topic.id).all()]
+    return jsonify(data)
+
+
+@api_bp.route('/topics/<int:topic_id>/grants', methods=['GET'])
+def list_topic_grants(topic_id):
+    """查看课题的定向授权列表"""
+    topic = Topic.query.get_or_404(topic_id)
+    caller = _get_caller_info()
+    err = _ensure_topic_viewable(caller, topic)
+    if err:
+        return err
+    grants = TopicGrant.query.filter_by(topic_id=topic.id).all()
+    return jsonify({'items': [g.to_dict() for g in grants], 'total': len(grants)})
+
+
+@api_bp.route('/topics/<int:topic_id>/grants', methods=['PUT'])
+def replace_topic_grants(topic_id):
+    """整体替换课题的定向授权列表 — 发起人或管理员"""
+    topic = Topic.query.get_or_404(topic_id)
+    caller = _get_caller_info()
+    if not caller:
+        return jsonify({'error': '未登录'}), 401
+    if not caller['is_admin'] and not _is_topic_author(caller, topic):
+        return jsonify({'error': '只有发起人或管理员可以调整授权'}), 403
+
+    data = request.get_json() or {}
+    grants = data.get('grants')
+    if not isinstance(grants, list):
+        return jsonify({'error': 'grants 必须是数组'}), 400
+    if topic.visibility == 'assigned' and not grants:
+        return jsonify({'error': '指定范围的课题不能清空授权，请先切换可见范围'}), 400
+
+    added, skipped = _sync_topic_grants(topic, grants, caller['username'])
+    if topic.visibility == 'assigned' and not added:
+        db.session.rollback()
+        return jsonify({'error': '指定的用户或 Agent 均无效，请重新选择'}), 400
+    db.session.commit()
+
+    log_action('update', 'topic', topic.id, topic.title,
+               operator=caller['username'],
+               detail='更新课题授权：%d 条生效，%d 条无效' % (added, len(skipped)))
+
+    return jsonify({
+        'message': '授权已更新',
+        'total': added,
+        'skipped_grants': skipped,
+        'items': [g.to_dict() for g in
+                  TopicGrant.query.filter_by(topic_id=topic.id).all()],
+    })
+
+
+@api_bp.route('/topics/<int:topic_id>/visibility', methods=['POST'])
+def update_topic_visibility(topic_id):
+    """调整课题可见范围 — 发起人或管理员
+
+    切到 assigned 时必须同时给出 grants，否则会造成除发起人外无人可见。
+    """
+    topic = Topic.query.get_or_404(topic_id)
+    caller = _get_caller_info()
+    if not caller:
+        return jsonify({'error': '未登录'}), 401
+    if not caller['is_admin'] and not _is_topic_author(caller, topic):
+        return jsonify({'error': '只有发起人或管理员可以调整可见范围'}), 403
+
+    data = request.get_json() or {}
+    raw = str(data.get('visibility') or '').strip()
+    if raw not in TOPIC_VISIBILITIES:
+        return jsonify({
+            'error': '无效的可见范围，可选：%s' % '/'.join(TOPIC_VISIBILITIES.keys()),
+        }), 400
+
+    old = topic.visibility
+    topic.visibility = raw
+
+    if raw == 'assigned':
+        grants = data.get('grants')
+        existing = TopicGrant.query.filter_by(topic_id=topic.id).count()
+        if grants:
+            added, _ = _sync_topic_grants(topic, grants, caller['username'])
+            if not added:
+                db.session.rollback()
+                return jsonify({'error': '指定的用户或 Agent 均无效，请重新选择'}), 400
+        elif not existing:
+            db.session.rollback()
+            return jsonify({'error': '切换到指定范围时必须至少指定一个用户或 Agent'}), 400
+
+    db.session.commit()
+
+    log_action('update', 'topic', topic.id, topic.title,
+               operator=caller['username'],
+               detail='课题可见范围 %s → %s' % (
+                   TOPIC_VISIBILITIES.get(old, old),
+                   TOPIC_VISIBILITIES.get(raw, raw)))
+
+    return jsonify(topic.to_dict())
+
+
+def _review_scope_of(topic):
+    """课题的评审范围：返回 (library, root_module_path, error_response)。
+
+    范围锁定在课题自己的 `review_module_paths`，越界内容不返回，
+    避免有人借"完全公开评审"读到整个用例库。
+    """
+    if topic.board != 'case_review':
+        return None, None, (jsonify({'error': '该课题不是用例评审课题'}), 400)
+    if not topic.review_library_id:
+        return None, None, (jsonify({'error': '该评审课题未关联用例库'}), 400)
+    library = TestCaseLibrary.query.get(topic.review_library_id)
+    if not library:
+        return None, None, (jsonify({'error': '关联的用例库已不存在'}), 404)
+
+    paths = topic.review_module_paths or []
+    root = str(paths[0] or '').strip().strip('/') if paths else ''
+    return library, root, None
+
+
+def _in_review_scope(module_path, root_path, scoped):
+    """目录/用例路径是否落在评审范围内。scoped=False 表示整库评审。"""
+    module_path = (module_path or '').strip().strip('/')
+    if not scoped:
+        return True
+    if not root_path:
+        # 范围锁定为"(未分类)"根目录
+        return module_path == ''
+    return module_path == root_path or module_path.startswith(root_path + '/')
+
+
+def _load_topic_marks(topic_id):
+    """返回 {节点 id: mark} 与 {节点 id: 记录} 两份映射。"""
+    rows = CaseReviewNodeMark.query.filter_by(topic_id=topic_id).all()
+    return ({r.node_id: r.mark for r in rows}, {r.node_id: r for r in rows})
+
+
+def _parse_node_id(node_id):
+    """`case:123` → ('case', '123')；`mod:登录模块` → ('module', '登录模块')。"""
+    node_id = str(node_id or '').strip()
+    if node_id.startswith('case:'):
+        return 'case', node_id[5:]
+    if node_id.startswith('mod:'):
+        return 'module', node_id[4:]
+    return None, None
+
+
+@api_bp.route('/topics/<int:topic_id>/review-mindmap', methods=['GET'])
+def get_review_mindmap(topic_id):
+    """评审课题的目录脑图（含评审标记）。
+
+    鉴权走**课题可见性**而不是用例库权限：完全公开评审的外部评审人没有
+    用例库权限，若走 `_ensure_library_access` 必然 403。
+    """
+    from app.services.case_mindmap import (DEFAULT_MAX_LEAVES,
+                                           build_directory_mindmap)
+
+    topic = Topic.query.get_or_404(topic_id)
+    if topic.status == 'deleted':
+        return jsonify({'error': '课题已删除'}), 404
+
+    caller = _get_caller_info()
+    err = _ensure_topic_viewable(caller, topic)
+    if err:
+        return err
+
+    library, root, scope_err = _review_scope_of(topic)
+    if scope_err:
+        return scope_err
+
+    scoped = bool(topic.review_module_paths)
+    try:
+        max_nodes = int(request.args.get('max_nodes', DEFAULT_MAX_LEAVES))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'max_nodes 必须是整数'}), 400
+    max_nodes = max(50, min(max_nodes, 5000))
+
+    # module_path：只取评审范围内某个子目录的子树，供前端展开被截断的目录时就地补齐。
+    # 缺省 None 表示整个评审范围；显式传空串表示"未分类"那一支。
+    sub_path = request.args.get('module_path')
+    if sub_path is not None:
+        sub_path = sub_path.strip().strip('/')
+        scope_root = root if scoped else ''
+        in_scope = (not scoped) or (
+            sub_path == scope_root
+            or (bool(scope_root) and sub_path.startswith(scope_root + '/'))
+            or (not scope_root and sub_path == '')
+        )
+        if not in_scope:
+            return jsonify({'error': 'module_path 超出该评审范围'}), 400
+
+    effective_root = sub_path if sub_path is not None else (root if scoped else '')
+    # 整库评审 + 未传 module_path 时不加目录过滤，避免把"未分类"之外的用例漏掉
+    filter_by_path = scoped or sub_path is not None
+
+    query = TestCase.query.filter_by(library_id=library.id)
+    if filter_by_path:
+        if effective_root:
+            query = query.filter(db.or_(
+                TestCase.module_path == effective_root,
+                TestCase.module_path.like(effective_root + '/%'),
+            ))
+        else:
+            # 范围限定但路径为空 = "未分类"那一支，不能退化成整库
+            query = query.filter(db.or_(
+                TestCase.module_path == '',
+                TestCase.module_path.is_(None),
+            ))
+    cases = query.all()
+
+    marks, _rows = _load_topic_marks(topic.id)
+    if effective_root:
+        root_text = effective_root.split('/')[-1]
+    elif sub_path is not None or scoped:
+        root_text = '(未分类)'
+    else:
+        root_text = library.name or '用例库#%d' % library.id
+
+    mindmap = build_directory_mindmap(
+        root_text, cases, root_module_path=effective_root,
+        marks=marks, max_nodes=max_nodes)
+    mindmap.update({
+        'topic_id': topic.id,
+        'library_id': library.id,
+        'library_name': library.name,
+        'scope_type': 'module' if scoped else 'library',
+        'scope_module_path': root if scoped else '',
+        'subtree_module_path': sub_path,
+        'can_mark': can_mark_review_nodes(
+            caller, topic,
+            topic_project_id=_topic_project_id(topic),
+            granted=_is_topic_granted(caller, topic),
+            caller_has_project_access=caller_has_any_project(caller)),
+    })
+    return jsonify(mindmap)
+
+
+@api_bp.route('/topics/<int:topic_id>/review-cases/<int:case_id>', methods=['GET'])
+def get_review_case(topic_id, case_id):
+    """评审范围内单条用例的详情，供脑图就地展开前提/步骤/预期。
+
+    鉴权同样走**课题可见性**：完全公开评审的外部评审人没有用例库权限，
+    却必须能看到用例步骤，否则根本没法评审。
+    """
+    topic = Topic.query.get_or_404(topic_id)
+    if topic.status == 'deleted':
+        return jsonify({'error': '课题已删除'}), 404
+
+    caller = _get_caller_info()
+    err = _ensure_topic_viewable(caller, topic)
+    if err:
+        return err
+
+    library, root, scope_err = _review_scope_of(topic)
+    if scope_err:
+        return scope_err
+
+    case = TestCase.query.filter_by(id=case_id, library_id=library.id).first()
+    if not case:
+        return jsonify({'error': '用例不存在'}), 404
+
+    if topic.review_module_paths:
+        path = case.module_path or ''
+        in_scope = (path == root or path.startswith(root + '/')) if root else (path == '')
+        if not in_scope:
+            return jsonify({'error': '该用例不在评审范围内'}), 403
+
+    return jsonify({
+        'id': case.id,
+        'case_id': case.case_id,
+        'title': case.title,
+        'priority': case.priority,
+        'module_path': case.module_path or '',
+        'content': case.content or {},
+    })
+
+
+@api_bp.route('/topics/<int:topic_id>/review-marks', methods=['GET'])
+def list_review_marks(topic_id):
+    """列出该评审的全部节点标记"""
+    topic = Topic.query.get_or_404(topic_id)
+    caller = _get_caller_info()
+    err = _ensure_topic_viewable(caller, topic)
+    if err:
+        return err
+
+    from app.services.case_mindmap import MARKS
+    rows = CaseReviewNodeMark.query.filter_by(topic_id=topic.id).all()
+    return jsonify({
+        'items': [r.to_dict() for r in rows],
+        'total': len(rows),
+        'mark_legend': {k: dict(v) for k, v in MARKS.items()},
+    })
+
+
+@api_bp.route('/topics/<int:topic_id>/review-marks', methods=['PUT'])
+def update_review_marks(topic_id):
+    """批量打/清除评审节点标记（幂等）。
+
+    请求体：{"marks": [{"node_id": "case:123", "mark": "question", "note": "可选"}]}
+    mark 传空值表示清除该节点标记。
+
+    标记只写评审镜像层，**不回写用例库**。
+    """
+    from app.services.case_mindmap import normalize_mark
+
+    topic = Topic.query.get_or_404(topic_id)
+    if topic.status == 'deleted':
+        return jsonify({'error': '课题已删除'}), 404
+
+    caller = _get_caller_info()
+    if not caller:
+        return jsonify({'error': '未登录'}), 401
+    if not can_mark_review_nodes(
+            caller, topic,
+            topic_project_id=_topic_project_id(topic),
+            granted=_is_topic_granted(caller, topic),
+            caller_has_project_access=caller_has_any_project(caller)):
+        return jsonify({'error': '无权在该评审上打标记'}), 403
+
+    library, root, scope_err = _review_scope_of(topic)
+    if scope_err:
+        return scope_err
+    scoped = bool(topic.review_module_paths)
+
+    data = request.get_json() or {}
+    items = data.get('marks')
+    if not isinstance(items, list):
+        return jsonify({'error': 'marks 必须是数组'}), 400
+    if len(items) > 500:
+        return jsonify({'error': '单次最多提交 500 个标记'}), 400
+
+    # 允许清除他人标记的人：评审发起人 / 管理员
+    can_clear_others = caller['is_admin'] or _is_topic_author(caller, topic)
+    operator = caller['username']
+
+    existing = {r.node_id: r for r in
+                CaseReviewNodeMark.query.filter_by(topic_id=topic.id).all()}
+    case_cache = {}
+    applied, cleared, skipped = 0, 0, []
+
+    for item in items:
+        if not isinstance(item, dict):
+            skipped.append({'item': item, 'reason': 'NOT_OBJECT'})
+            continue
+        node_id = str(item.get('node_id') or '').strip()
+        node_type, node_key = _parse_node_id(node_id)
+        if not node_type:
+            skipped.append({'node_id': node_id, 'reason': 'BAD_NODE_ID'})
+            continue
+
+        # 范围校验：越界节点一律拒绝，防止借公开评审标记范围外的用例
+        if node_type == 'case':
+            if not node_key.isdigit():
+                skipped.append({'node_id': node_id, 'reason': 'BAD_CASE_ID'})
+                continue
+            case = case_cache.get(node_key)
+            if case is None:
+                case = TestCase.query.get(int(node_key))
+                case_cache[node_key] = case
+            if not case or case.library_id != library.id:
+                skipped.append({'node_id': node_id, 'reason': 'CASE_NOT_IN_LIBRARY'})
+                continue
+            if not _in_review_scope(case.module_path, root, scoped):
+                skipped.append({'node_id': node_id, 'reason': 'OUT_OF_SCOPE'})
+                continue
+        else:
+            node_key = node_key.strip().strip('/')
+            if not _in_review_scope(node_key, root, scoped):
+                skipped.append({'node_id': node_id, 'reason': 'OUT_OF_SCOPE'})
+                continue
+
+        mark = normalize_mark(item.get('mark'))
+        row = existing.get(node_id)
+
+        if mark is None:
+            if row is None:
+                continue
+            if row.marked_by and row.marked_by != operator and not can_clear_others:
+                skipped.append({'node_id': node_id, 'reason': 'NOT_YOUR_MARK'})
+                continue
+            db.session.delete(row)
+            existing.pop(node_id, None)
+            cleared += 1
+            continue
+
+        note = str(item.get('note') or '').strip()[:500]
+        if row is None:
+            row = CaseReviewNodeMark(
+                topic_id=topic.id, node_type=node_type, node_key=node_key,
+                mark=mark, note=note, marked_by=operator)
+            db.session.add(row)
+            existing[node_id] = row
+        else:
+            if row.marked_by and row.marked_by != operator and not can_clear_others:
+                skipped.append({'node_id': node_id, 'reason': 'NOT_YOUR_MARK'})
+                continue
+            row.mark = mark
+            row.note = note
+            row.marked_by = operator
+        applied += 1
+
+    db.session.commit()
+
+    rows = CaseReviewNodeMark.query.filter_by(topic_id=topic.id).all()
+    return jsonify({
+        'message': '标记已更新',
+        'applied': applied,
+        'cleared': cleared,
+        'skipped': skipped,
+        'items': [r.to_dict() for r in rows],
+    })
 
 
 @api_bp.route('/topics/<int:topic_id>', methods=['DELETE'])
@@ -429,12 +938,10 @@ def reply_topic(topic_id):
     if not caller:
         return jsonify({'error': '未登录'}), 401
 
-    # visibility 权限检查：project 类型只能同项目回复
-    if topic.visibility == 'project':
-        caller_projects = set(caller.get('project_ids') or [])
-        topic_pid = _topic_project_id(topic)
-        if topic_pid and topic_pid not in caller_projects:
-            return jsonify({'error': '仅同项目成员可参与讨论'}), 403
+    # visibility 四档参与权限检查
+    err = _ensure_topic_commentable(caller, topic)
+    if err:
+        return err
 
     data = request.get_json()
     if not data or not data.get('content'):

@@ -196,6 +196,7 @@ def _normalize_memo(m: dict) -> dict:
         'createTime': m.get('createTime'),
         'updateTime': m.get('updateTime'),
         'tags': m.get('tags') or [],
+        'rowStatus': m.get('rowStatus') or 'ACTIVE',
     }
 
 
@@ -237,6 +238,9 @@ def search_memos(
     while len(collected) < limit:
         batch = list_memos_raw(page_size=min(limit * 2, 100), page_token=page_token)
         for m in batch.get('memos') or []:
+            # 本部署 ListMemos 不按状态过滤，已归档也会返回 → 客户端跳过 ARCHIVED。
+            if (m.get('rowStatus') or 'ACTIVE') == 'ARCHIVED':
+                continue
             content = m.get('content') or ''
             if claw_needle and claw_needle not in content:
                 continue
@@ -276,7 +280,6 @@ def create_memo(content: str, visibility: Optional[str] = None) -> dict:
     body = {
         'content': content,
         'visibility': vis,
-        'state': 'NORMAL',
     }
     created = _request('POST', '/api/v1/memos', json_body=body)
     return _normalize_memo(created)
@@ -290,7 +293,6 @@ def update_memo(memo_name: str, content: str, visibility: Optional[str] = None) 
     body = {
         'content': content,
         'visibility': vis,
-        'state': 'NORMAL',
     }
     updated = _request(
         'PATCH',
@@ -299,6 +301,56 @@ def update_memo(memo_name: str, content: str, visibility: Optional[str] = None) 
         params={'updateMask': 'content,visibility'},
     )
     return _normalize_memo(updated)
+
+
+def archive_memo(memo_name: str) -> Optional[dict]:
+    """把 memo 置为 ARCHIVED（软抹除：不再出现在 list/搜索/索引，但可追溯）。"""
+    mid = _memo_id_from_name(memo_name)
+    if not mid:
+        return None
+    # 本部署的 Memos 用 rowStatus(ACTIVE/ARCHIVED)，非 state；mask 需蛇形 row_status（camelCase 会被忽略）。
+    updated = _request(
+        'PATCH',
+        f'/api/v1/memos/{mid}',
+        json_body={'rowStatus': 'ARCHIVED'},
+        params={'updateMask': 'row_status'},
+    )
+    return _normalize_memo(updated)
+
+
+def archive_taskctx_memos(claw_name: Optional[str], ref: str) -> List[str]:
+    """归档某任务的短期工作记忆（taskctx memo）。
+
+    ref 形如 ``todo-2298`` / ``agent_task-123`` / ``workflow_step-45``；
+    对应内容标签 ``#openclaw/taskctx/{ref}``。返回被归档的 memo name 列表。
+    任务处理完即调用，保证笔记索引只保留"进行中"的上下文。
+    """
+    ref = (ref or '').strip()
+    if not claw_name or not ref:
+        return []
+    try:
+        if not _config()[1]:
+            return []
+    except Exception:
+        return []
+    needle = f'#openclaw/taskctx/{ref}'
+    archived: List[str] = []
+    try:
+        # 用类目前缀 'taskctx' 检索（→ #openclaw/taskctx），再用完整 needle 精确到 ref。
+        candidates = search_memos(tag='taskctx', limit=80, claw_name=claw_name)
+    except Exception as e:
+        logger.warning('archive_taskctx_memos 搜索失败 ref=%s: %s', ref, e)
+        return []
+    for m in candidates:
+        content = m.get('content') or ''
+        name = m.get('name')
+        if name and needle in content:
+            try:
+                archive_memo(name)
+                archived.append(name)
+            except Exception as e:
+                logger.warning('归档 taskctx memo %s 失败: %s', name, e)
+    return archived
 
 
 def _find_existing_memo(

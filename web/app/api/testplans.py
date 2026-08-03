@@ -10,17 +10,68 @@ from flask import request, jsonify, session
 from sqlalchemy import func
 from app import db
 from app.models import (TestPlan, TestPlanReport, TestTask, TestTaskCase, TestIteration,
+                        TestIterationTab,
                         TestTaskChain, TestTaskChainStep,
                         TestTaskReport, TestTaskBugReport,
                         Project, OpenClawInstance, TestCaseLibrary, TestCase, User,
-                        ClawTodo)
+                        ClawMessage, ClawTodo)
 from app.api import api_bp
+from app.services.iteration_tabs import (
+    append_chart,
+    append_row,
+    can_edit_tab_cell,
+    normalize_tab_payload,
+    normalize_flow_steps_payload,
+    should_preserve_existing_rows,
+    update_cell_value,
+)
+from app.services.tapd_bug_case_link import (
+    build_tapd_bug_url,
+    build_case_info_snapshot,
+    parse_tapd_bug_url,
+    sync_task_case_bug_link,
+)
 
 
 def _get_current_user():
     """获取当前用户（支持 Web session 和 OpenClaw Bearer Token）"""
     from app.api.skills import _get_current_user as _orig
     return _orig()
+
+
+def _actor_name(user):
+    if not user:
+        return 'system'
+    return (getattr(user, '_claw_name', None)
+            or getattr(user, 'username', None)
+            or getattr(user, 'name', None)
+            or 'system')
+
+
+def _caller_project_ids(user):
+    from app.api.auth_utils import user_project_ids
+    ids = set(user_project_ids(user))
+    claw_id = getattr(user, '_claw_id', None)
+    if claw_id:
+        claw = OpenClawInstance.query.get(claw_id)
+        if claw and claw.project_id:
+            ids.add(int(claw.project_id))
+    return ids
+
+
+def _can_edit_iteration_tabs(user, iteration):
+    """项目内成员可共建迭代页签；全局管理员兜底全权。"""
+    if not user:
+        return False
+    role = getattr(user, 'role', '')
+    if role == 'super_admin':
+        return True
+    project_ids = _caller_project_ids(user)
+    if role == 'admin' and not project_ids:
+        return True
+    if iteration.project_id:
+        return int(iteration.project_id) in project_ids
+    return role == 'admin'
 
 
 def _can_edit_plan(user, plan):
@@ -232,6 +283,202 @@ def delete_test_iteration(iteration_id):
     db.session.delete(iteration)
     db.session.commit()
     return jsonify({'message': f'测试迭代 "{iteration.name}" 已删除'})
+
+
+@api_bp.route('/test-iterations/<int:iteration_id>/tabs', methods=['GET'])
+def list_iteration_tabs(iteration_id):
+    """获取迭代动态页签。"""
+    TestIteration.query.get_or_404(iteration_id)
+    tabs = (TestIterationTab.query
+            .filter_by(iteration_id=iteration_id)
+            .order_by(TestIterationTab.created_at.asc())
+            .all())
+    return jsonify([tab.to_dict() for tab in tabs])
+
+
+@api_bp.route('/test-iterations/<int:iteration_id>/tabs', methods=['POST'])
+def upsert_iteration_tab(iteration_id):
+    """创建或整体更新迭代动态页签。"""
+    iteration = TestIteration.query.get_or_404(iteration_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未认证'}), 401
+    if not _can_edit_iteration_tabs(user, iteration):
+        return jsonify({'error': '仅项目内成员可修改迭代页签'}), 403
+    data = request.get_json() or {}
+    payload = normalize_tab_payload(data)
+    tab = TestIterationTab.query.filter_by(
+        iteration_id=iteration_id,
+        tab_key=payload['tab_key'],
+    ).first()
+    actor = _actor_name(user)
+    if tab:
+        status_code = 200
+    else:
+        tab = TestIterationTab(
+            iteration_id=iteration_id,
+            tab_key=payload['tab_key'],
+            created_by=actor,
+        )
+        db.session.add(tab)
+        status_code = 201
+    if should_preserve_existing_rows(tab.rows_json or [], payload['rows'], data):
+        payload['rows'] = tab.rows_json or []
+    tab.title = payload['title']
+    tab.tab_type = payload['tab_type']
+    tab.view_mode = payload['view_mode']
+    tab.columns_json = payload['columns']
+    tab.rows_json = payload['rows']
+    tab.charts_json = payload['charts']
+    tab.updated_by = actor
+    db.session.commit()
+    return jsonify(tab.to_dict()), status_code
+
+
+@api_bp.route('/test-iterations/<int:iteration_id>/tabs/<tab_key>', methods=['GET'])
+def get_iteration_tab(iteration_id, tab_key):
+    """获取单个迭代动态页签。"""
+    tab = TestIterationTab.query.filter_by(
+        iteration_id=iteration_id,
+        tab_key=tab_key,
+    ).first_or_404()
+    return jsonify(tab.to_dict())
+
+
+@api_bp.route('/test-iterations/<int:iteration_id>/tabs/<tab_key>/cells', methods=['PATCH'])
+def patch_iteration_tab_cell(iteration_id, tab_key):
+    """更新指定行/列单元格值。"""
+    iteration = TestIteration.query.get_or_404(iteration_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未认证'}), 401
+    if not can_edit_tab_cell(user) or not _can_edit_iteration_tabs(user, iteration):
+        return jsonify({'error': '无权修改单元格'}), 403
+    tab = TestIterationTab.query.filter_by(
+        iteration_id=iteration_id,
+        tab_key=tab_key,
+    ).first_or_404()
+    data = request.get_json() or {}
+    row_id = data.get('row_id')
+    column_key = data.get('column_key')
+    if not row_id or not column_key:
+        return jsonify({'error': 'row_id 和 column_key 为必填项'}), 400
+    try:
+        tab.rows = update_cell_value(
+            tab.rows or [],
+            row_id,
+            column_key,
+            data.get('value'),
+        )
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 404
+    tab.updated_by = _actor_name(user)
+    db.session.commit()
+    return jsonify(tab.to_dict())
+
+
+@api_bp.route('/test-iterations/<int:iteration_id>/tabs/<tab_key>/rows', methods=['POST'])
+def append_iteration_tab_row(iteration_id, tab_key):
+    """追加一行数据。"""
+    iteration = TestIteration.query.get_or_404(iteration_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未认证'}), 401
+    if not _can_edit_iteration_tabs(user, iteration):
+        return jsonify({'error': '仅项目内成员可追加行'}), 403
+    tab = TestIterationTab.query.filter_by(
+        iteration_id=iteration_id,
+        tab_key=tab_key,
+    ).first_or_404()
+    data = request.get_json() or {}
+    row = data.get('row') if isinstance(data.get('row'), dict) else data
+    try:
+        tab.rows = append_row(tab.rows or [], row)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    tab.updated_by = _actor_name(user)
+    db.session.commit()
+    return jsonify(tab.to_dict()), 201
+
+
+@api_bp.route('/test-iterations/<int:iteration_id>/tabs/<tab_key>/charts', methods=['POST'])
+def append_iteration_tab_chart(iteration_id, tab_key):
+    """追加一个图表配置。"""
+    iteration = TestIteration.query.get_or_404(iteration_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未认证'}), 401
+    if not _can_edit_iteration_tabs(user, iteration):
+        return jsonify({'error': '仅项目内成员可追加图表'}), 403
+    tab = TestIterationTab.query.filter_by(
+        iteration_id=iteration_id,
+        tab_key=tab_key,
+    ).first_or_404()
+    data = request.get_json() or {}
+    chart = data.get('chart') if isinstance(data.get('chart'), dict) else data
+    try:
+        tab.charts = append_chart(tab.charts or [], chart)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    if tab.view_mode == 'table':
+        tab.view_mode = 'table_chart'
+    tab.updated_by = _actor_name(user)
+    db.session.commit()
+    return jsonify(tab.to_dict()), 201
+
+
+@api_bp.route('/test-iterations/<int:iteration_id>/tabs/<tab_key>', methods=['DELETE'])
+def delete_iteration_tab(iteration_id, tab_key):
+    """删除迭代动态页签。"""
+    iteration = TestIteration.query.get_or_404(iteration_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未认证'}), 401
+    tab = TestIterationTab.query.filter_by(
+        iteration_id=iteration_id,
+        tab_key=tab_key,
+    ).first_or_404()
+    if not _can_edit_iteration_tabs(user, iteration):
+        return jsonify({'error': '仅项目内成员可删除页签'}), 403
+    db.session.delete(tab)
+    db.session.commit()
+    return jsonify({'message': f'页签 "{tab.title}" 已删除'})
+
+
+@api_bp.route('/test-iterations/<int:iteration_id>/tabs/<tab_key>/flow', methods=['POST'])
+def upsert_flow_progress(iteration_id, tab_key):
+    """Agent 上报流程进度：按步骤合并更新，页签不存在则自动创建。"""
+    iteration = TestIteration.query.get_or_404(iteration_id)
+    user = _get_current_user()
+    if not user:
+        return jsonify({'error': '未认证'}), 401
+    if not _can_edit_iteration_tabs(user, iteration):
+        return jsonify({'error': '仅项目内成员可上报流程进度'}), 403
+    data = request.get_json() or {}
+    actor = _actor_name(user)
+
+    tab = TestIterationTab.query.filter_by(
+        iteration_id=iteration_id,
+        tab_key=tab_key,
+    ).first()
+    if tab:
+        status_code = 200
+    else:
+        tab = TestIterationTab(
+            iteration_id=iteration_id,
+            tab_key=tab_key,
+            created_by=actor,
+        )
+        db.session.add(tab)
+        status_code = 201
+
+    tab.title = str(data.get('title') or tab.title or '流程进度')
+    tab.tab_type = 'custom'
+    tab.view_mode = 'flow_progress'
+    tab.rows = normalize_flow_steps_payload(data, tab.rows, actor)
+    tab.updated_by = actor
+    db.session.commit()
+    return jsonify(tab.to_dict()), status_code
 
 
 def _recalc_iteration_stats(iteration):
@@ -1034,6 +1281,50 @@ def _recalc_task_case_stats(task):
         task.progress = 100
 
 
+def _merge_task_bug_id(task, bug_id):
+    bug_id = str(bug_id or '').strip()
+    if not task or not bug_id:
+        return
+    current = list(task.tapd_bug_ids or [])
+    if bug_id not in current:
+        current.append(bug_id)
+    task.tapd_bug_ids = current
+    task.bug_count = len(current)
+
+
+def _apply_case_bug_sync(tc, task, plan, bug_url):
+    parsed = parse_tapd_bug_url(bug_url)
+    if not parsed:
+        return {'status': 'none'}
+    workspace_id = (
+        parsed['workspace_id']
+        or (getattr(plan, 'tapd_workspace_id', '') or '')
+        or (getattr(getattr(plan, 'project', None), 'tapd_workspace_id', '') or '')
+    )
+    tc.tapd_bug_id = parsed['bug_id']
+    tc.tapd_bug_url = (
+        parsed.get('url')
+        or (build_tapd_bug_url(workspace_id, parsed['bug_id']) if workspace_id else '')
+    )
+    tc.case_info_snapshot = build_case_info_snapshot(tc, task, plan)
+    _merge_task_bug_id(task, parsed['bug_id'])
+    try:
+        result = sync_task_case_bug_link(tc, task, plan, bug_url)
+    except Exception as exc:
+        tc.bug_sync_status = 'failed'
+        tc.bug_sync_error = str(exc)
+        return {'status': 'failed', 'error': str(exc)}
+
+    tc.tapd_bug_id = result['bug_id']
+    tc.tapd_bug_url = result['bug_url']
+    tc.case_info_snapshot = result['case_info_snapshot']
+    tc.bug_sync_status = 'synced'
+    tc.bug_sync_error = ''
+    tc.bug_synced_at = datetime.now()
+    _merge_task_bug_id(task, result['bug_id'])
+    return {'status': 'synced'}
+
+
 # ==================== 用例执行状态 ====================
 
 @api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/cases', methods=['GET'])
@@ -1227,42 +1518,92 @@ def update_task_case(plan_id, task_id, tc_id):
 
     请求体：
     {
-        "status": "passed|failed|blocked|skipped",
+        "status": "passed|failed|blocked|skipped",  // 可选，备注可局部保存
         "note": "失败原因等备注",
-        "tapd_bug_id": "关联的 TAPD Bug ID"
+        "tapd_bug_id": "关联的 TAPD Bug ID",
+        "tapd_bug_url": "关联的 TAPD Bug 链接"
     }
     """
     tc = TestTaskCase.query.filter_by(task_id=task_id, id=tc_id).first_or_404()
-    data = request.get_json()
+    task = TestTask.query.get_or_404(task_id)
+    plan = TestPlan.query.get(plan_id)
+    data = request.get_json(silent=True) or {}
 
-    if not data or not data.get('status'):
-        return jsonify({'error': 'status 为必填项'}), 400
+    if not data:
+        return jsonify({'error': '请求体不能为空'}), 400
 
     valid_statuses = ('pending', 'passed', 'failed', 'blocked', 'skipped')
-    if data['status'] not in valid_statuses:
+    if data.get('status') and data['status'] not in valid_statuses:
         return jsonify({'error': f'status 必须是: {", ".join(valid_statuses)}'}), 400
 
-    tc.status = data['status']
-    tc.executed_at = datetime.now()
+    bug_url = None
+    if 'tapd_bug_url' in data:
+        bug_url = (data.get('tapd_bug_url') or '').strip()
+        effective_status = data.get('status') or tc.status
+        if bug_url and effective_status not in ('failed', 'blocked'):
+            return jsonify({'error': '只有失败/阻塞用例允许关联 Bug 链接'}), 400
+        if bug_url:
+            try:
+                parse_tapd_bug_url(bug_url)
+            except ValueError as exc:
+                return jsonify({'error': str(exc)}), 400
 
-    user = _get_current_user()
-    if user:
-        tc.executed_by = getattr(user, 'username', '') or getattr(user, 'name', '')
+    if data.get('status'):
+        tc.status = data['status']
+        tc.executed_at = datetime.now()
+
+        user = _get_current_user()
+        if user:
+            tc.executed_by = getattr(user, 'username', '') or getattr(user, 'name', '')
     if 'note' in data:
         tc.note = data['note']
     if 'tapd_bug_id' in data:
         tc.tapd_bug_id = data['tapd_bug_id']
+        _merge_task_bug_id(task, data['tapd_bug_id'])
+    sync_result = {'status': tc.bug_sync_status or 'none'}
+    if 'tapd_bug_url' in data:
+        if bug_url:
+            sync_result = _apply_case_bug_sync(tc, task, plan, bug_url)
+        else:
+            tc.tapd_bug_url = ''
+            tc.bug_sync_status = 'none'
+            tc.bug_sync_error = ''
 
     # 重算任务统计
-    task = TestTask.query.get(task_id)
     if task:
         _recalc_task_case_stats(task)
-        plan = TestPlan.query.get(plan_id)
         if plan:
             _recalc_plan_stats(plan)
 
     db.session.commit()
-    return jsonify(tc.to_dict())
+    result = tc.to_dict()
+    result['bug_sync_result'] = sync_result
+    return jsonify(result)
+
+
+@api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/cases/<int:tc_id>/bug-sync/retry', methods=['POST'])
+def retry_task_case_bug_sync(plan_id, task_id, tc_id):
+    """重试单条用例的 TAPD Bug 用例信息同步。"""
+    tc = TestTaskCase.query.filter_by(task_id=task_id, id=tc_id).first_or_404()
+    task = TestTask.query.get_or_404(task_id)
+    plan = TestPlan.query.get(plan_id)
+    if not tc.tapd_bug_url:
+        return jsonify({'error': '该用例未关联 Bug 链接'}), 400
+    if tc.status not in ('failed', 'blocked'):
+        return jsonify({'error': '只有失败/阻塞用例允许同步 Bug 用例信息'}), 400
+
+    try:
+        parse_tapd_bug_url(tc.tapd_bug_url)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    sync_result = _apply_case_bug_sync(tc, task, plan, tc.tapd_bug_url)
+    _recalc_task_case_stats(task)
+    if plan:
+        _recalc_plan_stats(plan)
+    db.session.commit()
+    result = tc.to_dict()
+    result['bug_sync_result'] = sync_result
+    return jsonify(result)
 
 
 @api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/cases/batch', methods=['POST'])
@@ -1516,11 +1857,11 @@ def get_task_tapd_bugs(plan_id, task_id):
                         'error': '未配置 TAPD workspace_id'})
 
     try:
-        from app.api.tapd import _tapd_request
+        from app.api.tapd import TAPD_API_BASE_URL, _tapd_request
         bugs = []
         for bug_id in task.tapd_bug_ids:
             try:
-                data = _tapd_request('GET', 'https://api.tapd.cn/bugs',
+                data = _tapd_request('GET', f'{TAPD_API_BASE_URL}/bugs',
                                      {'workspace_id': ws_id, 'id': bug_id})
                 for item in data:
                     bug = item.get('Bug', {})
@@ -1819,6 +2160,10 @@ def start_task_chain(plan_id, chain_id):
     _notify_chain_step(chain, first_step, action='started')
 
     db.session.commit()
+    if first_step.assignee_claw_id:
+        from app.api.agent_client import notify_claw, notify_claw_todo
+        notify_claw(first_step.assignee_claw_id)
+        notify_claw_todo(first_step.assignee_claw_id)
     return jsonify(chain.to_dict(with_steps=True))
 
 
@@ -1866,6 +2211,10 @@ def submit_chain_step(plan_id, chain_id, step_id):
         chain.completed_at = datetime.now()
 
     db.session.commit()
+    if next_step and next_step.assignee_claw_id:
+        from app.api.agent_client import notify_claw, notify_claw_todo
+        notify_claw(next_step.assignee_claw_id)
+        notify_claw_todo(next_step.assignee_claw_id)
 
     return jsonify({
         'chain': chain.to_dict(with_steps=True),
@@ -1898,11 +2247,9 @@ def update_chain_step(plan_id, chain_id, step_id):
 
 
 def _notify_chain_step(chain, step, action='your_turn', prev_step=None):
-    """Create a notification todo for the step's assignee"""
+    """Create task-chain todo and message notifications for the assignee."""
     if not step.assignee_claw_id:
-        return
-
-    from app.api.agent_client import notify_claw_todo
+        return None
 
     if action == 'started':
         title = f'[任务链] {chain.name} - 第{step.step_order}步开始'
@@ -1937,6 +2284,13 @@ def _notify_chain_step(chain, step, action='your_turn', prev_step=None):
         created_by='system:task_chain',
     )
     db.session.add(todo)
-
-    # Notify SSE immediately
-    notify_claw_todo(step.assignee_claw_id)
+    msg = ClawMessage(
+        claw_id=step.assignee_claw_id,
+        sender_name='Hub任务链',
+        content=message,
+        msg_type='task_delegate',
+        direction='to_claw',
+        status='pending',
+    )
+    db.session.add(msg)
+    return {'todo': todo, 'message': msg}

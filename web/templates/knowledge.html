@@ -45,6 +45,27 @@
     box-shadow: 0 0 0 1px var(--accent-dim), 0 4px 16px rgba(108,92,231,0.08);
     transform: translateY(-2px);
 }
+/* 项目基本信息（📌 特别标识）：整行横幅 + 高亮卡片 */
+.kn-profile-band {
+    grid-column: 1 / -1;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: #b8860b;
+    letter-spacing: 0.5px;
+    padding: 2px 2px 0;
+}
+.kn-card-profile {
+    border-color: #e0a800;
+    background: linear-gradient(180deg, rgba(255,193,7,0.08), var(--bg-card) 60%);
+    box-shadow: 0 0 0 1px rgba(224,168,0,0.35);
+}
+.kn-card-profile:hover { border-color: #e0a800; }
+.tag.tag-profile {
+    background: rgba(224,168,0,0.18);
+    color: #b8860b;
+    border: 1px solid rgba(224,168,0,0.5);
+    font-weight: 700;
+}
 .kn-card-title {
     font-family: 'Noto Sans SC', sans-serif;
     font-size: 0.94rem;
@@ -108,7 +129,7 @@
 .kn-card-actions {
     position: absolute;
     top: 10px;
-    right: 10px;
+    right: 44px;
     display: flex;
     gap: 2px;
     opacity: 0;
@@ -127,6 +148,45 @@
 .kn-act-btn:hover { background: var(--bg-hover); border-color: var(--accent); }
 .kn-act-btn.del { color: var(--red); }
 .kn-act-btn.del:hover { background: var(--red-dim); }
+.kn-favorite-btn {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 29px;
+    height: 29px;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: var(--bg-card);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    transition: transform .15s ease, color .15s ease, border-color .15s ease;
+    z-index: 1;
+}
+.kn-favorite-btn:hover { transform: scale(1.08); border-color: #e0a800; }
+.kn-favorite-btn.active { color: #e0a800; border-color: rgba(224,168,0,.6); }
+.kn-filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 34px;
+    padding: 0 11px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: .82rem;
+    background: var(--bg-card);
+}
+.kn-filter-toggle input { accent-color: #e0a800; }
+.kn-share-panel {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border: 1px solid rgba(224,168,0,.35);
+    border-radius: 8px;
+    background: rgba(224,168,0,.06);
+}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/vditor@3.10.8/dist/index.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
@@ -181,6 +241,10 @@
             <option value="approved">已通过</option>
             <option value="rejected">已拒绝</option>
         </select>
+        <label class="kn-filter-toggle">
+            <input type="checkbox" id="filter-favorite" onchange="loadKnowledge()">
+            <span>★ 仅收藏</span>
+        </label>
         <span id="result-count" style="color:var(--text-muted);font-size:0.82rem"></span>
     </div>
 
@@ -301,7 +365,7 @@ const sourceLabels = {
 const categoryLabels = {
     'method': '测试方法', 'bug-standard': 'Bug 标准', 'bug-pattern': 'Bug 模式',
     'perf-baseline': '性能基线', 'pitfall': '踩坑记录', 'workflow': '流程规范',
-    'best-practice': '最佳实践',
+    'best-practice': '最佳实践', 'project_profile': '项目基本信息',
 };
 
 function escapeHtml(str) {
@@ -353,19 +417,26 @@ function renderEntry(e) {
         `;
     }
 
+    const isProfile = !!e.is_project_profile;
     return `
-        <div class="kn-card" onclick="showDetail(${e.id})">
+        <div class="kn-card${isProfile ? ' kn-card-profile' : ''}" onclick="showDetail(${e.id})">
+            <button class="kn-favorite-btn${e.is_favorite ? ' active' : ''}"
+                    onclick="event.stopPropagation();toggleFavorite(${e.id})"
+                    title="${e.is_favorite ? '取消收藏' : '收藏'}"
+                    aria-label="${e.is_favorite ? '取消收藏' : '收藏'}">★</button>
             <div class="kn-card-actions" onclick="event.stopPropagation()">
                 <button class="kn-act-btn" onclick="showEditModal(${e.id})" title="编辑">✏️</button>
                 <button class="kn-act-btn del" onclick="deleteEntry(${e.id})" title="删除">🗑️</button>
             </div>
-            <div class="kn-card-title" title="${escapeHtml(e.title)}"><span style="font-size:0.72rem;color:var(--text-muted);font-weight:400;margin-right:6px">#${e.id}</span>${escapeHtml(e.title)}</div>
+            <div class="kn-card-title" title="${escapeHtml(e.title)}"><span style="font-size:0.72rem;color:var(--text-muted);font-weight:400;margin-right:6px">#${e.id}</span>${isProfile ? '📌 ' : ''}${escapeHtml(e.title)}</div>
             <div class="kn-card-preview">${escapeHtml(preview)}${(e.content||'').length > 160 ? '...' : ''}</div>
             <div class="kn-card-tags">
+                ${isProfile ? '<span class="tag tag-profile">📌 项目基本信息</span>' : ''}
                 ${src ? `<span class="tag ${src[0]}">${src[1]}</span>` : ''}
                 <span class="tag tag-accent">${categoryLabels[e.category] || e.category}</span>
                 <span class="tag ${statusColors[e.status] || 'tag-blue'}">${statusLabels[e.status] || e.status}</span>
                 ${e.project_name ? `<span class="tag tag-blue">${escapeHtml(e.project_name)}</span>` : ''}
+                ${e.is_shared ? '<span class="tag tag-yellow">🔗 已分享</span>' : ''}
             </div>
             <div class="kn-card-footer">
                 ${submitter ? `
@@ -401,19 +472,39 @@ async function loadKnowledge() {
     const status = $('#filter-status').value;
     const project = $('#filter-project').value;
     const search = $('#filter-search').value.trim();
+    const favoriteOnly = $('#filter-favorite').checked;
     if (scope) params.set('scope', scope);
     if (source) params.set('source_type', source);
     if (category) params.set('category', category);
     if (status) params.set('status', status);
     if (project) params.set('project', project);
     if (search) params.set('search', search);
+    if (favoriteOnly) params.set('favorite', '1');
+    // 分组模式：项目基本信息（📌）单独返回，其余走汇总列表
+    params.set('group_profile', '1');
 
     try {
-        const entries = await API.listKnowledge(params.toString());
-        allEntries = entries;
+        const resp = await API.listKnowledge(params.toString());
+        // 兼容两种返回：数组（旧）或 {project_profile, entries}（分组）
+        let profile = null, entries;
+        if (Array.isArray(resp)) {
+            entries = resp;
+        } else {
+            profile = resp.project_profile || null;
+            entries = resp.entries || [];
+        }
+        // allEntries 供 showDetail 查找（含 profile）
+        allEntries = profile ? [profile, ...entries] : entries;
         const list = $('#knowledge-list');
-        $('#result-count').textContent = entries.length > 0 ? `共 ${entries.length} 条` : '';
-        if (entries.length === 0) {
+        const total = entries.length + (profile ? 1 : 0);
+        $('#result-count').textContent = total > 0 ? `共 ${total} 条${profile ? '（含📌项目基本信息）' : ''}` : '';
+
+        let html = '';
+        // 置顶单独渲染项目基本信息卡片
+        if (profile) {
+            html += `<div class="kn-profile-band">📌 项目基本信息（项目接入必备）</div>` + renderEntry(profile);
+        }
+        if (entries.length === 0 && !profile) {
             list.innerHTML = `
                 <div class="empty-state">
                     <div class="empty-state-icon">📚</div>
@@ -421,7 +512,8 @@ async function loadKnowledge() {
                     <button class="btn btn-primary" onclick="showCreateModal()">+ 新增知识</button>
                 </div>`;
         } else {
-            list.innerHTML = entries.map(renderEntry).join('');
+            html += entries.map(renderEntry).join('');
+            list.innerHTML = html;
         }
     } catch (err) {
         showToast('加载失败: ' + err.message, 'error');
@@ -467,6 +559,19 @@ async function showDetail(id) {
     if (!e) return;
     const src = sourceLabels[e.source_type] || null;
     const submitter = getSubmitterInfo(e);
+    const sharePanel = e.can_manage_share ? `
+        <div class="kn-share-panel">
+            <div style="font-size:.8rem;font-weight:600;margin-bottom:8px">匿名分享</div>
+            ${e.is_shared && e.share_url ? `
+                <div style="display:flex;gap:7px;flex-wrap:wrap">
+                    <a class="btn btn-sm btn-ghost" href="${escapeHtml(e.share_url)}" target="_blank">打开分享页</a>
+                    <button class="btn btn-sm btn-ghost" onclick="manageKnowledgeShare(${e.id}, 'refresh')">刷新链接</button>
+                    <button class="btn btn-sm btn-danger" onclick="manageKnowledgeShare(${e.id}, 'revoke')">撤销分享</button>
+                </div>
+            ` : `
+                <button class="btn btn-sm btn-primary" onclick="manageKnowledgeShare(${e.id}, 'enable')">生成匿名分享链接</button>
+            `}
+        </div>` : '';
     
     $('#detail-title').textContent = e.title;
     $('#detail-body').innerHTML = `
@@ -490,9 +595,12 @@ async function showDetail(id) {
         <div class="markdown-body" style="line-height:1.8;font-size:0.92rem;color:var(--text-primary);padding:16px;background:var(--bg-secondary);border-radius:var(--radius-sm)">
             ${renderMarkdown(e.content)}
         </div>
+        ${sharePanel}
     `;
     window._detailEntryData = e;
     $('#detail-actions').innerHTML = `
+        <button class="btn btn-ghost" onclick="toggleFavorite(${e.id})">${e.is_favorite ? '★ 取消收藏' : '☆ 收藏'}</button>
+        <a class="btn btn-ghost" href="/api/v1/knowledge/${e.id}/export.md">下载 Markdown</a>
         <button class="btn btn-ghost" onclick="showFullKnowledge()">全屏查看</button>
         <button class="btn btn-ghost" onclick="closeDetailModal()">关闭</button>
         <button class="btn btn-primary" onclick="closeDetailModal();showEditModal(${e.id})">编辑</button>
@@ -502,6 +610,51 @@ async function showDetail(id) {
 
 function closeDetailModal() {
     $('#detail-modal').classList.remove('active');
+}
+
+async function toggleFavorite(id) {
+    const entry = allEntries.find(item => item.id === id);
+    if (!entry) return;
+    try {
+        if (entry.is_favorite) {
+            await API.unfavoriteKnowledge(id);
+        } else {
+            await API.favoriteKnowledge(id);
+        }
+        entry.is_favorite = !entry.is_favorite;
+        showToast(entry.is_favorite ? '已收藏' : '已取消收藏', 'success');
+        if ($('#detail-modal').classList.contains('active')) showDetail(id);
+        loadKnowledge();
+    } catch (err) {
+        showToast('收藏操作失败: ' + err.message, 'error');
+    }
+}
+
+async function manageKnowledgeShare(id, action) {
+    const entry = allEntries.find(item => item.id === id);
+    if (!entry) return;
+    try {
+        if (action === 'revoke') {
+            if (!await customConfirm('撤销后，当前分享链接将立即失效，确定继续？')) return;
+            await API.unshareKnowledge(id);
+            entry.is_shared = false;
+            entry.share_url = null;
+            entry.share_token = null;
+            showToast('分享链接已撤销', 'success');
+        } else {
+            const result = await API.shareKnowledge(id, action === 'refresh');
+            entry.is_shared = true;
+            entry.share_url = result.share_url;
+            entry.share_token = result.share_token;
+            const absoluteUrl = new URL(result.share_url, window.location.origin).href;
+            try { await navigator.clipboard.writeText(absoluteUrl); } catch (_) {}
+            showToast(action === 'refresh' ? '链接已刷新并复制' : '分享链接已生成并复制', 'success');
+        }
+        showDetail(id);
+        loadKnowledge();
+    } catch (err) {
+        showToast('分享操作失败: ' + err.message, 'error');
+    }
 }
 
 // 全屏查看知识详情

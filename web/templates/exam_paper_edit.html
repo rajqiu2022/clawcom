@@ -1,0 +1,333 @@
+{% extends "base.html" %}
+{% block title %}试卷编辑 - 考试中心{% endblock %}
+{% block page_title %}试卷编辑{% endblock %}
+{% block nav_exams %}active{% endblock %}
+
+{% block top_actions %}
+<button class="btn" onclick="window.location.href='/exams'">← 返回试卷列表</button>
+{% endblock %}
+
+{% block head %}
+<style>
+.paper-header { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:20px; margin-bottom:20px; }
+.paper-info { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:14px; }
+.q-list { display:flex; flex-direction:column; gap:14px; }
+.q-card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:18px; }
+.q-header { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:10px; }
+.q-num { font-weight:600; color:#3b82f6; }
+.q-type-tag { font-size:0.72rem; padding:2px 8px; border-radius:4px; background:#dbeafe; color:#1e40af; }
+.q-points { font-size:0.85rem; color:#6b7280; }
+.q-actions { display:flex; gap:6px; }
+.q-actions button { font-size:0.8rem; padding:4px 10px; }
+.q-title { font-size:1rem; font-weight:500; margin-bottom:6px; }
+.q-desc { color:#4b5563; margin-bottom:8px; white-space:pre-wrap; }
+.q-options { padding-left:14px; }
+.q-option-line { padding:3px 0; color:#374151; }
+.q-answer-box { background:#fef3c7; border-left:3px solid #f59e0b; padding:8px 12px; margin-top:8px; font-size:0.85rem; border-radius:4px; }
+.q-criteria-box { background:#dbeafe; border-left:3px solid #3b82f6; padding:8px 12px; margin-top:8px; font-size:0.85rem; border-radius:4px; }
+
+.modal-overlay { position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); display:none; align-items:center; justify-content:center; z-index:1000; }
+.modal-overlay.show { display:flex; }
+.modal-box { background:#fff; border-radius:10px; padding:24px; width:680px; max-width:92vw; max-height:90vh; overflow:auto; }
+.modal-title { font-size:1.1rem; font-weight:600; margin-bottom:16px; display:flex; justify-content:space-between; }
+.modal-close { cursor:pointer; color:#6b7280; font-size:1.4rem; line-height:1; }
+.modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:20px; }
+.option-row { display:flex; gap:8px; align-items:center; margin-bottom:6px; }
+.option-row input { flex:1; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="paper-header" id="paper-header"></div>
+
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+    <h3 style="margin:0">题目列表</h3>
+    <button class="btn btn-primary" onclick="openQuestionModal()">+ 新增题目</button>
+</div>
+<div class="q-list" id="q-list"></div>
+<div id="q-empty" style="text-align:center;color:#9ca3af;padding:30px;display:none">尚无题目</div>
+
+<!-- 题目编辑弹窗 -->
+<div class="modal-overlay" id="modal-q">
+    <div class="modal-box">
+        <div class="modal-title">
+            <span id="q-modal-title">新增题目</span>
+            <span class="modal-close" onclick="closeQModal()">×</span>
+        </div>
+        <div class="form-group">
+            <label class="form-label">题型 *</label>
+            <select class="form-select" id="q-type" onchange="onTypeChange()">
+                <option value="single">单选</option>
+                <option value="multiple">多选</option>
+                <option value="judge">判断</option>
+                <option value="fill">填空</option>
+                <option value="essay">简答（开放）</option>
+                <option value="case_design">用例编写</option>
+                <option value="api_op">API 操作</option>
+                <option value="scenario">场景题</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label class="form-label">题目标题 *</label>
+            <input class="form-input" id="q-title">
+        </div>
+        <div class="form-group">
+            <label class="form-label">题干说明</label>
+            <textarea class="form-input" id="q-desc" rows="4" placeholder="markdown，可写背景/提示"></textarea>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+            <div class="form-group">
+                <label class="form-label">分值</label>
+                <input type="number" class="form-input" id="q-points" value="10">
+            </div>
+            <div class="form-group">
+                <label class="form-label">考点 Skill 标签</label>
+                <input class="form-input" id="q-skill-tag" placeholder="如 testcase-manager">
+            </div>
+        </div>
+
+        <div class="form-group" id="q-options-group">
+            <label class="form-label">选项（单选/多选用）</label>
+            <div id="q-options-list"></div>
+            <button class="btn" style="font-size:0.8rem;padding:4px 10px;margin-top:6px" onclick="addOptionRow()">+ 添加选项</button>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">标准答案</label>
+            <input class="form-input" id="q-answer"
+                   placeholder="单选: A | 多选: A,C | 判断: true/false | 填空: 答案 | 主观题: 留空或写要点">
+            <div style="font-size:0.78rem;color:#6b7280;margin-top:4px">主观题可填评分要点（多个用 ; 分隔），仅供参考</div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">评分细则（主观题用）</label>
+            <textarea class="form-input" id="q-criteria" rows="3" placeholder="markdown，例：覆盖正常流2分/异常流2分/边界值2分..."></textarea>
+        </div>
+        <div class="form-group" id="q-script-group" style="display:none">
+            <label class="form-label">自动判分脚本（API 操作题）</label>
+            <textarea class="form-input" id="q-script" rows="4" placeholder="Python 表达式，可用变量 answer, expected"></textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn" onclick="closeQModal()">关闭</button>
+            <button class="btn btn-primary" onclick="submitQuestion()">保存</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const PAPER_ID = {{ paper_id }};
+let paper = null;
+let questions = [];
+let editingQid = null;
+
+(async function init() {
+    await loadPaper();
+    renderHeader();
+    renderQuestions();
+})();
+
+async function loadPaper() {
+    try {
+        paper = await API.get('/exams/papers/' + PAPER_ID);
+        questions = paper.questions || [];
+    } catch(e) { alert('加载失败：' + (e?.message || e)); }
+}
+
+function renderHeader() {
+    if (!paper) return;
+    document.getElementById('paper-header').innerHTML = `
+        <h2 style="margin:0 0 10px 0">${esc(paper.name)}</h2>
+        <div style="color:#6b7280;margin-bottom:14px">${esc(paper.description || '')}</div>
+        <div class="paper-info">
+            <div><strong>分类：</strong>${paper.category}</div>
+            <div><strong>难度：</strong>${paper.difficulty}</div>
+            <div><strong>总分：</strong>${paper.total_score}</div>
+            <div><strong>及格分：</strong>${paper.pass_score}</div>
+            <div><strong>时长：</strong>${paper.time_limit_min}分钟</div>
+            <div><strong>状态：</strong>${paper.status}</div>
+            <div><strong>题数：</strong>${(questions||[]).length}</div>
+        </div>
+    `;
+}
+
+function renderQuestions() {
+    const list = document.getElementById('q-list');
+    if (!questions || questions.length === 0) {
+        list.innerHTML = '';
+        document.getElementById('q-empty').style.display = '';
+        return;
+    }
+    document.getElementById('q-empty').style.display = 'none';
+    const typeLabel = {single:'单选',multiple:'多选',judge:'判断',fill:'填空',essay:'简答',case_design:'用例编写',api_op:'API操作',scenario:'场景题'};
+    list.innerHTML = questions.map((q, idx) => {
+        const optHtml = (q.options || []).map(o => `<div class="q-option-line"><strong>${o.key}.</strong> ${esc(o.text)}</div>`).join('');
+        let answerStr = '';
+        if (q.standard_answer !== undefined && q.standard_answer !== null) {
+            answerStr = Array.isArray(q.standard_answer) ? q.standard_answer.join(', ') : String(q.standard_answer);
+        }
+        return `<div class="q-card">
+            <div class="q-header">
+                <div>
+                    <span class="q-num">第 ${idx+1} 题</span>
+                    <span class="q-type-tag">${typeLabel[q.type]||q.type}</span>
+                    <span class="q-points">${q.points} 分</span>
+                    ${q.skill_tag?`<span class="q-type-tag" style="background:#f3f4f6;color:#374151">${q.skill_tag}</span>`:''}
+                </div>
+                <div class="q-actions">
+                    <button class="btn btn-secondary" onclick="editQuestion(${q.id})">编辑</button>
+                    <button class="btn btn-danger" onclick="deleteQuestion(${q.id})">删除</button>
+                </div>
+            </div>
+            <div class="q-title">${esc(q.title)}</div>
+            ${q.description?`<div class="q-desc">${esc(q.description)}</div>`:''}
+            ${optHtml?`<div class="q-options">${optHtml}</div>`:''}
+            ${answerStr?`<div class="q-answer-box"><strong>标准答案：</strong>${esc(answerStr)}</div>`:''}
+            ${q.grading_criteria?`<div class="q-criteria-box"><strong>评分细则：</strong>${esc(q.grading_criteria)}</div>`:''}
+        </div>`;
+    }).join('');
+}
+
+function openQuestionModal() {
+    editingQid = null;
+    document.getElementById('q-modal-title').textContent = '新增题目';
+    document.getElementById('q-type').value = 'single';
+    document.getElementById('q-title').value = '';
+    document.getElementById('q-desc').value = '';
+    document.getElementById('q-points').value = 10;
+    document.getElementById('q-skill-tag').value = '';
+    document.getElementById('q-answer').value = '';
+    document.getElementById('q-criteria').value = '';
+    document.getElementById('q-script').value = '';
+    document.getElementById('q-options-list').innerHTML = '';
+    addOptionRow(); addOptionRow();
+    onTypeChange();
+    document.getElementById('modal-q').classList.add('show');
+}
+
+function editQuestion(qid) {
+    const q = questions.find(x => x.id === qid);
+    if (!q) return;
+    editingQid = qid;
+    document.getElementById('q-modal-title').textContent = '编辑题目';
+    document.getElementById('q-type').value = q.type;
+    document.getElementById('q-title').value = q.title || '';
+    document.getElementById('q-desc').value = q.description || '';
+    document.getElementById('q-points').value = q.points || 10;
+    document.getElementById('q-skill-tag').value = q.skill_tag || '';
+    let ans = q.standard_answer;
+    if (Array.isArray(ans)) ans = ans.join(',');
+    else if (ans === null || ans === undefined) ans = '';
+    document.getElementById('q-answer').value = ans;
+    document.getElementById('q-criteria').value = q.grading_criteria || '';
+    document.getElementById('q-script').value = q.auto_grade_script || '';
+    const optList = document.getElementById('q-options-list');
+    optList.innerHTML = '';
+    (q.options || []).forEach(o => {
+        const row = document.createElement('div');
+        row.className = 'option-row';
+        row.innerHTML = `<input class="form-input" style="width:60px" value="${o.key||''}" placeholder="A">
+            <input class="form-input" value="${esc(o.text||'')}" placeholder="选项内容">
+            <button class="btn" style="font-size:0.8rem;padding:4px 10px" onclick="this.parentElement.remove()">×</button>`;
+        optList.appendChild(row);
+    });
+    if (!q.options || q.options.length === 0) addOptionRow();
+    onTypeChange();
+    document.getElementById('modal-q').classList.add('show');
+}
+
+function closeQModal() { document.getElementById('modal-q').classList.remove('show'); }
+
+function addOptionRow() {
+    const optList = document.getElementById('q-options-list');
+    const idx = optList.children.length;
+    const key = String.fromCharCode(65 + idx);
+    const row = document.createElement('div');
+    row.className = 'option-row';
+    row.innerHTML = `<input class="form-input" style="width:60px" value="${key}" placeholder="A">
+        <input class="form-input" placeholder="选项内容">
+        <button class="btn" style="font-size:0.8rem;padding:4px 10px" onclick="this.parentElement.remove()">×</button>`;
+    optList.appendChild(row);
+}
+
+function onTypeChange() {
+    const t = document.getElementById('q-type').value;
+    const isChoice = t === 'single' || t === 'multiple';
+    document.getElementById('q-options-group').style.display = isChoice ? '' : 'none';
+    document.getElementById('q-script-group').style.display = t === 'api_op' ? '' : 'none';
+}
+
+async function submitQuestion() {
+    const t = document.getElementById('q-type').value;
+    const title = document.getElementById('q-title').value.trim();
+    if (!title) { alert('题目标题必填'); return; }
+
+    let options = null;
+    if (t === 'single' || t === 'multiple') {
+        options = [];
+        document.querySelectorAll('#q-options-list .option-row').forEach(row => {
+            const inputs = row.querySelectorAll('input');
+            const k = inputs[0].value.trim();
+            const txt = inputs[1].value.trim();
+            if (k && txt) options.push({key: k, text: txt});
+        });
+        if (options.length < 2) { alert('请至少填写 2 个选项'); return; }
+    }
+
+    let standard_answer = document.getElementById('q-answer').value.trim();
+    if (t === 'multiple') {
+        standard_answer = standard_answer.split(/[,，;；\s]+/).filter(Boolean).map(s => s.toUpperCase());
+    } else if (t === 'judge') {
+        const v = standard_answer.toLowerCase();
+        standard_answer = (v === 'true' || v === '对' || v === '是' || v === '1');
+    } else if (t === 'fill') {
+        if (standard_answer.includes(';') || standard_answer.includes('|')) {
+            standard_answer = standard_answer.split(/[;|]/).map(s => s.trim()).filter(Boolean);
+        }
+    } else if (t === 'essay' || t === 'case_design' || t === 'scenario' || t === 'api_op') {
+        if (standard_answer && standard_answer.includes(';')) {
+            standard_answer = standard_answer.split(';').map(s => s.trim()).filter(Boolean);
+        }
+        if (!standard_answer) standard_answer = null;
+    }
+
+    const body = {
+        type: t,
+        title,
+        description: document.getElementById('q-desc').value,
+        options,
+        points: parseInt(document.getElementById('q-points').value) || 10,
+        skill_tag: document.getElementById('q-skill-tag').value.trim() || null,
+        standard_answer,
+        grading_criteria: document.getElementById('q-criteria').value || null,
+        auto_grade_script: document.getElementById('q-script').value || null,
+    };
+
+    try {
+        if (editingQid) {
+            await API.put('/exams/questions/' + editingQid, body);
+        } else {
+            await API.post('/exams/papers/' + PAPER_ID + '/questions', body);
+        }
+        closeQModal();
+        await loadPaper();
+        renderHeader();
+        renderQuestions();
+    } catch(e) {
+        alert('保存失败：' + (e?.message || e));
+    }
+}
+
+async function deleteQuestion(qid) {
+    if (!confirm('确认删除此题？')) return;
+    try {
+        await API.del('/exams/questions/' + qid);
+        await loadPaper();
+        renderHeader();
+        renderQuestions();
+    } catch(e) { alert('删除失败：' + (e?.message || e)); }
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+</script>
+{% endblock %}

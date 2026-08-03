@@ -66,6 +66,12 @@ const API = {
     createKnowledge(data) { return this.post('/knowledge', data); },
     updateKnowledge(id, data) { return this.put(`/knowledge/${id}`, data); },
     deleteKnowledge(id) { return this.del(`/knowledge/${id}`); },
+    favoriteKnowledge(id) { return this.post(`/knowledge/${id}/favorite`); },
+    unfavoriteKnowledge(id) { return this.del(`/knowledge/${id}/favorite`); },
+    shareKnowledge(id, refresh = false) {
+        return this.post(`/knowledge/${id}/share${refresh ? '?refresh=1' : ''}`);
+    },
+    unshareKnowledge(id) { return this.del(`/knowledge/${id}/share`); },
 
     // Projects
     listProjects() { return this.get('/projects'); },

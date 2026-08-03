@@ -143,6 +143,14 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
 .tc-tab-content { flex: 1; overflow-y: auto; overflow-x: hidden; }
 .tc-tab-panel { display: none; padding: 16px; min-height: 400px; }
 .tc-tab-panel.active { display: block; }
+/* 目录脑图自带双向滚动：tc-tab-content 是 overflow-x:hidden，会把宽脑图裁掉 */
+#tab-content .cmm-wrap { height: calc(100vh - 340px); min-height: 360px; }
+.cmm-markbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 10px; margin-bottom: 8px; border: 1px solid var(--border);
+    border-radius: 6px; background: var(--bg-card); font-size: 0.82rem; }
+.cmm-markbar label { color: var(--text-secondary); }
+.cmm-markbar-tip { color: var(--text-muted); }
+.cmm-markbar-tip a { color: var(--accent); }
 
 /* ===== 用例列表 — 重新设计 ===== */
 .tc-list-header {
@@ -168,7 +176,7 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
 
 .tc-case-card {
     display: grid;
-    grid-template-columns: 140px 1fr 130px 56px 72px 110px 48px;
+    grid-template-columns: var(--tc-cols, 140px minmax(100px,1fr) 130px 56px 72px 110px 48px);
     align-items: center; gap: 0;
     padding: 8px 16px;
     background: var(--bg-card);
@@ -177,6 +185,7 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
     transition: all 0.2s ease;
     cursor: default;
 }
+.tc-case-card > * { min-width: 0; }
 .tc-case-card:hover {
     background: var(--bg-hover);
     border-color: var(--accent);
@@ -223,7 +232,7 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
 /* 列表表头 */
 .tc-list-head {
     display: grid;
-    grid-template-columns: 140px 1fr 130px 56px 72px 110px 48px;
+    grid-template-columns: var(--tc-cols, 140px minmax(100px,1fr) 130px 56px 72px 110px 48px);
     padding: 6px 16px;
     font-size: 0.72rem; font-weight: 600;
     color: var(--text-muted);
@@ -232,8 +241,25 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
     border-bottom: 1px solid var(--border);
     margin-bottom: 4px;
 }
+/* 表头列不裁剪，否则会把落在列边界外的拖拽手柄裁掉（导致抓不到、看不见） */
+.tc-list-head span { position: relative; min-width: 0; white-space: nowrap; overflow: visible; }
 .tc-list-head span:nth-child(4),
 .tc-list-head span:nth-child(7) { text-align: center; }
+
+/* 列宽拖拽手柄：跨在列右边界上，默认显示一条淡分隔线提示可拖 */
+.tc-col-resizer {
+    position: absolute; top: 0; right: -7px; width: 14px; height: 100%;
+    cursor: col-resize; z-index: 20;
+    display: flex; align-items: center; justify-content: center;
+}
+.tc-col-resizer::after {
+    content: ''; width: 2px; height: 55%; background: var(--border); border-radius: 1px;
+    transition: background 0.12s, height 0.12s;
+}
+.tc-col-resizer:hover::after,
+.tc-col-resizer.dragging::after { background: var(--accent); height: 100%; }
+body.tc-col-resizing { cursor: col-resize !important; user-select: none; }
+body.tc-col-resizing * { cursor: col-resize !important; }
 
 /* 分页 */
 .tc-pagination {
@@ -287,9 +313,10 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
 .case-mm-node {
     position: absolute; white-space: nowrap; border-radius: 10px; padding: 8px 16px;
     font-size: 0.84rem; display: inline-flex; align-items: center; gap: 6px;
-    transition: box-shadow 0.15s;
+    transition: box-shadow 0.15s; cursor: move; user-select: none;
 }
 .case-mm-node:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+.case-mm-node.dragging { box-shadow: 0 6px 18px rgba(0,0,0,0.28); z-index: 5; }
 .case-mm-root {
     background: var(--accent); color: #fff; font-weight: 700; font-size: 0.95rem;
     border-radius: 20px; padding: 12px 24px; box-shadow: 0 4px 16px rgba(99,102,241,0.3);
@@ -301,7 +328,7 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
 .case-mm-leaf {
     background: var(--bg-secondary); border: 1px solid var(--border); font-weight: 400;
     color: var(--text-secondary); border-radius: 8px; padding: 5px 14px; font-size: 0.8rem;
-    white-space: normal; max-width: 380px;
+    white-space: normal; overflow-wrap: anywhere; max-width: 380px;
 }
 .case-mm-badge {
     display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.7rem;
@@ -381,8 +408,8 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
                         <button class="btn btn-primary btn-sm" onclick="openCaseModal()" style="font-size:0.82rem">+ 新建用例</button>
                     </div>
                 </div>
-                <div class="tc-list-head">
-                    <span>ID</span><span>用例名称</span><span>需求</span><span>优先级</span><span>创建人</span><span>更新时间</span><span>操作</span>
+                <div class="tc-list-head" id="tc-list-head">
+                    <span>ID<i class="tc-col-resizer" data-col="0" title="拖动调整列宽，双击复位"></i></span><span>用例名称<i class="tc-col-resizer" data-col="1" title="拖动调整列宽，双击复位"></i></span><span>需求<i class="tc-col-resizer" data-col="2" title="拖动调整列宽，双击复位"></i></span><span>优先级<i class="tc-col-resizer" data-col="3" title="拖动调整列宽，双击复位"></i></span><span>创建人<i class="tc-col-resizer" data-col="4" title="拖动调整列宽，双击复位"></i></span><span>更新时间<i class="tc-col-resizer" data-col="5" title="拖动调整列宽，双击复位"></i></span><span>操作</span>
                 </div>
                 <div class="tc-case-list" id="case-list"></div>
                 <div class="tc-pagination" id="pagination"></div>
@@ -559,7 +586,7 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
     </div>
     <input type="hidden" id="lib-share-id">
     <div style="font-size:0.82rem;color:var(--text-muted);margin-bottom:10px">
-      授权后被共享人/OpenClaw 可只读查看本库；选择 <code>reviewer</code> 还可发起 / 参与评审。
+      授权后被共享人/OpenClaw 可只读查看本库；选择 <code>reviewer</code> 还可发起 / 参与评审；选择 <code>editor</code> 可编辑用例内容（用例增删改 / 脑图 / 目录 / 导入），但不可删除或重命名整个库、也不可再授权他人。
     </div>
 
     <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
@@ -585,6 +612,7 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
         <select class="form-select" id="lib-share-form-perm">
           <option value="reviewer" selected>reviewer（只读 + 可评审）</option>
           <option value="readonly">readonly（仅查看）</option>
+          <option value="editor">editor（可编辑用例内容）</option>
         </select>
       </div>
       <div style="flex:1 1 160px">
@@ -621,10 +649,35 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
       <div id="lib-review-top-actions" style="display:flex;gap:6px"></div>
     </div>
 
+    <div id="lib-review-scope-busy" style="display:none;background:rgba(245,158,11,0.12);color:#f59e0b;padding:10px 12px;border-radius:6px;margin-bottom:14px;font-size:0.85rem"></div>
+
     <form id="lib-review-form" style="background:var(--bg-secondary);padding:10px;border-radius:8px;margin-bottom:14px">
+      <input type="hidden" id="lib-review-scope-type" value="library">
+      <input type="hidden" id="lib-review-module-path" value="">
       <div class="form-group">
-        <label class="form-label" style="font-size:0.78rem">本次评审范围（简要）</label>
-        <input type="text" class="form-input" id="lib-review-scope" placeholder="例：登录 + 支付模块 共 56 条用例">
+        <label class="form-label" style="font-size:0.78rem">评审范围</label>
+        <div id="lib-review-scope-badge" style="font-size:0.85rem;padding:6px 10px;border-radius:6px;background:var(--accent-dim);color:var(--accent)"></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" style="font-size:0.78rem">可见范围</label>
+        <select class="form-select" id="lib-review-visibility" onchange="onLibReviewVisibilityChange()">
+          <option value="public_all">🌍 完全公开（所有人，含无项目权限用户）</option>
+          <option value="public" selected>🌐 Hub 用户或 Agent</option>
+          <option value="project">📁 项目内用户或 Agent</option>
+          <option value="assigned">🎯 指定用户或 Agent</option>
+        </select>
+      </div>
+      <div class="form-group" id="lib-review-grants-wrap" style="display:none">
+        <label class="form-label" style="font-size:0.78rem">指定参与者</label>
+        <div style="display:flex;gap:8px">
+          <input class="form-input" id="lib-review-grant-users" style="flex:1" placeholder="用户 ID，逗号分隔">
+          <input class="form-input" id="lib-review-grant-claws" style="flex:1" placeholder="Agent ID，逗号分隔">
+        </div>
+        <div style="font-size:0.74rem;color:var(--text-muted);margin-top:4px">授权给用户时，其名下 Agent 自动继承</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label" style="font-size:0.78rem">范围补充说明（可选）</label>
+        <input type="text" class="form-input" id="lib-review-scope" placeholder="例：本轮只看新增的 12 条异常用例">
       </div>
       <div class="form-group">
         <label class="form-label" style="font-size:0.78rem">发起说明</label>
@@ -644,6 +697,7 @@ body.tc-resizing-sidebar { cursor: col-resize; user-select: none; }
 {% endblock %}
 
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/case_mindmap.js') }}?v={{ cache_bust }}"></script>
 <script>
 // ==================== 状态 ====================
 let allLibraries = [];
@@ -661,6 +715,20 @@ let pageSize = 20;
 
 const PRIO_CLS = { P0:'p0', P1:'p1', P2:'p2', P3:'p3' };
 function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// 把值序列化成能安全塞进 HTML 属性的 JS 字面量，用于内联 onclick 的参数。
+// 直接写 JSON.stringify(path) 会产出带双引号的 "登录模块"，塞进
+// onclick="..." 会提前终止属性值 → Uncaught SyntaxError: Unexpected end of input。
+// 写 '${path.replace(/'/g,"\\'")}' 也不行：目录名含双引号时同样破坏属性。
+// 转成 HTML 实体后浏览器解析属性时会解码回来，JS 引擎收到的是合法字面量。
+function jsAttr(v) {
+    return JSON.stringify(v === undefined ? null : v)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
 function fmtMetaTime(s) {
     if (!s) return '-';
     return String(s).substring(0, 16).replace('T', ' ');
@@ -738,6 +806,7 @@ function latestBy(items, key) {
 // ==================== 初始化 ====================
 async function init() {
     initSidebarResize();
+    initColResize();
     try {
         const projects = await API.listProjects();
         const sel = $('#project-filter');
@@ -812,6 +881,73 @@ function initSidebarResize() {
     });
 }
 
+// ===== 用例列表列宽拖拽 =====
+const TC_COL_DEFAULT = [140, null, 130, 56, 72, 110, 48]; // null=用例名称列弹性(1fr)
+const TC_COL_MIN = [50, 100, 44, 44, 50, 70, 40];
+let tcColWidths = TC_COL_DEFAULT.slice();
+
+function applyTcColWidths() {
+    const panel = document.getElementById('panel-list');
+    if (!panel) return;
+    const tpl = tcColWidths.map(w => (w == null ? 'minmax(100px,1fr)' : w + 'px')).join(' ');
+    panel.style.setProperty('--tc-cols', tpl);
+}
+
+function saveTcColWidths() {
+    try { localStorage.setItem('testcases.colWidths', JSON.stringify(tcColWidths)); } catch(e) {}
+}
+
+function initColResize() {
+    const head = document.getElementById('tc-list-head');
+    if (!head) return;
+    try {
+        const raw = localStorage.getItem('testcases.colWidths');
+        const arr = raw ? JSON.parse(raw) : null;
+        if (Array.isArray(arr) && arr.length === TC_COL_DEFAULT.length) tcColWidths = arr;
+    } catch(e) {}
+    applyTcColWidths();
+
+    let col = -1, startX = 0, startW = 0, resizerEl = null;
+    const onMove = (e) => {
+        if (col < 0) return;
+        const w = Math.max(TC_COL_MIN[col] || 40, Math.round(startW + (e.clientX - startX)));
+        tcColWidths[col] = w;
+        applyTcColWidths();
+    };
+    const onUp = () => {
+        if (resizerEl) resizerEl.classList.remove('dragging');
+        col = -1; resizerEl = null;
+        document.body.classList.remove('tc-col-resizing');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        saveTcColWidths();
+    };
+    head.addEventListener('mousedown', (e) => {
+        const r = e.target.closest('.tc-col-resizer');
+        if (!r) return;
+        e.preventDefault();
+        col = parseInt(r.dataset.col, 10);
+        // 弹性列首次拖动时量取实际渲染宽度转为 px
+        startW = tcColWidths[col] != null
+            ? tcColWidths[col]
+            : Math.round(r.parentElement.getBoundingClientRect().width);
+        startX = e.clientX;
+        resizerEl = r; r.classList.add('dragging');
+        document.body.classList.add('tc-col-resizing');
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+    // 双击手柄复位该列
+    head.addEventListener('dblclick', (e) => {
+        const r = e.target.closest('.tc-col-resizer');
+        if (!r) return;
+        const c = parseInt(r.dataset.col, 10);
+        tcColWidths[c] = TC_COL_DEFAULT[c];
+        applyTcColWidths();
+        saveTcColWidths();
+    });
+}
+
 async function loadTree() {
     const project = $('#project-filter').value;
     const params = project ? `?project_name=${encodeURIComponent(project)}` : '';
@@ -868,23 +1004,18 @@ function renderTree() {
 
         const libCollapsed = !expandedLibs.has(lib.id);
 
-        const reviewBadge = libReviewBadgeHtml(lib);
-        const sharedBadge = libSharedBadgeHtml(lib);
         const libInfo = calcNodeInfo(lib, null);
-        const libCreatorBadge = libInfo.creator && libInfo.creator !== '-'
-            ? `<span class="tc-tree-creator" title="创建者：${escHtml(libInfo.creator)}">${escHtml(libInfo.creator)}</span>`
-            : '';
         const canShare = lib.can_share || lib.shared_with_me === false /* fallback：若后端没返回 can_share，作者本人前端按可共享渲染由后端二次校验兜底 */;
-        const shareBtn = `<span class="tc-tree-add" style="color:#3b82f6" onclick="event.stopPropagation();openLibShareDialog(${lib.id}, '${(lib.name || '').replace(/'/g, "\\'")}')" title="共享/邀请评审">👥</span>`;
+        const shareBtn = `<span class="tc-tree-add" style="color:#3b82f6" onclick="event.stopPropagation();openLibShareDialog(${lib.id}, ${jsAttr(lib.name || '')})" title="共享/邀请评审">👥</span>`;
         const canReview = lib.can_manage || (lib.shared_with_me && lib.my_share_permission && lib.my_share_permission !== 'readonly');
-        const reviewBtn = canReview ? `<span class="tc-tree-add" style="color:#10b981" onclick="event.stopPropagation();openLibReviewDialog(${lib.id}, '${(lib.name || '').replace(/'/g, "\\'")}')" title="发起/查看评审">📝</span>` : '';
+        const reviewBtn = canReview ? `<span class="tc-tree-add" style="color:#10b981" onclick="event.stopPropagation();openLibReviewDialog(${lib.id}, ${jsAttr(lib.name || '')})" title="发起/查看评审">📝</span>` : '';
+        const libMindmapBtn = `<span class="tc-tree-add" style="color:#8b5cf6" onclick="event.stopPropagation();openDirMindmapTab(${lib.id}, ${jsAttr(lib.name || '')}, null)" title="查看整库目录脑图">🧠</span>`;
         html += `<div class="tc-tree-lib${isLibSel ? ' active' : ''}" onclick="selectNode(${lib.id}, null)" style="color:${isLibSel ? 'var(--accent)' : ''}">
-            <span class="tc-tree-arrow${libCollapsed ? '' : ' open'}" onclick="event.stopPropagation();toggleLib(${lib.id})">›</span> ${libCollapsed ? '📁' : '📂'} <span class="tc-tree-name">${escHtml(lib.name)}</span>
-            ${reviewBadge}${sharedBadge}
-            ${libCreatorBadge}
+            <span class="tc-tree-arrow${libCollapsed ? '' : ' open'}" onclick="event.stopPropagation();toggleLib(${lib.id})">›</span> ${libCollapsed ? '📁' : '📂'} <span class="tc-tree-name" title="${escHtml(lib.name)}">${escHtml(lib.name)}</span>
             <span class="tc-tree-info" onclick="event.stopPropagation();openTestcaseInfoModal(${lib.id}, null)" title="查看用例库信息">i</span>
             <span class="tc-tree-cnt">${realCasesOf(cases).length}</span>
             <span class="tc-tree-add" onclick="event.stopPropagation();openSubdirModal(${lib.id}, '')" title="新增子目录">+</span>
+            ${libMindmapBtn}
             ${shareBtn}
             ${reviewBtn}
         </div>`;
@@ -900,17 +1031,18 @@ function renderTree() {
                 const isCollapsed = !expandedDirs.has(collapsedKey);
                 if (search && !name.toLowerCase().includes(search)) continue;
                 const info = calcNodeInfo(lib, path);
-                const showCreator = info.creator && info.creator !== '-' && info.creator !== inheritedCreator;
-                const creatorBadge = showCreator
-                    ? `<span class="tc-tree-creator" title="创建者：${escHtml(info.creator)}">${escHtml(info.creator)}</span>`
+                const dirReviewBtn = canReview
+                    ? `<span class="tc-tree-add" style="color:#10b981" onclick="event.stopPropagation();openLibReviewDialog(${lib.id}, ${jsAttr(lib.name || '')}, ${jsAttr(path)})" title="对该目录发起评审">📝</span>`
                     : '';
-                h += `<div class="tc-tree-dir${isActive ? ' active' : ''}" style="padding-left:${indent}px" onclick="selectNode(${lib.id}, '${path.replace(/'/g, "\\'")}')">
-                    ${hasKids ? `<span class="tc-tree-arrow${isCollapsed ? '' : ' open'}" onclick="event.stopPropagation();toggleDir('${collapsedKey.replace(/'/g, "\\'")}')">›</span>` : '<span style="width:12px;flex-shrink:0"></span>'} ${hasKids ? (isCollapsed ? '📁' : '📂') : '📄'} <span class="tc-tree-name">${escHtml(name)}</span>
-                    ${creatorBadge}
-                    <span class="tc-tree-info" onclick="event.stopPropagation();openTestcaseInfoModal(${lib.id}, ${JSON.stringify(path)})" title="查看目录信息">i</span>
+                const dirMindmapBtn = `<span class="tc-tree-add" style="color:#8b5cf6" onclick="event.stopPropagation();openDirMindmapTab(${lib.id}, ${jsAttr(lib.name || '')}, ${jsAttr(path)})" title="从该目录展开脑图">🧠</span>`;
+                h += `<div class="tc-tree-dir${isActive ? ' active' : ''}" style="padding-left:${indent}px" onclick="selectNode(${lib.id}, ${jsAttr(path)})">
+                    ${hasKids ? `<span class="tc-tree-arrow${isCollapsed ? '' : ' open'}" onclick="event.stopPropagation();toggleDir(${jsAttr(collapsedKey)})">›</span>` : '<span style="width:12px;flex-shrink:0"></span>'} ${hasKids ? (isCollapsed ? '📁' : '📂') : '📄'} <span class="tc-tree-name" title="${escHtml(name)}">${escHtml(name)}</span>
+                    <span class="tc-tree-info" onclick="event.stopPropagation();openTestcaseInfoModal(${lib.id}, ${jsAttr(path)})" title="查看目录信息">i</span>
                     <span class="tc-tree-cnt">${node._count}</span>
-                    <span class="tc-tree-add" onclick="event.stopPropagation();openSubdirModal(${lib.id}, '${path.replace(/'/g, "\\'")}')" title="新增子目录">+</span>
-                    <span class="tc-tree-del" onclick="event.stopPropagation();openDelDirModal(${lib.id}, '${path.replace(/'/g, "\\'")}', '${name.replace(/'/g, "\\'")}')" title="删除目录">×</span>
+                    <span class="tc-tree-add" onclick="event.stopPropagation();openSubdirModal(${lib.id}, ${jsAttr(path)})" title="新增子目录">+</span>
+                    ${dirMindmapBtn}
+                    ${dirReviewBtn}
+                    <span class="tc-tree-del" onclick="event.stopPropagation();openDelDirModal(${lib.id}, ${jsAttr(path)}, ${jsAttr(name)})" title="删除目录">×</span>
                 </div>`;
                 if (hasKids) {
                     h += `<div class="tc-tree-sub${isCollapsed ? ' collapsed' : ''}">` +
@@ -1063,8 +1195,180 @@ function openCaseTab(caseData) {
     panel.id = 'panel-' + tabId;
     panel.innerHTML = renderCaseMindmap(caseData);
     $('#tab-content').appendChild(panel);
+    requestAnimationFrame(() => {
+        const canvas = panel.querySelector('.case-mm-canvas');
+        if (canvas) updateMindmapEdges(canvas);
+    });
 
     activateTab(tabId);
+}
+
+// ==================== 目录脑图 Tab ====================
+// tabId 不能直接拼目录路径：路径含 `/` 与中文，会破坏 querySelector 选择器
+let dirMindmapSeq = 0;
+const dirMindmapTabIds = {};   // "libId:path" → tabId
+
+function openDirMindmapTab(libId, libName, modulePath) {
+    const cacheKey = libId + ':' + (modulePath === null ? '*' : modulePath);
+    let tabId = dirMindmapTabIds[cacheKey];
+    if (tabId && openTabs.find(t => t.id === tabId)) {
+        activateTab(tabId);
+        return;
+    }
+    tabId = 'dirmm-' + (++dirMindmapSeq);
+    dirMindmapTabIds[cacheKey] = tabId;
+
+    if (openTabs.length >= MAX_TABS) closeTab(openTabs[0].id);
+
+    const label = modulePath === null
+        ? (libName || '用例库')
+        : (modulePath === '' ? '(未分类)' : modulePath.split('/').pop());
+    openTabs.push({ id: tabId, title: label, type: 'dirmm' });
+
+    const btn = document.createElement('div');
+    btn.className = 'tc-tab-btn';
+    btn.dataset.tab = tabId;
+    btn.onclick = () => activateTab(tabId);
+    const shortLabel = label.length > 12 ? label.substring(0, 12) + '...' : label;
+    btn.innerHTML = `🧠 ${escHtml(shortLabel)} <span class="tc-tab-close" onclick="event.stopPropagation();closeTab('${tabId}')">&times;</span>`;
+    $('#tab-bar').appendChild(btn);
+
+    const panel = document.createElement('div');
+    panel.className = 'tc-tab-panel';
+    panel.id = 'panel-' + tabId;
+    panel.innerHTML = '<div class="cmm-empty">脑图加载中…</div>';
+    $('#tab-content').appendChild(panel);
+    activateTab(tabId);
+
+    loadDirMindmap(panel, libId, modulePath);
+}
+
+async function loadDirMindmap(panel, libId, modulePath) {
+    const qs = modulePath === null ? '' : '?module_path=' + encodeURIComponent(modulePath);
+    try {
+        // 评审课题列表拉不到不该拖垮脑图本身，失败就退化成只读
+        const [data, reviewRes] = await Promise.all([
+            API.request('GET', `/testcase-libraries/${libId}/directory-mindmap${qs}`),
+            API.request('GET', `/testcase-libraries/${libId}/reviews`).catch(() => ({reviews: []})),
+        ]);
+
+        // 标记挂在评审课题上，所以只有范围覆盖当前目录、且仍在进行中的评审可选
+        const candidates = filterRelatedReviews(reviewRes.reviews || [], modulePath)
+            .filter(r => r.status === 'submitted' && r.related_topic_id);
+
+        panel.innerHTML = '';
+        const bar = document.createElement('div');
+        bar.className = 'cmm-markbar';
+        panel.appendChild(bar);
+        const host = document.createElement('div');
+        host.className = 'cmm-host';
+        panel.appendChild(host);
+
+        const view = CaseMindmap.render(host, data, {
+            canMark: false,
+            markHint: candidates.length ? '' : '该范围暂无进行中的评审，标记需先发起评审',
+            onLoadChildren: (node, done) => loadMindmapChildren(libId, node, done),
+        });
+        renderMarkBar(bar, view, libId, candidates);
+    } catch (e) {
+        panel.innerHTML = `<div class="cmm-empty">脑图加载失败：${escHtml(e.message || e)}</div>`;
+    }
+}
+
+/** 顶部"标注到评审课题"选择条：选中课题后脑图才进入可标注状态 */
+function renderMarkBar(bar, view, libId, candidates) {
+    if (!candidates.length) {
+        bar.innerHTML = '<span style="color:var(--text-muted)">评审标记需要挂在评审课题上，'
+            + '当前范围没有进行中的评审。可在左侧目录上点 📝 发起评审后再来标注。</span>';
+        return;
+    }
+    const opts = candidates.map(r => {
+        const scope = r.scope_summary || r.scope_module_path
+            || (r.scope_type === 'library' ? '整库评审' : '未标注范围');
+        return `<option value="${r.related_topic_id}">#${r.id} ${escHtml(scope)}</option>`;
+    }).join('');
+    bar.innerHTML = `<label>标注到评审课题：</label>
+        <select class="form-input" style="width:auto;min-width:220px">
+            <option value="">仅查看（不标注）</option>${opts}
+        </select>
+        <span class="cmm-markbar-tip"></span>`;
+
+    const sel = bar.querySelector('select');
+    const tip = bar.querySelector('.cmm-markbar-tip');
+    sel.addEventListener('change', () => onMarkTopicChange(sel, tip, view, libId));
+}
+
+async function onMarkTopicChange(sel, tip, view, libId) {
+    const topicId = sel.value;
+    if (!topicId) {
+        view.applyMarks({});
+        view.setOptions({canMark: false, onMarkChange: null,
+                         markHint: '已切回只读，选择评审课题后可标注'});
+        tip.textContent = '';
+        return;
+    }
+    tip.textContent = '加载标记中…';
+    try {
+        const res = await API.request('GET', `/topics/${topicId}/review-marks`);
+        const byNode = {};
+        (res.items || []).forEach(m => { if (m.mark) byNode[m.node_id] = m.mark; });
+        view.applyMarks(byNode);
+        view.setOptions({
+            canMark: true,
+            markHint: '',
+            onMarkChange: (nodeId, mark) => saveDirMark(topicId, nodeId, mark, view, tip),
+        });
+        tip.innerHTML = `<a href="/topics/${topicId}" target="_blank">查看课题讨论 ↗</a>`;
+    } catch (e) {
+        sel.value = '';
+        tip.textContent = '加载标记失败：' + (e.message || e);
+    }
+}
+
+async function saveDirMark(topicId, nodeId, mark, view, tip) {
+    try {
+        await API.request('PUT', `/topics/${topicId}/review-marks`,
+                          {marks: [{node_id: nodeId, mark: mark}]});
+        tip.innerHTML = `<a href="/topics/${topicId}" target="_blank">查看课题讨论 ↗</a>`;
+    } catch (e) {
+        // 常见于节点不在该课题评审范围内：拉回服务端真实状态，避免界面骗人
+        showToast('标记失败：' + (e.message || e), 'error');
+        try {
+            const res = await API.request('GET', `/topics/${topicId}/review-marks`);
+            const byNode = {};
+            (res.items || []).forEach(m => { if (m.mark) byNode[m.node_id] = m.mark; });
+            view.applyMarks(byNode);
+        } catch (_) { /* 回滚失败就保持现状，错误已提示 */ }
+    }
+}
+
+/** 展开脑图节点时按需补内容：用例补前提/步骤/预期，目录补被截断的用例 */
+async function loadMindmapChildren(libId, node, done) {
+    try {
+        if (node.node_type === CaseMindmap.NODE_CASE) {
+            const c = await API.request('GET',
+                `/testcase-libraries/${libId}/cases/${node.case_id}`);
+            const kids = CaseMindmap.caseDetailChildren(node.id, c);
+            done(kids, kids.length ? null : '该用例没有填写前提/步骤/预期');
+            return;
+        }
+        const qs = '?module_path=' + encodeURIComponent(node.module_path || '');
+        const sub = await API.request('GET',
+            `/testcase-libraries/${libId}/directory-mindmap${qs}`);
+        done(sub.children || []);
+    } catch (e) {
+        done(null, e.message || String(e));
+    }
+}
+
+async function openCaseById(libId, caseId) {
+    const cached = (casesCache[libId] || []).find(c => c.id === caseId);
+    if (cached) { openCaseTab(cached); return; }
+    try {
+        openCaseTab(await API.request('GET', `/testcase-libraries/${libId}/cases/${caseId}`));
+    } catch (e) {
+        showToast('打开用例失败: ' + (e.message || e), 'error');
+    }
 }
 
 function closeTab(tabId) {
@@ -1205,6 +1509,12 @@ function allCaseById(id) {
 }
 
 // ==================== 用例脑图（单条用例） ====================
+function estimateMindmapLeafHeight(text, width) {
+    const charsPerLine = Math.max(12, Math.floor(width / 12));
+    const lines = Math.max(1, Math.ceil(String(text || '').length / charsPerLine));
+    return Math.max(34, lines * 17 + 12);
+}
+
 function renderCaseMindmap(c) {
     const content = c.content || {};
     const preconditions = content.preconditions || '';
@@ -1231,7 +1541,17 @@ function renderCaseMindmap(c) {
 
     // 计算总高度
     let totalH = 0;
-    sections.forEach(s => { totalH += NODE_H + V_GAP + s.items.length * (NODE_H + V_GAP); });
+    sections.forEach(s => {
+        let sectionH = 0;
+        s.items.forEach((item, i) => {
+            const txt = typeof item === 'string' ? item : JSON.stringify(item);
+            const displayTxt = txt.length > 60 ? txt.substring(0, 60) + '...' : txt;
+            const leafW = Math.min(displayTxt.length * 12 + 30, 380);
+            const leafH = estimateMindmapLeafHeight(`${i + 1}. ${txt}`, leafW);
+            sectionH += leafH + V_GAP;
+        });
+        totalH += Math.max(NODE_H, sectionH - V_GAP) + V_GAP * 3;
+    });
     if (totalH > 0) totalH -= V_GAP;
     totalH = Math.max(totalH, NODE_H);
 
@@ -1245,7 +1565,21 @@ function renderCaseMindmap(c) {
     const secX = rootX + Math.min(rootW, 400) + H_GAP;
 
     sections.forEach(sec => {
-        const secH = sec.items.length * (NODE_H + V_GAP) - V_GAP;
+        const leafLayouts = sec.items.map((item, i) => {
+            const txt = typeof item === 'string' ? item : JSON.stringify(item);
+            const displayTxt = txt.length > 60 ? txt.substring(0, 60) + '...' : txt;
+            const leafW = Math.min(displayTxt.length * 12 + 30, 380);
+            return {
+                txt,
+                leafW,
+                leafH: estimateMindmapLeafHeight(`${i + 1}. ${txt}`, leafW),
+            };
+        });
+        const secH = Math.max(
+            NODE_H,
+            leafLayouts.reduce((sum, leaf) => sum + leaf.leafH, 0)
+                + Math.max(0, leafLayouts.length - 1) * V_GAP
+        );
         const secId = nid++;
         const secW = sec.label.length * 14 + 40;
         const secY = curY + secH / 2 - NODE_H / 2;
@@ -1255,14 +1589,11 @@ function renderCaseMindmap(c) {
         // 三级节点（叶子）
         const leafX = secX + Math.min(secW, 200) + H_GAP * 0.8;
         let leafY = curY;
-        sec.items.forEach((item, i) => {
+        leafLayouts.forEach(({ txt, leafW, leafH }, i) => {
             const leafId = nid++;
-            const txt = typeof item === 'string' ? item : JSON.stringify(item);
-            const displayTxt = txt.length > 60 ? txt.substring(0, 60) + '...' : txt;
-            const leafW = Math.min(displayTxt.length * 12 + 30, 380);
-            nodes.push({ id: leafId, x: leafX, y: leafY, w: leafW, h: NODE_H, type: 'leaf', text: `${i + 1}. ${txt}` });
+            nodes.push({ id: leafId, x: leafX, y: leafY, w: leafW, h: leafH, type: 'leaf', text: `${i + 1}. ${txt}` });
             edges.push({ from: secId, to: leafId, color: 'var(--border)' });
-            leafY += NODE_H + V_GAP;
+            leafY += leafH + V_GAP;
         });
 
         curY += secH + V_GAP * 3;
@@ -1278,14 +1609,14 @@ function renderCaseMindmap(c) {
     let nodesHtml = '';
     nodes.forEach(n => {
         if (n.type === 'root') {
-            nodesHtml += `<div class="case-mm-node case-mm-root" style="left:${n.x}px;top:${n.y}px">
+            nodesHtml += `<div class="case-mm-node case-mm-root" data-mm-node-id="${n.id}" onmousedown="mmNodeDragStart(event,this)" style="left:${n.x}px;top:${n.y}px">
                 ${escHtml(n.text)} <span class="case-mm-badge ${PRIO_CLS[n.priority]}">${n.priority}</span>
                 <span style="font-size:0.75rem;opacity:0.7;margin-left:4px">${n.caseId || ''}</span>
             </div>`;
         } else if (n.type === 'section') {
-            nodesHtml += `<div class="case-mm-node case-mm-section" style="left:${n.x}px;top:${n.y}px">${n.text}</div>`;
+            nodesHtml += `<div class="case-mm-node case-mm-section" data-mm-node-id="${n.id}" onmousedown="mmNodeDragStart(event,this)" style="left:${n.x}px;top:${n.y}px">${n.text}</div>`;
         } else {
-            nodesHtml += `<div class="case-mm-node case-mm-leaf" style="left:${n.x}px;top:${n.y}px;width:${n.w}px">${escHtml(n.text)}</div>`;
+            nodesHtml += `<div class="case-mm-node case-mm-leaf" data-mm-node-id="${n.id}" onmousedown="mmNodeDragStart(event,this)" style="left:${n.x}px;top:${n.y}px;width:${n.w}px">${escHtml(n.text)}</div>`;
         }
     });
 
@@ -1297,10 +1628,10 @@ function renderCaseMindmap(c) {
         const x1 = from.x + from.w, y1 = from.y + from.h / 2;
         const x2 = to.x, y2 = to.y + to.h / 2;
         const cx = (x1 + x2) / 2;
-        pathsHtml += `<path d="M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}" stroke="${e.color}" />`;
+        pathsHtml += `<path data-mm-from="${e.from}" data-mm-to="${e.to}" d="M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}" stroke="${e.color}" />`;
     });
 
-    return `<div style="overflow:hidden;cursor:grab;min-height:400px;position:relative;border:1px solid var(--border);border-radius:8px" onmousedown="mmDragStart(event,this)" oncontextmenu="return false">
+    return `<div class="case-mm-viewport" style="overflow:hidden;cursor:grab;min-height:400px;position:relative;border:1px solid var(--border);border-radius:8px" onmousedown="mmDragStart(event,this)" oncontextmenu="return false">
         <div class="case-mm-canvas" style="width:${canvasW}px;height:${canvasH}px;transform:translate(0px,0px);transform-origin:0 0">
             <svg width="${canvasW}" height="${canvasH}">${pathsHtml}</svg>
             ${nodesHtml}
@@ -1311,6 +1642,7 @@ function renderCaseMindmap(c) {
 // 脑图画布拖拽
 let _mmDrag = null;
 function mmDragStart(e, el) {
+    if (e.target.closest('.case-mm-node')) return;
     e.preventDefault();
     const canvas = el.querySelector('.case-mm-canvas');
     const style = canvas.style.transform || 'translate(0px,0px)';
@@ -1320,14 +1652,57 @@ function mmDragStart(e, el) {
     _mmDrag = { el, canvas, sx: e.clientX, sy: e.clientY, ox, oy, moved: false };
     el.style.cursor = 'grabbing';
 }
+function mmNodeDragStart(e, node) {
+    e.preventDefault();
+    e.stopPropagation();
+    const canvas = node.closest('.case-mm-canvas');
+    const viewport = node.closest('.case-mm-viewport');
+    _mmDrag = {
+        kind: 'node',
+        el: node,
+        viewport,
+        canvas,
+        sx: e.clientX,
+        sy: e.clientY,
+        ox: node.offsetLeft,
+        oy: node.offsetTop,
+        moved: false,
+    };
+    node.classList.add('dragging');
+}
+function updateMindmapEdges(canvas) {
+    canvas.querySelectorAll('svg path[data-mm-from][data-mm-to]').forEach(path => {
+        const from = canvas.querySelector(`[data-mm-node-id="${path.dataset.mmFrom}"]`);
+        const to = canvas.querySelector(`[data-mm-node-id="${path.dataset.mmTo}"]`);
+        if (!from || !to) return;
+        const x1 = from.offsetLeft + from.offsetWidth;
+        const y1 = from.offsetTop + from.offsetHeight / 2;
+        const x2 = to.offsetLeft;
+        const y2 = to.offsetTop + to.offsetHeight / 2;
+        const cx = (x1 + x2) / 2;
+        path.setAttribute('d', `M${x1},${y1} C${cx},${y1} ${cx},${y2} ${x2},${y2}`);
+    });
+}
 document.addEventListener('mousemove', e => {
     if (!_mmDrag) return;
     const dx = e.clientX - _mmDrag.sx, dy = e.clientY - _mmDrag.sy;
     if (Math.abs(dx) > 3 || Math.abs(dy) > 3) _mmDrag.moved = true;
-    _mmDrag.canvas.style.transform = `translate(${_mmDrag.ox + dx}px, ${_mmDrag.oy + dy}px)`;
+    if (_mmDrag.kind === 'node') {
+        _mmDrag.el.style.left = `${Math.max(0, _mmDrag.ox + dx)}px`;
+        _mmDrag.el.style.top = `${Math.max(0, _mmDrag.oy + dy)}px`;
+        updateMindmapEdges(_mmDrag.canvas);
+    } else {
+        _mmDrag.canvas.style.transform = `translate(${_mmDrag.ox + dx}px, ${_mmDrag.oy + dy}px)`;
+    }
 });
 document.addEventListener('mouseup', () => {
-    if (_mmDrag) { _mmDrag.el.style.cursor = 'grab'; _mmDrag = null; }
+    if (!_mmDrag) return;
+    if (_mmDrag.kind === 'node') {
+        _mmDrag.el.classList.remove('dragging');
+    } else {
+        _mmDrag.el.style.cursor = 'grab';
+    }
+    _mmDrag = null;
 });
 
 // ==================== 用例 CRUD ====================
@@ -1911,13 +2286,40 @@ async function toggleLibPublicShare(on) {
 }
 
 // -------- 评审弹窗 --------
-function openLibReviewDialog(libId, libName) {
+// modulePath 为 null/undefined 表示整库评审；空字符串表示"(未分类)"根目录
+function openLibReviewDialog(libId, libName, modulePath) {
+    const isModule = modulePath !== undefined && modulePath !== null;
     document.getElementById('lib-review-libid').value = libId;
     document.getElementById('lib-review-name').textContent = libName || `#${libId}`;
+    document.getElementById('lib-review-scope-type').value = isModule ? 'module' : 'library';
+    document.getElementById('lib-review-module-path').value = isModule ? modulePath : '';
+    document.getElementById('lib-review-scope-badge').textContent = isModule
+        ? `📂 目录：${modulePath || '(未分类)'}（含全部子目录）`
+        : '📚 整库评审';
     document.getElementById('lib-review-scope').value = '';
     document.getElementById('lib-review-note').value = '';
+    document.getElementById('lib-review-visibility').value = 'public';
+    document.getElementById('lib-review-grant-users').value = '';
+    document.getElementById('lib-review-grant-claws').value = '';
+    onLibReviewVisibilityChange();
     document.getElementById('lib-review-modal').classList.add('active');
     loadLibReviewList();
+}
+
+function onLibReviewVisibilityChange() {
+    const assigned = document.getElementById('lib-review-visibility').value === 'assigned';
+    document.getElementById('lib-review-grants-wrap').style.display = assigned ? '' : 'none';
+}
+
+function collectLibReviewGrants() {
+    const parseIds = (raw) => (raw || '').split(/[,，\s]+/)
+        .map(s => parseInt(s, 10)).filter(n => !isNaN(n) && n > 0);
+    const grants = [];
+    parseIds(document.getElementById('lib-review-grant-users').value)
+        .forEach(id => grants.push({type: 'user', id}));
+    parseIds(document.getElementById('lib-review-grant-claws').value)
+        .forEach(id => grants.push({type: 'claw', id}));
+    return grants;
 }
 
 function closeLibReviewDialog() {
@@ -1938,6 +2340,42 @@ function reviewStatusBadge(st) {
     return `<span style="color:${c.color};font-weight:600">${c.txt}</span>`;
 }
 
+function reviewScopeLabel(rv) {
+    const count = rv.scope_case_count ? `，${rv.scope_case_count} 条用例` : '';
+    if ((rv.scope_type || 'library') === 'module') {
+        return `📂 ${rv.scope_module_path || '(未分类)'}（含子目录${count}）`;
+    }
+    return `📚 整库${count ? '（' + count.slice(1) + '）' : ''}`;
+}
+
+// 同一范围只允许一个进行中的评审；命中时隐藏发起表单并给出跳转入口
+function applyLibReviewFormState(items) {
+    const scopeType = document.getElementById('lib-review-scope-type').value;
+    const modulePath = document.getElementById('lib-review-module-path').value || '';
+    const form = document.getElementById('lib-review-form');
+    const hint = document.getElementById('lib-review-scope-busy');
+
+    const busy = (items || []).find(rv => rv.status === 'submitted'
+        && (rv.scope_type || 'library') === scopeType
+        && (rv.scope_module_path || '') === modulePath);
+
+    if (busy) {
+        form.style.display = 'none';
+        const label = scopeType === 'module'
+            ? `目录「${modulePath || '(未分类)'}」` : '整库';
+        const link = busy.related_topic_id
+            ? `<button class="btn btn-ghost btn-sm" onclick="window.open('/topics/${busy.related_topic_id}','_blank')">👁 打开课题</button>`
+            : '';
+        hint.style.display = '';
+        hint.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center">
+            <span>${label}已有进行中的评审 #${busy.id}，请先撤回或等待审批</span>${link}</div>`;
+    } else {
+        form.style.display = '';
+        hint.style.display = 'none';
+        hint.innerHTML = '';
+    }
+}
+
 async function loadLibReviewList() {
     const libId = document.getElementById('lib-review-libid').value;
     const lib = (allLibraries || []).find(x => x.id == libId);
@@ -1948,20 +2386,19 @@ async function loadLibReviewList() {
 
     // 顶部操作按钮：评审中时显示"关闭评审"
     const topActions = document.getElementById('lib-review-top-actions');
-    if (curStatus === 'pending_review') {
-        topActions.innerHTML = `<button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="closeLibReviewTopic(${libId})">🔒 关闭评审</button>`;
-        // 隐藏发起表单
-        document.getElementById('lib-review-form').style.display = 'none';
-    } else {
-        topActions.innerHTML = '';
-        document.getElementById('lib-review-form').style.display = '';
-    }
+    topActions.innerHTML = curStatus === 'pending_review'
+        ? `<button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="closeLibReviewTopic(${libId})">🔒 关闭评审</button>`
+        : '';
 
     const el = document.getElementById('lib-review-list');
     el.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:18px">加载中...</div>';
     try {
         const r = await API.request('GET', `/testcase-libraries/${libId}/reviews`);
         const items = r.reviews || [];
+
+        // 发起表单的可用性按"当前范围"判断，而不是库级状态 —— 不同目录可以并行评审
+        applyLibReviewFormState(items);
+
         if (!items.length) {
             el.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:18px">暂无评审记录</div>';
             return;
@@ -1980,7 +2417,7 @@ async function loadLibReviewList() {
                   <div>#${rv.id} ${reviewStatusBadge(rv.status)} <span style="color:var(--text-muted);font-size:0.78rem">by ${escHtml(rv.submitted_by||'-')} · ${escHtml(String(rv.submitted_at||'').slice(0,16))}</span></div>
                   <div style="display:flex;gap:6px">${actions.join('')}</div>
                 </div>
-                ${rv.scope_summary ? `<div style="font-size:0.8rem;margin-top:4px"><b>范围：</b>${escHtml(rv.scope_summary)}</div>` : ''}
+                <div style="font-size:0.8rem;margin-top:4px"><b>范围：</b>${escHtml(reviewScopeLabel(rv))}${rv.scope_summary ? ' · ' + escHtml(rv.scope_summary) : ''}</div>
                 ${rv.submit_note ? `<div style="font-size:0.8rem;color:var(--text-secondary);margin-top:2px">${escHtml(rv.submit_note)}</div>` : ''}
                 ${rv.decided_by ? `<div style="font-size:0.76rem;color:var(--text-muted);margin-top:4px">→ ${escHtml(rv.decided_by)} · ${escHtml(String(rv.decided_at||'').slice(0,16))} ${rv.decision_note ? '· ' + escHtml(rv.decision_note) : ''}</div>` : ''}
             </div>`;
@@ -1995,11 +2432,28 @@ document.getElementById('lib-review-form').addEventListener('submit', async (ev)
     const libId = document.getElementById('lib-review-libid').value;
     const scope = document.getElementById('lib-review-scope').value.trim();
     const note = document.getElementById('lib-review-note').value.trim();
+    const scopeType = document.getElementById('lib-review-scope-type').value;
+    const visibility = document.getElementById('lib-review-visibility').value;
+
+    const body = {
+        scope_summary: scope,
+        submit_note: note,
+        scope_type: scopeType,
+        visibility: visibility,
+    };
+    if (scopeType === 'module') {
+        body.scope_module_path = document.getElementById('lib-review-module-path').value;
+    }
+    if (visibility === 'assigned') {
+        body.grants = collectLibReviewGrants();
+        if (!body.grants.length) {
+            showToast('请至少指定一个用户或 Agent', 'error');
+            return;
+        }
+    }
+
     try {
-        const res = await API.request('POST', `/testcase-libraries/${libId}/reviews`, {
-            scope_summary: scope,
-            submit_note: note,
-        });
+        const res = await API.request('POST', `/testcase-libraries/${libId}/reviews`, body);
         showToast('已发起评审，正在跳转课题...', 'success');
         document.getElementById('lib-review-scope').value = '';
         document.getElementById('lib-review-note').value = '';

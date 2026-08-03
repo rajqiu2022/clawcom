@@ -1045,6 +1045,22 @@ def create_panorama_snapshot():
         name = f"快照 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
     modules, relations, entities, items = _collect_workspace_panorama_state(project_id, workspace)
+
+    def _max_dt(objs, *attrs):
+        best = None
+        for obj in objs or []:
+            for attr in attrs:
+                value = getattr(obj, attr, None)
+                if value and (best is None or value > best):
+                    best = value
+        return best
+
+    view_updated_at = _max_dt(modules, 'updated_at', 'last_changed_at')
+    for _coll in (relations, entities):
+        _dt = _max_dt(_coll, 'updated_at')
+        if _dt and (view_updated_at is None or _dt > view_updated_at):
+            view_updated_at = _dt
+
     snapshot = PanoramaSnapshot(
         project_id=project_id,
         workspace_id=workspace.id if workspace else None,
@@ -1054,6 +1070,7 @@ def create_panorama_snapshot():
         relation_count=len([i for i in items if i['item_type'] == 'relation']),
         code_entity_count=len(entities),
         created_by=_operator_info(),
+        view_updated_at=view_updated_at,
     )
     db.session.add(snapshot)
     db.session.flush()

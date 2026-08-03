@@ -52,6 +52,7 @@ from app.models import (
     RequirementEngineeringLink,
     RequirementFunctionLink,
     RequirementItem,
+    RequirementReviewVerdict,
     RequirementTestcaseLink,
     TapdBaseline,
     TapdFieldMapCache,
@@ -62,6 +63,7 @@ from app.models import (
     TestIteration,
     _now,
 )
+from app.services.requirement_coverage import summarize_requirement_coverage
 
 
 # ==================== 通用工具 ====================
@@ -1089,6 +1091,106 @@ def get_baselines_cache():
         'total': len(items),
         'baselines': [b.to_dict() for b in items],
     })
+
+
+# ==================== 需求逐条评审结论 ====================
+
+def _review_key(data):
+    key = data.get('review_key') or data.get('workflow_run_id') or data.get('run_id') or 'default'
+    return str(key).strip()[:80] or 'default'
+
+
+def _clean_issues(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [x for x in value if isinstance(x, (dict, str))]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return [x for x in parsed if isinstance(x, (dict, str))]
+        except Exception:
+            return [value]
+    return []
+
+
+@api_bp.route('/requirements/items/<int:item_id>/review-verdict',
+              methods=['POST', 'PUT'])
+def upsert_requirement_review_verdict(item_id):
+    """写入或更新单条需求评审结论。"""
+    item = RequirementItem.query.get_or_404(item_id)
+    data = request.get_json() or {}
+    key = _review_key(data)
+    verdict = str(data.get('verdict') or 'pass').strip()
+    if verdict not in ('pass', 'problem', 'risk', 'not_testable'):
+        return jsonify({'error': 'verdict 必须是 pass/problem/risk/not_testable'}), 400
+    risk_level = str(data.get('risk_level') or item.risk_level or 'low').strip()
+    if risk_level not in ('low', 'medium', 'high', 'critical'):
+        risk_level = 'low'
+    testability = str(data.get('testability') or 'testable').strip()
+    if testability not in ('testable', 'unclear', 'not_testable'):
+        testability = 'testable'
+
+    row = RequirementReviewVerdict.query.filter_by(
+        requirement_item_id=item.id,
+        review_key=key,
+    ).first()
+    created = row is None
+    if row is None:
+        row = RequirementReviewVerdict(
+            requirement_item_id=item.id,
+            iteration_id=item.iteration_id,
+            review_key=key,
+            reviewer_name=_operator(),
+        )
+        db.session.add(row)
+    row.verdict = verdict
+    row.risk_level = risk_level
+    row.testability = testability
+    row.issues_json = _clean_issues(data.get('issues'))
+    row.summary = str(data.get('summary') or '').strip()
+    row.reviewer_name = _operator()
+    claw = _current_claw()
+    row.reviewer_claw_id = claw.id if claw else None
+    row.updated_at = _now()
+    db.session.commit()
+    log_action('upsert', 'requirement_review_verdict', row.id,
+               f'{item.tapd_story_id} review_key={key}',
+               operator=_operator())
+    return jsonify(row.to_dict()), 201 if created else 200
+
+
+@api_bp.route('/requirements/iterations/<int:iteration_id>/review-verdicts',
+              methods=['GET'])
+def list_requirement_review_verdicts(iteration_id):
+    """获取某迭代的逐条需求评审结论。"""
+    key = request.args.get('review_key')
+    q = RequirementReviewVerdict.query.filter_by(iteration_id=iteration_id)
+    if key:
+        q = q.filter_by(review_key=str(key).strip())
+    rows = q.order_by(RequirementReviewVerdict.updated_at.desc()).all()
+    return jsonify({
+        'iteration_id': iteration_id,
+        'total': len(rows),
+        'items': [r.to_dict() for r in rows],
+    })
+
+
+@api_bp.route('/requirements/iterations/<int:iteration_id>/coverage',
+              methods=['GET'])
+def get_requirement_coverage(iteration_id):
+    """获取某迭代的需求→用例覆盖缺口。"""
+    reqs = RequirementItem.query.filter_by(
+        iteration_id=iteration_id).order_by(RequirementItem.id.asc()).all()
+    req_ids = [r.id for r in reqs]
+    links = []
+    if req_ids:
+        links = RequirementTestcaseLink.query.filter(
+            RequirementTestcaseLink.requirement_item_id.in_(req_ids)).all()
+    summary = summarize_requirement_coverage(reqs, links)
+    summary['iteration_id'] = iteration_id
+    return jsonify(summary)
 
 
 # ==================== 用例关联 ====================

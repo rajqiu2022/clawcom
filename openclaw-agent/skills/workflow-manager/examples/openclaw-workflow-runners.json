@@ -1,0 +1,18 @@
+{
+  "deepflow.bkci.download_install": {
+    "command": ["python", "F:/DeepFlow/scripts/workflow/download_install.py"],
+    "timeout_sec": 1800
+  },
+  "deepflow.racinggo.prepare_env": {
+    "command": ["python", "F:/DeepFlow/scripts/workflow/prepare_env.py"],
+    "timeout_sec": 1800
+  },
+  "deepflow.racinggo.mobile_smoke": {
+    "command": ["python", "F:/DeepFlow/scripts/workflow/mobile_smoke.py"],
+    "timeout_sec": 7200
+  },
+  "deepflow.hub.mobile_final_report": {
+    "command": ["python", "F:/DeepFlow/scripts/workflow/mobile_final_report.py"],
+    "timeout_sec": 1800
+  }
+}

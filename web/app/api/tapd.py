@@ -27,7 +27,7 @@ def _get_tapd_credentials():
         return '', ''
 
 
-def _tapd_request(method, url, params=None, api_user='', api_password=''):
+def _tapd_request(method, url, params=None, data=None, api_user='', api_password=''):
     """调用 TAPD 开放 API"""
     if not api_user or not api_password:
         api_user, api_password = _get_tapd_credentials()
@@ -40,6 +40,7 @@ def _tapd_request(method, url, params=None, api_user='', api_password=''):
             method,
             url,
             params=params,
+            data=data,
             auth=(api_user, api_password),
             timeout=30,
         )
@@ -345,13 +346,13 @@ def tapd_dashboard():
             stories_data = _tapd_request(
                 'GET', f'{TAPD_API_BASE_URL}/stories/count',
                 {'workspace_id': p.tapd_workspace_id},
-                api_user, api_password
+                api_user=api_user, api_password=api_password
             )
             # 拉取缺陷统计
             bugs_data = _tapd_request(
                 'GET', f'{TAPD_API_BASE_URL}/bugs/count',
                 {'workspace_id': p.tapd_workspace_id},
-                api_user, api_password
+                api_user=api_user, api_password=api_password
             )
 
             result.append({

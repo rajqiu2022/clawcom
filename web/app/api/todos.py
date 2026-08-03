@@ -336,6 +336,20 @@ def complete_todo(claw_id, todo_id):
         todo.enabled = False
 
     db.session.commit()
+
+    # 任务处理完 → 归档其短期工作记忆（taskctx memo），保持笔记索引精简、新鲜。
+    # 归档是软抹除（Memos state=ARCHIVED），可追溯；best-effort，失败不影响主流程。
+    if status in ('submitted', 'skipped'):
+        try:
+            from app import memos_client
+            _claw = OpenClawInstance.query.get(claw_id)
+            if _claw and _claw.name:
+                memos_client.archive_taskctx_memos(_claw.name, f'todo-{todo_id}')
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                'archive taskctx memo failed for todo %s', todo_id, exc_info=True)
+
     return jsonify(log.to_dict())
 
 

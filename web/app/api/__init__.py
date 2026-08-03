@@ -9,9 +9,12 @@ PUBLIC_PATHS = [
     '/api/v1/auth/woa-callback',   # WOA SSO 回调
     '/api/v1/system-changelog',    # 系统变更日志（公开）
     '/api/v1/test-reports/shared/',  # 测试报告分享外链匿名只读（MEMORY #134）
+    '/api/v1/knowledge/shared/',    # 知识分享外链匿名只读与 Markdown 下载
 ]
 
 # Token 验证缓存（避免每次请求遍历所有 claw）
+# 只缓存 claw_id，不缓存 ORM 对象；gunicorn/gevent 下跨请求复用 ORM 对象
+# 会在 Session 结束后变成 detached instance，后续访问字段触发 500。
 _token_claw_cache = {}
 _token_cache_ts = 0
 _TOKEN_CACHE_TTL = 60  # 60秒缓存
@@ -28,14 +31,21 @@ def _verify_bearer_token(token):
         _token_claw_cache.clear()
         _token_cache_ts = now
 
+    from app.models import OpenClawInstance
+
     if token in _token_claw_cache:
-        return _token_claw_cache[token]
+        claw_id = _token_claw_cache[token]
+        if not claw_id:
+            return None
+        return (OpenClawInstance.query
+                .filter(OpenClawInstance.id == claw_id)
+                .filter(OpenClawInstance.status != 'deleted')
+                .first())
 
     # 遍历验证
-    from app.models import OpenClawInstance
     for claw in OpenClawInstance.query.filter(OpenClawInstance.status != 'deleted').all():
         if claw.verify_token(token):
-            _token_claw_cache[token] = claw
+            _token_claw_cache[token] = claw.id
             return claw
 
     _token_claw_cache[token] = None
@@ -74,11 +84,16 @@ def require_auth():
             is_project_required_path,
             user_has_project_access,
         )
+        from app.services.review_visibility import is_project_exempt_review_path
         user = User.query.get(uid)
         if user:
             ensure_user_projects_initialized(user, session)
+            # 完全公开（visibility=public_all）的评审要让无项目权限的用户也能看和评论，
+            # 因此对少量评审读/回复接口豁免这道粗门禁。逐条可见性判定仍在 topics.py 执行，
+            # 无项目用户依然拿不到 public / project / assigned 课题。
             if (not user_has_project_access(user)
-                    and is_project_required_path(path)):
+                    and is_project_required_path(path)
+                    and not is_project_exempt_review_path(path, request.method)):
                 return jsonify({
                     'error': '请开通项目后再使用',
                     'code': 'PROJECT_REQUIRED',
@@ -101,7 +116,7 @@ def require_auth():
     return jsonify({'error': '未认证，请在 Header 中携带 Authorization: Bearer {TOKEN} 或先登录 Web'}), 401
 
 
-from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans, engineering, requirements, test_accounts, review_comments, wecom, agent_deployments, agent_templates, shared_articles, test_reports, panorama, testcase_panorama_links, exams, secrets  # noqa: F401
+from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans, engineering, requirements, test_accounts, review_comments, wecom, agent_deployments, agent_templates, shared_articles, test_reports, panorama, testcase_panorama_links, exams, secrets, workflows, tasks_context, ops_verify, memories  # noqa: F401
 
 # 注册 Agent Hub 通信中心蓝图
 api_bp.register_blueprint(agent_hub.agent_hub_bp, url_prefix='/agent-hub')

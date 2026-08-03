@@ -1,11 +1,27 @@
-"""Hermes/Venus model choices shared by API and deploy renderer."""
+"""Hermes LLM provider / model choices shared by API and deploy renderer."""
 
 DEFAULT_HERMES_LLM_PROVIDER = "venus"
 DEFAULT_HERMES_LLM_MODEL = "venus"
+DEFAULT_TIMIAI_LLM_MODEL = "deepseek-v4-pro"
 
-HERMES_LLM_MODELS = {
+HERMES_LLM_PROVIDERS = {
     "venus": {
-        "label": "Venus（默认）",
+        "label": "Venus",
+        "api_mode": "chat_completions",
+        "base_url": "http://v2.open.venus.oa.com/llmproxy",
+        "api_key_env": "VENUS_API_KEY",
+    },
+    "timiai": {
+        "label": "TimiAI",
+        "api_mode": "chat_completions",
+        "base_url": "http://api.timiai.woa.com/ai_api_manage/llmproxy",
+        "api_key_env": "TIMIAI_API_KEY",
+    },
+}
+
+VENUS_LLM_MODELS = {
+    "venus": {
+        "label": "Venus（默认 GLM 5.1）",
         "config_model": "glm-5.1",
         "context_length": 128000,
     },
@@ -36,7 +52,70 @@ HERMES_LLM_MODELS = {
     },
 }
 
-_ALIASES = {
+TIMIAI_LLM_MODELS = {
+    "deepseek-v4-pro": {
+        "label": "DeepSeek V4 Pro",
+        "config_model": "deepseek-v4-pro",
+        "context_length": 128000,
+    },
+    "glm-5.2": {
+        "label": "GLM 5.2",
+        "config_model": "glm-5.2",
+        "context_length": 128000,
+    },
+    "glm-5v-turbo": {
+        "label": "GLM 5V Turbo",
+        "config_model": "glm-5v-turbo",
+        "context_length": 128000,
+    },
+    "claude-sonnet-4.6": {
+        "label": "Claude Sonnet 4.6",
+        "config_model": "claude-sonnet-4.6",
+        "context_length": 128000,
+    },
+    "gemini-3.1-pro-preview": {
+        "label": "Gemini 3.1 Pro Preview",
+        "config_model": "gemini-3.1-pro-preview",
+        "context_length": 128000,
+    },
+    # GBT 项目专用（TimiAI 侧模型名带 -r1 / -stb 后缀，与其它项目不同）
+    "deepseek-v4-pro-r1": {
+        "label": "DeepSeek V4 Pro (R1)",
+        "config_model": "deepseek-v4-pro-r1",
+        "context_length": 128000,
+    },
+    "deepseek-v4-flash-r1": {
+        "label": "DeepSeek V4 Flash (R1)",
+        "config_model": "deepseek-v4-flash-r1",
+        "context_length": 128000,
+    },
+    "gemini-3.1-pro-preview-stb": {
+        "label": "Gemini 3.1 Pro Preview (STB)",
+        "config_model": "gemini-3.1-pro-preview-stb",
+        "context_length": 128000,
+    },
+    # QQ飞车端游 / 魂斗罗 专属
+    "kimi-k3": {
+        "label": "Kimi K3",
+        "config_model": "kimi-k3",
+        "context_length": 200000,
+    },
+    "minimax-m3": {
+        "label": "MiniMax M3",
+        "config_model": "minimax-m3",
+        "context_length": 200000,
+    },
+}
+
+# 兼容旧 import
+HERMES_LLM_MODELS = VENUS_LLM_MODELS
+
+HERMES_VISION_DEFAULTS = {
+    "venus": {"provider": "venus", "model": "glm-5.1"},
+    "timiai": {"provider": "timiai", "model": "deepseek-v4-pro"},
+}
+
+_VENUS_ALIASES = {
     "": DEFAULT_HERMES_LLM_MODEL,
     "venus": "venus",
     "kimi2.6": "kimi-k2.6",
@@ -58,29 +137,114 @@ _ALIASES = {
     "hunyuan v3": "hunyuan-v3",
 }
 
+_TIMIAI_ALIASES = {
+    "": DEFAULT_TIMIAI_LLM_MODEL,
+    "claude-sonnet-4.6": "claude-sonnet-4.6",
+    "claude sonnet 4.6": "claude-sonnet-4.6",
+    "glm5.2": "glm-5.2",
+    "glm-5.2": "glm-5.2",
+    "glm 5.2": "glm-5.2",
+    "glm-5v-turbo": "glm-5v-turbo",
+    "glm5v-turbo": "glm-5v-turbo",
+    "gemini-3.1-pro-preview": "gemini-3.1-pro-preview",
+    "gemini 3.1 pro preview": "gemini-3.1-pro-preview",
+    # GBT 专用别名
+    "deepseek-v4-pro-r1": "deepseek-v4-pro-r1",
+    "deepseekv4pro-r1": "deepseek-v4-pro-r1",
+    "deepseek-v4-flash-r1": "deepseek-v4-flash-r1",
+    "deepseekv4flash-r1": "deepseek-v4-flash-r1",
+    "gemini-3.1-pro-preview-stb": "gemini-3.1-pro-preview-stb",
+    "kimik3": "kimi-k3",
+    "kimi3": "kimi-k3",
+    "kimi-k3": "kimi-k3",
+    "kimi k3": "kimi-k3",
+    "minimaxm3": "minimax-m3",
+    "minimax-m3": "minimax-m3",
+    "minimax m3": "minimax-m3",
+    "minimax": "minimax-m3",
+}
 
-def normalize_hermes_model(value: str) -> str:
-    """Normalize UI/user input to one stored Hermes model key."""
-    key = (value or "").strip().lower()
-    key = key.replace("_", "-")
-    if key in HERMES_LLM_MODELS:
+
+def normalize_hermes_provider(value: str) -> str:
+    key = (value or DEFAULT_HERMES_LLM_PROVIDER).strip().lower()
+    if key in HERMES_LLM_PROVIDERS:
         return key
-    normalized = _ALIASES.get(key)
+    raise ValueError(f"不支持的大模型平台：{value}")
+
+
+def hermes_models_for_provider(provider: str) -> dict:
+    provider = normalize_hermes_provider(provider)
+    return TIMIAI_LLM_MODELS if provider == "timiai" else VENUS_LLM_MODELS
+
+
+def default_hermes_model(provider: str) -> str:
+    provider = normalize_hermes_provider(provider)
+    return DEFAULT_TIMIAI_LLM_MODEL if provider == "timiai" else DEFAULT_HERMES_LLM_MODEL
+
+
+def normalize_hermes_model(value: str, provider: str = None) -> str:
+    """Normalize UI/user input to one stored Hermes model key."""
+    raw = (value or "").strip().lower().replace("_", "-")
+    if provider:
+        provider = normalize_hermes_provider(provider)
+        models = hermes_models_for_provider(provider)
+        aliases = _TIMIAI_ALIASES if provider == "timiai" else _VENUS_ALIASES
+        if raw in models:
+            return raw
+        normalized = aliases.get(raw)
+        if normalized:
+            return normalized
+        raise ValueError(f"不支持的大模型：{value}")
+
+    if raw in VENUS_LLM_MODELS:
+        return raw
+    if raw in TIMIAI_LLM_MODELS:
+        return raw
+    normalized = _VENUS_ALIASES.get(raw) or _TIMIAI_ALIASES.get(raw)
     if normalized:
         return normalized
     raise ValueError(f"不支持的大模型：{value}")
 
 
-def hermes_model_label(value: str) -> str:
-    key = normalize_hermes_model(value)
-    return HERMES_LLM_MODELS[key]["label"]
+def hermes_provider_api_mode(provider: str) -> str:
+    return HERMES_LLM_PROVIDERS[normalize_hermes_provider(provider)]["api_mode"]
 
 
-def hermes_config_model(value: str) -> str:
-    key = normalize_hermes_model(value)
-    return HERMES_LLM_MODELS[key]["config_model"]
+def hermes_provider_label(provider: str) -> str:
+    return HERMES_LLM_PROVIDERS[normalize_hermes_provider(provider)]["label"]
 
 
-def hermes_context_length(value: str) -> int:
-    key = normalize_hermes_model(value)
-    return int(HERMES_LLM_MODELS[key]["context_length"])
+def hermes_model_label(value: str, provider: str = None) -> str:
+    provider = normalize_hermes_provider(provider or _infer_provider(value))
+    key = normalize_hermes_model(value, provider)
+    return hermes_models_for_provider(provider)[key]["label"]
+
+
+def hermes_display_label(value: str, provider: str = None) -> str:
+    """Card/UI label with platform prefix."""
+    provider = normalize_hermes_provider(provider or _infer_provider(value))
+    return f"{hermes_provider_label(provider)} · {hermes_model_label(value, provider)}"
+
+
+def _infer_provider(model_value: str) -> str:
+    raw = (model_value or "").strip().lower().replace("_", "-")
+    if raw in TIMIAI_LLM_MODELS or raw in _TIMIAI_ALIASES:
+        return "timiai"
+    return DEFAULT_HERMES_LLM_PROVIDER
+
+
+def hermes_config_model(value: str, provider: str = None) -> str:
+    provider = normalize_hermes_provider(provider or _infer_provider(value))
+    key = normalize_hermes_model(value, provider)
+    return hermes_models_for_provider(provider)[key]["config_model"]
+
+
+def hermes_context_length(value: str, provider: str = None) -> int:
+    provider = normalize_hermes_provider(provider or _infer_provider(value))
+    key = normalize_hermes_model(value, provider)
+    return int(hermes_models_for_provider(provider)[key]["context_length"])
+
+
+def hermes_vision_config(provider: str) -> dict:
+    provider = normalize_hermes_provider(provider)
+    return dict(HERMES_VISION_DEFAULTS[provider])

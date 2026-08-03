@@ -1,10 +1,20 @@
 import os
 import uuid
 from datetime import datetime
-from flask import request, jsonify, current_app, send_from_directory
+from urllib.parse import quote
+from flask import (Response, request, jsonify, current_app,
+                   send_from_directory)
 from app import db
-from app.models import KnowledgeEntry, KnowledgeDistribution, Topic
+from app.models import (KnowledgeEntry, KnowledgeDistribution,
+                        KnowledgeFavorite, OpenClawInstance, Topic)
 from app.api import api_bp
+from app.services.knowledge_sharing import (
+    can_manage_knowledge_share,
+    knowledge_favorite_owner,
+    knowledge_markdown,
+    knowledge_markdown_filename,
+    public_knowledge_payload,
+)
 
 
 def _get_current_user():
@@ -22,6 +32,96 @@ def _get_current_openclaw():
     """
     from app.api.auth_utils import get_current_claw
     return get_current_claw()
+
+
+def _favorite_owner():
+    return knowledge_favorite_owner(
+        _get_current_user(),
+        _get_current_openclaw(),
+    )
+
+
+def _favorite_filter(owner):
+    if owner['claw_id']:
+        return KnowledgeFavorite.claw_id == owner['claw_id']
+    return KnowledgeFavorite.user_id == owner['user_id']
+
+
+def _favorite_knowledge_ids(owner, entry_ids=None):
+    query = KnowledgeFavorite.query.filter(_favorite_filter(owner))
+    if entry_ids is not None:
+        ids = [int(item) for item in entry_ids]
+        if not ids:
+            return set()
+        query = query.filter(KnowledgeFavorite.knowledge_id.in_(ids))
+    return {row.knowledge_id for row in query.all()}
+
+
+def _entry_payload(entry, favorite_ids=None):
+    payload = entry.to_dict()
+    if favorite_ids is None:
+        try:
+            favorite_ids = _favorite_knowledge_ids(
+                _favorite_owner(), [entry.id])
+        except ValueError:
+            favorite_ids = set()
+    payload['is_favorite'] = entry.id in favorite_ids
+    payload['can_manage_share'] = _may_manage_share(entry)
+    if payload['can_manage_share'] and entry.is_shared and entry.share_token:
+        payload['share_token'] = entry.share_token
+        payload['share_url'] = f'/k/{entry.share_token}'
+    return payload
+
+
+def _owned_claw_ids(user, claw):
+    if claw is not None and getattr(claw, 'id', None):
+        return {int(claw.id)}
+    username = str(getattr(user, 'username', '') or '').strip()
+    if not username:
+        return set()
+    rows = (OpenClawInstance.query
+            .filter(OpenClawInstance.owner == username,
+                    OpenClawInstance.status != 'deleted')
+            .with_entities(OpenClawInstance.id)
+            .all())
+    return {int(row[0]) for row in rows}
+
+
+def _may_manage_share(entry):
+    user = _get_current_user()
+    claw = _get_current_openclaw()
+    return can_manage_knowledge_share(
+        entry,
+        user=user,
+        claw=claw,
+        owned_claw_ids=_owned_claw_ids(user, claw),
+    )
+
+
+def _shared_entry(token):
+    return KnowledgeEntry.query.filter_by(
+        share_token=token,
+        is_shared=True,
+    ).first()
+
+
+def _markdown_response(entry):
+    filename = knowledge_markdown_filename(entry.title)
+    response = Response(
+        knowledge_markdown(entry),
+        content_type='text/markdown; charset=utf-8',
+    )
+    response.headers['Content-Disposition'] = (
+        'attachment; filename="knowledge.md"; '
+        f"filename*=UTF-8''{quote(filename)}"
+    )
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
+
+
+# 「项目基本信息」特别标识：每个项目接入 Hub 的必备身份卡（TAPD/前后端仓库/分支/协作平台）。
+# 用保留 category 作为标识，无需 schema 迁移；拉列表 group_profile=1 时单独返回。
+PROJECT_PROFILE_CATEGORY = 'project_profile'
 
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
@@ -78,6 +178,21 @@ def list_knowledge():
     module = request.args.get('module')
     status = request.args.get('status')
     source_type = request.args.get('source_type')
+    favorite_only = request.args.get('favorite') in (
+        '1', 'true', 'True', 'yes')
+
+    try:
+        owner = _favorite_owner()
+    except ValueError:
+        owner = None
+
+    if favorite_only:
+        if owner is None:
+            return jsonify({'error': '收藏筛选需要登录身份'}), 401
+        query = query.join(
+            KnowledgeFavorite,
+            KnowledgeFavorite.knowledge_id == KnowledgeEntry.id,
+        ).filter(_favorite_filter(owner))
 
     if scope:
         query = query.filter(KnowledgeEntry.scope == scope)
@@ -106,7 +221,46 @@ def list_knowledge():
     entries = query.order_by(
         KnowledgeEntry.created_at.desc()
     ).limit(200).all()
-    return jsonify([e.to_dict() for e in entries])
+    favorite_ids = (
+        _favorite_knowledge_ids(owner, [entry.id for entry in entries])
+        if owner else set()
+    )
+
+    # 「项目基本信息」特别标识（category=project_profile）：
+    # 当 group_profile=1（Agent 拉知识库列表推荐带上）时，把当前项目的基本信息条目
+    # 单独返回，其余走汇总列表。缺失该条目 = 该项目尚未完成接入的必备第一步。
+    group_profile = request.args.get('group_profile') in ('1', 'true', 'True', 'yes')
+    if group_profile:
+        target_project = project
+        if not target_project:
+            caller_claw = _get_current_openclaw()
+            if caller_claw and getattr(caller_claw, 'project_name', None):
+                target_project = caller_claw.project_name
+        profile = None
+        if target_project:
+            profile = KnowledgeEntry.query.filter(
+                KnowledgeEntry.category == PROJECT_PROFILE_CATEGORY,
+                KnowledgeEntry.project_name == target_project,
+                KnowledgeEntry.status == 'approved',
+            ).order_by(KnowledgeEntry.updated_at.desc()).first()
+        if profile and favorite_only and profile.id not in favorite_ids:
+            profile = None
+        profile_id = profile.id if profile else None
+        others = [
+            _entry_payload(e, favorite_ids)
+            for e in entries if e.id != profile_id
+        ]
+        return jsonify({
+            'project_profile': (
+                _entry_payload(profile, favorite_ids) if profile else None
+            ),
+            'has_project_profile': profile is not None,
+            'target_project': target_project,
+            'entries': others,
+            'count': len(others),
+        })
+
+    return jsonify([_entry_payload(e, favorite_ids) for e in entries])
 
 
 @api_bp.route('/knowledge', methods=['POST'])
@@ -243,8 +397,114 @@ def batch_import_knowledge():
 @api_bp.route('/knowledge/<int:entry_id>', methods=['GET'])
 def get_knowledge(entry_id):
     """获取单条知识详情"""
-    entry = KnowledgeEntry.query.get_or_404(entry_id)
-    return jsonify(entry.to_dict())
+    entry = db.get_or_404(KnowledgeEntry, entry_id)
+    return jsonify(_entry_payload(entry))
+
+
+@api_bp.route('/knowledge/shared/<token>', methods=['GET'])
+def get_shared_knowledge(token):
+    """匿名读取显式分享的知识条目。"""
+    entry = _shared_entry(token)
+    if entry is None:
+        return jsonify({'error': '分享链接不存在或已失效'}), 404
+    return jsonify(public_knowledge_payload(entry))
+
+
+@api_bp.route('/knowledge/shared/<token>/export.md', methods=['GET'])
+def export_shared_knowledge(token):
+    """匿名下载显式分享知识的 Markdown 文件。"""
+    entry = _shared_entry(token)
+    if entry is None:
+        return jsonify({'error': '分享链接不存在或已失效'}), 404
+    return _markdown_response(entry)
+
+
+@api_bp.route('/knowledge/<int:entry_id>/export.md', methods=['GET'])
+def export_knowledge(entry_id):
+    """下载单条知识的 Markdown 文件。"""
+    return _markdown_response(db.get_or_404(KnowledgeEntry, entry_id))
+
+
+@api_bp.route('/knowledge/<int:entry_id>/favorite', methods=['POST'])
+def favorite_knowledge(entry_id):
+    """收藏知识；重复调用保持幂等。"""
+    db.get_or_404(KnowledgeEntry, entry_id)
+    try:
+        owner = _favorite_owner()
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 401
+    favorite = KnowledgeFavorite.query.filter_by(
+        knowledge_id=entry_id,
+        **owner,
+    ).first()
+    if favorite is not None:
+        return jsonify({
+            'message': '已收藏',
+            'knowledge_id': entry_id,
+            'is_favorite': True,
+        })
+    db.session.add(KnowledgeFavorite(
+        knowledge_id=entry_id,
+        **owner,
+    ))
+    db.session.commit()
+    return jsonify({
+        'message': '收藏成功',
+        'knowledge_id': entry_id,
+        'is_favorite': True,
+    }), 201
+
+
+@api_bp.route('/knowledge/<int:entry_id>/favorite', methods=['DELETE'])
+def unfavorite_knowledge(entry_id):
+    """取消当前用户或 Agent 对知识的收藏。"""
+    db.get_or_404(KnowledgeEntry, entry_id)
+    try:
+        owner = _favorite_owner()
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 401
+    KnowledgeFavorite.query.filter_by(
+        knowledge_id=entry_id,
+        **owner,
+    ).delete(synchronize_session=False)
+    db.session.commit()
+    return jsonify({
+        'message': '已取消收藏',
+        'knowledge_id': entry_id,
+        'is_favorite': False,
+    })
+
+
+@api_bp.route('/knowledge/<int:entry_id>/share', methods=['POST'])
+def share_knowledge(entry_id):
+    """启用或刷新匿名分享链接。"""
+    entry = db.get_or_404(KnowledgeEntry, entry_id)
+    if not _may_manage_share(entry):
+        return jsonify({'error': '仅创建者、Agent owner 或管理员可管理分享'}), 403
+    refresh = request.args.get('refresh') in ('1', 'true', 'True', 'yes')
+    token = entry.enable_share(refresh=refresh)
+    db.session.commit()
+    return jsonify({
+        'message': '分享链接已刷新' if refresh else '分享链接已启用',
+        'is_shared': True,
+        'share_token': token,
+        'share_url': f'/k/{token}',
+        'export_url': f'/api/v1/knowledge/shared/{token}/export.md',
+    })
+
+
+@api_bp.route('/knowledge/<int:entry_id>/share', methods=['DELETE'])
+def unshare_knowledge(entry_id):
+    """撤销匿名分享并使旧 token 立即失效。"""
+    entry = db.get_or_404(KnowledgeEntry, entry_id)
+    if not _may_manage_share(entry):
+        return jsonify({'error': '仅创建者、Agent owner 或管理员可管理分享'}), 403
+    entry.revoke_share()
+    db.session.commit()
+    return jsonify({
+        'message': '分享链接已撤销',
+        'is_shared': False,
+    })
 
 
 @api_bp.route('/knowledge/<int:entry_id>', methods=['PUT'])
@@ -419,6 +679,7 @@ def delete_knowledge(entry_id):
         {'review_knowledge_id': None})
     # Delete associated distribution records
     KnowledgeDistribution.query.filter_by(knowledge_id=entry_id).delete()
+    KnowledgeFavorite.query.filter_by(knowledge_id=entry_id).delete()
     db.session.delete(entry)
     db.session.commit()
     return jsonify({'message': '已删除'})

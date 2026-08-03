@@ -1,0 +1,361 @@
+{% extends "base.html" %}
+{% block title %}考试 - 考试中心{% endblock %}
+{% block page_title %}考试{% endblock %}
+{% block nav_exams %}active{% endblock %}
+
+{% block top_actions %}
+<button class="btn" onclick="window.location.href='/exams'">← 返回考试中心</button>
+{% endblock %}
+
+{% block head %}
+<style>
+.session-meta { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:18px; margin-bottom:16px; display:flex; flex-wrap:wrap; gap:18px; }
+.session-meta div strong { color:#111827; }
+.timer-bar { background:#fef3c7; border:1px solid #f59e0b; padding:12px 16px; border-radius:8px; margin-bottom:16px; font-weight:600; color:#92400e; display:flex; justify-content:space-between; }
+.timer-expired { background:#fee2e2; border-color:#ef4444; color:#991b1b; }
+
+.q-block { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:20px; margin-bottom:14px; }
+.q-num { font-size:0.9rem; color:#6b7280; margin-bottom:6px; }
+.q-title { font-size:1.05rem; font-weight:600; margin-bottom:10px; }
+.q-desc { color:#4b5563; margin-bottom:12px; white-space:pre-wrap; }
+.q-options label { display:flex; gap:10px; padding:8px 12px; border:1px solid #e5e7eb; border-radius:6px; margin-bottom:6px; cursor:pointer; }
+.q-options label:hover { background:#f9fafb; }
+.q-options label.selected { background:#dbeafe; border-color:#3b82f6; }
+.q-options input { margin-top:3px; }
+textarea.essay { width:100%; min-height:160px; padding:10px 12px; border:1px solid #e5e7eb; border-radius:6px; resize:vertical; font-family:inherit; }
+.fill-input { width:100%; padding:8px 12px; border:1px solid #e5e7eb; border-radius:6px; }
+
+.submit-bar { position:sticky; bottom:0; background:#fff; padding:16px; border-top:1px solid #e5e7eb; margin-top:20px; display:flex; justify-content:space-between; align-items:center; }
+.save-status { font-size:0.85rem; color:#6b7280; }
+.save-status.saving { color:#3b82f6; }
+.save-status.saved { color:#10b981; }
+
+/* 结果页 */
+.result-summary { background:linear-gradient(135deg,#dbeafe,#ede9fe); border-radius:10px; padding:24px; margin-bottom:20px; }
+.result-score { font-size:2.4rem; font-weight:700; color:#1e40af; }
+.result-passed { font-size:1.1rem; margin-top:6px; }
+.result-passed.yes { color:#166534; }
+.result-passed.no { color:#991b1b; }
+.q-result { border-left:4px solid #e5e7eb; padding-left:12px; margin-top:8px; }
+.q-result.correct { border-left-color:#10b981; }
+.q-result.partial { border-left-color:#f59e0b; }
+.q-result.wrong { border-left-color:#ef4444; }
+.q-result.pending { border-left-color:#6366f1; }
+.user-answer { background:#f9fafb; padding:8px 12px; border-radius:6px; margin-top:6px; font-size:0.9rem; }
+.std-answer { background:#dcfce7; padding:8px 12px; border-radius:6px; margin-top:6px; font-size:0.9rem; }
+.peer-review-box { background:#eff6ff; border:1px solid #93c5fd; border-radius:6px; padding:10px 14px; margin-top:6px; font-size:0.88rem; }
+.peer-input { display:flex; gap:8px; align-items:center; margin-top:8px; }
+.peer-input input[type=number] { width:80px; padding:5px 8px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="session-meta" id="session-meta"></div>
+<div id="timer-area"></div>
+
+<div id="result-area" style="display:none"></div>
+
+<div id="answer-area"></div>
+
+<div class="submit-bar" id="submit-bar" style="display:none">
+    <div class="save-status" id="save-status">已自动保存</div>
+    <button class="btn btn-primary" onclick="confirmSubmit()" id="btn-submit">交卷</button>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const SESSION_ID = {{ session_id }};
+let sess = null;
+let paper = null;
+let questions = [];
+let answersMap = {};
+let timerInterval = null;
+let saveTimer = null;
+let currentUser = null;
+
+(async function init() {
+    try {
+        currentUser = await API.get('/auth/me');
+    } catch(e){}
+    await loadSession();
+    if (sess.status === 'in_progress') {
+        renderAnswerMode();
+        startTimer();
+    } else {
+        renderResultMode();
+    }
+})();
+
+async function loadSession() {
+    try {
+        const data = await API.get('/exams/sessions/' + SESSION_ID);
+        sess = data;
+        paper = data.paper;
+        questions = (paper && paper.questions) || [];
+        // 答案 map
+        answersMap = {};
+        (data.answers || []).forEach(a => { answersMap[a.question_id] = a; });
+        renderMeta();
+    } catch(e) {
+        document.getElementById('session-meta').innerHTML = '<div style="color:#ef4444">加载失败：' + (e?.message||e) + '</div>';
+        throw e;
+    }
+}
+
+function renderMeta() {
+    const statusLabel = {in_progress:'进行中',submitted:'已交卷',grading:'判分中',completed:'已完成',expired:'已超时'};
+    document.getElementById('session-meta').innerHTML = `
+        <div><strong>试卷：</strong>${esc(sess.paper_name||'')}</div>
+        <div><strong>考生：</strong>${esc(sess.examinee_display||'')}</div>
+        <div><strong>状态：</strong>${statusLabel[sess.status]||sess.status}</div>
+        <div><strong>开始：</strong>${(sess.started_at||'').slice(0,16)}</div>
+        <div><strong>截止：</strong>${(sess.deadline_at||'').slice(0,16) || '不限时'}</div>
+        ${sess.submitted_at?`<div><strong>提交：</strong>${sess.submitted_at.slice(0,16)}</div>`:''}
+    `;
+}
+
+function startTimer() {
+    if (!sess.deadline_at) return;
+    const deadline = new Date(sess.deadline_at).getTime();
+    timerInterval = setInterval(() => {
+        const remain = deadline - Date.now();
+        const ta = document.getElementById('timer-area');
+        if (remain <= 0) {
+            ta.innerHTML = '<div class="timer-bar timer-expired">已超时，请立即交卷</div>';
+            clearInterval(timerInterval);
+            return;
+        }
+        const m = Math.floor(remain / 60000);
+        const s = Math.floor((remain % 60000) / 1000);
+        ta.innerHTML = `<div class="timer-bar"><span>剩余时间：${m}分${s}秒</span><span>${questions.length} 题</span></div>`;
+    }, 1000);
+}
+
+function renderAnswerMode() {
+    document.getElementById('submit-bar').style.display = '';
+    const area = document.getElementById('answer-area');
+    area.innerHTML = questions.map((q, idx) => {
+        const ansContent = answersMap[q.id]?.answer_content;
+        return `<div class="q-block" id="qb-${q.id}">
+            <div class="q-num">第 ${idx+1} 题 · ${q.points} 分 · ${typeLabel(q.type)}</div>
+            <div class="q-title">${esc(q.title)}</div>
+            ${q.description?`<div class="q-desc">${esc(q.description)}</div>`:''}
+            ${renderQuestionInput(q, ansContent)}
+        </div>`;
+    }).join('');
+    // 绑定保存
+    questions.forEach(q => bindAutoSave(q));
+}
+
+function typeLabel(t) {
+    return {single:'单选',multiple:'多选',judge:'判断',fill:'填空',essay:'简答',case_design:'用例编写',api_op:'API操作',scenario:'场景题'}[t] || t;
+}
+
+function renderQuestionInput(q, savedAnswer) {
+    const sa = parseAnswer(savedAnswer);
+    if (q.type === 'single') {
+        return '<div class="q-options">' + (q.options||[]).map(o => {
+            const sel = sa === o.key ? 'checked' : '';
+            return `<label data-q="${q.id}"><input type="radio" name="q-${q.id}" value="${o.key}" ${sel}> <strong>${o.key}.</strong> ${esc(o.text)}</label>`;
+        }).join('') + '</div>';
+    }
+    if (q.type === 'multiple') {
+        const sel = Array.isArray(sa) ? sa : [];
+        return '<div class="q-options">' + (q.options||[]).map(o => {
+            const checked = sel.includes(o.key) ? 'checked' : '';
+            return `<label data-q="${q.id}"><input type="checkbox" name="q-${q.id}" value="${o.key}" ${checked}> <strong>${o.key}.</strong> ${esc(o.text)}</label>`;
+        }).join('') + '</div>';
+    }
+    if (q.type === 'judge') {
+        return `<div class="q-options">
+            <label data-q="${q.id}"><input type="radio" name="q-${q.id}" value="true" ${sa===true?'checked':''}> 对</label>
+            <label data-q="${q.id}"><input type="radio" name="q-${q.id}" value="false" ${sa===false?'checked':''}> 错</label>
+        </div>`;
+    }
+    if (q.type === 'fill') {
+        return `<input class="fill-input" data-q="${q.id}" value="${esc(sa||'')}" placeholder="请填写答案">`;
+    }
+    return `<textarea class="essay" data-q="${q.id}" placeholder="请详细作答（支持 markdown）">${esc(sa||savedAnswer||'')}</textarea>`;
+}
+
+function parseAnswer(s) {
+    if (s === undefined || s === null || s === '') return null;
+    try { return JSON.parse(s); } catch(e) { return s; }
+}
+
+function bindAutoSave(q) {
+    const block = document.getElementById('qb-' + q.id);
+    if (!block) return;
+    const handler = () => scheduleSave(q);
+    block.querySelectorAll('input, textarea').forEach(el => {
+        el.addEventListener('change', handler);
+        if (el.tagName === 'TEXTAREA' || el.type === 'text') el.addEventListener('input', handler);
+    });
+}
+
+function scheduleSave(q) {
+    const status = document.getElementById('save-status');
+    status.className = 'save-status saving';
+    status.textContent = '保存中...';
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => saveAnswer(q), 600);
+}
+
+async function saveAnswer(q) {
+    const block = document.getElementById('qb-' + q.id);
+    if (!block) return;
+    let content;
+    if (q.type === 'single' || q.type === 'judge') {
+        const r = block.querySelector('input:checked');
+        content = r ? r.value : '';
+        if (q.type === 'judge') content = (content === 'true');
+    } else if (q.type === 'multiple') {
+        content = Array.from(block.querySelectorAll('input:checked')).map(i => i.value);
+    } else if (q.type === 'fill') {
+        content = block.querySelector('input').value;
+    } else {
+        content = block.querySelector('textarea').value;
+    }
+    try {
+        await API.post('/exams/sessions/' + SESSION_ID + '/answer', {
+            question_id: q.id, answer_content: content,
+        });
+        const status = document.getElementById('save-status');
+        status.className = 'save-status saved';
+        status.textContent = '已自动保存 · ' + new Date().toLocaleTimeString();
+    } catch(e) {
+        const status = document.getElementById('save-status');
+        status.className = 'save-status';
+        status.style.color = '#ef4444';
+        status.textContent = '保存失败：' + (e?.message||e);
+    }
+}
+
+async function confirmSubmit() {
+    if (!confirm('确认交卷？交卷后无法修改答案')) return;
+    try {
+        await API.post('/exams/sessions/' + SESSION_ID + '/submit', {});
+        alert('交卷成功');
+        window.location.reload();
+    } catch(e) {
+        alert('交卷失败：' + (e?.message||e));
+    }
+}
+
+// ===== 结果模式 =====
+
+function renderResultMode() {
+    document.getElementById('submit-bar').style.display = 'none';
+    document.getElementById('timer-area').innerHTML = '';
+    const isAdmin = currentUser && currentUser.role === 'super_admin';
+    const isExaminee = isMyExam();
+
+    document.getElementById('result-area').style.display = '';
+    document.getElementById('result-area').innerHTML = `<div class="result-summary">
+        <div style="font-size:0.9rem;color:#1e3a8a;margin-bottom:4px">最终得分</div>
+        <div class="result-score">${sess.total_score} / ${paper?paper.total_score:''}</div>
+        <div class="result-passed ${sess.passed?'yes':'no'}">${sess.passed?'✓ 通过':'✗ 未通过'}（及格分 ${paper?paper.pass_score:''}）</div>
+        <div style="margin-top:10px;color:#374151;font-size:0.9rem">
+            客观题 ${sess.auto_score} 分 · 主观题 ${sess.manual_score} 分 · 状态：${sess.status}
+        </div>
+    </div>`;
+
+    const area = document.getElementById('answer-area');
+    area.innerHTML = questions.map((q, idx) => {
+        const a = answersMap[q.id];
+        const ansContent = a?.answer_content;
+        const sa = parseAnswer(ansContent);
+        const final = a?.final_score ?? 0;
+        const auto = a?.auto_score;
+        let cssState = 'pending';
+        if (auto !== null && auto !== undefined) {
+            if (auto >= q.points) cssState = 'correct';
+            else if (auto > 0) cssState = 'partial';
+            else cssState = 'wrong';
+        } else if (a?.peer_scores && a.peer_scores.length > 0) {
+            cssState = 'partial';
+        }
+
+        const userAnsHtml = ansContent ? `<div class="user-answer"><strong>你的答案：</strong>${esc(formatAnswer(sa, q))}</div>` : '<div class="user-answer" style="color:#9ca3af">未作答</div>';
+
+        // 标准答案 / 评分细则（仅 admin 或已完成）
+        const showAnswer = isAdmin || sess.status === 'completed';
+        let stdHtml = '';
+        if (showAnswer && q.standard_answer !== undefined) {
+            const std = formatAnswer(q.standard_answer, q);
+            if (std) stdHtml = `<div class="std-answer"><strong>参考答案：</strong>${esc(std)}</div>`;
+        }
+        if (showAnswer && q.grading_criteria) {
+            stdHtml += `<div class="std-answer" style="background:#dbeafe"><strong>评分细则：</strong>${esc(q.grading_criteria)}</div>`;
+        }
+
+        // peer scores
+        let peerHtml = '';
+        if (a?.peer_scores && a.peer_scores.length > 0) {
+            peerHtml = a.peer_scores.map(p => `<div class="peer-review-box">
+                <strong>${esc(p.reviewer_display||'')}</strong> 评分：<strong>${p.score}</strong> 分
+                ${p.comment?`<div style="margin-top:4px;color:#374151">${esc(p.comment)}</div>`:''}
+            </div>`).join('');
+        }
+
+        // 评分输入框（如果当前用户不是考生本人，且题型是主观题）
+        let peerInputHtml = '';
+        const isSubjective = ['essay','case_design','scenario','api_op'].includes(q.type);
+        if (isSubjective && !isExaminee && (sess.status === 'grading' || sess.status === 'completed' || isAdmin)) {
+            peerInputHtml = `<div class="peer-input">
+                <span>我的评分：</span>
+                <input type="number" id="peer-score-${a.id}" min="0" max="${q.points}" placeholder="0~${q.points}">
+                <input type="text" id="peer-comment-${a.id}" placeholder="评语（可选）" style="flex:1">
+                <button class="btn btn-primary" style="font-size:0.85rem;padding:4px 12px" onclick="submitPeerScore(${a.id}, ${q.points})">提交评分</button>
+            </div>`;
+        }
+
+        return `<div class="q-block">
+            <div class="q-num">第 ${idx+1} 题 · ${q.points} 分 · ${typeLabel(q.type)} · 得分：<strong>${final}</strong></div>
+            <div class="q-title">${esc(q.title)}</div>
+            ${q.description?`<div class="q-desc">${esc(q.description)}</div>`:''}
+            ${(q.options||[]).length>0?`<div style="color:#6b7280;font-size:0.88rem;margin-bottom:6px">${(q.options||[]).map(o=>`${o.key}. ${esc(o.text)}`).join(' &nbsp; ')}</div>`:''}
+            <div class="q-result ${cssState}">
+                ${userAnsHtml}
+                ${stdHtml}
+                ${peerHtml}
+                ${peerInputHtml}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function isMyExam() {
+    if (!currentUser || !sess) return false;
+    if (sess.examinee_user_id && currentUser.id === sess.examinee_user_id) return true;
+    if (sess.examinee_claw_id && currentUser.bound_claw_id === sess.examinee_claw_id) return true;
+    return false;
+}
+
+function formatAnswer(a, q) {
+    if (a === null || a === undefined || a === '') return '';
+    if (Array.isArray(a)) return a.join(', ');
+    if (typeof a === 'boolean') return a ? '对' : '错';
+    return String(a);
+}
+
+async function submitPeerScore(answerId, maxPoints) {
+    const score = parseInt(document.getElementById('peer-score-' + answerId).value);
+    const comment = document.getElementById('peer-comment-' + answerId).value;
+    if (isNaN(score) || score < 0 || score > maxPoints) {
+        alert(`分数必须在 0~${maxPoints} 之间`);
+        return;
+    }
+    try {
+        await API.post('/exams/answers/' + answerId + '/peer-score', { score, comment });
+        await loadSession();
+        renderResultMode();
+    } catch(e) {
+        alert('提交失败：' + (e?.message||e));
+    }
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+</script>
+{% endblock %}

@@ -1,0 +1,252 @@
+[
+  {
+    "id": "pitfall-hub-api-prefix-001",
+    "title": "Hub API 路径前缀不统一",
+    "project": "RacingGO",
+    "module": "hub",
+    "type": "api",
+    "symptom": "不同 Agent 调 Hub API 时使用不同路径前缀，导致接口 404 或路由不匹配。",
+    "root_cause": "SSE/消息接口无 /v1 前缀，日报/配置/heartbeat 等有 /v1；缺少项目级路径规范。",
+    "solution": "任务开始前确认接口类别：openclaws 消息/SSE 用 /api/openclaws/，其余多数用 /api/v1/；调用前输出最终 URL。",
+    "verified_steps": [
+      "匹配关键词 Hub API 或 openclaws。",
+      "区分消息类（无 v1）与配置/日报类（有 v1）。",
+      "接口调用前输出完整 URL 并核对 404 时是否前缀错误。"
+    ],
+    "related_tools": ["hub"],
+    "keywords": ["Hub", "API", "路径", "前缀", "404", "openclaws", "v1"],
+    "status": "active",
+    "owner": "大赫",
+    "created_at": "2026-06-07",
+    "updated_at": "2026-06-07",
+    "evidence": {
+      "discussion_url": "https://clawteam.woa.com:18800/topics/36",
+      "source": "agent discussion"
+    }
+  },
+  {
+    "id": "pitfall-tapd-screenshot-504-001",
+    "title": "TAPD 截图上传容器内直接调用 OSS 会 504",
+    "project": "RacingGO",
+    "module": "tapd",
+    "type": "tapd",
+    "symptom": "容器内直接调 oss.apiv2.tapd.woa.com 上传截图超时返回 504。",
+    "root_cause": "容器网络到 TAPD OSS 网关不稳定，需走本地脚本绕过。",
+    "solution": "使用本地脚本 tapd_screenshot.py 或 tapd-toolkit 的 upload_bug_image，不要直接调 OSS 域名。",
+    "verified_steps": [
+      "截图生成后调用 tapd_screenshot.py --bug-id <id> --image-path <path>。",
+      "期望 HTTP 200 且返回 url 字段。",
+      "若 504，检查是否误调 oss.apiv2.tapd.woa.com。"
+    ],
+    "related_tools": ["tapd", "tapd-toolkit"],
+    "keywords": ["TAPD", "截图", "504", "OSS", "上传", "图片"],
+    "status": "active",
+    "owner": "condibot",
+    "created_at": "2026-06-07",
+    "updated_at": "2026-06-07",
+    "evidence": {
+      "discussion_url": "https://clawteam.woa.com:18800/topics/36",
+      "source": "agent discussion"
+    }
+  },
+  {
+    "id": "pitfall-hub-json-parse-001",
+    "title": "Hub API 响应 JSON 含未转义控制字符",
+    "project": "RacingGO",
+    "module": "hub",
+    "type": "api",
+    "symptom": "curl 管道 json.loads 解析 Hub 响应崩溃，报 JSONDecodeError。",
+    "root_cause": "Hub 响应体偶尔混入未转义控制字符，严格 JSON 解析失败。",
+    "solution": "使用 urllib 读取 + decode(errors='replace') + json.loads(strict=False) 解析；或修复 Hub 端响应序列化。",
+    "verified_steps": [
+      "curl Hub /api/v1/topics 等接口获取响应。",
+      "用 strict=False 解析，确认不再抛 JSONDecodeError。",
+      "记录 workaround 有效期，Hub 修复后改 status 为 fixed。"
+    ],
+    "related_tools": ["hub"],
+    "keywords": ["Hub", "JSON", "解析", "控制字符", "json.loads"],
+    "status": "workaround",
+    "owner": "艾维",
+    "created_at": "2026-06-07",
+    "updated_at": "2026-06-07",
+    "evidence": {
+      "discussion_url": "https://clawteam.woa.com:18800/topics/36",
+      "source": "agent discussion"
+    }
+  },
+  {
+    "id": "pitfall-hub-secrets-update-001",
+    "title": "Hub Secrets POST 更新 share_scope 不持久化",
+    "project": "RacingGO",
+    "module": "hub",
+    "type": "api",
+    "symptom": "POST /api/v1/secrets 更新已有密钥时 share_scope 和 share_project_id 返回 200 但不写入。",
+    "root_cause": "Hub Secrets 更新接口未持久化部分字段，属已知 Bug。",
+    "solution": "先 DELETE 旧密钥，再 POST 一次性带齐所有字段创建新记录。",
+    "verified_steps": [
+      "DELETE /api/v1/secrets/{id} 删除旧记录。",
+      "POST /api/v1/secrets 带齐 name、value、share_scope、share_project_id。",
+      "GET 列表确认 share_scope 已正确持久化。"
+    ],
+    "related_tools": ["hub", "secrets"],
+    "keywords": ["Hub", "Secrets", "share_scope", "假成功", "更新"],
+    "status": "workaround",
+    "owner": "小赫",
+    "created_at": "2026-06-07",
+    "updated_at": "2026-06-07",
+    "evidence": {
+      "discussion_url": "https://clawteam.woa.com:18800/topics/36",
+      "source": "agent discussion"
+    }
+  },
+  {
+    "id": "pitfall-wecom-image-send-001",
+    "title": "WeCom 汇总报告不能只发图片链接",
+    "project": "RacingGO",
+    "module": "wecom",
+    "type": "wecom",
+    "symptom": "Agent 最终汇总报告只发文字，图片给链接，反复查历史后才重新发出图片。",
+    "root_cause": "图片没有进入结构化资产台账，缺少发送所需的 local_path 或 media_id。",
+    "solution": "生成和发送图片后写入 asset registry；汇总时按 asset_id 重新上传或复用 media_id。",
+    "verified_steps": [
+      "生成图片后记录 asset_id、local_path、wecom_media_id、wecom_msg_id。",
+      "汇总报告时先查任务资产台账。",
+      "不可复用 media_id 时从 local_path 重新上传后发送。"
+    ],
+    "related_tools": ["wecom", "artifact_registry"],
+    "keywords": ["企业微信", "WeCom", "图片", "链接", "media_id", "汇总"],
+    "status": "active",
+    "owner": "小峰",
+    "created_at": "2026-06-07",
+    "updated_at": "2026-06-07",
+    "evidence": {
+      "discussion_url": "https://clawteam.woa.com:18800/topics/36",
+      "source": "agent discussion"
+    }
+  },
+  {
+    "id": "pitfall-wecom-websocket-001",
+    "title": "WeCom WebSocket 连接格式与响应判断",
+    "project": "RacingGO",
+    "module": "wecom",
+    "type": "wecom",
+    "symptom": "WeCom 消息发送失败或 Gateway 报 WebSocket code=1006；连接路径或成功判断写错。",
+    "root_cause": "WebSocket 地址为 wss://openws.work.weixin.qq.com（无 /ws）；成功用 errcode=0 而非 headers.status；消息体为嵌套 JSON。",
+    "solution": "使用 send_wecom_notify.py 或固化脚本；路径无 /ws 后缀；用 errcode 判成功；1006 多为重连间隙临时不可用，稍后重试。",
+    "verified_steps": [
+      "确认 WebSocket URL 为 wss://openws.work.weixin.qq.com。",
+      "发送后用 errcode=0 判断成功。",
+      "遇 code=1006 等待 Gateway 重连后重试，勿改代码。"
+    ],
+    "related_tools": ["wecom", "hermes-gateway"],
+    "keywords": ["企业微信", "WeCom", "WebSocket", "1006", "errcode", "Gateway"],
+    "status": "active",
+    "owner": "小赫",
+    "created_at": "2026-06-07",
+    "updated_at": "2026-06-07",
+    "evidence": {
+      "discussion_url": "https://clawteam.woa.com:18800/topics/36",
+      "source": "agent discussion"
+    }
+  },
+  {
+    "id": "pitfall-tapd-status-code-001",
+    "title": "TAPD 状态查询须传编码而非中文名",
+    "project": "RacingGO",
+    "module": "tapd",
+    "type": "tapd",
+    "symptom": "按中文状态名查询 TAPD 缺陷返回空结果，排查许久才发现参数错误。",
+    "root_cause": "TAPD API 状态过滤用 v_status 传编码列表（new,resolved 等），不同 workspace 编码不同。",
+    "solution": "查询前确认 workspace 状态映射表，v_status 传英文编码而非中文显示名。",
+    "verified_steps": [
+      "获取当前 workspace 状态映射（new→新 等）。",
+      "v_status 传 new,resolved,rejected 等编码。",
+      "返回非空结果确认参数正确。"
+    ],
+    "related_tools": ["tapd"],
+    "keywords": ["TAPD", "状态", "v_status", "编码", "查询", "空结果"],
+    "status": "active",
+    "owner": "艾维",
+    "created_at": "2026-06-07",
+    "updated_at": "2026-06-07",
+    "evidence": {
+      "discussion_url": "https://clawteam.woa.com:18800/topics/36",
+      "source": "agent discussion"
+    }
+  },
+  {
+    "id": "pitfall-trpc-cli-lfs-001",
+    "title": "trpc-cli 是 git-lfs 指针未拉取实体",
+    "project": "RacingGO",
+    "module": "deployment",
+    "type": "deployment",
+    "symptom": "拉代码后 trpc-cli 是指针文件，直接执行失败。",
+    "root_cause": "trpc-cli 通过 git-lfs 管理，clone 后未执行 git lfs pull。",
+    "solution": "进入仓库后执行 git lfs pull，确认 trpc-cli 为可执行二进制而非指针文本。",
+    "verified_steps": [
+      "git lfs install && git lfs pull。",
+      "file trpc-cli 确认为 ELF 或可执行文件。",
+      "执行 trpc-cli --version 成功。"
+    ],
+    "related_tools": ["git", "git-lfs"],
+    "keywords": ["trpc-cli", "git-lfs", "指针", "拉代码", "部署"],
+    "status": "active",
+    "owner": "condibot",
+    "created_at": "2026-06-07",
+    "updated_at": "2026-06-07",
+    "evidence": {
+      "discussion_url": "https://clawteam.woa.com:18800/topics/36",
+      "source": "agent discussion"
+    }
+  },
+  {
+    "id": "pitfall-hub-module-path-001",
+    "title": "用例库 module_path 曾被 Hub 忽略",
+    "project": "RacingGO",
+    "module": "hub",
+    "type": "hub",
+    "symptom": "批量创建用例时 Hub 忽略 module_path 字段，用例落到错误模块。",
+    "root_cause": "早期 Hub 用例创建接口未处理 module_path；后续已修复。",
+    "solution": "创建用例时仍传 module_path；若落位错误，查本条 status=fixed 确认是否 Hub 版本已升级。",
+    "verified_steps": [
+      "POST 用例时带 module_path 字段。",
+      "GET 用例确认 module_path 与预期一致。",
+      "不一致时检查 Hub 版本或改用 PUT 更新路径。"
+    ],
+    "related_tools": ["hub", "testcase"],
+    "keywords": ["Hub", "用例库", "module_path", "批量创建"],
+    "status": "fixed",
+    "owner": "小赫",
+    "created_at": "2026-06-07",
+    "updated_at": "2026-06-07",
+    "evidence": {
+      "discussion_url": "https://clawteam.woa.com:18800/topics/36",
+      "source": "agent discussion"
+    }
+  },
+  {
+    "id": "pitfall-racinggo-5dim-requirement-001",
+    "title": "RacingGO 改装需求为 5 维而非 iWiki 4 维",
+    "project": "RacingGO",
+    "module": "requirement",
+    "type": "pitfall",
+    "symptom": "按 iWiki 4 维定义分析游戏 UI，结论与实机 5 维不一致。",
+    "root_cause": "RacingGO 游戏 UI 实际 5 维，iWiki 文档写 4 维，以实机为准。",
+    "solution": "需求分析时以游戏实机 UI 维度为准，不盲信 iWiki 维度数；记录 5 维映射表。",
+    "verified_steps": [
+      "打开游戏改装 UI 数实际维度数。",
+      "与 iWiki 定义对比，以实机为准写验收点。",
+      "更新项目知识库标注 5 维约定。"
+    ],
+    "related_tools": ["requirement", "iwiki"],
+    "keywords": ["RacingGO", "需求", "5维", "iWiki", "改装", "维度"],
+    "status": "active",
+    "owner": "艾维",
+    "created_at": "2026-06-07",
+    "updated_at": "2026-06-07",
+    "evidence": {
+      "discussion_url": "https://clawteam.woa.com:18800/topics/36",
+      "source": "agent discussion"
+    }
+  }
+]

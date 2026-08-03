@@ -36,6 +36,7 @@ import json
 import os
 import queue
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -44,7 +45,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-SIDECAR_VERSION = '2.0.1'
+SIDECAR_VERSION = '2.5.0'
 
 HUB_URL = os.getenv('HUB_URL', '').rstrip('/')
 CLAW_ID = os.getenv('CLAW_ID', '').strip()
@@ -55,6 +56,10 @@ TODO_LOOP_SEC = int(os.getenv('TODO_LOOP_SEC', '120'))
 CONFIG_REFRESH_SEC = int(os.getenv('CONFIG_REFRESH_SEC', '60'))
 TODO_RETRY_SEC = int(os.getenv('TODO_RETRY_SEC', '3600'))
 TODO_SUCCESS_COOLDOWN_SEC = int(os.getenv('TODO_SUCCESS_COOLDOWN_SEC', '300'))
+WORKFLOW_HEARTBEAT_SEC = int(os.getenv('WORKFLOW_HEARTBEAT_SEC', '30'))
+TODO_WORKER_ENABLED = os.getenv('TODO_WORKER_ENABLED', 'true').lower() not in (
+    '0', 'false', 'no', 'off'
+)
 
 _stop_event = threading.Event()
 _config = {}
@@ -99,6 +104,137 @@ def http(method, path, body=None, timeout=30, query=None):
         return 0, {'error': f'{type(e).__name__}: {e}'}
 
 
+# ===================== Hub 能力索引（Rule #19 速查注入） =====================
+
+def capability_digest_lines():
+    """把 Hub 下发的能力索引摘要渲染成 prompt 行（每次回复/执行前必读）。
+
+    digest 随 /sidecar-config 每 60s 刷新一起下发；Hub 未提供时返回空，不影响旧行为。
+    """
+    digest = get_cfg('hub_capability_digest', '') or ''
+    digest = digest.strip()
+    if not digest:
+        return []
+    return [
+        '=== Hub 能力索引（Rule #19 速查，动手/回复前必读）===',
+        digest,
+        '=== 能力索引结束 ===',
+    ]
+
+
+def memo_index_lines():
+    """把 Hub 下发的笔记索引渲染成 prompt 行（三层记忆·记全层）。
+
+    memo_index 随 /sidecar-config 下发，含当前任务上下文(taskctx)与常驻决策(decision)。
+    只给"索引"（标题+摘要+id），需要全文时用 GET {HUB}/api/v1/memos/memo/{id} 取。
+    跨 session 保留：上下文压缩 / 每日会话重置后，仍会随下一次注入回到 prompt。
+    """
+    items = get_cfg('memo_index', []) or []
+    if not isinstance(items, list) or not items:
+        return []
+    taskctx = [it for it in items if it.get('kind') == 'taskctx']
+    decision = [it for it in items if it.get('kind') == 'decision']
+
+    def _fmt(it):
+        title = (it.get('title') or '').strip()
+        summary = (it.get('summary') or '').strip()
+        mid = it.get('id') or ''
+        tail = f'：{summary}' if summary and summary != title else ''
+        return f'- (id={mid}) {title}{tail}'
+
+    lines = [
+        f'=== 你的持久笔记索引（跨 session 保留；取全文：GET {HUB_URL}/api/v1/memos/memo/{{id}}）===',
+    ]
+    if taskctx:
+        lines.append('【当前任务上下文】')
+        lines.extend(_fmt(it) for it in taskctx)
+    if decision:
+        lines.append('【关键决策/配置】')
+        lines.extend(_fmt(it) for it in decision)
+    lines.append('=== 笔记索引结束（相关项请先取全文再作答，勿凭记忆臆测）===')
+    return lines
+
+
+def agent_profile_lines():
+    """Render Hub-managed agent profile into every LLM prompt."""
+    item = get_cfg('active_agent_profile') or {}
+    if not isinstance(item, dict):
+        return []
+    profile = item.get('profile') or {}
+    if not isinstance(profile, dict):
+        return []
+    lines = [
+        '=== Hub Agent 岗位说明书（必须遵守）===',
+        f"- 工位：{item.get('post_name') or item.get('post_key') or ''}",
+        f"- Profile：{profile.get('name') or profile.get('profile_key') or ''} v{profile.get('version') or 1}",
+    ]
+    system_prompt = (profile.get('system_prompt') or '').strip()
+    workflow_config = (profile.get('workflow_config') or '').strip()
+    required_skills = profile.get('required_skills') or []
+    if required_skills:
+        lines.append('- 必装/必读 Skills：' + ', '.join(str(x) for x in required_skills))
+    if system_prompt:
+        lines.extend(['', '岗位职责：', system_prompt])
+    if workflow_config:
+        lines.extend(['', '工作规范：', workflow_config])
+    lines.append('=== 岗位说明书结束 ===')
+    return lines
+
+
+# ===================== 任务上下文（记忆路由注入） =====================
+
+def fetch_task_context(ref_type, ref_id):
+    """拉取统一任务上下文包（required_skills / preflight / top_pitfalls / references）。
+
+    ref_type ∈ {'todo', 'agent_task', 'workflow_step'}。失败返回 {}。
+    """
+    if not ref_id:
+        return {}
+    try:
+        code, body = http('GET', f'/api/v1/tasks/{ref_type}/{ref_id}/context')
+        if code == 200 and isinstance(body, dict):
+            return body
+        log(f'[ctx] {ref_type}/{ref_id} code={code}')
+    except Exception as e:
+        log(f'[ctx] 拉取 {ref_type}/{ref_id} 异常: {e}')
+    return {}
+
+
+def format_task_context(tc):
+    """把上下文包渲染成给 LLM 的 prompt 行（执行前必读）。"""
+    if not isinstance(tc, dict):
+        return []
+    lines = []
+    skills = tc.get('required_skills') or []
+    if skills:
+        lines.append('必备 Skill（先加载再动手）：' + '、'.join(str(s) for s in skills))
+    op = tc.get('operating_protocol_skill')
+    if op:
+        lines.append(f'执行协议 Skill：{op}（务必遵循其生命周期）')
+    checklist = tc.get('preflight_checklist') or []
+    if checklist:
+        lines.append('执行前铁律（逐条确认后再动手）：')
+        for i, item in enumerate(checklist, 1):
+            lines.append(f'  {i}. {item}')
+    pitfalls = tc.get('top_pitfalls') or []
+    if pitfalls:
+        lines.append('高相关历史踩坑（务必规避）：')
+        for p in pitfalls:
+            if isinstance(p, dict):
+                lines.append(f"  - {p.get('title', '')}：{p.get('solution', '')}")
+    refs = tc.get('references') or []
+    if refs:
+        lines.append('相关经验参考：')
+        for r in refs:
+            if isinstance(r, dict):
+                t = r.get('title') or r.get('name') or ''
+                u = r.get('url') or r.get('link') or ''
+                lines.append(f'  - {t} {u}'.rstrip())
+            else:
+                lines.append(f'  - {r}')
+    return lines
+
+
 # ===================== 配置 =====================
 
 def fetch_config():
@@ -130,24 +266,232 @@ def set_cfg(new_cfg):
                 f'owner_wecom_userid={new_cfg.get("owner_wecom_userid", "(none)")!r}')
 
 
+_llm_apply_lock = threading.Lock()
+
+
+def _apply_env_lines(env_text, updates):
+    """把 updates(dict) 覆盖写进 .env 文本，缺失的 key 追加到末尾。"""
+    seen = set()
+    out = []
+    for ln in env_text.splitlines():
+        key = ln.split('=', 1)[0].strip() if ('=' in ln and not ln.lstrip().startswith('#')) else None
+        if key in updates:
+            out.append(f'{key}={updates[key]}')
+            seen.add(key)
+        else:
+            out.append(ln)
+    for k, v in updates.items():
+        if k not in seen:
+            out.append(f'{k}={v}')
+    return '\n'.join(out) + '\n'
+
+
+def apply_llm_config(cfg):
+    """把 Hub 下发的 llm_apply 落到本机 config.yaml + .env，并重启 gateway。
+
+    幂等：与现有配置一致时不写盘、不重启。任何异常都吞掉，绝不影响 sidecar 主流程。
+    仅当 Hub 下发 llm_apply（新版 Hub）时才生效；老 Hub 无此字段则跳过。
+    """
+    la = cfg.get('llm_apply') if isinstance(cfg, dict) else None
+    if not isinstance(la, dict):
+        return
+    provider = (la.get('provider') or '').strip()
+    config_model = (la.get('config_model') or '').strip()
+    if not provider or not config_model:
+        return
+    hermes_home = (get_cfg('hermes_home') or os.getenv('HERMES_HOME', '')).strip()
+    if not hermes_home:
+        return
+    cfg_path = os.path.join(hermes_home, 'config.yaml')
+    env_path = os.path.join(hermes_home, '.env')
+    if not os.path.isfile(cfg_path):
+        return
+
+    with _llm_apply_lock:
+        try:
+            content = open(cfg_path, encoding='utf-8').read()
+        except Exception as e:
+            log(f'[llm] 读 config.yaml 失败: {e}')
+            return
+
+        api_mode = (la.get('api_mode') or 'chat_completions').strip()
+        base_url = (la.get('base_url') or '').strip()
+        api_key_env = (la.get('api_key_env')
+                       or ('TIMIAI_API_KEY' if provider == 'timiai' else 'VENUS_API_KEY')).strip()
+        try:
+            context_length = int(la.get('context_length') or 128000)
+        except Exception:
+            context_length = 128000
+
+        block = (
+            "model:\n"
+            f"  default: {config_model}\n"
+            f"  provider: {provider}\n"
+            f"  api_mode: {api_mode}\n"
+            "providers:\n"
+            f"  {provider}:\n"
+            "    type: openai_compatible\n"
+            f"    base_url: {base_url}\n"
+            "    api_key: ${" + api_key_env + "}\n"
+            f"    default_model: {config_model}\n"
+            f"    api_mode: {api_mode}\n"
+            f"    context_length: {context_length}\n"
+        )
+
+        mi = content.find('model:')
+        marker = '\nfallback_providers:'
+        idx = content.find(marker)
+        if mi < 0 or idx < 0 or idx <= mi:
+            log('[llm] config.yaml 结构不识别（缺 model:/fallback_providers:），跳过 llm 应用')
+            return
+        new_content = content[:mi] + block + content[idx + 1:]
+
+        changed = False
+        if new_content != content:
+            try:
+                if not os.path.isfile(cfg_path + '.bak_preLLMapply'):
+                    shutil.copy2(cfg_path, cfg_path + '.bak_preLLMapply')
+                with open(cfg_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                changed = True
+                log(f'[llm] config.yaml 已更新 -> provider={provider} model={config_model} ctx={context_length}')
+            except Exception as e:
+                log(f'[llm] 写 config.yaml 失败: {e}')
+                return
+
+        try:
+            env_text = open(env_path, encoding='utf-8').read() if os.path.isfile(env_path) else ''
+        except Exception:
+            env_text = ''
+        updates = {
+            'HERMES_LLM_PROVIDER': provider,
+            'HERMES_LLM_MODEL': (la.get('model') or config_model),
+        }
+        if provider == 'timiai' and la.get('timiai_project'):
+            updates['HERMES_TIMIAI_PROJECT'] = la['timiai_project']
+        if la.get('api_key'):
+            updates[api_key_env] = la['api_key']
+        new_env = _apply_env_lines(env_text, updates)
+        if new_env != env_text:
+            try:
+                if os.path.isfile(env_path) and not os.path.isfile(env_path + '.bak_preLLMapply'):
+                    shutil.copy2(env_path, env_path + '.bak_preLLMapply')
+                with open(env_path, 'w', encoding='utf-8') as f:
+                    f.write(new_env)
+                changed = True
+                log('[llm] .env 已更新（HERMES_LLM_PROVIDER/MODEL' +
+                    ('/TIMIAI_PROJECT' if provider == 'timiai' else '') + '/API_KEY）')
+            except Exception as e:
+                log(f'[llm] 写 .env 失败: {e}')
+
+        if changed:
+            svc = (la.get('gateway_service') or f'hermes-gateway-claw-{CLAW_ID}.service').strip()
+            try:
+                r = subprocess.run(
+                    ['systemctl', 'restart', svc],
+                    capture_output=True, text=True, timeout=90,
+                    encoding='utf-8', errors='replace',
+                )
+                log(f'[llm] 重启 gateway {svc} rc={r.returncode} '
+                    f'{(r.stderr or "").strip()[:120]}')
+            except Exception as e:
+                log(f'[llm] 重启 gateway {svc} 失败: {e}')
+
+
 def config_refresh_loop():
     while not _stop_event.is_set():
         try:
             new_cfg = fetch_config()
             if new_cfg:
                 set_cfg(new_cfg)
+                try:
+                    apply_llm_config(new_cfg)
+                except Exception as e:
+                    log(f'[llm] 应用异常: {e}')
         except Exception as e:
             log(f'[config] 异常: {e}')
         _stop_event.wait(CONFIG_REFRESH_SEC)
 
 
-# ===================== 调用 LLM =====================
+# ===================== 调用 Agent 执行器 =====================
+
+def _which_first(names):
+    for name in names:
+        path = shutil.which(name)
+        if path:
+            return path
+    return ''
+
+
+def _build_agent_command(prompt, timeout, wecom_enabled):
+    """Build argv/cwd for supported non-interactive agent executors."""
+    agent_type = (get_cfg('agent_type', 'openclaw') or 'openclaw').strip().lower()
+    bin_path = (get_cfg('openclaw_bin') or '').strip()
+    agent_name = get_cfg('agent_name', 'main')
+    hermes_home = (get_cfg('hermes_home') or os.getenv('HERMES_HOME', '')).strip()
+    hermes_cwd = (
+        os.getenv('HERMES_CWD', '').strip()
+        or os.getenv('HERMES_INSTALL_DIR', '').strip()
+        or hermes_home
+    )
+
+    if agent_type == 'openclaw':
+        exe = bin_path or 'openclaw'
+        cmd = [exe, 'agent', '--message', prompt,
+               '--agent', agent_name, '--timeout', str(timeout)]
+        if wecom_enabled:
+            cmd += ['--channel', 'wecom']
+        return cmd, None, agent_type
+
+    if agent_type == 'hermes':
+        # Preferred for explicit wrappers: install_v2.sh may create a wrapper
+        # that accepts --message/--timeout. Native Hermes CLI uses chat -q.
+        exe = bin_path or os.getenv('HERMES_BIN', '').strip()
+        if exe:
+            base = os.path.basename(exe).lower()
+            if base in ('hermes', 'hermes.exe') or base in ('python', 'python.exe', 'python3'):
+                return [exe, 'chat', '-q', prompt, '-Q', '--max-turns', str(timeout)], None, agent_type
+            if base.startswith('hermes-agent'):
+                return [exe, '--query', prompt, '--max_turns', str(timeout)], None, agent_type
+            return [exe, '--message', prompt, '--timeout', str(timeout)], None, agent_type
+        exe = _which_first(['hermes', 'hermes-agent'])
+        if exe:
+            base = os.path.basename(exe).lower()
+            if base.startswith('hermes-agent'):
+                return [exe, '--query', prompt, '--max_turns', str(timeout)], None, agent_type
+            return [exe, 'chat', '-q', prompt, '-Q', '--max-turns', str(timeout)], None, agent_type
+        if hermes_home:
+            return [
+                sys.executable, '-m', 'hermes_cli.main',
+                'chat', '-q', prompt, '-Q', '--max-turns', str(timeout),
+            ], hermes_cwd, agent_type
+        return [], None, agent_type
+
+    if agent_type == 'custom':
+        exe = (os.getenv('CUSTOM_AGENT_BIN', '').strip() or bin_path)
+        if exe:
+            return [exe, '--message', prompt, '--timeout', str(timeout)], None, agent_type
+        return [], None, agent_type
+
+    return [], None, agent_type
+
+
+def _cmd_for_log(cmd):
+    logged = []
+    skip_next = False
+    for part in cmd:
+        if skip_next:
+            logged.append('<prompt>')
+            skip_next = False
+            continue
+        logged.append(part)
+        if part in ('--message', '--prompt', '-q', '--query'):
+            skip_next = True
+    return ' '.join(logged)
+
 
 def call_llm(prompt):
     """根据当前 agent_type 调用对应 CLI，返回 (ok, response_text, err)。"""
-    agent_type = get_cfg('agent_type', 'openclaw')
-    bin_path = get_cfg('openclaw_bin') or 'openclaw'
-    agent_name = get_cfg('agent_name', 'main')
     timeout = int(get_cfg('agent_timeout', 300))
     wecom_enabled = bool(get_cfg('wecom_enabled', False))
     env = os.environ.copy()
@@ -165,25 +509,28 @@ def call_llm(prompt):
         if owner_wecom:
             env['WECOM_HOME_CHANNEL'] = owner_wecom
             env['WECOM_HOME_CHANNEL_NAME'] = owner_wecom
+    env.setdefault('PYTHONIOENCODING', 'utf-8')
+    env.setdefault('PYTHONUTF8', '1')
+    hermes_home = (get_cfg('hermes_home') or os.getenv('HERMES_HOME', '')).strip()
+    if hermes_home:
+        env['HERMES_HOME'] = hermes_home
 
-    if agent_type == 'openclaw':
-        cmd = [bin_path, 'agent', '--message', prompt,
-               '--agent', agent_name, '--timeout', str(timeout)]
-        if wecom_enabled:
-            cmd += ['--channel', 'wecom']
-    elif agent_type == 'hermes':
-        # hermes 入口由 install.sh 生成 wrapper 脚本，统一为 --message 入参
-        cmd = [bin_path, '--message', prompt, '--timeout', str(timeout)]
-    else:
-        return False, '', f'unsupported agent_type={agent_type!r}'
+    cmd, cwd, agent_type = _build_agent_command(prompt, timeout, wecom_enabled)
+    if not cmd:
+        return False, '', (
+            f'unsupported or unconfigured agent_type={agent_type!r}; '
+            'set openclaw_bin/HERMES_BIN or hermes_home for hermes'
+        )
 
-    log(f'[llm] 调用 {agent_type} timeout={timeout}s prompt_len={len(prompt)}')
+    log(f'[llm] 调用 {agent_type} timeout={timeout}s prompt_len={len(prompt)} '
+        f'cmd={_cmd_for_log(cmd)!r} cwd={cwd or ""!r}')
     try:
         proc = subprocess.run(
             cmd, capture_output=True,
             timeout=timeout + 30, text=True,
             encoding='utf-8', errors='replace',
             env=env,
+            cwd=cwd or None,
         )
         if proc.returncode != 0:
             return False, '', (
@@ -194,12 +541,42 @@ def call_llm(prompt):
     except subprocess.TimeoutExpired:
         return False, '', f'subprocess timeout {timeout + 30}s'
     except FileNotFoundError:
-        return False, '', f'binary not found: {bin_path}'
+        return False, '', f'binary not found: {cmd[0] if cmd else agent_type}'
     except Exception as e:
         return False, '', f'{type(e).__name__}: {e}'
 
 
 # ===================== 消息处理 =====================
+
+def _is_workflow_hub_notification(msg):
+    """Workflow 可选聊天提醒，只提升可见性；节点完成必须走 AgentTask/result API。"""
+    if (msg.get('msg_type') or '') != 'task_delegate':
+        return False
+    sender = (msg.get('sender_name') or '').strip()
+    if sender != 'Workflow':
+        return False
+    content = msg.get('content') or ''
+    return any(token in content for token in (
+        'Workflow Step #',
+        'Workflow Run #',
+        'workflow_',
+    ))
+
+
+def _ack_workflow_notification(msg_id):
+    """Ack Workflow reminder without invoking Agent LLM."""
+    http('PUT', f'/api/openclaws/{CLAW_ID}/messages/{msg_id}/processing')
+    http(
+        'PUT', f'/api/openclaws/{CLAW_ID}/messages/{msg_id}/read',
+        body={
+            'reply': (
+                '已收到 Workflow 节点通知。实际执行由 AgentTask 驱动，'
+                '完成后 sidecar 会自动回写 Flow 结果。'
+            )[:4000],
+        },
+    )
+    http('PUT', f'/api/openclaws/{CLAW_ID}/messages/{msg_id}/done', body={})
+
 
 def handle_message(msg):
     """处理一条 ClawMessage：processing → LLM → done/failed。"""
@@ -219,6 +596,11 @@ def handle_message(msg):
         log(f'[msg] 开始处理 id={msg_id} type={msg_type} from={sender} '
             f'content_len={len(content)}')
 
+        if _is_workflow_hub_notification(msg):
+            log(f'[msg] workflow notification only id={msg_id}; skip chat LLM')
+            _ack_workflow_notification(msg_id)
+            return
+
         # 1. processing
         code, body = http('PUT', f'/api/openclaws/{CLAW_ID}/messages/{msg_id}/processing')
         if code not in (200, 404):
@@ -232,6 +614,20 @@ def handle_message(msg):
         prompt_lines = [
             f"[Hub聊天处理任务]",
             f"你（{claw_name or 'OpenClaw'}）收到了一条来自 {sender} 的 {msg_type} 消息：",
+        ]
+        cap_lines = capability_digest_lines()
+        if cap_lines:
+            prompt_lines.append("")
+            prompt_lines.extend(cap_lines)
+        memo_lines = memo_index_lines()
+        if memo_lines:
+            prompt_lines.append("")
+            prompt_lines.extend(memo_lines)
+        profile_lines = agent_profile_lines()
+        if profile_lines:
+            prompt_lines.append("")
+            prompt_lines.extend(profile_lines)
+        prompt_lines.extend([
             "",
             f"- 发件人: {sender}",
             f"- 消息类型: {msg_type}",
@@ -240,27 +636,21 @@ def handle_message(msg):
             "",
             f"必须完成：",
             f"1) 认真阅读消息内容，生成有价值的自然回复（禁止发送协议说明/状态模板）。",
-            f"2) 把回复写回当前消息的闭环接口：",
-            f"   PUT {HUB_URL}/api/openclaws/{CLAW_ID}/messages/{msg_id}/read",
-            f"   Headers: Authorization: Bearer {CLAW_TOKEN}",
-            f"   Body: {{\"reply\": \"<你的回复>\"}}",
-        ]
+            f"2) 只输出最终回复文本，不要调用任何工具、接口、终端或浏览器。",
+            f"3) Hub sidecar 会自动把你的回复写回消息闭环并标记完成。",
+        ])
 
         # claw→claw 消息：额外要求回复发送方
         if from_claw_id:
             prompt_lines.extend([
-                f"3) 使用 send-to-claw 工具回复发送方（target_claw_ids=[{from_claw_id}]），"
-                f"   把你的回复也发送给对方，让对方能在聊天记录中看到你的回复。",
+                f"4) 这是来自另一个 OpenClaw 的消息，sidecar 会自动把同一回复同步发给对方；你仍然只输出回复文本。",
             ])
 
         # 通知 owner（企微）
         if owner_wecom:
             prompt_lines.extend([
                 f"",
-                f"另外，请通过企微通知我的 owner 有新消息到达：",
-                f"  调用 send_message(action='send', target='wecom', "
-                f"message='收到来自{sender}的消息，已回复。') "
-                f"发企微通知；wecom home channel 已配置为 {owner_wecom}。",
+                f"无需主动企微通知 owner；Hub 会在通信中心保留处理记录。",
             ])
 
         prompt_lines.extend([
@@ -275,9 +665,27 @@ def handle_message(msg):
 
         # 3. done / failed
         if ok:
+            reply = (resp or '').strip() or '已收到。'
+            code, body = http(
+                'PUT', f'/api/openclaws/{CLAW_ID}/messages/{msg_id}/read',
+                body={'reply': reply[:4000]},
+            )
+            if code not in (200, 404):
+                log(f'[msg] read/reply 失败 id={msg_id} code={code} body={body}')
+            if from_claw_id:
+                code, body = http(
+                    'POST', f'/api/openclaws/{CLAW_ID}/send-to-claw',
+                    body={
+                        'target_claw_ids': [from_claw_id],
+                        'content': reply[:4000],
+                        'msg_type': 'text',
+                    },
+                )
+                if code not in (200, 201):
+                    log(f'[msg] send-to-claw 失败 id={msg_id} target={from_claw_id} code={code} body={body}')
             code, body = http(
                 'PUT', f'/api/openclaws/{CLAW_ID}/messages/{msg_id}/done',
-                body={'llm_response': resp[:4000]},
+                body={},
             )
             log(f'[msg] done id={msg_id} hub_code={code}')
         else:
@@ -289,6 +697,290 @@ def handle_message(msg):
     finally:
         with _inflight_lock:
             _inflight_msgs.discard(msg_id)
+
+
+def _extract_json_object(text):
+    raw = (text or '').strip()
+    if not raw:
+        return {}
+    candidates = [raw]
+    if '```' in raw:
+        parts = raw.split('```')
+        for part in parts:
+            part = part.strip()
+            if part.startswith('json'):
+                part = part[4:].strip()
+            if part.startswith('{') and part.endswith('}'):
+                candidates.append(part)
+    start = raw.find('{')
+    end = raw.rfind('}')
+    if start >= 0 and end > start:
+        candidates.append(raw[start:end + 1])
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+            if isinstance(value, dict):
+                return value
+        except Exception:
+            continue
+    return {}
+
+
+def _format_node_references(payload):
+    """渲染节点 references（Owner 在节点上指定的知识库/报告/用例等参考资料）。"""
+    refs = payload.get('references') or []
+    if not isinstance(refs, list) or not refs:
+        return []
+    lines = ['节点参考资料（Owner 指定，务必查阅）：']
+    for r in refs:
+        if isinstance(r, dict):
+            line = (f"  · [{r.get('type', '')}] "
+                    f"{r.get('title') or r.get('name') or ''} "
+                    f"{r.get('url') or r.get('ref') or ''}").rstrip()
+            lines.append(line)
+        else:
+            lines.append(f'  · {r}')
+    return lines
+
+
+def _workflow_agent_prompt(task, payload):
+    claw_name = get_cfg('claw_name', '')
+    # task_context：payload 内嵌优先，否则按 agent_task ref 拉
+    tc = payload.get('task_context')
+    if not isinstance(tc, dict) or not tc:
+        tc = fetch_task_context('agent_task', task.get('id'))
+    ctx_block = []
+    ctx_lines = format_task_context(tc)
+    if ctx_lines:
+        ctx_block = ['', '=== 任务上下文（Hub 记忆路由注入，执行前必读）==='] + ctx_lines + ['=== 上下文结束 ===']
+    profile_lines = agent_profile_lines()
+    if profile_lines:
+        ctx_block = ctx_block + [''] + profile_lines
+    node_refs = _format_node_references(payload)
+    if node_refs:
+        ctx_block = ctx_block + [''] + node_refs
+    return '\n'.join([
+        '[Workflow Agent 节点任务]',
+        f"你是 {claw_name or 'OpenClaw Agent'}，现在需要以自己的身份、记忆、Skills、Rules 和可用工具执行一个 Workflow 节点。",
+        '',
+        '任务元信息：',
+        f"- AgentTask ID: {task.get('task_id')}",
+        f"- Workflow Run: {payload.get('run_id')} / {payload.get('run_name')}",
+        f"- Step: {payload.get('step_id')} / {payload.get('step_name')}",
+        f"- Runner: {payload.get('runner')}",
+        f"- Progress API: {payload.get('progress_api')}",
+        f"- Result API: {payload.get('result_api')}",
+        *ctx_block,
+        '',
+        '节点 Prompt：',
+        str(payload.get('prompt') or '(无)'),
+        '',
+        '固定输入 inputs：',
+        json.dumps(payload.get('inputs') or {}, ensure_ascii=False, indent=2),
+        '',
+        '变量输入 input_vars：',
+        json.dumps(payload.get('input_vars') or {}, ensure_ascii=False, indent=2),
+        '',
+        '上游 outputs：',
+        json.dumps(payload.get('outputs') or {}, ensure_ascii=False, indent=2),
+        '',
+        'Run context：',
+        json.dumps(payload.get('context') or {}, ensure_ascii=False, indent=2),
+        '',
+        '执行要求：',
+        '1) 可以使用你自己的记忆、Skills、Rules、项目上下文和可用工具完成任务。',
+        '2) 不要只回复“收到”；必须给出真实执行结论。',
+        '3) 长耗时任务必须阶段性调用 Progress API，上报 phase/message/percent；例如下载包体、安装、执行测试、分析日志都应各上报一次，必要时携带 {"heartbeat": true} 同步刷新心跳。',
+        '4) 最终只输出一个 JSON 对象，不要输出额外解释。',
+        '5) JSON 字段建议如下：',
+        '{"status":"passed|blocked|failed","summary":"一句话结论","metrics":{},"outputs":{},"evidence":{},"logs":{},"blocker":{"type":"","message":"","suggested_action":""}}',
+    ])
+
+
+def _normalize_workflow_result(response_text, ok, err):
+    if not ok:
+        return {
+            'status': 'blocked',
+            'summary': 'Workflow agent task failed before producing result',
+            'blocker': {
+                'type': 'agent_invocation_failed',
+                'message': err or 'agent invocation failed',
+                'suggested_action': '检查 sidecar 日志、Hermes/OpenClaw CLI 和 Agent 配置',
+            },
+            'logs': {'agent_error': err or ''},
+        }
+    parsed = _extract_json_object(response_text)
+    if not parsed:
+        return {
+            'status': 'passed',
+            'summary': (response_text or 'Workflow agent task completed')[:500],
+            'logs': {'raw_agent_response': (response_text or '')[:4000]},
+        }
+    status = parsed.get('status') or 'passed'
+    if status not in ('passed', 'blocked', 'failed', 'skipped'):
+        status = 'passed'
+    result = {
+        'status': status,
+        'summary': parsed.get('summary') or '',
+        'metrics': parsed.get('metrics') if isinstance(parsed.get('metrics'), dict) else {},
+        'outputs': parsed.get('outputs') if isinstance(parsed.get('outputs'), dict) else {},
+        'evidence': parsed.get('evidence') if isinstance(parsed.get('evidence'), dict) else {},
+        'logs': parsed.get('logs') if isinstance(parsed.get('logs'), dict) else {},
+        'blocker': parsed.get('blocker') if isinstance(parsed.get('blocker'), dict) else {},
+    }
+    if not result['summary']:
+        result['summary'] = 'Workflow agent task completed'
+    return result
+
+
+def _workflow_heartbeat_path(payload):
+    run_id = payload.get('run_id')
+    step_id = payload.get('step_id')
+    if not run_id or not step_id:
+        return ''
+    return f'/api/v1/workflow-runs/{run_id}/steps/{step_id}/heartbeat'
+
+
+def _workflow_progress_path(payload):
+    path = payload.get('progress_api') or ''
+    if path:
+        return path
+    run_id = payload.get('run_id')
+    step_id = payload.get('step_id')
+    if not run_id or not step_id:
+        return ''
+    return f'/api/v1/workflow-runs/{run_id}/steps/{step_id}/progress'
+
+
+def _post_workflow_heartbeat(payload):
+    path = _workflow_heartbeat_path(payload)
+    if not path:
+        return
+    code, body = http('POST', path, {
+        'worker_id': f'sidecar:{CLAW_ID}',
+    }, timeout=15)
+    if code not in (200, 201):
+        log(f'[workflow-heartbeat] failed run={payload.get("run_id")} '
+            f'step={payload.get("step_id")} code={code} body={body}')
+
+
+def _post_workflow_progress(payload, phase, message, percent=None, detail=None, heartbeat=False):
+    path = _workflow_progress_path(payload)
+    if not path:
+        return
+    body = {
+        'worker_id': f'sidecar:{CLAW_ID}',
+        'phase': phase,
+        'message': message,
+        'heartbeat': bool(heartbeat),
+    }
+    if percent is not None:
+        body['percent'] = percent
+    if isinstance(detail, dict) and detail:
+        body['progress'] = detail
+    code, resp = http('POST', path, body, timeout=15)
+    if code not in (200, 201):
+        log(f'[workflow-progress] failed run={payload.get("run_id")} '
+            f'step={payload.get("step_id")} code={code} body={resp}')
+
+
+def _workflow_heartbeat_loop(payload, stop_event):
+    while True:
+        try:
+            _post_workflow_heartbeat(payload)
+        except Exception as exc:
+            log(f'[workflow-heartbeat] error run={payload.get("run_id")} '
+                f'step={payload.get("step_id")}: {type(exc).__name__}: {exc}')
+        if stop_event.wait(max(1, WORKFLOW_HEARTBEAT_SEC)):
+            return
+
+
+def _start_workflow_heartbeat(payload):
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_workflow_heartbeat_loop,
+        args=(payload, stop_event),
+        daemon=True,
+    )
+    thread.start()
+    return stop_event, thread
+
+
+def handle_task(task):
+    task_type = task.get('task_type')
+    task_id = task.get('task_id')
+    if task_type != 'workflow_agent_task':
+        log(f'[task] 忽略不支持任务 type={task_type} id={task_id}')
+        return
+    payload = task.get('payload') or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    log(f'[workflow-task] start task_id={task_id} run={payload.get("run_id")} step={payload.get("step_id")}')
+    heartbeat_stop = None
+    heartbeat_thread = None
+    try:
+        heartbeat_stop, heartbeat_thread = _start_workflow_heartbeat(payload)
+        _post_workflow_progress(
+            payload,
+            'agent_started',
+            'sidecar 已启动 Workflow Agent 节点，正在调用 Agent 执行',
+            percent=1,
+            heartbeat=True,
+        )
+        ok, resp, err = call_llm(_workflow_agent_prompt(task, payload))
+        result = _normalize_workflow_result(resp, ok, err)
+    except Exception as exc:
+        result = {
+            'status': 'blocked',
+            'summary': f'Workflow sidecar exception: {type(exc).__name__}',
+            'metrics': {},
+            'outputs': {},
+            'evidence': {},
+            'logs': {'error': str(exc)},
+            'blocker': {
+                'type': 'workflow_sidecar_exception',
+                'message': str(exc),
+                'suggested_action': '检查 hub-sse-sidecar 日志并重试 workflow step',
+            },
+        }
+    finally:
+        if heartbeat_stop:
+            heartbeat_stop.set()
+        if heartbeat_thread:
+            heartbeat_thread.join(timeout=5)
+    try:
+        final_status = result.get('status') or 'passed'
+        _post_workflow_progress(
+            payload,
+            'agent_completed' if final_status == 'passed' else 'agent_blocked',
+            result.get('summary') or 'Workflow Agent 节点已结束，准备回写结果',
+            percent=100 if final_status == 'passed' else None,
+            heartbeat=True,
+        )
+    except Exception as exc:
+        log(f'[workflow-progress] final update error run={payload.get("run_id")} '
+            f'step={payload.get("step_id")}: {type(exc).__name__}: {exc}')
+    result_api = payload.get('result_api')
+    if result_api:
+        code, body = http('POST', result_api, result, timeout=60)
+        if code not in (200, 201):
+            err_msg = f'post workflow result failed code={code} body={body}'
+            log(f'[workflow-task] {err_msg}')
+            http('POST', f'/api/openclaws/{CLAW_ID}/report', {
+                'task_id': task_id,
+                'status': 'failed',
+                'error': err_msg,
+            })
+            return
+    http('POST', f'/api/openclaws/{CLAW_ID}/report', {
+        'task_id': task_id,
+        'status': 'completed' if result.get('status') in ('passed', 'skipped') else 'failed',
+        'result': json.dumps(result, ensure_ascii=False),
+        'error': '' if result.get('status') in ('passed', 'skipped') else (
+            (result.get('blocker') or {}).get('message') or result.get('summary') or ''
+        ),
+    })
+    log(f'[workflow-task] done task_id={task_id} status={result.get("status")}')
 
 
 def _todo_key(todo_id):
@@ -397,34 +1089,98 @@ def send_to_claw(target_claw_ids, content, msg_type='text'):
 
 
 def handle_todo(todo):
-    """处理一条 ClawTodo：LLM 跑业务逻辑，sidecar 负责 complete 回调。"""
+    """处理一条 ClawTodo：LLM 跑业务逻辑并自行回调 complete。
+
+    设计原则：sidecar 不代替 LLM 自动 complete！
+    - LLM 处理完后应自己调 Hub API 标记完成
+    - 如果 LLM 忘了调 complete，Hub 的 timeout_watcher 会兜底告警
+    - 这样保证只有 LLM 真正执行了业务逻辑后才标记完成
+    """
     todo_id = todo.get('id')
     title = todo.get('title', '')
+    description = todo.get('description', '')
+    pitfall_notice = todo.get('pitfall_notice', '')
+    primary_skill = todo.get('primary_skill', '')
+    urgency = todo.get('urgency', '')
+    task_category = todo.get('task_category', '')
+    schedule_time = todo.get('schedule_time', '')
     if not todo_id:
         return
 
     owner_wecom = get_cfg('owner_wecom_userid', '')
     claw_name = get_cfg('claw_name', '')
     prompt_lines = [
-        f"你（{claw_name or 'OpenClaw'}）有一个待办任务：",
-        f"标题：{title}",
-        f"任务ID：{todo_id}",
-        "",
-        "请按 SOUL 流程完成。",
+        f"[Hub待办任务]",
+        f"你（{claw_name or 'OpenClaw'}）有一个待办任务需要处理：",
     ]
+    cap_lines = capability_digest_lines()
+    if cap_lines:
+        prompt_lines.append("")
+        prompt_lines.extend(cap_lines)
+    memo_lines = memo_index_lines()
+    if memo_lines:
+        prompt_lines.append("")
+        prompt_lines.extend(memo_lines)
+    profile_lines = agent_profile_lines()
+    if profile_lines:
+        prompt_lines.append("")
+        prompt_lines.extend(profile_lines)
+    prompt_lines.extend([
+        "",
+        f"- 标题：{title}",
+        f"- 任务ID：{todo_id}",
+    ])
+    if description:
+        prompt_lines.append(f"- 详情：{description}")
+    # 统一任务上下文包（记忆路由注入）：内嵌优先，否则按 todo ref 拉
+    tc = todo.get('task_context')
+    if not isinstance(tc, dict) or not tc:
+        tc = fetch_task_context('todo', todo_id)
+    ctx_lines = format_task_context(tc)
+    if ctx_lines:
+        prompt_lines.append("")
+        prompt_lines.append("=== 任务上下文（Hub 记忆路由注入，执行前必读）===")
+        prompt_lines.extend(ctx_lines)
+        prompt_lines.append("=== 上下文结束 ===")
+    elif pitfall_notice:
+        # 回退：无上下文包时用旧字段
+        prompt_lines.append(f"- 任务前公共经验：{pitfall_notice}")
+    if primary_skill and not ctx_lines:
+        prompt_lines.append(f"- 推荐主 Skill：{primary_skill}（先加载 agent-operating-protocol 再执行）")
+    if urgency:
+        prompt_lines.append(f"- 紧急度：{urgency}")
+    if task_category:
+        prompt_lines.append(f"- 类别：{task_category}")
+    if schedule_time:
+        prompt_lines.append(f"- 计划时间：{schedule_time}")
+
+    prompt_lines.extend([
+        "",
+        "你必须完成：",
+        f"1) 根据任务内容执行具体操作（如提交日报、审核资源、回复消息等）。",
+        f"2) 完成后，你必须调用 Hub API 标记此待办为完成：",
+        f"   POST {HUB_URL}/api/v1/openclaws/{CLAW_ID}/todos/{todo_id}/complete",
+        f"   Headers: Authorization: Bearer {CLAW_TOKEN}",
+        f'   Body: {{"result_summary": "<完成结果摘要>"}}',
+        "",
+        "重要：只有你真正完成了任务操作后，才调用 complete 接口！",
+        "如果你无法完成或不确定如何处理，不要调用 complete，等待人工介入。",
+    ])
+
     if owner_wecom:
-        prompt_lines.append(
-            f"完成后请调用 send_message(action='send', target='wecom', "
-            f"message='...') 发企微通知 owner；wecom home channel 已配置为 {owner_wecom}。"
-        )
+        prompt_lines.extend([
+            "",
+            f"另外，完成后请调用 send_message(action='send', target='wecom', "
+            f"message='...') 发企微通知 owner；wecom home channel 已配置为 {owner_wecom}。",
+        ])
+
     log(f'[todo] 派发给 LLM id={todo_id} title={title!r}')
     ok, resp, err = call_llm('\n'.join(prompt_lines))
     if not ok:
-        log(f'[todo] LLM 处理失败 id={todo_id} err={err}（不再 force_complete，'
-            f'Hub watcher 会兜底告警）')
+        log(f'[todo] LLM 处理失败 id={todo_id} err={err}（Hub watcher 会兜底告警）')
         return False
-    log(f'[todo] LLM 处理完成 id={todo_id}（sidecar 自动回调 complete）')
-    _post_complete(todo_id, result_summary=(resp or '')[:500])
+    log(f'[todo] LLM 已处理 id={todo_id} 等待 LLM 自行回调 complete '
+        f'resp_len={len(resp or "")}')
     return True
 
 
@@ -495,7 +1251,19 @@ def handle_event(event_name, data_str):
         threading.Thread(target=handle_message, args=(msg,), daemon=True).start()
         return
 
+    if event_name == 'task':
+        try:
+            task = json.loads(data_str)
+        except Exception as e:
+            log(f'[sse] task 解析失败: {e} data={data_str[:200]}')
+            return
+        threading.Thread(target=handle_task, args=(task,), daemon=True).start()
+        return
+
     if event_name == 'todos_pending':
+        if not TODO_WORKER_ENABLED:
+            log('[todo] worker disabled; skip todos_pending')
+            return
         try:
             payload = json.loads(data_str)
         except Exception:
@@ -552,7 +1320,7 @@ def main():
     claw_name = get_cfg('claw_name', '')
     post_message_to_hub(
         f"【{claw_name or 'OpenClaw'}】sidecar v{SIDECAR_VERSION} 已启动，"
-        f"SSE 连接就绪，todo worker 运行中。",
+        f"SSE 连接就绪，todo worker {'运行中' if TODO_WORKER_ENABLED else '已关闭'}。",
         msg_type='system'
     )
 
@@ -564,7 +1332,10 @@ def main():
     signal.signal(signal.SIGTERM, stop)
 
     threading.Thread(target=config_refresh_loop, name='cfg', daemon=True).start()
-    threading.Thread(target=todo_worker_loop, name='todo-worker', daemon=True).start()
+    if TODO_WORKER_ENABLED:
+        threading.Thread(target=todo_worker_loop, name='todo-worker', daemon=True).start()
+    else:
+        log('[todo] worker disabled by TODO_WORKER_ENABLED=false')
 
     sse_loop()
     log('sidecar 已退出')

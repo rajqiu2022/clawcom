@@ -18,6 +18,7 @@ from app.models import (
     _now,
 )
 from app.services.testcase_panorama_links import (
+    agent_test_metric_payload,
     aggregate_module_test_metrics,
     collect_descendant_module_ids,
     detect_orphan_links,
@@ -352,13 +353,10 @@ def module_test_metrics(module_id):
     if request.method == 'POST':
         data = request.get_json(force=True) or {}
         metric = PanoramaModuleTestMetric.query.filter_by(module_id=module_id).first()
-        base = metric.to_dict() if metric else {
-            'direct_case_count': 0,
-            'subtree_case_count': 0,
-            'linked_library_count': 0,
-            'linked_directory_count': 0,
-        }
-        base.update(data)
+        base = agent_test_metric_payload(
+            metric.to_dict() if metric else None,
+            data,
+        )
         metric = _upsert_metric(module_id, base, source=data.get('source') or 'agent')
         db.session.commit()
         return jsonify(metric.to_dict())

@@ -176,11 +176,12 @@ def require_claw_token(f):
     优先验证 URL 中 claw_id 对应的 Token；
     回退时验证 token 对应的 claw，但强制校验 claw_id 一致性（防越权）。
     """
+    from app import db
     from app.models import OpenClawInstance
 
     @wraps(f)
     def decorated(claw_id, *args, **kwargs):
-        claw = OpenClawInstance.query.get_or_404(claw_id)
+        claw = db.get_or_404(OpenClawInstance, claw_id)
         token = _get_bearer_token()
         if not token:
             return jsonify({'error': '缺少认证 Token'}), 401

@@ -652,6 +652,34 @@ GET /api/v1/panorama/modules/{MODULE_ID}/testcase-changes?since=2026-06-15T00:00
 - 关联功能模块：<module_path 列表>
 ```
 
+### 22. 目录脑图（★ 2026-07-30 新增）
+
+> 按 `module_path` 还原**真实目录层级**的脑图，可从任意一级目录展开。一次调用就能拿到整棵子树的结构 + 每个目录的用例数 + 每条用例的优先级，比逐层列目录省很多轮次。
+
+```
+GET /api/v1/testcase-libraries/{LIBRARY_ID}/directory-mindmap                 # 整库
+GET /api/v1/testcase-libraries/{LIBRARY_ID}/directory-mindmap?module_path=登录模块   # 从某目录展开
+GET /api/v1/testcase-libraries/{LIBRARY_ID}/directory-mindmap?module_path=          # 只看"(未分类)"根目录
+GET /api/v1/testcase-libraries/{LIBRARY_ID}/directory-mindmap?max_nodes=2000
+```
+
+不传 `module_path` = 整库；传空串 = 只看未挂目录的用例。`max_nodes` 限制**用例叶子**数，区间 `[50, 5000]`，默认 2000。
+
+**截断只砍用例叶子**：目录树与各目录 `case_count` 始终完整准确，所以 `truncated=true` 时目录数字依然可以直接用来汇报。判断用例是否全拿到看 `shown_case_count == total_case_count`。
+
+节点结构、`truncated` 语义与 `topic-discuss` Skill 里的 `review-mindmap` 完全一致，可复用同一套解析代码。**两者的区别**：
+
+| | 鉴权 | 评审标记 |
+|---|---|---|
+| `/testcase-libraries/{id}/directory-mindmap` | 用例库权限 | 不返回（用例库视图与评审镜像层隔离） |
+| `/topics/{id}/review-mindmap` | 课题 visibility | 返回 `mark` / `icons` / `can_mark` |
+
+评审场景一律用 `/topics/{id}/review-mindmap`：评审人可能压根没有用例库权限，走本接口必然 403。
+
+**与既有 `/mindmap` 接口的关系**：老的 `/mindmap` 是按「优先级 → 用例类型」分组的**统计型**脑图，和 XMind 导出共用，不是目录树，两者都保留、互不影响。
+
+`truncated=true` 时不要重试同一个路径，而是**收窄到更深一级目录**再拉，或调大 `max_nodes`。
+
 ---
 
 ## 八、版本管理（类 git）
@@ -797,7 +825,7 @@ POST /api/v1/testcase-libraries/{LIBRARY_ID}/shares
   "share_type": "user",            // 必填: user / claw / public
   "target_user_id": 12,            // share_type=user 时必填
   "target_claw_id": null,          // share_type=claw 时必填
-  "permission": "reviewer",        // 默认 readonly；可选 readonly / reviewer / editor
+  "permission": "reviewer",        // 默认 reviewer；可选 readonly / reviewer / editor
   "note": "邀请评审 v2.0",
   "expires_at": "2026-12-31T23:59:59"   // 选填，null=永久
 }
@@ -829,6 +857,8 @@ DELETE /api/v1/testcase-libraries/{LIBRARY_ID}/shares/public   # 关闭
 | `editor`   | ✅ | ✅ | ✅ |
 
 > 库的 owner / 项目 admin / super_admin 永远拥有全部权限，不受 share 影响。
+>
+> **`editor` 权限边界（2026-07-20 起后端真正生效）**：被授 `editor` 的 user / claw 可编辑**库内容**——用例增删改、脑图更新、目录重命名、批量导入等所有写操作。但 `editor` **不能**：删除 / 重命名整个库、修改库元信息（owner / 项目）、以及再把权限转授给第三方（`POST /shares` 仍要求 owner / 项目 admin / super_admin）。即 `editor` 只放开"改内容"，不放开"管库"与"再授权"。
 
 ---
 
@@ -871,11 +901,22 @@ POST /api/v1/testcase-libraries/{LIBRARY_ID}/reviews
     {"type":"user","id":12,"name":"alice"},
     {"type":"claw","id":3, "name":"claw-qa-1"}
   ],
-  "related_topic_id": 87                     // 选填：关联的 topic（讨论区）
+  "related_topic_id": 87,                    // 选填：关联的 topic（讨论区）
+
+  // ★ v3（2026-07-30）：评审课题的可见范围
+  "visibility": "public_all",                // public_all / public / project / assigned，缺省 public
+  "grants": [                                // 仅 visibility=assigned 时必填，至少一条
+    {"type":"user","id":12,"name":"alice"}
+  ]
 }
 ```
 
-**响应**：返回创建的 `TestCaseLibraryReview`（含自动统计的 `scope_case_count`）。
+**响应**：`201` + 创建的 `TestCaseLibraryReview`（含自动统计的 `scope_case_count`）。没传 `related_topic_id` 时会**自动建一个 `case_review` 课题**，响应里的 `related_topic_id` 就是它 —— 后续拉脑图 / 打标记 / 发评论都用这个 id。
+
+**`visibility` 说明（v3）**：这个字段写到自动创建的**评审课题**上，决定谁能看评审、谁能评论、谁能打节点标记；**不影响用例库本身的权限**。四档语义与完整的授权名单接口见 `topic-discuss` Skill 的「visibility 四档」一节。
+
+- 要让**没有本项目权限**的人（外部评审人、跨项目 Agent）也能参与，必须用 `visibility=public_all`
+- `invited_reviewers` 只是**展示用的邀请名单，不产生任何访问权**；真正授权要用 `visibility=assigned` + `grants`
 
 **权限**：作者 / 项目 admin / super_admin。
 
@@ -1050,6 +1091,14 @@ B. 邀请外部 OpenClaw 评审某子目录
 C. 全网公开（适合规范类用例库）
    POST /shares/public { permission: "readonly" }
    → 所有 OpenClaw 都能 GET 到，但不能改、不能 approve
+
+D. 把「编辑权限」授给另一个 agent（agent 授权 agent，2026-07-20 起生效）
+   1) 授权方 agent（须是库 owner / 项目 admin / super_admin）用自己的 Token 调：
+      POST /shares { share_type: "claw", target_claw_id: <目标agent的claw_id>, permission: "editor", note: "协作维护用例" }
+   2) 目标 agent 用自己的 Token 直接调写接口（创建/修改/删除用例、更新脑图、目录、导入）即被放行
+   3) 目标 agent 可 GET /testcase-libraries 看到 shared_with_me=true + my_share_permission="editor"
+   4) 不再协作时 DELETE /shares/{share_id} 撤销
+   ⚠️ 若授权方 agent 的 owner 只是普通 user 且非本库作者 → POST /shares 返回 403（无权授权他人）
 ```
 
 ---

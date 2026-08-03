@@ -1,0 +1,6 @@
+[Unit]
+Description=Rotate OpenClaw Web logs
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate -s /var/lib/logrotate/openclaw-web.status /etc/logrotate.d/openclaw-web

@@ -2213,6 +2213,20 @@ function renderStats() {
                 </div>
             </div>
         </div>` : ''}
+        ${(panoramaSnapshots.length ? panoramaSnapshots : (s.recent_snapshots || [])).length ? `
+        <div class="stats-section">
+            <h4>历史快照</h4>
+            <div style="display:flex;flex-direction:column;gap:8px">
+                ${(panoramaSnapshots.length ? panoramaSnapshots : (s.recent_snapshots || [])).map(s => `
+                <div style="padding:10px 12px;background:var(--bg-secondary);border-radius:var(--radius-sm);display:flex;justify-content:space-between;gap:12px;align-items:center">
+                    <div>
+                        <div style="font-size:0.84rem;font-weight:600">${esc(s.name)}</div>
+                        <div style="font-size:0.72rem;color:var(--text-muted)">模块 ${s.module_count || 0} · 关系 ${s.relation_count || 0} · 实体 ${s.code_entity_count || 0}${s.created_by ? ' · ' + esc(s.created_by) : ''}</div>
+                    </div>
+                    <div style="font-size:0.74rem;color:var(--text-secondary);white-space:nowrap">🕒 视图最新更新：${s.view_updated_at || s.created_at || '-'}</div>
+                </div>`).join('')}
+            </div>
+        </div>` : ''}
         ${(panoramaSnapshots.length || (s.recent_snapshots || []).length) ? `
         <div class="stats-section">
             <h4>快照对比</h4>

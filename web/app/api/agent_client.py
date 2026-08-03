@@ -17,12 +17,44 @@ import os
 from datetime import datetime, date, timedelta
 from flask import request, jsonify, Response, stream_with_context, Blueprint
 from app import db
-from app.models import OpenClawInstance, ClawMessage, ClawTodo, ClawTodoLog, _now
+from app.models import (AgentPostAssignment, AgentTask, OpenClawInstance,
+                        ClawMessage, ClawTodo, ClawTodoLog, _now)
 from functools import wraps
 import json
 import time
 import hashlib
 import logging
+
+
+def _workflow_task_deliverable(task):
+    """F3：workflow_agent_task 仅在其 run/step 仍活跃(running/retrying)时才投递。
+
+    否则(run 已 cancelled/blocked/succeeded、step 已结束) 返回 False —— 避免离线 agent
+    重连后被塞入死 run 的陈旧任务、再跑一遍 LLM 空转。非 workflow 任务一律放行。
+    """
+    if getattr(task, 'task_type', '') != 'workflow_agent_task':
+        return True
+    try:
+        payload = task.payload
+        if isinstance(payload, str):
+            payload = json.loads(payload) if payload.strip().startswith('{') else {}
+        if not isinstance(payload, dict):
+            return True
+        run_id = payload.get('run_id')
+        step_id = payload.get('step_id')
+        if not run_id or not step_id:
+            return True
+        from app.models import WorkflowRun, WorkflowRunStep
+        step = WorkflowRunStep.query.filter_by(run_id=run_id, step_id=step_id).first()
+        if not step or step.status not in ('running', 'retrying'):
+            return False
+        run = WorkflowRun.query.get(run_id)
+        if not run or run.status not in ('running', 'retrying'):
+            return False
+        return True
+    except Exception:
+        # 判定异常时保守放行，不因为守护逻辑阻断正常任务
+        return True
 
 
 def _is_missing(v):
@@ -274,44 +306,6 @@ def require_claw_token(f):
     """OpenClaw API Token 认证装饰器 — 统一版本（防越权）"""
     from app.api.auth_utils import require_claw_token as _unified
     return _unified(f)
-
-
-class AgentTask(db.Model):
-    """子agent任务队列"""
-    __tablename__ = 'agent_tasks'
-
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'), nullable=False)
-    task_id = db.Column(db.String(64), unique=True, nullable=False, comment='全局唯一任务ID')
-    task_type = db.Column(db.String(50), nullable=False, comment='任务类型')
-    command = db.Column(db.String(255), comment='操作命令')
-    target_path = db.Column(db.String(500), comment='目标文件路径')
-    payload = db.Column(db.Text, comment='操作内容(JSON)')  # JSON字符串
-    status = db.Column(db.String(20), default='pending', comment='pending/running/completed/failed')
-    result = db.Column(db.Text, comment='执行结果')
-    error = db.Column(db.Text, comment='错误信息')
-    created_at = db.Column(db.DateTime, default=_now)
-    assigned_at = db.Column(db.DateTime, comment='分配时间')
-    completed_at = db.Column(db.DateTime, comment='完成时间')
-
-    claw = db.relationship('OpenClawInstance', backref='tasks')
-
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'task_id': self.task_id,
-            'claw_id': self.claw_id,
-            'task_type': self.task_type,
-            'command': self.command,
-            'target_path': self.target_path,
-            'payload': json.loads(self.payload) if self.payload else None,
-            'status': self.status,
-            'result': self.result,
-            'error': self.error,
-            'created_at': str(self.created_at) if self.created_at else None,
-            'assigned_at': str(self.assigned_at) if self.assigned_at else None,
-            'completed_at': str(self.completed_at) if self.completed_at else None,
-        }
 
 
 @agent_bp.route('/<int:claw_id>/events', methods=['GET'])
@@ -571,6 +565,13 @@ def claw_sse_events(claw_id, claw=None):
                     # 发送待处理任务
                     task_events = []
                     for task in tasks:
+                        # F3：workflow 任务先校验 run/step 仍活跃，否则失效、不投递
+                        if not _workflow_task_deliverable(task):
+                            task.status = 'failed'
+                            task.error = 'workflow_run_or_step_inactive'
+                            task.completed_at = datetime.now()
+                            db.session.commit()
+                            continue
                         task.status = 'running'
                         task.assigned_at = datetime.now()
                         db.session.commit()
@@ -970,6 +971,67 @@ def claw_mark_failed(claw_id, msg_id, claw=None):
 
 # ==================== sidecar 配置中心：sidecar v2 拉配置 + 心跳 ====================
 
+def _build_llm_apply(claw):
+    """解析出可直接落到 agent config.yaml / .env 的完整大模型配置，供 sidecar 应用。
+
+    返回 dict（provider/model/config_model/api_mode/base_url/api_key_env/api_key/
+    context_length/timiai_project/gateway_service）；解析失败返回 None（sidecar 跳过）。
+    """
+    try:
+        from app.hermes_models import (
+            normalize_hermes_provider, normalize_hermes_model,
+            hermes_config_model, hermes_context_length,
+            hermes_provider_api_mode, HERMES_LLM_PROVIDERS,
+            DEFAULT_HERMES_LLM_MODEL, DEFAULT_TIMIAI_LLM_MODEL,
+        )
+        from app.services.hermes_timiai_projects import normalize_timiai_project
+        provider = normalize_hermes_provider(claw.llm_provider or 'venus')
+        default_model = DEFAULT_TIMIAI_LLM_MODEL if provider == 'timiai' else DEFAULT_HERMES_LLM_MODEL
+        model_key = normalize_hermes_model(claw.llm_model or default_model, provider)
+        config_model = hermes_config_model(model_key, provider)
+        context_length = hermes_context_length(model_key, provider)
+        api_mode = hermes_provider_api_mode(provider)
+        meta = HERMES_LLM_PROVIDERS[provider]
+        project = ''
+        api_key = ''
+        try:
+            from app.api.agent_deployments import (
+                _configured_timiai_api_key, _configured_venus_api_key,
+            )
+            if provider == 'timiai':
+                project = normalize_timiai_project(claw.timiai_project or 'gbt')
+                api_key = _configured_timiai_api_key(project) or ''
+            else:
+                api_key = _configured_venus_api_key() or ''
+        except Exception:
+            logger.exception('resolve llm api_key failed for claw %s', getattr(claw, 'id', '?'))
+        gateway_service = 'hermes-gateway-claw-%s.service' % claw.id
+        try:
+            from app.models import AgentDeployment
+            dep = (AgentDeployment.query
+                   .filter_by(openclaw_id=claw.id, agent_type='hermes')
+                   .order_by(AgentDeployment.created_at.desc()).first())
+            if dep and dep.container_name:
+                gateway_service = dep.container_name
+        except Exception:
+            pass
+        return {
+            'provider': provider,
+            'model': model_key,
+            'config_model': config_model,
+            'api_mode': api_mode,
+            'base_url': meta['base_url'],
+            'api_key_env': meta['api_key_env'],
+            'api_key': api_key,
+            'context_length': int(context_length),
+            'timiai_project': project,
+            'gateway_service': gateway_service,
+        }
+    except Exception:
+        logger.exception('build llm_apply failed for claw %s', getattr(claw, 'id', '?'))
+        return None
+
+
 @agent_bp.route('/<int:claw_id>/sidecar-config', methods=['GET'])
 @require_claw_token
 def claw_sidecar_config(claw_id, claw=None):
@@ -1028,7 +1090,67 @@ def claw_sidecar_config(claw_id, claw=None):
     payload['wecom_bot_secret'] = claw.get_wecom_bot_secret_plain() or ''
     payload['wecom_enabled'] = bool(claw.wecom_bot_id and claw.wecom_bot_secret)
     payload['owner_wecom_userid'] = owner_wecom_userid
+    _la = _build_llm_apply(claw)
+    if _la:
+        payload['llm_apply'] = _la
     payload['claw_name'] = claw.name
+    try:
+        assignments = AgentPostAssignment.query.filter_by(
+            claw_id=claw_id, status='active').all()
+        profiles = []
+        active_profile = None
+        for assignment in assignments:
+            post = assignment.post
+            profile = post.profile if post else None
+            if not post or not profile or post.status != 'active':
+                continue
+            item = {
+                'post_key': post.post_key,
+                'post_name': post.name,
+                'profile_version': assignment.profile_version or 1,
+                'required_profile_version': post.required_profile_version or 1,
+                'is_primary': bool(assignment.is_primary),
+                'profile': profile.to_dict(),
+            }
+            profiles.append(item)
+            if item['is_primary'] or active_profile is None:
+                active_profile = item
+        payload['agent_profiles'] = profiles
+        payload['active_agent_profile'] = active_profile
+    except Exception:
+        logger.exception('build agent profile config failed for claw %s', claw_id)
+        payload['agent_profiles'] = []
+        payload['active_agent_profile'] = None
+    # Hub 能力索引：sidecar 每次构 prompt 前注入，等价于"回复前先查 Rule #19"。
+    try:
+        from app.services.hub_capability import (
+            build_hub_capability_digest, HUB_CAPABILITY_VERSION,
+        )
+        payload['hub_capability_digest'] = build_hub_capability_digest()
+        payload['hub_capability_version'] = HUB_CAPABILITY_VERSION
+    except Exception:
+        logger.exception('build hub capability digest failed for claw %s', claw_id)
+    # 笔记索引（三层记忆·记全层）：当前任务上下文(taskctx) + 常驻决策(decision)。
+    # sidecar 每次构 prompt 前注入，让 agent 知道自己记过什么；取全文用 /api/v1/memos/memo/{id}。
+    try:
+        from app.services.memo_index import build_memo_index
+        payload['memo_index'] = build_memo_index(claw, limit=20)
+    except Exception:
+        logger.exception('build memo index failed for claw %s', claw_id)
+        payload['memo_index'] = []
+    try:
+        from app.services.memory_sync_config import (
+            build_memory_sync_config,
+            shared_memory_capability,
+        )
+        memory_sync = build_memory_sync_config(claw)
+        if memory_sync:
+            payload['memory_sync'] = memory_sync
+            payload.setdefault('capabilities', {})['shared_memory'] = (
+                shared_memory_capability()
+            )
+    except Exception:
+        logger.exception('build shared memory config failed for claw %s', claw_id)
     payload['server_time'] = datetime.now().isoformat()
     return jsonify(payload)
 
@@ -1253,15 +1375,22 @@ def get_pending_tasks_poll(claw_id, claw=None):
         AgentTask.status == 'pending'
     ).order_by(AgentTask.created_at.asc()).limit(10).all()
 
-    # 标记为 running
+    # 标记为 running（F3：workflow 任务先校验 run/step 仍活跃，否则失效不投递）
+    deliver = []
     for task in tasks:
+        if not _workflow_task_deliverable(task):
+            task.status = 'failed'
+            task.error = 'workflow_run_or_step_inactive'
+            task.completed_at = datetime.now()
+            continue
         task.status = 'running'
         task.assigned_at = datetime.now()
+        deliver.append(task)
     db.session.commit()
 
     return jsonify({
-        'has_tasks': len(tasks) > 0,
-        'tasks': [t.to_dict() for t in tasks],
+        'has_tasks': len(deliver) > 0,
+        'tasks': [t.to_dict() for t in deliver],
         'server_time': datetime.now().isoformat(),
     })
 

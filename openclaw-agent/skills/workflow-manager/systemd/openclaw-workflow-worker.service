@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenClaw Workflow Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/openclaw-workflow-worker.env
+WorkingDirectory=/opt/openclaw-agent/skills/workflow-manager
+ExecStart=/usr/bin/python3 /opt/openclaw-agent/skills/workflow-manager/scripts/workflow_worker.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/openclaw-workflow-worker.log
+StandardError=append:/var/log/openclaw-workflow-worker.log
+
+[Install]
+WantedBy=multi-user.target
