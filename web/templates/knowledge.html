@@ -425,6 +425,7 @@ function renderEntry(e) {
                     title="${e.is_favorite ? '取消收藏' : '收藏'}"
                     aria-label="${e.is_favorite ? '取消收藏' : '收藏'}">★</button>
             <div class="kn-card-actions" onclick="event.stopPropagation()">
+                ${e.can_manage_share ? `<button class="kn-act-btn" onclick="${e.is_shared ? `openKnowledgeShare(${e.id})` : `manageKnowledgeShare(${e.id}, 'enable')`}" title="${e.is_shared ? '打开分享页' : '生成分享链接'}">🔗</button>` : ''}
                 <button class="kn-act-btn" onclick="showEditModal(${e.id})" title="编辑">✏️</button>
                 <button class="kn-act-btn del" onclick="deleteEntry(${e.id})" title="删除">🗑️</button>
             </div>
@@ -559,17 +560,22 @@ async function showDetail(id) {
     if (!e) return;
     const src = sourceLabels[e.source_type] || null;
     const submitter = getSubmitterInfo(e);
+    const shareUrl = e.share_url
+        ? new URL(e.share_url, window.location.origin).href
+        : '';
     const sharePanel = e.can_manage_share ? `
         <div class="kn-share-panel">
-            <div style="font-size:.8rem;font-weight:600;margin-bottom:8px">匿名分享</div>
-            ${e.is_shared && e.share_url ? `
-                <div style="display:flex;gap:7px;flex-wrap:wrap">
-                    <a class="btn btn-sm btn-ghost" href="${escapeHtml(e.share_url)}" target="_blank">打开分享页</a>
-                    <button class="btn btn-sm btn-ghost" onclick="manageKnowledgeShare(${e.id}, 'refresh')">刷新链接</button>
+            <div style="font-size:.82rem;font-weight:600;margin-bottom:8px">分享外链（匿名只读）</div>
+            ${e.is_shared && shareUrl ? `
+                <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">
+                    <input class="form-input" id="share-url-${e.id}" readonly
+                           value="${escapeHtml(shareUrl)}" style="flex:1;min-width:260px">
+                    <button class="btn btn-sm btn-success" onclick="openKnowledgeShare(${e.id})">独立窗口打开</button>
+                    <button class="btn btn-sm btn-info" onclick="manageKnowledgeShare(${e.id}, 'refresh')">重新生成</button>
                     <button class="btn btn-sm btn-danger" onclick="manageKnowledgeShare(${e.id}, 'revoke')">撤销分享</button>
                 </div>
             ` : `
-                <button class="btn btn-sm btn-primary" onclick="manageKnowledgeShare(${e.id}, 'enable')">生成匿名分享链接</button>
+                <button class="btn btn-sm btn-primary" onclick="manageKnowledgeShare(${e.id}, 'enable')">生成分享链接</button>
             `}
         </div>` : '';
     
@@ -592,15 +598,20 @@ async function showDetail(id) {
             ${e.approved_by ? ` · 审核: ${e.approved_by}` : ''}
             ${e.reviewer_notes ? ` · 审核意见: ${e.reviewer_notes}` : ''}
         </div>
+        ${sharePanel}
         <div class="markdown-body" style="line-height:1.8;font-size:0.92rem;color:var(--text-primary);padding:16px;background:var(--bg-secondary);border-radius:var(--radius-sm)">
             ${renderMarkdown(e.content)}
         </div>
-        ${sharePanel}
     `;
     window._detailEntryData = e;
     $('#detail-actions').innerHTML = `
         <button class="btn btn-ghost" onclick="toggleFavorite(${e.id})">${e.is_favorite ? '★ 取消收藏' : '☆ 收藏'}</button>
         <a class="btn btn-ghost" href="/api/v1/knowledge/${e.id}/export.md">下载 Markdown</a>
+        ${e.can_manage_share ? (
+            e.is_shared && shareUrl
+                ? `<button class="btn btn-success" onclick="openKnowledgeShare(${e.id})">🔗 独立窗口打开</button>`
+                : `<button class="btn btn-primary" onclick="manageKnowledgeShare(${e.id}, 'enable')">🔗 分享</button>`
+        ) : ''}
         <button class="btn btn-ghost" onclick="showFullKnowledge()">全屏查看</button>
         <button class="btn btn-ghost" onclick="closeDetailModal()">关闭</button>
         <button class="btn btn-primary" onclick="closeDetailModal();showEditModal(${e.id})">编辑</button>
@@ -655,6 +666,21 @@ async function manageKnowledgeShare(id, action) {
     } catch (err) {
         showToast('分享操作失败: ' + err.message, 'error');
     }
+}
+
+function openKnowledgeShare(id) {
+    const input = document.getElementById('share-url-' + id);
+    const entry = allEntries.find(item => item.id === id);
+    const url = input && input.value
+        ? input.value
+        : (entry && entry.share_url
+            ? new URL(entry.share_url, window.location.origin).href
+            : '');
+    if (!url) {
+        showToast('请先生成分享链接', 'error');
+        return;
+    }
+    window.open(url, '_blank', 'noopener');
 }
 
 // 全屏查看知识详情
