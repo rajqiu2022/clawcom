@@ -26,6 +26,25 @@ PREFLIGHT_CHECKLIST = [
 
 MAX_TOP_PITFALLS = 3
 MAX_SOLUTION_CHARS = 120
+MAX_SKILL_POLICY_ITEMS = 32
+MAX_SKILL_NAME_CHARS = 128
+
+
+def _skill_policy_names(values) -> list[str]:
+    """Normalize a bounded Hub-authored Skill policy list."""
+    if not isinstance(values, (list, tuple)):
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values[:MAX_SKILL_POLICY_ITEMS]:
+        if not isinstance(value, str):
+            continue
+        name = value.strip()
+        if not name or len(name) > MAX_SKILL_NAME_CHARS or name in seen:
+            continue
+        seen.add(name)
+        result.append(name)
+    return result
 
 
 def build_task_context_payload(
@@ -35,6 +54,7 @@ def build_task_context_payload(
     project: str | None = None,
     claw=None,
     pitfall_source=None,
+    skill_policy=None,
 ) -> dict[str, Any]:
     """构建任务上下文包。字段全部给安全默认值。"""
     ctx = build_task_operating_context(
@@ -47,6 +67,14 @@ def build_task_context_payload(
     for skill in (primary_skill, GENERAL_SHELL_SKILL):
         if skill and skill not in required_skills:
             required_skills.append(skill)
+
+    policy = skill_policy if isinstance(skill_policy, dict) else {}
+    blocking_skills = _skill_policy_names(policy.get('blocking_skills'))
+    for skill in blocking_skills:
+        if skill not in required_skills:
+            required_skills.append(skill)
+    if policy.get('strict_required') is True:
+        blocking_skills = list(required_skills)
 
     matched = ctx.get('matched_pitfalls') or []
     top_pitfalls: list[dict[str, Any]] = []
@@ -71,6 +99,8 @@ def build_task_context_payload(
     return {
         'project': ctx.get('project') or project or '',
         'required_skills': required_skills,
+        # required_skills 是优先加载请求；只有此列表才是执行前硬门禁。
+        'blocking_skills': blocking_skills,
         'primary_skill': primary_skill,
         'operating_protocol_skill': ctx.get('operating_protocol_skill') or 'agent-operating-protocol',
         'trigger_terms': ctx.get('trigger_terms') or [],

@@ -15,7 +15,7 @@ VALID_REF_TYPES = {'todo', 'agent_task', 'workflow_step'}
 
 
 def _resolve_task(ref_type: str, ref_id: int):
-    """返回 (title, description, claw, project) 或 None（不存在）。"""
+    """返回 (title, description, claw, project, skill_policy) 或 None。"""
     from app.models import ClawTodo, AgentTask, WorkflowRunStep
 
     if ref_type == 'todo':
@@ -24,7 +24,7 @@ def _resolve_task(ref_type: str, ref_id: int):
             return None
         claw = getattr(todo, 'openclaw', None)
         project = getattr(claw, 'project_name', None)
-        return todo.title, todo.description, claw, project
+        return todo.title, todo.description, claw, project, {}
 
     if ref_type == 'agent_task':
         task = db.session.get(AgentTask, ref_id)
@@ -43,7 +43,11 @@ def _resolve_task(ref_type: str, ref_id: int):
                        or task.target_path or '')
         claw = getattr(task, 'claw', None)
         project = getattr(claw, 'project_name', None)
-        return title, description, claw, project
+        policy = payload.get('skill_policy')
+        if not isinstance(policy, dict):
+            embedded = payload.get('task_context')
+            policy = embedded if isinstance(embedded, dict) else {}
+        return title, description, claw, project, policy
 
     if ref_type == 'workflow_step':
         step = db.session.get(WorkflowRunStep, ref_id)
@@ -60,7 +64,11 @@ def _resolve_task(ref_type: str, ref_id: int):
             project = getattr(definition, 'project_name', None)
         if not project:
             project = getattr(claw, 'project_name', None)
-        return title, description, claw, project
+        policy = config.get('skill_policy')
+        if not isinstance(policy, dict):
+            embedded = config.get('task_context')
+            policy = embedded if isinstance(embedded, dict) else {}
+        return title, description, claw, project, policy
 
     return None
 
@@ -77,9 +85,10 @@ def get_task_context(ref_type, ref_id):
     if resolved is None:
         return jsonify({'error': '任务不存在'}), 404
 
-    title, description, claw, project = resolved
+    title, description, claw, project, skill_policy = resolved
     payload = build_task_context_payload(
         title or '', description, project=project, claw=claw,
+        skill_policy=skill_policy,
     )
     payload['ref_type'] = ref_type
     payload['ref_id'] = ref_id

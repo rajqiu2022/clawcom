@@ -35,10 +35,35 @@ class TaskContextTest(unittest.TestCase):
             pitfall_source=lambda *a, **k: [],
         )
         for key in ('project', 'required_skills', 'primary_skill',
-                    'top_pitfalls', 'preflight_checklist', 'references'):
+                    'blocking_skills', 'top_pitfalls',
+                    'preflight_checklist', 'references'):
             self.assertIn(key, ctx)
         self.assertTrue(ctx['preflight_checklist'])
         self.assertIn('basic-operations-preflight', ctx['required_skills'])
+        self.assertEqual([], ctx['blocking_skills'])
+
+    def test_explicit_blocking_skills_are_bounded_and_requested(self):
+        ctx = task_context.build_task_context_payload(
+            title='高风险发布',
+            pitfall_source=lambda *a, **k: [],
+            skill_policy={
+                'blocking_skills': [
+                    'release-safety', 'release-safety', '', 123,
+                ],
+            },
+        )
+
+        self.assertEqual(['release-safety'], ctx['blocking_skills'])
+        self.assertIn('release-safety', ctx['required_skills'])
+
+    def test_strict_required_expands_to_explicit_blocking_list(self):
+        ctx = task_context.build_task_context_payload(
+            title='迁移期任务',
+            pitfall_source=lambda *a, **k: [],
+            skill_policy={'strict_required': True},
+        )
+
+        self.assertEqual(ctx['required_skills'], ctx['blocking_skills'])
 
     def test_top_pitfalls_truncated(self):
         fake = [

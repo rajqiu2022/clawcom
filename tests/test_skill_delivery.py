@@ -258,7 +258,9 @@ class SkillManifestServiceTest(unittest.TestCase):
             'name': 'missing-skill',
             'sources': ['profile'],
             'reason': 'not_found',
+            'blocking': False,
         }])
+        self.assertEqual([], manifest['blocking_skills'])
 
     def test_task_context_skills_are_automatically_authorized(self):
         manifest = skill_delivery.build_skill_manifest(
@@ -334,6 +336,22 @@ class SkillManifestServiceTest(unittest.TestCase):
             'project-skill': 'project_forbidden',
             'private-skill': 'private_forbidden',
         })
+
+    def test_task_policy_marks_only_explicit_skills_as_blocking(self):
+        self.task.payload = (
+            '{"title":"需求评审","skill_policy":'
+            '{"blocking_skills":["requirement-analysis"]}}'
+        )
+        db.session.commit()
+
+        manifest = skill_delivery.build_skill_manifest(
+            self.claw, ref_type='agent_task', ref_id=self.task.id)
+        by_name = {item['name']: item for item in manifest['skills']}
+
+        self.assertEqual(
+            ['requirement-analysis'], manifest['blocking_skills'])
+        self.assertTrue(by_name['requirement-analysis']['blocking'])
+        self.assertFalse(by_name['basic-operations-preflight']['blocking'])
 
 
 if __name__ == '__main__':

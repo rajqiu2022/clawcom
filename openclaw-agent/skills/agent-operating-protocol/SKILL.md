@@ -34,7 +34,8 @@
 
 | 字段 | 含义 |
 |------|------|
-| `required_skills` | 本任务必须先加载的 Skill 列表（含 `basic-operations-preflight`） |
+| `required_skills` | 本任务建议优先加载的 Skill 列表（含 `basic-operations-preflight`） |
+| `blocking_skills` | 缺失时客观上禁止继续的 Skill；默认空列表 |
 | `preflight_checklist` | 执行前必须逐条确认的通用铁律（5 条） |
 | `top_pitfalls` | 命中的高相关历史踩坑（title + solution） |
 | `references` | 相关经验/资料引用 |
@@ -45,7 +46,11 @@
 1. Todo / AgentTask / workflow step 的 SSE 推送 / `GET` 返回里已内嵌（sidecar v2.1+ 会拼进 prompt）；
 2. 若手上没有，主动拉：`GET /api/v1/tasks/{ref_type}/{ref_id}/context`，`ref_type ∈ {todo, agent_task, workflow_step}`。
 
-**你必须做的第一件事**：读出 `task_context`，用 **一句话**确认「已加载 {required_skills}，已确认 {N} 条前置铁律，已知 {M} 条历史踩坑」——**不要逐条复述全文**（节省 token）。旧字段 `pitfall_notice` 仍兼容保留，等价于 `top_pitfalls` 摘要。
+**你必须做的第一件事**：读出 `task_context`，尝试加载 `required_skills`，再用
+**一句话**确认「已加载 {实际加载项}；不可用可选项 {降级项或无}；已确认 {N} 条前置铁律；
+已知 {M} 条历史踩坑」——不得声称已加载实际不可用的 Skill。只有
+`blocking_skills` 中的 Skill 缺失时才停止任务；其它项记录降级后继续。旧字段
+`pitfall_notice` 仍兼容保留，等价于 `top_pitfalls` 摘要。
 
 ---
 
@@ -55,7 +60,7 @@
 
 | 顺序 | 来源 | 动作 |
 |------|------|------|
-| 0 | `task_context.required_skills` | **先加载这些 Skill**（含通用壳 `basic-operations-preflight`），再动手 |
+| 0 | `task_context.required_skills` | 优先加载这些 Skill；可选项不可用时记录降级并继续，`blocking_skills` 缺失才停止 |
 | 1 | 公共踩坑 | 读 `task_context.top_pitfalls`（已推送）；不足再 `GET /knowledge?category=pitfall&project={项目}&search={关键词}` |
 | 2 | 项目 Rules | `GET /rules?project={项目}` 扫与任务相关的条目 |
 | 3 | 主 Skill | 加载 `primary_skill`（见下表），只加载 **1 个**主 Skill |
@@ -158,7 +163,8 @@ pitfall, owner-correction, {module}
 
 | 字段 | 含义 |
 |------|------|
-| `required_skills` | 必装 Skill（含 `basic-operations-preflight`） |
+| `required_skills` | 建议优先加载的 Skill（含 `basic-operations-preflight`） |
+| `blocking_skills` | 缺失则停止的显式阻断 Skill；默认空列表 |
 | `preflight_checklist` | 执行前铁律（5 条） |
 | `top_pitfalls` | 命中的高相关踩坑（title+solution） |
 | `references` | 相关经验引用 |
@@ -171,7 +177,7 @@ pitfall, owner-correction, {module}
 **执行 Todo 的标准开场白**（模板，等价"提交前 Gate"起手）：
 
 ```
-收到待办「{title}」。已加载 {required_skills}；已确认 {N} 条前置铁律；已知 {M} 条历史踩坑。开始执行，写操作后将调 /ops/verify 复核。
+收到待办「{title}」。已加载 {实际加载项}；不可用可选项 {降级项或无}；已确认 {N} 条前置铁律；已知 {M} 条历史踩坑。开始执行，写操作后将调 /ops/verify 复核。
 ```
 
 ---
@@ -186,6 +192,7 @@ pitfall, owner-correction, {module}
 6. ❌ SOP 长期只放 Memos 不升级
 7. ❌ 一次加载 10 个 Skill 而不是 1 个主 Skill
 8. ❌ 声称「无法发图」前未查资产台账（WeCom 场景）
+9. ❌ 将任意 `required_skills` 缺失当成整轮阻断，或声称已加载实际不可用的 Skill
 
 ---
 

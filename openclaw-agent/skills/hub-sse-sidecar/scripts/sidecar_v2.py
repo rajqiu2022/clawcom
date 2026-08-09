@@ -45,7 +45,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-SIDECAR_VERSION = '2.5.0'
+SIDECAR_VERSION = '2.5.1'
 
 HUB_URL = os.getenv('HUB_URL', '').rstrip('/')
 CLAW_ID = os.getenv('CLAW_ID', '').strip()
@@ -172,7 +172,16 @@ def agent_profile_lines():
     workflow_config = (profile.get('workflow_config') or '').strip()
     required_skills = profile.get('required_skills') or []
     if required_skills:
-        lines.append('- 必装/必读 Skills：' + ', '.join(str(x) for x in required_skills))
+        lines.append(
+            '- 建议 Skills（可用时优先加载）：'
+            + ', '.join(str(x) for x in required_skills)
+        )
+    blocking_skills = profile.get('blocking_skills') or []
+    if blocking_skills:
+        lines.append(
+            '- 阻断型 Skills（缺失则停止）：'
+            + ', '.join(str(x) for x in blocking_skills)
+        )
     if system_prompt:
         lines.extend(['', '岗位职责：', system_prompt])
     if workflow_config:
@@ -207,10 +216,24 @@ def format_task_context(tc):
     lines = []
     skills = tc.get('required_skills') or []
     if skills:
-        lines.append('必备 Skill（先加载再动手）：' + '、'.join(str(s) for s in skills))
+        lines.append(
+            '建议 Skill（可用时优先加载）：'
+            + '、'.join(str(s) for s in skills)
+        )
+    blocking = tc.get('blocking_skills') or []
+    if blocking:
+        lines.append(
+            '阻断型 Skill（缺失则停止）：'
+            + '、'.join(str(s) for s in blocking)
+        )
+    if skills or blocking:
+        lines.append(
+            'Skill 可用性规则：未加载的可选 Skill 不得使用或声称已使用；'
+            '记录降级后继续。只有上述阻断型 Skill 缺失时才停止任务。'
+        )
     op = tc.get('operating_protocol_skill')
     if op:
-        lines.append(f'执行协议 Skill：{op}（务必遵循其生命周期）')
+        lines.append(f'执行协议 Skill：{op}（可用时遵循其生命周期）')
     checklist = tc.get('preflight_checklist') or []
     if checklist:
         lines.append('执行前铁律（逐条确认后再动手）：')

@@ -147,7 +147,7 @@ def resolve_task_context(ref_type: str, ref_id: int, claw) -> dict[str, Any]:
     resolved = _resolve_task(ref_type, ref_id)
     if resolved is None:
         raise SkillDeliveryError('task_not_found', '任务不存在', 404)
-    title, description, task_claw, project = resolved
+    title, description, task_claw, project, skill_policy = resolved
     if not task_claw or task_claw.id != claw.id:
         raise SkillDeliveryError(
             'task_forbidden',
@@ -159,10 +159,17 @@ def resolve_task_context(ref_type: str, ref_id: int, claw) -> dict[str, Any]:
         description,
         project=project,
         claw=task_claw,
+        skill_policy=skill_policy,
     )
 
 
-def _source_names(claw, ref_type=None, ref_id=None) -> dict[str, list[str]]:
+def _source_names(
+    claw,
+    ref_type=None,
+    ref_id=None,
+    *,
+    task_context=None,
+) -> dict[str, list[str]]:
     if (ref_type is None) != (ref_id is None):
         raise SkillDeliveryError(
             'invalid_task_ref',
@@ -181,7 +188,8 @@ def _source_names(claw, ref_type=None, ref_id=None) -> dict[str, list[str]]:
         'task_context': [],
     }
     if ref_type is not None:
-        task_context = resolve_task_context(ref_type, int(ref_id), claw)
+        if task_context is None:
+            task_context = resolve_task_context(ref_type, int(ref_id), claw)
         source_names['task_context'] = [
             name
             for name in (
@@ -212,15 +220,37 @@ def _skill_unavailable_reason(skill, claw) -> str | None:
     return None
 
 
-def _source_map(claw, ref_type=None, ref_id=None) -> dict[str, list[str]]:
+def _source_contract(
+    claw,
+    ref_type=None,
+    ref_id=None,
+) -> tuple[dict[str, list[str]], list[str]]:
     result: dict[str, list[str]] = {}
-    source_names = _source_names(claw, ref_type=ref_type, ref_id=ref_id)
+    task_context = None
+    if ref_type is not None:
+        task_context = resolve_task_context(ref_type, int(ref_id), claw)
+    source_names = _source_names(
+        claw,
+        ref_type=ref_type,
+        ref_id=ref_id,
+        task_context=task_context,
+    )
     for source in SOURCE_ORDER:
         for name in source_names[source]:
             result.setdefault(name, [])
             if source not in result[name]:
                 result[name].append(source)
-    return result
+    blocking: list[str] = []
+    if task_context is not None:
+        blocking = [
+            name
+            for name in (
+                _required_skill_name(value)
+                for value in task_context.get('blocking_skills') or []
+            )
+            if name
+        ]
+    return result, list(dict.fromkeys(blocking))
 
 
 def _task_query(ref_type, ref_id) -> str:
@@ -237,11 +267,12 @@ def build_skill_manifest(
 ) -> dict[str, Any]:
     from app.models import Skill
 
-    sources_by_name = _source_map(
+    sources_by_name, blocking_skills = _source_contract(
         claw,
         ref_type=ref_type,
         ref_id=ref_id,
     )
+    blocking_set = set(blocking_skills)
     names = sorted(sources_by_name)
     found = {
         skill.name: skill
@@ -261,6 +292,7 @@ def build_skill_manifest(
                 'name': name,
                 'sources': sources,
                 'reason': 'not_found',
+                'blocking': name in blocking_set,
             })
             continue
         reason = _skill_unavailable_reason(skill, claw)
@@ -269,6 +301,7 @@ def build_skill_manifest(
                 'name': name,
                 'sources': sources,
                 'reason': reason,
+                'blocking': name in blocking_set,
             })
             continue
 
@@ -294,6 +327,7 @@ def build_skill_manifest(
             'content_version': descriptor['content_version'],
             'sha256': descriptor['sha256'],
             'sources': sources,
+            'blocking': name in blocking_set,
             'files': files,
             'pack_url': (
                 f'{root}/openclaws/{claw.id}/skills/{skill.id}/pack{query}'
@@ -310,6 +344,7 @@ def build_skill_manifest(
         ),
         'skills': skills,
         'missing_skills': missing,
+        'blocking_skills': blocking_skills,
     }
 
 
