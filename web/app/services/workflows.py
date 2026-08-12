@@ -435,6 +435,49 @@ def normalize_step_references(value):
     return refs
 
 
+def normalize_analysis_config(value):
+    """Normalize the optional code-analysis contract attached to a node.
+
+    Keeping this as node metadata lets old workflow runners ignore it while
+    capable Agent runners receive a stable API contract in their task payload.
+    """
+    if not isinstance(value, dict):
+        return {}
+    allowed_baseline_vars = (
+        'client_repo', 'client_base_sha', 'client_target_sha',
+        'server_repo', 'server_base_sha', 'server_target_sha',
+        'config_digest', 'proto_digest', 'requirement_revision',
+        'testcase_revisions', 'knowledge_snapshots',
+        'analysis_profile_version', 'rule_snapshot_id',
+    )
+    baseline_vars = {}
+    raw_baseline_vars = value.get('baseline_vars')
+    if isinstance(raw_baseline_vars, dict):
+        for key in allowed_baseline_vars:
+            raw = raw_baseline_vars.get(key)
+            if raw not in (None, ''):
+                baseline_vars[key] = str(raw).strip()[:240]
+    report_format = str(value.get('report_format') or 'html').strip().lower()
+    if report_format not in ('html', 'markdown'):
+        report_format = 'html'
+    return {
+        'enabled': bool(value.get('enabled', True)),
+        'profile': str(value.get('profile') or 'requirement_code_joint').strip()[:100],
+        'create_report': bool(value.get('create_report', True)),
+        'report_title_template': str(
+            value.get('report_title_template') or '代码分析报告 - {run_name}'
+        ).strip()[:300],
+        'report_format': report_format,
+        'iteration_id_var': str(
+            value.get('iteration_id_var') or 'iteration_id').strip()[:160],
+        'report_id_var': str(
+            value.get('report_id_var') or 'analysis_report_id').strip()[:160],
+        'baseline_vars': baseline_vars,
+        'require_independent_review': bool(
+            value.get('require_independent_review', True)),
+    }
+
+
 def normalize_step(step, idx):
     """Normalize a single workflow step definition."""
     if not isinstance(step, dict):
@@ -466,6 +509,8 @@ def normalize_step(step, idx):
         ],
         'retry_max': int(step.get('retry_max') or 0),
     }
+    if isinstance(step.get('analysis'), dict):
+        normalized['analysis'] = normalize_analysis_config(step.get('analysis'))
     for key in ('auto_block_on_heartbeat_loss', 'heartbeat_auto_block', 'auto_block_on_no_response'):
         if key in step:
             normalized[key] = bool(step.get(key))
@@ -619,6 +664,31 @@ def build_workflow_agent_task_payload(run, step, outputs=None):
     # 透传统一任务上下文包（由 step.to_dict(with_context=True) 注入）
     if isinstance(step.get('task_context'), dict):
         payload['task_context'] = step['task_context']
+    analysis = config.get('analysis') if isinstance(config.get('analysis'), dict) else {}
+    if analysis.get('enabled'):
+        payload['analysis'] = dict(analysis)
+        payload['analysis']['api_contract'] = {
+            'create_run': {
+                'method': 'POST',
+                'path': '/api/v1/shift-left/analysis-runs',
+            },
+            'upsert_finding': {
+                'method': 'PUT',
+                'path': '/api/v1/shift-left/findings:upsert',
+            },
+            'complete_run': {
+                'method': 'POST',
+                'path_template': '/api/v1/shift-left/analysis-runs/{analysis_run_id}/result',
+            },
+            'create_report': {
+                'method': 'POST',
+                'path': '/api/v1/test-reports',
+            },
+        }
+        payload['analysis']['report_binding'] = {
+            'workflow_artifact_type': 'test_report',
+            'result_field': analysis.get('report_id_var') or 'analysis_report_id',
+        }
     return payload
 
 

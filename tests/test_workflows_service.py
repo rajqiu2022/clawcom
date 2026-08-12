@@ -295,6 +295,33 @@ class WorkflowServiceTest(unittest.TestCase):
             definition['steps'][0]['target_post'],
             'requirement_analyst')
 
+    def test_normalize_definition_preserves_safe_code_analysis_config(self):
+        definition = workflows.normalize_workflow_definition({
+            'key': 'analysis_flow',
+            'name': 'Analysis Flow',
+            'steps': [{
+                'id': 'code_analysis',
+                'name': '代码分析',
+                'type': 'agent_task',
+                'analysis': {
+                    'enabled': True,
+                    'profile': 'requirement_code_joint',
+                    'report_format': 'pdf',
+                    'baseline_vars': {
+                        'client_target_sha': 'client_target_sha',
+                        'server_target_sha': 'server_target_sha',
+                        'unexpected_secret': 'must-not-pass',
+                    },
+                },
+            }],
+        })
+        analysis = definition['steps'][0]['analysis']
+        self.assertTrue(analysis['enabled'])
+        self.assertEqual(analysis['report_format'], 'html')
+        self.assertEqual(analysis['baseline_vars']['client_target_sha'],
+                         'client_target_sha')
+        self.assertNotIn('unexpected_secret', analysis['baseline_vars'])
+
     def test_ready_steps_only_include_dependency_satisfied_pending_steps(self):
         definition = workflows.normalize_workflow_definition({
             'key': 'demo',
@@ -364,6 +391,32 @@ class WorkflowServiceTest(unittest.TestCase):
         self.assertEqual(payload['outputs']['editor_report']['report_id'], 123)
         self.assertIn('/api/v1/workflow-runs/7/steps/analyze_report/result',
                       payload['result_api'])
+
+    def test_build_agent_task_payload_includes_shift_left_api_contract(self):
+        payload = workflows.build_workflow_agent_task_payload(
+            run={'id': 19, 'run_name': '需求闭环', 'context': {}},
+            step={
+                'step_id': 'engineering_analysis',
+                'name': '工程分析',
+                'config': {
+                    'analysis': workflows.normalize_analysis_config({
+                        'enabled': True,
+                        'create_report': True,
+                        'report_id_var': 'analysis_report_id',
+                    }),
+                },
+            },
+            outputs={},
+        )
+        self.assertTrue(payload['analysis']['enabled'])
+        self.assertEqual(
+            payload['analysis']['api_contract']['upsert_finding']['method'],
+            'PUT')
+        self.assertIn('/api/v1/shift-left/analysis-runs',
+                      payload['analysis']['api_contract']['create_run']['path'])
+        self.assertEqual(
+            payload['analysis']['report_binding']['result_field'],
+            'analysis_report_id')
 
     def test_build_agent_task_payload_contains_references_and_display_state(self):
         payload = workflows.build_workflow_agent_task_payload(

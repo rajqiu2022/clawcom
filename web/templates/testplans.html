@@ -257,6 +257,39 @@
 .tp-tag-P2 { background: rgba(59,130,246,0.12); color: #3b82f6; }
 .tp-tag-P3 { background: rgba(156,163,175,0.12); color: #9ca3af; }
 
+/* 测试左移：结构化代码分析结果。默认由 SHIFT_LEFT_ENABLED 隐藏。 */
+.sl-summary { display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;margin-bottom:14px; }
+.sl-stat { border:1px solid var(--border);border-radius:12px;background:var(--bg-card);padding:12px 14px; }
+.sl-stat strong { display:block;font-size:1.35rem;line-height:1.1;color:var(--text-primary); }
+.sl-stat span { display:block;margin-top:5px;font-size:.76rem;color:var(--text-muted); }
+.sl-toolbar { display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px; }
+.sl-toolbar select { border:1px solid var(--border);border-radius:9px;background:var(--bg-secondary);color:var(--text-primary);padding:7px 10px; }
+.sl-table-wrap { overflow:auto;border:1px solid var(--border);border-radius:12px;background:var(--bg-card); }
+.sl-table { width:100%;min-width:920px;border-collapse:collapse;font-size:.82rem; }
+.sl-table th { padding:10px;text-align:left;color:var(--text-secondary);background:var(--bg-secondary);border-bottom:1px solid var(--border); }
+.sl-table td { padding:11px 10px;border-bottom:1px solid var(--border);vertical-align:top; }
+.sl-table tr:last-child td { border-bottom:0; }
+.sl-title { max-width:360px;font-weight:700;color:var(--text-primary);line-height:1.45;word-break:break-word; }
+.sl-sub { margin-top:4px;color:var(--text-muted);font-size:.74rem;word-break:break-all; }
+.sl-pill { display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;font-size:.72rem;font-weight:700;background:var(--bg-secondary);color:var(--text-secondary);border:1px solid var(--border);white-space:nowrap; }
+.sl-severity-critical,.sl-severity-high { color:#ef4444;border-color:#ef444466;background:#ef444418; }
+.sl-severity-medium { color:#f59e0b;border-color:#f59e0b66;background:#f59e0b18; }
+.sl-severity-low,.sl-severity-info { color:#3b82f6;border-color:#3b82f666;background:#3b82f618; }
+.sl-detail-overlay { position:fixed;inset:0;z-index:10020;background:rgba(2,6,23,.62);display:flex;align-items:center;justify-content:center;padding:22px; }
+.sl-detail { width:min(920px,96vw);max-height:88vh;overflow:auto;border:1px solid var(--border);border-radius:16px;background:var(--bg-card);box-shadow:0 22px 70px rgba(0,0,0,.38); }
+.sl-detail-head { position:sticky;top:0;z-index:1;display:flex;gap:12px;align-items:flex-start;padding:17px 20px;border-bottom:1px solid var(--border);background:var(--bg-card); }
+.sl-detail-body { padding:18px 20px; }
+.sl-detail-grid { display:grid;grid-template-columns:1fr 1fr;gap:14px; }
+.sl-panel { border:1px solid var(--border);border-radius:12px;padding:13px;background:var(--bg-secondary); }
+.sl-panel h4 { margin:0 0 8px;font-size:.8rem;color:var(--text-muted); }
+.sl-panel pre { margin:0;white-space:pre-wrap;word-break:break-word;font:inherit;color:var(--text-primary);line-height:1.55; }
+.sl-events { margin-top:14px;display:flex;flex-direction:column;gap:8px; }
+.sl-event { border-left:3px solid var(--border);padding:7px 10px;background:var(--bg-secondary);border-radius:0 9px 9px 0; }
+.sl-event-meta { font-size:.72rem;color:var(--text-muted);margin-bottom:4px; }
+.sl-comment-box { display:flex;gap:8px;margin-top:14px; }
+.sl-comment-box textarea { flex:1;min-height:70px;resize:vertical;border:1px solid var(--border);border-radius:10px;background:var(--bg-secondary);color:var(--text-primary);padding:10px; }
+@media (max-width:900px) { .sl-summary{grid-template-columns:1fr 1fr}.sl-detail-grid{grid-template-columns:1fr} }
+
 .iter-tab-bar { display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 18px 12px;border-bottom:1px solid var(--border); }
 .iter-tab-btn { border:1px solid var(--border);background:var(--bg-card);color:var(--text-secondary);border-radius:999px;padding:6px 12px;font-size:0.82rem;cursor:pointer;transition:.15s; }
 .iter-tab-btn:hover { border-color:var(--accent);color:var(--accent); }
@@ -548,6 +581,9 @@ let libraries = [];
 let taskCasePages = {};
 let isBootstrappingTestplans = true;
 let pendingTestplanDeepLink = parseTestplanDeepLink();
+const SHIFT_LEFT_ENABLED = {{ config.get('SHIFT_LEFT_ENABLED', false)|tojson }};
+let shiftLeftFindings = [];
+let shiftLeftFilters = { severity: '', status: '' };
 
 const VERSION_TYPE_MAP = { regular:'常规版本', resource:'资源版本', hotfix:'紧急补丁' };
 const STATUS_MAP = { draft:'草稿', active:'进行中', completed:'已完成', archived:'已归档' };
@@ -985,17 +1021,22 @@ function renderIterDetailArea(iter) {
 }
 
 function builtInIterationTabs() {
-    return [
+    const tabs = [
         { tab_key: 'requirements', title: '需求', tab_type: 'requirement', builtin: true },
         { tab_key: 'bugs', title: 'Bug', tab_type: 'bug', builtin: true },
     ];
+    if (SHIFT_LEFT_ENABLED) {
+        tabs.push({ tab_key: 'code_analysis', title: '代码分析', tab_type: 'shift_left', builtin: true });
+    }
+    return tabs;
 }
 
 function mergedIterationTabs() {
     const byKey = {};
     currentIterTabs.forEach(t => { byKey[t.tab_key] = t; });
+    const builtInKeys = new Set(builtInIterationTabs().map(t => t.tab_key));
     return builtInIterationTabs().map(t => byKey[t.tab_key] || t)
-        .concat(currentIterTabs.filter(t => !['requirements', 'bugs'].includes(t.tab_key)));
+        .concat(currentIterTabs.filter(t => !builtInKeys.has(t.tab_key)));
 }
 
 function renderIterTabBar() {
@@ -1044,6 +1085,10 @@ function canManageIterationTab(tab) {
 function renderCurrentIterationTab() {
     const el = document.getElementById('dynamic-tab-content');
     if (!el) return;
+    if (currentIterTabKey === 'code_analysis' && SHIFT_LEFT_ENABLED) {
+        renderCodeAnalysisTab();
+        return;
+    }
     const tab = findIterationTab(currentIterTabKey);
     if (!tab || tab.builtin) {
         const name = tab ? tab.title : currentIterTabKey;
@@ -1077,6 +1122,180 @@ function renderCurrentIterationTab() {
         ${showCharts ? renderDynamicCharts(tab) : ''}
         ${showTable ? renderDynamicTable(tab) : ''}
         ${!showCharts && !showTable ? '<div class="iter-tab-empty">当前页签没有可展示内容</div>' : ''}`;
+}
+
+const SHIFT_LEFT_STATUS_LABELS = {
+    new:'新发现', triaged:'已分诊', validation_planned:'待验证', validating:'验证中',
+    needs_human:'需人工判断', confirmed:'已确认', dev_acknowledged:'开发已确认',
+    fixing:'修复中', fix_ready:'待回归', reverifying:'回归中', closed:'已关闭',
+    rejected:'已驳回', blocked:'阻塞', reopened:'重新打开'
+};
+const SHIFT_LEFT_EVIDENCE_LABELS = {
+    hypothesis:'推测', contract_confirmed:'契约确认', runtime_confirmed:'运行确认',
+    human_confirmed:'人工确认', fixed_verified:'修复已验证'
+};
+
+function shiftLeftIdempotencyKey(prefix) {
+    const suffix = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+    return `testplan-${prefix}-${suffix}`.slice(0, 128);
+}
+
+async function shiftLeftWrite(path, data, prefix = 'write') {
+    const response = await fetch(`/api/v1${path}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': shiftLeftIdempotencyKey(prefix),
+        },
+        body: JSON.stringify(data || {}),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    return payload;
+}
+
+async function renderCodeAnalysisTab() {
+    const el = document.getElementById('dynamic-tab-content');
+    if (!el || currentIterTabKey !== 'code_analysis') return;
+    const projectId = currentIterDetail && currentIterDetail.project_id;
+    if (!projectId || !currentIterId) {
+        el.innerHTML = '<div class="iter-tab-empty">当前测试迭代未关联项目，无法加载代码分析结果</div>';
+        return;
+    }
+    el.innerHTML = '<div class="iter-tab-empty">正在读取结构化代码分析结果…</div>';
+    const params = new URLSearchParams({
+        project_id: String(projectId), iteration_id: String(currentIterId), page_size: '200'
+    });
+    if (shiftLeftFilters.severity) params.set('severity', shiftLeftFilters.severity);
+    if (shiftLeftFilters.status) params.set('status', shiftLeftFilters.status);
+    try {
+        const result = await API.get(`/shift-left/findings?${params.toString()}`);
+        if (currentIterTabKey !== 'code_analysis') return;
+        shiftLeftFindings = result.items || [];
+        el.innerHTML = renderCodeAnalysisContent(result.total || 0);
+    } catch (e) {
+        el.innerHTML = `<div class="iter-tab-empty">加载代码分析失败：${esc(e.message)}</div>`;
+    }
+}
+
+function renderCodeAnalysisContent(total) {
+    const openStates = new Set(['new','triaged','validation_planned','validating','needs_human','confirmed','dev_acknowledged','fixing','fix_ready','reverifying','reopened']);
+    const highCount = shiftLeftFindings.filter(f => ['critical','high'].includes(f.severity)).length;
+    const openCount = shiftLeftFindings.filter(f => openStates.has(f.status)).length;
+    const verifyCount = shiftLeftFindings.filter(f => ['fix_ready','reverifying'].includes(f.status)).length;
+    return `
+        <div class="sl-summary">
+            <div class="sl-stat"><strong>${total}</strong><span>当前筛选结果</span></div>
+            <div class="sl-stat"><strong>${openCount}</strong><span>待处理</span></div>
+            <div class="sl-stat"><strong>${highCount}</strong><span>高风险 / 严重</span></div>
+            <div class="sl-stat"><strong>${verifyCount}</strong><span>待回归验证</span></div>
+        </div>
+        <div class="sl-toolbar">
+            <strong style="margin-right:auto">代码分析问题</strong>
+            <select onchange="shiftLeftFilters.severity=this.value;renderCodeAnalysisTab()">
+                <option value="">全部风险</option>
+                ${['critical','high','medium','low','info'].map(v => `<option value="${v}" ${shiftLeftFilters.severity===v?'selected':''}>${v}</option>`).join('')}
+            </select>
+            <select onchange="shiftLeftFilters.status=this.value;renderCodeAnalysisTab()">
+                <option value="">全部状态</option>
+                ${Object.entries(SHIFT_LEFT_STATUS_LABELS).map(([v,n]) => `<option value="${v}" ${shiftLeftFilters.status===v?'selected':''}>${esc(n)}</option>`).join('')}
+            </select>
+            <button class="tp-btn-sm" onclick="renderCodeAnalysisTab()">刷新</button>
+        </div>
+        ${shiftLeftFindings.length ? `
+        <div class="sl-table-wrap"><table class="sl-table">
+            <thead><tr><th>问题</th><th>模块</th><th>风险</th><th>证据</th><th>状态</th><th>负责人</th><th>最近发现</th><th></th></tr></thead>
+            <tbody>${shiftLeftFindings.map(f => `
+                <tr>
+                    <td><div class="sl-title">${esc(f.title)}</div><div class="sl-sub">#${f.id} · ${esc(f.finding_key)}</div></td>
+                    <td>${esc(f.module || '-')}</td>
+                    <td><span class="sl-pill sl-severity-${esc(f.severity)}">${esc(f.severity)}</span></td>
+                    <td><span class="sl-pill">${esc(SHIFT_LEFT_EVIDENCE_LABELS[f.evidence_level] || f.evidence_level)}</span></td>
+                    <td><span class="sl-pill">${esc(SHIFT_LEFT_STATUS_LABELS[f.status] || f.status)}</span></td>
+                    <td>${esc(f.owner || '-')}</td>
+                    <td>${esc(f.last_seen_at || '-')}</td>
+                    <td><button class="tp-btn-sm" onclick="openShiftLeftFinding(${Number(f.id)})">查看 / 处理</button></td>
+                </tr>`).join('')}</tbody>
+        </table></div>` : '<div class="iter-tab-empty">本迭代暂无代码分析问题。Workflow 产出 Finding 后会自动显示在这里。</div>'}`;
+}
+
+function shiftLeftTransitionActions(finding) {
+    const next = {
+        new:['triage','分诊'], triaged:['confirm','确认问题'], confirmed:['acknowledge','开发确认'],
+        dev_acknowledged:['start_fix','开始修复'], fixing:['submit_fix','提交修复'],
+        fix_ready:['start_reverify','开始回归'], reverifying:['close','验证并关闭'],
+        blocked:['reopen','重新打开'], rejected:['reopen','重新打开'], closed:['reopen','重新打开']
+    }[finding.status];
+    return next ? `<button class="tp-btn-sm" onclick="transitionShiftLeftFinding(${finding.id},'${next[0]}')">${next[1]}</button>` : '';
+}
+
+async function openShiftLeftFinding(findingId) {
+    try {
+        const finding = await API.get(`/shift-left/findings/${findingId}`);
+        document.getElementById('shift-left-detail-overlay')?.remove();
+        const comments = (finding.events || []).filter(e => e.event_type === 'comment');
+        const overlay = document.createElement('div');
+        overlay.id = 'shift-left-detail-overlay';
+        overlay.className = 'sl-detail-overlay';
+        overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+        overlay.innerHTML = `<div class="sl-detail">
+            <div class="sl-detail-head">
+                <div style="flex:1;min-width:0"><div class="sl-title" style="max-width:none;font-size:1rem">${esc(finding.title)}</div>
+                <div class="sl-sub">#${finding.id} · revision ${finding.revision} · ${esc(finding.finding_key)}</div></div>
+                <span class="sl-pill sl-severity-${esc(finding.severity)}">${esc(finding.severity)}</span>
+                <span class="sl-pill">${esc(SHIFT_LEFT_STATUS_LABELS[finding.status] || finding.status)}</span>
+                ${shiftLeftTransitionActions(finding)}
+                <button class="tp-btn-sm" onclick="document.getElementById('shift-left-detail-overlay').remove()">关闭</button>
+            </div>
+            <div class="sl-detail-body">
+                <div class="sl-detail-grid">
+                    <div class="sl-panel"><h4>问题描述</h4><pre>${esc(finding.description || '暂无描述')}</pre></div>
+                    <div class="sl-panel"><h4>业务影响</h4><pre>${esc(finding.business_impact || '暂无影响说明')}</pre></div>
+                    <div class="sl-panel"><h4>代码位置</h4><pre>${esc(JSON.stringify(finding.code_locations || [], null, 2))}</pre></div>
+                    <div class="sl-panel"><h4>关联与修复</h4><pre>${esc(JSON.stringify({associations:finding.associations || {},fix_ref:finding.fix_ref || '',verification_ref:finding.verification_ref || ''}, null, 2))}</pre></div>
+                </div>
+                <div class="sl-events">
+                    <strong>备注与协作记录</strong>
+                    ${comments.length ? comments.map(e => `<div class="sl-event"><div class="sl-event-meta">${esc(e.actor_name || e.actor_type)} · ${esc(e.created_at || '')}</div><div>${esc((e.payload || {}).content || '')}</div></div>`).join('') : '<div class="sl-sub">暂无备注</div>'}
+                </div>
+                <div class="sl-comment-box"><textarea id="shift-left-comment" placeholder="补充判断、根因、修改建议或验证结果"></textarea><button class="tp-btn-sm" onclick="addShiftLeftComment(${finding.id})">添加备注</button></div>
+            </div>
+        </div>`;
+        document.body.appendChild(overlay);
+    } catch (e) { showToast('加载问题详情失败: ' + e.message, 'error'); }
+}
+
+async function addShiftLeftComment(findingId) {
+    const input = document.getElementById('shift-left-comment');
+    const content = (input?.value || '').trim();
+    if (!content) return showToast('请先填写备注', 'error');
+    try {
+        await shiftLeftWrite(`/shift-left/findings/${findingId}/comments`, {content}, 'comment');
+        showToast('备注已添加', 'success');
+        await openShiftLeftFinding(findingId);
+    } catch (e) { showToast('添加备注失败: ' + e.message, 'error'); }
+}
+
+async function transitionShiftLeftFinding(findingId, action) {
+    try {
+        const finding = await API.get(`/shift-left/findings/${findingId}`);
+        const body = { action, from_revision: finding.revision, reason: `Hub UI: ${action}` };
+        if (action === 'submit_fix') {
+            const value = prompt('请输入修复提交、PR 或变更单链接');
+            if (!value) return;
+            body.fix_ref = value;
+        }
+        if (action === 'close') {
+            const value = prompt('请输入独立回归记录或验证报告链接');
+            if (!value) return;
+            body.fix_ref = finding.fix_ref;
+            body.verification_ref = value;
+        }
+        const updated = await shiftLeftWrite(`/shift-left/findings/${findingId}/transitions`, body, action);
+        showToast(`状态已更新为 ${SHIFT_LEFT_STATUS_LABELS[updated.status] || updated.status}`, 'success');
+        await openShiftLeftFinding(findingId);
+        await renderCodeAnalysisTab();
+    } catch (e) { showToast('状态更新失败: ' + e.message, 'error'); }
 }
 
 const _flowStatusMap = {

@@ -8,7 +8,7 @@ MVP scope:
 from datetime import datetime
 import copy
 
-from flask import jsonify, request, session
+from flask import current_app, jsonify, request, session
 
 from app import db
 from app.api import api_bp
@@ -149,7 +149,27 @@ DEFAULT_AGENT_TEAM_REQ_TO_CASE_WORKFLOW = {
             'runner': 'agent.skill.engineering-analysis',
             'depends_on': ['requirement_review'],
             'prompt': '基于需求列表和工程变更，补齐 impl_status、函数级影响面和测试关注点。',
-            'outputs': ['impl_status_count', 'impact_modules'],
+            'outputs': ['impl_status_count', 'impact_modules',
+                        'analysis_run_id', 'analysis_report_id'],
+            'analysis': {
+                'enabled': True,
+                'profile': 'requirement_code_joint',
+                'create_report': True,
+                'report_title_template': '代码分析报告 - {run_name}',
+                'report_format': 'html',
+                'iteration_id_var': 'iteration_id',
+                'report_id_var': 'analysis_report_id',
+                'baseline_vars': {
+                    'client_repo': 'client_repo',
+                    'client_base_sha': 'client_base_sha',
+                    'client_target_sha': 'client_target_sha',
+                    'server_repo': 'server_repo',
+                    'server_base_sha': 'server_base_sha',
+                    'server_target_sha': 'server_target_sha',
+                    'requirement_revision': 'requirement_revision',
+                },
+                'require_independent_review': True,
+            },
         },
         {
             'id': 'case_design',
@@ -186,6 +206,13 @@ BUILTIN_WORKFLOWS = [
     DEFAULT_RACINGGO_WORKFLOW,
     DEFAULT_AGENT_TEAM_REQ_TO_CASE_WORKFLOW,
 ]
+
+
+def _shift_left_enabled():
+    value = current_app.config.get('SHIFT_LEFT_ENABLED', False)
+    if isinstance(value, str):
+        return value.lower() in ('1', 'true', 'yes', 'on')
+    return bool(value)
 
 
 def _actor_name():
@@ -447,10 +474,43 @@ def _ensure_builtin_definition(raw_definition):
         if not existing.visibility_scope:
             existing.visibility_scope = 'project'
             changed = True
+        # Compatible metadata backfill: only add a built-in analysis contract
+        # when the matching node has never been configured by an operator.
+        raw_analysis = {
+            step.get('id'): step.get('analysis')
+            for step in (raw_definition.get('steps') or [])
+            if isinstance(step, dict) and isinstance(step.get('analysis'), dict)
+        } if _shift_left_enabled() else {}
+        raw_outputs = {
+            step.get('id'): list(step.get('outputs') or [])
+            for step in (raw_definition.get('steps') or [])
+            if isinstance(step, dict) and step.get('id') in raw_analysis
+        }
+        definition = copy.deepcopy(existing.definition_json or {})
+        definition_steps = definition.get('steps') or []
+        definition_changed = False
+        for step in definition_steps:
+            if (isinstance(step, dict) and step.get('id') in raw_analysis
+                    and not isinstance(step.get('analysis'), dict)):
+                step['analysis'] = copy.deepcopy(raw_analysis[step['id']])
+                outputs = list(step.get('outputs') or [])
+                for output_name in raw_outputs.get(step['id'], []):
+                    if output_name not in outputs:
+                        outputs.append(output_name)
+                step['outputs'] = outputs
+                definition_changed = True
+        if definition_changed:
+            existing.definition_json = definition
+            changed = True
         if changed:
             db.session.commit()
         return existing
-    definition = normalize_workflow_definition(raw_definition)
+    definition_source = copy.deepcopy(raw_definition)
+    if not _shift_left_enabled():
+        for step in (definition_source.get('steps') or []):
+            if isinstance(step, dict):
+                step.pop('analysis', None)
+    definition = normalize_workflow_definition(definition_source)
     row = WorkflowDefinition(
         workflow_key=definition['key'],
         name=definition['name'],
@@ -743,6 +803,8 @@ def _dispatch_heartbeat_fallback_task(run, step):
             step.to_dict(),
             _workflow_outputs_context(run),
         )
+        if not _shift_left_enabled():
+            payload.pop('analysis', None)
         payload.update({
             'kind': 'workflow_no_response_reminder',
             'prompt': (
@@ -1296,6 +1358,8 @@ def _dispatch_agent_task(step):
         step.to_dict(with_context=True),
         _workflow_outputs_context(step.run) if step.run else {},
     )
+    if not _shift_left_enabled():
+        payload.pop('analysis', None)
     for target_claw_id in target_claw_ids:
         task_id = (
             base_task_id

@@ -341,6 +341,7 @@ function _avatarLabel(name) {
 }
 
 const TOPIC_ID = {{ topic_id }};
+const SHIFT_LEFT_ENABLED = {{ 'true' if shift_left_enabled else 'false' }};
 let topicData = null;
 let isAdmin = false;
 let myClawId = null;
@@ -405,12 +406,16 @@ function renderTopic() {
         // 总评审状态
         const reviewStatusLabel = t.review_status === 'closed' ? '已关闭' : '评审中';
         const reviewStatusClass = t.review_status === 'closed' ? 'review-badge-closed' : 'review-badge-reviewing';
+        const canInviteDeveloperAi = SHIFT_LEFT_ENABLED && (isAdmin
+            || (myUserId && myUserId === t.author_user_id)
+            || (myClawId && myClawId === t.author_claw_id));
 
         reviewBlock = `<div style="background:var(--bg-secondary);border-radius:8px;padding:12px 16px;margin:12px 0">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
                 <h4 style="font-size:0.88rem;margin:0;color:var(--accent)">📋 用例评审</h4>
                 <span class="review-badge ${reviewStatusClass}">${reviewStatusLabel}</span>
                 <span style="font-size:0.78rem;color:var(--text-muted)">${(t.review_rounds || []).length} 轮评审</span>
+                ${canInviteDeveloperAi ? '<button class="btn btn-primary btn-sm" style="margin-left:auto" onclick="createCaseReviewDeveloperAiLink()">邀请 Developer AI</button>' : ''}
             </div>
             <div style="display:flex;gap:4px;margin-bottom:8px">
                 <button class="review-type-tab active" data-scope-tab="info" onclick="switchReviewScopeTab('info')">📋 评审范围</button>
@@ -448,6 +453,54 @@ function renderTopic() {
             ${reviewBlock}
             <div class="md-body">${renderMarkdown(t.content || '')}</div>
         </div>`;
+}
+
+async function createCaseReviewDeveloperAiLink() {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.innerHTML = `<div class="modal" style="max-width:620px">
+        <h3 class="modal-title">邀请 Developer AI 参与用例评审</h3>
+        <p style="color:var(--text-muted);line-height:1.6">默认只允许读取本评审范围内的用例、增加评论和节点标记，不允许直接通过或驳回评审。</p>
+        <div class="form-group"><label>Developer AI 身份标识</label><input id="_case_ai_identity" class="form-input" value="developer-ai:case-review" placeholder="例如 developer-ai:racinggo-client"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="form-group"><label>邀请有效期（分钟）</label><input id="_case_ai_invite" class="form-input" type="number" min="5" max="1440" value="30"></div>
+            <div class="form-group"><label>Token 有效期（分钟）</label><input id="_case_ai_token" class="form-input" type="number" min="5" max="1440" value="120"></div>
+        </div>
+        <div class="modal-actions"><button class="btn btn-ghost" id="_case_ai_cancel">取消</button><button class="btn btn-primary" id="_case_ai_create">生成一次性链接</button></div>
+    </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('#_case_ai_cancel').onclick = () => overlay.remove();
+    overlay.querySelector('#_case_ai_create').onclick = async () => {
+        const identity = overlay.querySelector('#_case_ai_identity').value.trim();
+        if (!identity) { showToast('请填写 Developer AI 身份标识', 'error'); return; }
+        const key = `case-review-${TOPIC_ID}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        try {
+            const response = await fetch('/api/v1/collaboration-sessions', {
+                method:'POST',
+                headers:{'Content-Type':'application/json','Idempotency-Key':key},
+                body:JSON.stringify({
+                    subject_type:'case_review', subject_id:TOPIC_ID,
+                    agent_identity:identity,
+                    invitation_ttl_minutes:Number(overlay.querySelector('#_case_ai_invite').value || 30),
+                    token_ttl_minutes:Number(overlay.querySelector('#_case_ai_token').value || 120),
+                }),
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+            const hub = (window.HUB_WEB_URL || window.HUB_PUBLIC_URL || location.origin).replace(/\/+$/, '');
+            const link = `${hub}${data.invitation_path || '/developer-ai/collaborate'}#invite=${encodeURIComponent(data.invitation_code)}&exchange=${encodeURIComponent(data.exchange_url)}`;
+            overlay.querySelector('.modal').innerHTML = `
+                <h3 class="modal-title">协作链接已生成</h3>
+                <p style="color:var(--text-muted);line-height:1.6">请只发送给目标 Developer AI。邀请码只能兑换一次，明文不会再次返回。</p>
+                <textarea id="_case_ai_link" class="form-input" rows="5" readonly>${_esc(link)}</textarea>
+                <div class="modal-actions"><button class="btn btn-ghost" id="_case_ai_done">完成</button><button class="btn btn-primary" id="_case_ai_copy">复制链接</button></div>`;
+            overlay.querySelector('#_case_ai_done').onclick = () => overlay.remove();
+            overlay.querySelector('#_case_ai_copy').onclick = async () => {
+                await navigator.clipboard.writeText(link);
+                showToast('协作链接已复制', 'success');
+            };
+        } catch (error) { showToast('生成失败：' + error.message, 'error'); }
+    };
 }
 
 // ==================== 评审目录脑图 ====================

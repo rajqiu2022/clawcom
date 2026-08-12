@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, session, redirect, request, jsonify
+from flask import Blueprint, current_app, render_template, session, redirect, request, jsonify
 from app import db
 
 views_bp = Blueprint('views', __name__)
@@ -232,7 +232,9 @@ def check_login():
 
     # 5) 测试报告分享外链（MEMORY #134）：匿名只读，不能要求登录
     #    /r/<token> 或 /test-reports/share/<token> 都放行
-    if request.path.startswith('/r/') or request.path.startswith('/test-reports/share/'):
+    if (request.path.startswith('/r/')
+            or request.path.startswith('/test-reports/share/')
+            or request.path == '/developer-ai/collaborate'):
         return None
 
     # 知识库匿名分享页：只读正文，并支持通过公开 API 下载 Markdown。
@@ -468,7 +470,9 @@ def exam_session_page(session_id):
 
 @views_bp.route('/topics/<int:topic_id>')
 def topic_detail(topic_id):
-    return render_template('topic_detail.html', topic_id=topic_id)
+    return render_template(
+        'topic_detail.html', topic_id=topic_id,
+        shift_left_enabled=_shift_left_enabled())
 
 
 @views_bp.route('/shared-articles')
@@ -485,7 +489,28 @@ def shared_articles_page(article_id=None):
 @views_bp.route('/test-reports/<int:report_id>')
 def test_reports_page(report_id=None):
     """测试报告列表 + 详情 modal（登录态）。点详情走 ?report_id=xx。"""
-    return render_template('test_reports.html', initial_report_id=report_id)
+    return render_template(
+        'test_reports.html', initial_report_id=report_id,
+        shift_left_enabled=_shift_left_enabled())
+
+
+@views_bp.route('/workflows')
+def workflows_page():
+    return render_template(
+        'workflows.html', shift_left_enabled=_shift_left_enabled())
+
+
+def _shift_left_enabled():
+    value = current_app.config.get('SHIFT_LEFT_ENABLED', False)
+    if isinstance(value, str):
+        return value.lower() in ('1', 'true', 'yes', 'on')
+    return bool(value)
+
+
+@views_bp.route('/developer-ai/collaborate')
+def developer_ai_collaborate_page():
+    """Public handoff page; the one-time invitation stays in URL fragment."""
+    return render_template('developer_ai_collaborate.html')
 
 
 # 匿名外链页：/r/<token>（短路径，便于分享）；/test-reports/share/<token>（备用）

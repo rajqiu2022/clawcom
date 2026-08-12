@@ -8,6 +8,10 @@ load_dotenv()
 class Config:
     SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key')
 
+    # 测试左移首期为纯增量能力，生产默认关闭；灰度项目确认后显式开启。
+    SHIFT_LEFT_ENABLED = os.getenv('SHIFT_LEFT_ENABLED', '0') in (
+        '1', 'true', 'True', 'yes', 'on')
+
     # Session（OA/WOA 单点登录后保持登录态）
     # SameSite=Lax 兼容 passport.woa.com 302 跳回我们的 callback。
     PERMANENT_SESSION_LIFETIME = timedelta(days=int(os.getenv('SESSION_DAYS', '30')))

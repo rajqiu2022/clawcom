@@ -294,6 +294,7 @@ function showConfirm(msg) {
 // =============================================
 
 const HUB = (window.HUB_WEB_URL || window.HUB_PUBLIC_URL || location.origin).replace(/\/+$/, '');
+const SHIFT_LEFT_ENABLED = {{ 'true' if shift_left_enabled else 'false' }};
 let META = { types: [], risk_levels: [], statuses: [], max_attachment_size: 10485760 };
 let PROJECTS = [];
 let ITERATIONS = [];
@@ -682,6 +683,16 @@ async function openDetail(id) {
                    </div>`
                 : `<button class="btn btn-primary" onclick="enableShare(${d.id}, false)">生成分享链接</button>`}
         </div>` : (d.is_shared ? `<div style="color:#10b981">🔗 此报告已分享：<a href="${HUB}/r/${d.share_token}" target="_blank">${HUB}/r/${d.share_token}</a></div>` : '');
+    const developerSection = SHIFT_LEFT_ENABLED && d.can_edit ? `
+        <div style="padding:12px;border:1px solid #14b8a655;border-radius:10px;background:#14b8a60d">
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+                <div style="flex:1;min-width:240px">
+                    <div style="font-weight:700;color:#0f9f80">Developer AI 临时协作</div>
+                    <div style="font-size:12px;color:var(--text-secondary);margin-top:3px">按当前报告签发一次性链接，可读问题、增加备注并更新修复状态；凭据自动过期且全程审计。</div>
+                </div>
+                <button class="btn btn-primary" onclick="createDeveloperAiLink('analysis_report', ${d.id}, ${d.project_id || 'null'})">生成协作链接</button>
+            </div>
+        </div>` : '';
 
     const headerBlock = `
         <div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;margin-bottom:8px">
@@ -712,6 +723,7 @@ async function openDetail(id) {
             footerParts.push(`<div><div style="font-weight:600;margin-bottom:6px">附件</div>${attachments}</div>`);
         }
         if (shareSection) footerParts.push(shareSection);
+        if (developerSection) footerParts.push(developerSection);
         body.innerHTML = `
             <div class="detail-html-top">${headerBlock}</div>
             <div class="detail-html-content">${rendered}</div>
@@ -734,7 +746,61 @@ async function openDetail(id) {
                 </div>` : ''}
         </div>
         ${shareSection ? `<div style="margin-top:14px">${shareSection}</div>` : ''}
+        ${developerSection ? `<div style="margin-top:14px">${developerSection}</div>` : ''}
     `;
+}
+
+async function createDeveloperAiLink(subjectType, subjectId, projectId) {
+    const result = await new Promise(resolve => {
+        const html = `<div class="modal" style="max-width:620px">
+            <h2 class="modal-title">生成 Developer AI 协作链接</h2>
+            <p style="color:var(--text-secondary);line-height:1.6">链接中的邀请码只能兑换一次。默认开放报告读取、问题备注和开发侧状态更新，不开放提权或跨对象访问。</p>
+            <div class="form-group"><label>Developer AI 身份标识</label><input id="_dev_ai_identity" class="form-input" value="developer-ai:project-client" placeholder="例如 developer-ai:racinggo-client"></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                <div class="form-group"><label>邀请有效期（分钟）</label><input id="_dev_ai_invite_ttl" class="form-input" type="number" min="5" max="1440" value="30"></div>
+                <div class="form-group"><label>Token 有效期（分钟）</label><input id="_dev_ai_token_ttl" class="form-input" type="number" min="5" max="1440" value="120"></div>
+            </div>
+            <div class="modal-actions"><button class="btn btn-ghost" id="_dev_ai_cancel">取消</button><button class="btn btn-primary" id="_dev_ai_create">生成一次性链接</button></div>
+        </div>`;
+        const overlay = _buildOverlay(html);
+        overlay.querySelector('#_dev_ai_cancel').onclick = () => _closeOverlay(overlay, () => resolve(null));
+        overlay.querySelector('#_dev_ai_create').onclick = () => {
+            const identity = overlay.querySelector('#_dev_ai_identity').value.trim();
+            if (!identity) { showToast('请填写 Developer AI 身份标识', 'warning'); return; }
+            const value = {
+                agent_identity: identity,
+                invitation_ttl_minutes: Number(overlay.querySelector('#_dev_ai_invite_ttl').value || 30),
+                token_ttl_minutes: Number(overlay.querySelector('#_dev_ai_token_ttl').value || 120),
+            };
+            _closeOverlay(overlay, () => resolve(value));
+        };
+    });
+    if (!result) return;
+    const payload = Object.assign(result, {subject_type: subjectType, subject_id: subjectId});
+    if (projectId) payload.project_id = projectId;
+    const requestId = window.crypto && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const response = await fetch('/api/v1/collaboration-sessions', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','Idempotency-Key':`dev-ai-${subjectType}-${subjectId}-${requestId}`},
+        body:JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) { showToast('生成失败：' + (data.error || response.status), 'error'); return; }
+    const link = `${HUB}${data.invitation_path || '/developer-ai/collaborate'}#invite=${encodeURIComponent(data.invitation_code)}&exchange=${encodeURIComponent(data.exchange_url)}`;
+    const html = `<div class="modal" style="max-width:680px">
+        <h2 class="modal-title">协作链接已生成</h2>
+        <p style="color:var(--text-secondary);line-height:1.6">请只发送给目标 Developer AI。邀请码只返回这一次，页面关闭后无法找回。</p>
+        <textarea class="form-input" id="_dev_ai_link" rows="4" readonly>${escapeHtml(link)}</textarea>
+        <div class="modal-actions"><button class="btn btn-ghost" id="_dev_ai_done">完成</button><button class="btn btn-primary" id="_dev_ai_copy">复制链接</button></div>
+    </div>`;
+    const overlay = _buildOverlay(html);
+    overlay.querySelector('#_dev_ai_done').onclick = () => _closeOverlay(overlay);
+    overlay.querySelector('#_dev_ai_copy').onclick = async () => {
+        await navigator.clipboard.writeText(link);
+        showToast('协作链接已复制', 'success');
+    };
 }
 
 async function changeStatus(id, newStatus) {

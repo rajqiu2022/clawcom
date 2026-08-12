@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Developer AI 临时协作</title>
+    <style>
+        :root { color-scheme:dark;--bg:#07110f;--card:#0d1b18;--line:#234039;--text:#e7f7f1;--muted:#8fb3a8;--accent:#36d399;--danger:#fb7185; }
+        * { box-sizing:border-box; }
+        body { margin:0;min-height:100vh;font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--text);background:radial-gradient(circle at 15% 0,#134e3c 0,transparent 38%),linear-gradient(145deg,#07110f,#090d13); }
+        main { width:min(900px,calc(100% - 32px));margin:0 auto;padding:64px 0; }
+        .eyebrow { color:var(--accent);font:700 12px/1.2 ui-monospace,monospace;letter-spacing:.16em;text-transform:uppercase; }
+        h1 { margin:14px 0 12px;font-size:clamp(30px,5vw,54px);line-height:1.05;letter-spacing:-.04em; }
+        .lead { color:var(--muted);font-size:16px;line-height:1.75;max-width:680px; }
+        .card { margin-top:30px;border:1px solid var(--line);border-radius:20px;background:rgba(13,27,24,.88);box-shadow:0 28px 80px rgba(0,0,0,.3);overflow:hidden; }
+        .card-head { display:flex;gap:14px;align-items:center;padding:20px 22px;border-bottom:1px solid var(--line); }
+        .pulse { width:12px;height:12px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 7px rgba(54,211,153,.12); }
+        .card-body { padding:24px; }
+        .status { display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:5px 10px;color:var(--muted);font-size:13px; }
+        .warning { margin:18px 0;padding:12px 14px;border-left:3px solid #fbbf24;background:rgba(251,191,36,.08);color:#fde68a;line-height:1.6;font-size:14px; }
+        pre { white-space:pre-wrap;word-break:break-all;background:#050a09;border:1px solid var(--line);border-radius:14px;padding:16px;color:#b6f3dd;font:13px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace; }
+        button { border:0;border-radius:11px;padding:11px 17px;font-weight:800;cursor:pointer; }
+        .primary { background:var(--accent);color:#052019; }
+        .ghost { background:transparent;border:1px solid var(--line);color:var(--text); }
+        .actions { display:flex;gap:10px;flex-wrap:wrap;margin-top:18px; }
+        .result { display:none;margin-top:20px; }
+        .result.active { display:block; }
+        .danger { color:var(--danger); }
+        footer { margin-top:20px;color:var(--muted);font-size:12px;line-height:1.6; }
+    </style>
+</head>
+<body>
+<main>
+    <div class="eyebrow">Hub secure handoff</div>
+    <h1>Developer AI<br>临时协作入口</h1>
+    <p class="lead">此链接只授予指定报告或用例评审的最小权限。邀请只能兑换一次，访问凭据有有效期、调用预算和完整审计记录。</p>
+    <section class="card">
+        <div class="card-head"><span class="pulse"></span><strong>一次性凭据交接</strong><span class="status" id="state">等待读取邀请</span></div>
+        <div class="card-body">
+            <div id="missing" class="warning" style="display:none">链接中没有有效邀请。请让 Hub 操作者重新生成 Developer AI 协作链接。</div>
+            <div id="ready" style="display:none">
+                <div class="warning">不要让聊天软件或链接预览自动兑换。请由目标 Developer AI 在准备开始工作时兑换一次。</div>
+                <p>机器调用协议：</p>
+                <pre id="curl-command"></pre>
+                <div class="actions">
+                    <button class="primary" id="exchange-btn">兑换临时访问凭据</button>
+                    <button class="ghost" id="copy-btn">复制兑换命令</button>
+                </div>
+            </div>
+            <div class="result" id="result">
+                <strong>访问凭据（仅显示本次）</strong>
+                <pre id="token-result"></pre>
+                <div class="actions"><button class="ghost" id="copy-token-btn">复制 Bearer Token</button></div>
+                <p class="danger">关闭页面前请交给目标 Developer AI；Hub 不会再次返回明文 Token。</p>
+            </div>
+        </div>
+    </section>
+    <footer>建议把 Token 放在 <code>Authorization: Bearer &lt;token&gt;</code> 中调用响应里给出的对象 API。不要把 Token 写入仓库、报告正文或日志。</footer>
+</main>
+<script>
+const params = new URLSearchParams(location.hash.slice(1));
+const invitation = params.get('invite') || '';
+const exchangePath = params.get('exchange') || '/api/v1/collaboration-sessions/exchange';
+const state = document.getElementById('state');
+const command = `curl -X POST "${location.origin}${exchangePath}" -H "Content-Type: application/json" -d '${JSON.stringify({invitation_code: invitation})}'`;
+if (!invitation.startsWith('hub_ci_') || !exchangePath.startsWith('/api/v1/')) {
+    document.getElementById('missing').style.display = '';
+    state.textContent = '邀请无效';
+} else {
+    document.getElementById('ready').style.display = '';
+    document.getElementById('curl-command').textContent = command;
+    state.textContent = '邀请待兑换';
+}
+document.getElementById('copy-btn')?.addEventListener('click', async () => {
+    await navigator.clipboard.writeText(command);
+    state.textContent = '兑换命令已复制';
+});
+document.getElementById('exchange-btn')?.addEventListener('click', async event => {
+    event.currentTarget.disabled = true;
+    state.textContent = '正在兑换';
+    try {
+        const response = await fetch(exchangePath, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({invitation_code:invitation})});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        document.getElementById('result').classList.add('active');
+        document.getElementById('token-result').textContent = JSON.stringify(data, null, 2);
+        state.textContent = '凭据已签发';
+        history.replaceState(null, '', location.pathname);
+        document.getElementById('copy-token-btn').onclick = async () => navigator.clipboard.writeText(data.access_token || '');
+    } catch (error) {
+        state.textContent = '兑换失败';
+        alert(error.message);
+        event.currentTarget.disabled = false;
+    }
+});
+</script>
+</body>
+</html>

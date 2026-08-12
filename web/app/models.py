@@ -907,6 +907,30 @@ class ClawOpsVerification(db.Model):
         }
 
 
+class WorkflowOperationIdempotency(db.Model):
+    """Persisted idempotency records for Workflow Worker write APIs."""
+    __tablename__ = 'workflow_operation_idempotencies'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    actor_type = db.Column(db.String(20), nullable=False, default='claw')
+    actor_id = db.Column(db.Integer, nullable=False)
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    method = db.Column(db.String(10), nullable=False)
+    path = db.Column(db.String(300), nullable=False)
+    request_hash = db.Column(db.String(64), nullable=False)
+    response_status = db.Column(db.Integer)
+    response_body_json = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+    expires_at = db.Column(db.DateTime)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'actor_type', 'actor_id', 'idempotency_key',
+            name='uq_workflow_operation_idempotency_actor_key'),
+    )
+
+
 def _workflow_step_display_state_for_model(status):
     if status in ('running', 'retrying', 'waiting_approval'):
         return 'running'
@@ -6328,3 +6352,321 @@ class ClawSecret(db.Model):
         """获取明文值"""
         return _simple_decrypt(self.encrypted_value) if self.encrypted_value else ''
 
+
+# ============== 测试左移 / Developer AI 协作（增量、默认不触发现有流程） ==============
+
+class ShiftLeftAnalysisRun(db.Model):
+    """一次精确基线的代码/需求增量分析。"""
+    __tablename__ = 'shift_left_analysis_runs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           nullable=False, index=True)
+    iteration_id = db.Column(db.Integer, db.ForeignKey('test_iterations.id'),
+                             index=True)
+    workflow_run_id = db.Column(db.Integer, db.ForeignKey('workflow_runs.id'),
+                                index=True)
+    report_id = db.Column(db.Integer, db.ForeignKey('test_reports.id'), index=True)
+    baseline_fingerprint = db.Column(db.String(64), nullable=False, index=True)
+    rerun_sequence = db.Column(db.Integer, nullable=False, default=0)
+    rerun_of_id = db.Column(db.Integer,
+                            db.ForeignKey('shift_left_analysis_runs.id'), index=True)
+    rerun_reason = db.Column(db.String(500), default='')
+    status = db.Column(db.String(32), nullable=False, default='pending', index=True)
+    baseline_json = db.Column(db.JSON, nullable=False)
+    context_snapshot_json = db.Column(db.JSON)
+    result_summary_json = db.Column(db.JSON)
+    output_schema_version = db.Column(db.String(32), default='v1')
+    created_by = db.Column(db.String(120), default='system')
+    updated_by = db.Column(db.String(120), default='system')
+    revision = db.Column(db.Integer, nullable=False, default=1)
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+    finished_at = db.Column(db.DateTime)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'project_id', 'baseline_fingerprint', 'rerun_sequence',
+            name='uq_shift_left_analysis_baseline_rerun'),
+        db.Index('ix_shift_left_analysis_project_status', 'project_id', 'status'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'iteration_id': self.iteration_id,
+            'workflow_run_id': self.workflow_run_id,
+            'report_id': self.report_id,
+            'baseline_fingerprint': self.baseline_fingerprint,
+            'rerun_sequence': self.rerun_sequence or 0,
+            'rerun_of_id': self.rerun_of_id,
+            'rerun_reason': self.rerun_reason or '',
+            'status': self.status,
+            'baseline': self.baseline_json or {},
+            'context_snapshot': self.context_snapshot_json or {},
+            'result_summary': self.result_summary_json or {},
+            'output_schema_version': self.output_schema_version or 'v1',
+            'created_by': self.created_by,
+            'updated_by': self.updated_by,
+            'revision': self.revision or 1,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+            'finished_at': str(self.finished_at) if self.finished_at else None,
+        }
+
+
+class ShiftLeftFinding(db.Model):
+    """跨 Analysis Run 持续存在的结构化风险对象。"""
+    __tablename__ = 'shift_left_findings'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           nullable=False, index=True)
+    analysis_run_id = db.Column(
+        db.Integer, db.ForeignKey('shift_left_analysis_runs.id'),
+        nullable=False, index=True)
+    finding_key = db.Column(db.String(255), nullable=False)
+    title = db.Column(db.String(300), nullable=False)
+    module = db.Column(db.String(160), default='', index=True)
+    severity = db.Column(db.String(20), nullable=False, default='medium', index=True)
+    confidence = db.Column(db.Float, nullable=False, default=0.0)
+    evidence_level = db.Column(db.String(32), nullable=False,
+                               default='hypothesis', index=True)
+    source_type = db.Column(db.String(40), nullable=False, default='agent')
+    status = db.Column(db.String(32), nullable=False, default='new', index=True)
+    owner = db.Column(db.String(120), default='', index=True)
+    description = db.Column(db.Text)
+    business_impact = db.Column(db.Text)
+    context_quality = db.Column(db.String(20), default='fresh')
+    code_locations_json = db.Column(db.JSON)
+    associations_json = db.Column(db.JSON)
+    fix_ref = db.Column(db.String(500), default='')
+    verification_ref = db.Column(db.String(500), default='')
+    fix_actor_key = db.Column(db.String(80), default='')
+    verification_actor_key = db.Column(db.String(80), default='')
+    status_reason = db.Column(db.Text)
+    first_seen_at = db.Column(db.DateTime, default=_now)
+    last_seen_at = db.Column(db.DateTime, default=_now, index=True)
+    created_by = db.Column(db.String(120), default='system')
+    created_by_actor_key = db.Column(db.String(80), default='system:0')
+    updated_by = db.Column(db.String(120), default='system')
+    revision = db.Column(db.Integer, nullable=False, default=1)
+    is_archived = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        db.UniqueConstraint('project_id', 'finding_key',
+                            name='uq_shift_left_finding_project_key'),
+        db.Index('ix_shift_left_findings_project_state',
+                 'project_id', 'status', 'severity'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'analysis_run_id': self.analysis_run_id,
+            'finding_key': self.finding_key,
+            'title': self.title,
+            'module': self.module or '',
+            'severity': self.severity,
+            'confidence': self.confidence or 0.0,
+            'evidence_level': self.evidence_level,
+            'source_type': self.source_type,
+            'status': self.status,
+            'owner': self.owner or '',
+            'description': self.description or '',
+            'business_impact': self.business_impact or '',
+            'context_quality': self.context_quality or 'fresh',
+            'code_locations': self.code_locations_json or [],
+            'associations': self.associations_json or {},
+            'fix_ref': self.fix_ref or '',
+            'verification_ref': self.verification_ref or '',
+            'status_reason': self.status_reason or '',
+            'first_seen_at': str(self.first_seen_at) if self.first_seen_at else None,
+            'last_seen_at': str(self.last_seen_at) if self.last_seen_at else None,
+            'created_by': self.created_by,
+            'updated_by': self.updated_by,
+            'revision': self.revision or 1,
+            'is_archived': bool(self.is_archived),
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class ShiftLeftFindingEvent(db.Model):
+    """Finding 的追加式证据、备注、评审结论和状态审计。"""
+    __tablename__ = 'shift_left_finding_events'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    finding_id = db.Column(db.Integer, db.ForeignKey('shift_left_findings.id',
+                                                      ondelete='CASCADE'),
+                           nullable=False, index=True)
+    event_type = db.Column(db.String(32), nullable=False, index=True)
+    payload_json = db.Column(db.JSON, nullable=False)
+    actor_type = db.Column(db.String(24), nullable=False)
+    actor_id = db.Column(db.Integer, nullable=False)
+    actor_key = db.Column(db.String(80), nullable=False)
+    actor_name = db.Column(db.String(120), default='')
+    idempotency_key = db.Column(db.String(128))
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'finding_id', 'actor_key', 'idempotency_key',
+            name='uq_shift_left_finding_event_idempotency'),
+        db.Index('ix_shift_left_finding_event_type', 'finding_id', 'event_type'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'finding_id': self.finding_id,
+            'event_type': self.event_type,
+            'payload': self.payload_json or {},
+            'actor_type': self.actor_type,
+            'actor_id': self.actor_id,
+            'actor_name': self.actor_name or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class ShiftLeftAnalysisFinding(db.Model):
+    """Analysis Run 与稳定 Finding 的出现关系及当时快照。"""
+    __tablename__ = 'shift_left_analysis_findings'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    analysis_run_id = db.Column(
+        db.Integer, db.ForeignKey('shift_left_analysis_runs.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    finding_id = db.Column(
+        db.Integer, db.ForeignKey('shift_left_findings.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    snapshot_json = db.Column(db.JSON, nullable=False)
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        db.UniqueConstraint('analysis_run_id', 'finding_id',
+                            name='uq_shift_left_analysis_finding'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'analysis_run_id': self.analysis_run_id,
+            'finding_id': self.finding_id,
+            'snapshot': self.snapshot_json or {},
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class CollaborationSession(db.Model):
+    """一次性邀请兑换的任务级短期 API 会话。"""
+    __tablename__ = 'collaboration_sessions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           nullable=False, index=True)
+    subject_type = db.Column(db.String(32), nullable=False, index=True)
+    subject_id = db.Column(db.Integer, nullable=False, index=True)
+    agent_identity = db.Column(db.String(160), nullable=False)
+    scopes_json = db.Column(db.JSON, nullable=False)
+    invitation_hash = db.Column(db.String(64), nullable=False, unique=True)
+    access_token_hash = db.Column(db.String(64), unique=True)
+    status = db.Column(db.String(20), nullable=False, default='pending', index=True)
+    invitation_expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    token_expires_at = db.Column(db.DateTime, index=True)
+    token_ttl_seconds = db.Column(db.Integer, nullable=False, default=7200)
+    max_calls = db.Column(db.Integer, nullable=False, default=500)
+    call_count = db.Column(db.Integer, nullable=False, default=0)
+    created_by_type = db.Column(db.String(24), nullable=False)
+    created_by_id = db.Column(db.Integer, nullable=False)
+    created_by_name = db.Column(db.String(120), default='')
+    creator_actor_key = db.Column(db.String(80), nullable=False)
+    create_idempotency_key = db.Column(db.String(128), nullable=False)
+    create_request_hash = db.Column(db.String(64), nullable=False)
+    exchanged_at = db.Column(db.DateTime)
+    last_activity_at = db.Column(db.DateTime)
+    revoked_at = db.Column(db.DateTime)
+    revoked_by = db.Column(db.String(120), default='')
+    revoke_reason = db.Column(db.String(500), default='')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        db.Index('ix_collaboration_subject', 'subject_type', 'subject_id'),
+        db.Index('ix_collaboration_project_status', 'project_id', 'status'),
+        db.UniqueConstraint(
+            'creator_actor_key', 'create_idempotency_key',
+            name='uq_collaboration_creator_idempotency'),
+    )
+
+    def effective_status(self, now=None):
+        now = now or _now()
+        if self.status in ('revoked', 'completed'):
+            return self.status
+        if self.status == 'pending' and self.invitation_expires_at <= now:
+            return 'expired'
+        if self.status == 'active' and self.token_expires_at and self.token_expires_at <= now:
+            return 'expired'
+        if self.max_calls and (self.call_count or 0) >= self.max_calls:
+            return 'exhausted'
+        return self.status
+
+    def has_scope(self, scope):
+        return scope in (self.scopes_json or [])
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'subject': {'type': self.subject_type, 'id': self.subject_id},
+            'agent_identity': self.agent_identity,
+            'scopes': self.scopes_json or [],
+            'status': self.effective_status(),
+            'invitation_expires_at': str(self.invitation_expires_at),
+            'token_expires_at': str(self.token_expires_at) if self.token_expires_at else None,
+            'token_ttl_seconds': self.token_ttl_seconds or 7200,
+            'max_calls': self.max_calls,
+            'call_count': self.call_count or 0,
+            'created_by': self.created_by_name,
+            'exchanged_at': str(self.exchanged_at) if self.exchanged_at else None,
+            'last_activity_at': str(self.last_activity_at) if self.last_activity_at else None,
+            'revoked_at': str(self.revoked_at) if self.revoked_at else None,
+            'revoked_by': self.revoked_by or '',
+            'revoke_reason': self.revoke_reason or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class CollaborationSessionEvent(db.Model):
+    """临时协作会话生命周期审计（不保存邀请码或 Token 明文）。"""
+    __tablename__ = 'collaboration_session_events'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    session_id = db.Column(db.Integer, db.ForeignKey('collaboration_sessions.id',
+                                                      ondelete='CASCADE'),
+                           nullable=False, index=True)
+    event_type = db.Column(db.String(32), nullable=False, index=True)
+    actor_type = db.Column(db.String(24), nullable=False)
+    actor_id = db.Column(db.Integer, nullable=False)
+    actor_name = db.Column(db.String(160), default='')
+    detail_json = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'session_id': self.session_id,
+            'event_type': self.event_type,
+            'actor_type': self.actor_type,
+            'actor_id': self.actor_id,
+            'actor_name': self.actor_name or '',
+            'detail': self.detail_json or {},
+            'created_at': str(self.created_at) if self.created_at else None,
+        }

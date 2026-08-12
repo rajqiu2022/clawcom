@@ -28,3 +28,15 @@ def test_task_case_folder_tree_is_present():
         "taskFolderState",
     ):
         assert marker in source
+
+def test_shift_left_tab_is_feature_gated_and_api_driven():
+    source = TEMPLATE.read_text(encoding="utf-8")
+    for marker in (
+        "SHIFT_LEFT_ENABLED",
+        "tab_key: 'code_analysis'",
+        "renderCodeAnalysisTab",
+        "/shift-left/findings?",
+        "addShiftLeftComment",
+        "transitionShiftLeftFinding",
+    ):
+        assert marker in source

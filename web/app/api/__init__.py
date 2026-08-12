@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, session, g
+from flask import Blueprint, request, jsonify, session, g, current_app
 
 api_bp = Blueprint('api', __name__)
 
@@ -10,6 +10,7 @@ PUBLIC_PATHS = [
     '/api/v1/system-changelog',    # 系统变更日志（公开）
     '/api/v1/test-reports/shared/',  # 测试报告分享外链匿名只读（MEMORY #134）
     '/api/v1/knowledge/shared/',    # 知识分享外链匿名只读与 Markdown 下载
+    '/api/v1/collaboration-sessions/exchange',  # 一次性邀请码兑换短期 Token
 ]
 
 # Token 验证缓存（避免每次请求遍历所有 claw）
@@ -55,6 +56,11 @@ def _verify_bearer_token(token):
 @api_bp.before_request
 def require_auth():
     """全局 API 认证：所有 /api/v1/ 请求必须携带 Bearer Token 或 Web session 登录"""
+    # 测试客户端可能在外层复用 app context；显式清除请求级临时身份，避免上一
+    # 请求的协作 Token 泄漏到后续 Web session。真实 WSGI 请求中同样是安全 no-op。
+    for cache_key in ('_collaboration_session', '_auth_claw', '_auth_user',
+                      '_auth_user_super'):
+        g.pop(cache_key, None)
     path = request.path
 
     # OPTIONS 预检请求放行
@@ -65,6 +71,51 @@ def require_auth():
     for pub in PUBLIC_PATHS:
         if path.startswith(pub):
             return None
+
+    # Developer AI 临时协作 Token 使用独立前缀和路径白名单，不能被当作
+    # OpenClaw Token 访问 Hub 其他 API。显式 Authorization 优先于 Web session，
+    # 避免登录浏览器误把临时 Token 提升为用户权限。
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer hub_cs_'):
+        if not current_app.config.get('SHIFT_LEFT_ENABLED', False):
+            return jsonify({'error': '临时协作能力未开启',
+                            'code': 'SHIFT_LEFT_DISABLED'}), 401
+        token = auth[7:]
+        from app import db
+        from app.models import CollaborationSession
+        from app.services.shift_left import (
+            collaboration_path_allowed,
+            find_active_collaboration_session,
+            now_cst_naive,
+        )
+        if not collaboration_path_allowed(path, request.method):
+            return jsonify({'error': '临时协作 Token 不允许访问该路径',
+                            'code': 'COLLABORATION_PATH_DENIED'}), 403
+        collaboration = find_active_collaboration_session(token)
+        if not collaboration:
+            return jsonify({'error': '临时协作 Token 无效、已过期或已撤销',
+                            'code': 'COLLABORATION_TOKEN_INVALID'}), 401
+        now = now_cst_naive()
+        updated = (CollaborationSession.query
+                   .filter(
+                       CollaborationSession.id == collaboration.id,
+                       CollaborationSession.status == 'active',
+                       CollaborationSession.call_count <
+                       CollaborationSession.max_calls,
+                   )
+                   .update({
+                       CollaborationSession.call_count:
+                           CollaborationSession.call_count + 1,
+                       CollaborationSession.last_activity_at: now,
+                   }, synchronize_session=False))
+        if not updated:
+            db.session.rollback()
+            return jsonify({'error': '临时协作调用预算已耗尽',
+                            'code': 'COLLABORATION_BUDGET_EXHAUSTED'}), 429
+        db.session.commit()
+        g._collaboration_session = db.session.get(
+            CollaborationSession, collaboration.id)
+        return None
 
     # OpenClaw 注册 bootstrap 链接需要在 Agent 尚未接入前可访问；
     # bootstrap.sh / offline-install-bundle.sh 内部仍会校验 query token，
@@ -116,7 +167,7 @@ def require_auth():
     return jsonify({'error': '未认证，请在 Header 中携带 Authorization: Bearer {TOKEN} 或先登录 Web'}), 401
 
 
-from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans, engineering, requirements, test_accounts, review_comments, wecom, agent_deployments, agent_templates, shared_articles, test_reports, panorama, testcase_panorama_links, exams, secrets, workflows, tasks_context, ops_verify, memories  # noqa: F401
+from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans, engineering, requirements, test_accounts, review_comments, wecom, agent_deployments, agent_templates, shared_articles, test_reports, panorama, testcase_panorama_links, exams, secrets, workflows, tasks_context, ops_verify, memories, shift_left  # noqa: F401
 
 # 注册 Agent Hub 通信中心蓝图
 api_bp.register_blueprint(agent_hub.agent_hub_bp, url_prefix='/agent-hub')

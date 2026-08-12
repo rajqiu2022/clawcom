@@ -18,6 +18,10 @@
 .wf-item { border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px;cursor:pointer;background:var(--bg-secondary); }
 .wf-item:hover { border-color:var(--accent); }
 .wf-item.active { border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim); }
+.wf-run-head { display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:start; }
+.wf-run-title { min-width:0;font-weight:700;line-height:1.4;overflow-wrap:anywhere;word-break:break-word; }
+.wf-run-actions { display:flex;align-items:center;gap:6px;flex:0 0 auto;white-space:nowrap; }
+.wf-run-actions .wf-status,.wf-run-actions .btn { flex:0 0 auto;white-space:nowrap; }
 .wf-meta { color:var(--text-muted);font-size:0.78rem;line-height:1.5; }
 .wf-status { display:inline-flex;align-items:center;border-radius:999px;padding:2px 8px;font-size:0.74rem;font-weight:700;border:1px solid transparent; }
 .wf-status-pending { color:#64748b;background:#64748b22;border-color:#64748b66; }
@@ -76,6 +80,7 @@
 .wf-flow-node.active { border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim),0 16px 34px rgba(59,130,246,.15); }
 .wf-flow-node-title { font-weight:800;line-height:1.35;margin:8px 0 6px; }
 .wf-flow-node-sub { color:var(--text-muted);font-family:monospace;font-size:.72rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+.wf-analysis-badge { display:inline-flex;align-items:center;gap:4px;color:#0f766e;background:#14b8a622;border:1px solid #14b8a666;border-radius:999px;padding:2px 7px;font-size:.7rem;font-weight:800; }
 .wf-flow-node-status { margin-top:8px;display:flex;gap:6px;align-items:center;flex-wrap:wrap; }
 .wf-progress-line { margin-top:8px;font-size:.72rem;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
 .wf-progress-bar { width:100%;height:5px;border-radius:999px;background:var(--border);overflow:hidden;margin-top:6px; }
@@ -229,6 +234,7 @@
 </div>
 
 <script>
+const SHIFT_LEFT_ENABLED = {{ 'true' if shift_left_enabled else 'false' }};
 let definitions = [];
 let favoriteDefinitions = [];
 let runs = [];
@@ -740,6 +746,7 @@ function renderFlowNode(step, idx) {
         <div class="wf-flow-node-title">${idx + 1}. ${esc(step.name || step.id)}</div>
         <div class="wf-flow-node-sub">${esc(step.runner || step.id)}</div>
         <div class="wf-meta" style="margin-top:8px">${meta.label}${step.approval_required ? ' · 需审批' : ''}</div>
+        ${SHIFT_LEFT_ENABLED && step.analysis?.enabled ? '<div style="margin-top:7px"><span class="wf-analysis-badge">⌁ 代码分析</span></div>' : ''}
     </div>`;
 }
 function selectTemplateStep(stepId) {
@@ -759,6 +766,7 @@ function renderDefinitionInspector(step) {
     const branches = step.branches && step.branches.length
         ? step.branches.map(b => `<div class="wf-gate-item"><span class="wf-code">if ${esc(b.if || b.expression || '')}</span><br><span class="wf-meta">then：${esc((b.then || []).join(', ') || '-')} · else：${esc((b.else || []).join(', ') || '-')}</span></div>`).join('')
         : '<div class="wf-meta">无分支规则</div>';
+    const analysis = step.analysis && step.analysis.enabled ? step.analysis : null;
     return `<div>
         <div class="wf-inspector-title">
             ${nodeTypeBadge(step)}
@@ -784,11 +792,90 @@ function renderDefinitionInspector(step) {
         ${step.inputs && Object.keys(step.inputs).length ? `<div class="wf-inspector-section"><div class="wf-inspector-section-title">输入参数</div><pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(step.inputs, null, 2))}</pre></div>` : ''}
         ${step.input_vars && Object.keys(step.input_vars).length ? `<div class="wf-inspector-section"><div class="wf-inspector-section-title">输入变量</div><pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(step.input_vars, null, 2))}</pre></div>` : ''}
         ${step.outputs && step.outputs.length ? `<div class="wf-inspector-section"><div class="wf-inspector-section-title">输出变量</div><div class="wf-chip-row">${step.outputs.map(x => `<span class="wf-code">${esc(x)}</span>`).join('')}</div></div>` : ''}
+        ${SHIFT_LEFT_ENABLED ? `<div class="wf-inspector-section">
+            <div class="wf-inspector-section-title">代码分析</div>
+            ${analysis ? `<div class="wf-gate-item">
+                <div><b>${esc(analysis.profile || 'requirement_code_joint')}</b></div>
+                <div class="wf-meta">${analysis.create_report ? '生成分析报告' : '仅输出结构化问题'} · ${esc(analysis.report_format || 'html')} · ${analysis.require_independent_review ? '要求独立评审' : '无需独立评审'}</div>
+                <div class="wf-meta">迭代变量：<span class="wf-code">${esc(analysis.iteration_id_var || 'iteration_id')}</span></div>
+            </div>` : '<div class="wf-meta">未启用。普通节点继续按现有 Runner 协议执行。</div>'}
+            ${currentDefinitionData?.can_manage ? `<button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="configureAnalysisNode('${esc(step.id)}')">${analysis ? '修改代码分析配置' : '配置为代码分析节点'}</button>` : ''}
+        </div>` : ''}
         <div class="wf-inspector-section">
             <div class="wf-inspector-section-title">分支规则</div>
             <div class="wf-gate-list">${branches}</div>
         </div>
     </div>`;
+}
+
+async function configureAnalysisNode(stepId) {
+    if (!currentDefinitionData?.can_manage) return;
+    const steps = currentDefinitionData.definition?.steps || [];
+    const step = steps.find(item => item.id === stepId);
+    if (!step) return;
+    const current = step.analysis || {};
+    const defaults = {
+        client_repo: 'client_repo', client_base_sha: 'client_base_sha', client_target_sha: 'client_target_sha',
+        server_repo: 'server_repo', server_base_sha: 'server_base_sha', server_target_sha: 'server_target_sha',
+        requirement_revision: 'requirement_revision'
+    };
+    const baseline = Object.keys(current.baseline_vars || {}).length ? current.baseline_vars : defaults;
+    const result = await new Promise(resolve => {
+        const html = `<div class="modal" style="max-width:780px">
+            <div class="modal-icon info">⌁</div>
+            <div class="modal-title">配置代码分析节点</div>
+            <div class="modal-desc" style="text-align:left;white-space:normal">
+                <b>${esc(step.name || step.id)}</b>
+                <div class="wf-start-hint">配置只作为兼容扩展写入节点；未升级的 Runner 会忽略它，现有 Workflow 行为不变。</div>
+            </div>
+            <div class="wf-start-grid">
+                <div class="wf-start-field"><label>分析模式</label><input id="_wf_an_profile" class="form-input" value="${esc(current.profile || 'requirement_code_joint')}"></div>
+                <div class="wf-start-field"><label>报告格式</label><select id="_wf_an_format" class="form-input"><option value="html" ${(current.report_format || 'html') === 'html' ? 'selected' : ''}>HTML</option><option value="markdown" ${current.report_format === 'markdown' ? 'selected' : ''}>Markdown</option></select></div>
+                <div class="wf-start-field"><label>迭代 ID 变量</label><input id="_wf_an_iteration" class="form-input" value="${esc(current.iteration_id_var || 'iteration_id')}"></div>
+                <div class="wf-start-field"><label>报告 ID 输出变量</label><input id="_wf_an_report_id" class="form-input" value="${esc(current.report_id_var || 'analysis_report_id')}"></div>
+            </div>
+            <div class="wf-start-field" style="text-align:left;margin-top:10px"><label>报告标题模板</label><input id="_wf_an_title" class="form-input" value="${esc(current.report_title_template || '代码分析报告 - {run_name}')}"></div>
+            <div class="wf-start-field" style="text-align:left;margin-top:10px"><label>基线变量映射（JSON 对象）</label><textarea id="_wf_an_baseline" class="form-input" rows="7">${esc(JSON.stringify(baseline, null, 2))}</textarea></div>
+            <div class="wf-start-mode">
+                <label><input id="_wf_an_enabled" type="checkbox" ${current.enabled === false ? '' : 'checked'}> 启用代码分析协议</label>
+                <label><input id="_wf_an_report" type="checkbox" ${current.create_report === false ? '' : 'checked'}> 自动生成报告</label>
+                <label><input id="_wf_an_review" type="checkbox" ${current.require_independent_review === false ? '' : 'checked'}> 要求独立评审</label>
+            </div>
+            <div class="modal-actions"><button class="btn btn-ghost" id="_wf_an_cancel">取消</button><button class="btn btn-primary" id="_wf_an_save">保存配置</button></div>
+        </div>`;
+        const overlay = _buildOverlay(html);
+        overlay.querySelector('#_wf_an_cancel').onclick = () => _closeOverlay(overlay, () => resolve(null));
+        overlay.querySelector('#_wf_an_save').onclick = () => {
+            let baselineVars;
+            try { baselineVars = parseJsonObject(overlay.querySelector('#_wf_an_baseline').value, '基线变量映射'); }
+            catch (e) { showToast(e.message, 'warning'); return; }
+            const value = {
+                enabled: overlay.querySelector('#_wf_an_enabled').checked,
+                profile: overlay.querySelector('#_wf_an_profile').value.trim(),
+                create_report: overlay.querySelector('#_wf_an_report').checked,
+                report_title_template: overlay.querySelector('#_wf_an_title').value.trim(),
+                report_format: overlay.querySelector('#_wf_an_format').value,
+                iteration_id_var: overlay.querySelector('#_wf_an_iteration').value.trim(),
+                report_id_var: overlay.querySelector('#_wf_an_report_id').value.trim(),
+                baseline_vars: baselineVars,
+                require_independent_review: overlay.querySelector('#_wf_an_review').checked,
+            };
+            _closeOverlay(overlay, () => resolve(value));
+        };
+        overlay.addEventListener('click', e => { if (e.target === overlay) _closeOverlay(overlay, () => resolve(null)); });
+    });
+    if (!result) return;
+    try {
+        const updatedSteps = steps.map(item => item.id === stepId ? Object.assign({}, item, {analysis: result}) : item);
+        await api(`/workflow-definitions/${currentDefinitionData.id}`, {
+            method: 'PATCH',
+            body: JSON.stringify({definition: {steps: updatedSteps}}),
+        });
+        showToast('代码分析节点配置已保存', 'success');
+        await openDefinition(currentDefinitionData.id);
+    } catch (e) {
+        await customAlert('保存失败：' + e.message, 'error');
+    }
 }
 async function loadRuns(selectId) {
     const state = workflowListPaging.runs;
@@ -800,10 +887,12 @@ async function loadRuns(selectId) {
     const el = document.getElementById('run-list');
     el.innerHTML = runs.length ? runs.map(r => `
         <div class="wf-item ${r.id === currentRunId ? 'active' : ''}" data-run-id="${r.id}" onclick="openRun(${r.id})">
-            <div style="display:flex;gap:6px;align-items:center">
-                <span style="font-weight:700;flex:1">#${r.id} ${esc(r.run_name || r.workflow_name)}</span>
-                ${statusBadge(r.status)}
-                ${r.can_delete ? `<button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteRun(${r.id})">删除</button>` : ''}
+            <div class="wf-run-head">
+                <span class="wf-run-title">#${r.id} ${esc(r.run_name || r.workflow_name)}</span>
+                <span class="wf-run-actions">
+                    ${statusBadge(r.status)}
+                    ${r.can_delete ? `<button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteRun(${r.id})">删除</button>` : ''}
+                </span>
             </div>
             <div class="wf-meta">${esc(r.workflow_name)} · 当前：${esc(r.current_step_id || '-')}</div>
         </div>
