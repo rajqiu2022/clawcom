@@ -229,9 +229,9 @@ def _audit_sidecar_health():
         from sqlalchemy import or_ as _or
 
         threshold = datetime.now() - timedelta(seconds=SIDECAR_AUDIT_OFFLINE_GRACE)
-        hermes_claws = (
+        managed_claws = (
             db.session.query(AgentDeployment.openclaw_id)
-            .filter(AgentDeployment.agent_type == 'hermes',
+            .filter(AgentDeployment.agent_type.in_(('hermes', 'codex')),
                     AgentDeployment.deploy_method == 'systemd',
                     AgentDeployment.status == 'success')
             .group_by(AgentDeployment.openclaw_id)
@@ -239,7 +239,7 @@ def _audit_sidecar_health():
         )
         offline_claws = (
             OpenClawInstance.query
-            .filter(OpenClawInstance.id.in_(hermes_claws))
+            .filter(OpenClawInstance.id.in_(managed_claws))
             .filter(_or(OpenClawInstance.last_activity.is_(None),
                         OpenClawInstance.last_activity < threshold))
             .all()
@@ -1077,6 +1077,12 @@ def claw_sidecar_config(claw_id, claw=None):
         sver = request.args.get('sidecar_version', '')
         if sver and cfg.sidecar_version != sver:
             cfg.sidecar_version = sver
+        reported_type = (request.args.get('agent_type') or '').strip().lower()
+        if reported_type in ('openclaw', 'hermes', 'codex', 'custom') \
+                and cfg.agent_type != reported_type:
+            cfg.agent_type = reported_type
+            cfg.config_version = int(cfg.config_version or 0) + 1
+            cfg.updated_by = 'sidecar_provider_activation'
 
     db.session.commit()
 

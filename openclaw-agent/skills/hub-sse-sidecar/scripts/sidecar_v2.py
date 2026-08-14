@@ -44,8 +44,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
-SIDECAR_VERSION = '2.5.1'
+SIDECAR_VERSION = '2.6.0'
 
 HUB_URL = os.getenv('HUB_URL', '').rstrip('/')
 CLAW_ID = os.getenv('CLAW_ID', '').strip()
@@ -71,6 +72,8 @@ _todo_queue = queue.Queue()
 _todo_lock = threading.Lock()
 _queued_todos = set()
 _todo_cooldown_until = {}
+_codex_provider = None
+_codex_provider_lock = threading.Lock()
 
 
 def log(msg):
@@ -513,10 +516,57 @@ def _cmd_for_log(cmd):
     return ' '.join(logged)
 
 
-def call_llm(prompt):
+def _call_codex_provider(prompt, timeout, task_kind):
+    """Invoke the SDK in-process; credentials remain in the service user's home."""
+    global _codex_provider
+    try:
+        from codex_sdk_provider import CodexSdkProvider
+        from provider_runtime import CancellationToken, ProviderInvocation
+    except Exception as exc:
+        return False, '', f'codex_provider_import_failed:{type(exc).__name__}'
+
+    with _codex_provider_lock:
+        if _codex_provider is None:
+            _codex_provider = CodexSdkProvider(model=os.getenv('CODEX_MODEL', '').strip() or None)
+        provider = _codex_provider
+
+    workspace = os.getenv('CODEX_WORKSPACE', '').strip() or None
+    invocation = ProviderInvocation(
+        invocation_id=str(uuid.uuid4()),
+        task_kind='workflow' if task_kind == 'workflow' else 'message',
+        prompt=prompt,
+        context={'claw_id': CLAW_ID, 'source': 'hub-sse-sidecar'},
+        session_key=f'hub-claw-{CLAW_ID}-{task_kind}',
+        timeout_seconds=max(1, min(int(timeout), 3600)),
+        workspace=workspace,
+        execution_scope='repo_read',
+        result_schema=None,
+    )
+
+    def on_event(event):
+        log(f'[codex] event={event.kind} message={event.message[:200]!r}')
+
+    try:
+        result = provider.invoke(invocation, on_event, CancellationToken())
+    except Exception as exc:
+        return False, '', f'codex_provider_error:{type(exc).__name__}'
+    if not result.ok:
+        return False, '', result.error or 'codex_provider_failed'
+    return True, result.final_response, ''
+
+
+def call_llm(prompt, task_kind='message'):
     """根据当前 agent_type 调用对应 CLI，返回 (ok, response_text, err)。"""
     timeout = int(get_cfg('agent_timeout', 300))
     wecom_enabled = bool(get_cfg('wecom_enabled', False))
+    # A managed deployment pins provider identity locally. Hub runtime config
+    # may tune the provider, but cannot silently switch an installed binary.
+    agent_type = (os.getenv('AGENT_TYPE', '').strip()
+                  or get_cfg('agent_type', 'openclaw')
+                  or 'openclaw').strip().lower()
+    if agent_type == 'codex':
+        log(f'[llm] 调用 codex sdk timeout={timeout}s prompt_len={len(prompt)}')
+        return _call_codex_provider(prompt, timeout, task_kind)
     env = os.environ.copy()
     if wecom_enabled:
         wecom_key = get_cfg('wecom_bot_id', '')
@@ -950,7 +1000,7 @@ def handle_task(task):
             percent=1,
             heartbeat=True,
         )
-        ok, resp, err = call_llm(_workflow_agent_prompt(task, payload))
+        ok, resp, err = call_llm(_workflow_agent_prompt(task, payload), task_kind='workflow')
         result = _normalize_workflow_result(resp, ok, err)
     except Exception as exc:
         result = {

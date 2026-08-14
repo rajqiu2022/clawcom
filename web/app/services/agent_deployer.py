@@ -41,9 +41,13 @@ from typing import Optional
 from app.hermes_models import (
     DEFAULT_HERMES_LLM_PROVIDER,
     DEFAULT_HERMES_LLM_MODEL,
+    HERMES_LLM_PROVIDERS,
     hermes_config_model,
     hermes_context_length,
+    hermes_provider_api_mode,
+    hermes_vision_config,
     normalize_hermes_model,
+    normalize_hermes_provider,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +56,7 @@ logger = logging.getLogger(__name__)
 # ---------- 命名规范 ----------
 
 _SAFE_NAME_RE = re.compile(r'[^A-Za-z0-9_]+')
+_SHA256_RE = re.compile(r'^[0-9a-fA-F]{64}$')
 AGENT_ROOT_DIR = "/opt/openclaw-agents"
 AGENT_SHARE_DIR = "/opt/agent_share"
 AGENT_SERVICE_GROUP = "openclaw_agents"
@@ -113,6 +118,11 @@ def build_systemd_unit_name(claw_id: int) -> str:
     用 ``claw-<id>`` 保证同机多 OpenClaw 不冲突。
     """
     return f"hermes-gateway-claw-{int(claw_id)}.service"
+
+
+def build_codex_unit_name(claw_id: int) -> str:
+    """Linux Codex provider 只托管 Hub Sidecar，不额外启动 Gateway。"""
+    return f"openclaw-sidecar-v2-claw-{int(claw_id)}.service"
 
 
 def normalize_agent_work_dirs(raw) -> list[str]:
@@ -188,6 +198,7 @@ class DeployRequest:
     ssh_key_passphrase: Optional[str] = None
 
     deploy_method: str = 'systemd'
+    agent_type: str = 'hermes'
 
     # docker 专用
     image: str = 'ccr.ccs.tencentyun.com/hermes/hermes-agent:latest'
@@ -201,7 +212,21 @@ class DeployRequest:
     hermes_start_mode: str = 'gateway'  # 'gateway' | 'module'
     systemd_user: str = ''  # 空值时自动使用 oclaw_<claw_id>
 
+    # Linux Codex provider（SDK + CLI 共享同一运行用户的 CODEX_HOME）
+    codex_runtime_dir: str = '/opt/codex-runtime'
+    codex_data_dir: Optional[str] = None
+    codex_python: Optional[str] = None
+    codex_cli: str = '/usr/local/bin/codex'
+    codex_workspace: Optional[str] = None
+    codex_model: str = ''
+    codex_requirements: Optional[str] = None
+    codex_wheelhouse: Optional[str] = None
+    codex_requirements_sha256: str = ''
+    codex_auth_mode: str = 'chatgpt_subscription'
+
     venus_api_key: Optional[str] = None
+    timiai_api_key: Optional[str] = None
+    timiai_project: str = 'gbt'
     llm_provider: str = DEFAULT_HERMES_LLM_PROVIDER
     llm_model: str = DEFAULT_HERMES_LLM_MODEL
     wecom_bot_id: str = ''
@@ -215,12 +240,16 @@ class DeployRequest:
 
     def systemd_install_dir(self) -> str:
         """systemd：venv / 源码根目录。"""
+        if self.agent_type == 'codex':
+            return (self.codex_runtime_dir or '').rstrip('/')
         if self.hermes_install_dir:
             return self.hermes_install_dir.rstrip('/')
         return (self.hermes_home or '').rstrip('/')
 
     def systemd_data_dir(self) -> str:
         """systemd：HERMES_HOME（数据、config.yaml 根目录）。"""
+        if self.agent_type == 'codex':
+            return (self.codex_data_dir or '').rstrip('/')
         if self.hermes_data_dir:
             return self.hermes_data_dir.rstrip('/')
         return (self.hermes_home or '').rstrip('/')
@@ -228,6 +257,10 @@ class DeployRequest:
     def systemd_split_layout(self) -> bool:
         """是否采用指南 v2 的拆分目录（install 与 data 为不同路径）。"""
         return bool(self.hermes_install_dir and self.hermes_data_dir)
+
+    def codex_home_dir(self) -> str:
+        """CLI 与 SDK 共用的私有认证目录；Hub 永不读取其中内容。"""
+        return f"{self.systemd_data_dir()}/home/.codex"
 
     def systemd_service_user(self) -> str:
         """systemd 运行用户；root 会被收敛到 per-agent 用户。"""
@@ -251,6 +284,8 @@ class DeployRequest:
         切换 "容器" / "Unit" 的展示文案。
         """
         if self.deploy_method == 'systemd':
+            if self.agent_type == 'codex':
+                return build_codex_unit_name(self.openclaw_id)
             return build_systemd_unit_name(self.openclaw_id)
         return build_container_name(self.openclaw_id)
 
@@ -380,35 +415,37 @@ def _render_config_yaml(req: DeployRequest) -> str:
     若 ``req`` 带 ``hub_url`` + ``claw_token``，写入 ``hub:`` 节点（与《Hermes Agent
     标准化部署指南》v2 一致），便于 Gateway 直连 Hub。
     """
-    selected_model = normalize_hermes_model(req.llm_model)
-    config_model = hermes_config_model(selected_model)
-    context_length = hermes_context_length(selected_model)
-    provider = (req.llm_provider or DEFAULT_HERMES_LLM_PROVIDER).strip().lower() or 'venus'
-    if provider != 'venus':
-        provider = 'venus'
+    provider = normalize_hermes_provider(req.llm_provider)
+    selected_model = normalize_hermes_model(req.llm_model, provider)
+    config_model = hermes_config_model(selected_model, provider)
+    context_length = hermes_context_length(selected_model, provider)
+    api_mode = hermes_provider_api_mode(provider)
+    provider_meta = HERMES_LLM_PROVIDERS[provider]
+    vision = hermes_vision_config(provider)
+    vision_api_mode = hermes_provider_api_mode(vision["provider"])
 
     lines = [
         "# Hermes Agent 配置（由 Hub 代建生成）",
-        f"# Hub 选择：{selected_model}",
+        f"# Hub 选择：{provider} / {selected_model}",
         "model:",
         f"  default: {_yaml_quote(config_model)}",
         f"  provider: {_yaml_quote(provider)}",
-        "  api_mode: \"chat_completions\"",
+        f"  api_mode: {_yaml_quote(api_mode)}",
         "",
         "providers:",
-        "  venus:",
+        f"  {provider}:",
         "    type: \"openai_compatible\"",
-        "    base_url: \"http://v2.open.venus.oa.com/llmproxy\"",
-        "    api_key: \"${VENUS_API_KEY}\"",
+        f"    base_url: {_yaml_quote(provider_meta['base_url'])}",
+        f"    api_key: \"${{{provider_meta['api_key_env']}}}\"",
         f"    default_model: {_yaml_quote(config_model)}",
-        "    api_mode: \"chat_completions\"",
+        f"    api_mode: {_yaml_quote(api_mode)}",
         f"    context_length: {context_length}",
         "",
         "auxiliary:",
         "  vision:",
-        f"    model: {_yaml_quote(config_model)}",
-        "    provider: \"venus\"",
-        "    api_mode: \"chat_completions\"",
+        f"    model: {_yaml_quote(vision['model'])}",
+        f"    provider: {_yaml_quote(vision['provider'])}",
+        f"    api_mode: {_yaml_quote(vision_api_mode)}",
         "",
         "enable_tools: true",
         "enable_vision: true",
@@ -458,6 +495,7 @@ def _render_env_file(req: DeployRequest) -> str:
     lines = [
         "# Hermes 环境变量（由 Hub 代建生成）",
         f"VENUS_API_KEY={req.venus_api_key or ''}",
+        f"TIMIAI_API_KEY={req.timiai_api_key or ''}",
         "HERMES_CODEX_STREAMING=false",
         "HERMES_LOG_LEVEL=INFO",
         f"HERMES_SESSION_DIR={session_dir}",
@@ -466,8 +504,9 @@ def _render_env_file(req: DeployRequest) -> str:
         f"OPENCLAW_HUB_URL={req.hub_url.rstrip('/')}",
         f"OPENCLAW_CLAW_ID={req.openclaw_id}",
         f"OPENCLAW_TOKEN={req.claw_token}",
-        f"HERMES_LLM_PROVIDER={req.llm_provider or DEFAULT_HERMES_LLM_PROVIDER}",
-        f"HERMES_LLM_MODEL={normalize_hermes_model(req.llm_model)}",
+        f"HERMES_LLM_PROVIDER={normalize_hermes_provider(req.llm_provider)}",
+        f"HERMES_LLM_MODEL={normalize_hermes_model(req.llm_model, req.llm_provider)}",
+        f"HERMES_TIMIAI_PROJECT={req.timiai_project or 'gbt'}",
         f"AGENT_WORK_DIRS={json.dumps(req.work_dirs or [], ensure_ascii=False)}",
     ]
     if req.wecom_bot_id and req.wecom_bot_secret:
@@ -623,7 +662,7 @@ def _render_sidecar_wrapper(req: DeployRequest) -> str:
 
 
 def _render_sidecar_env(req: DeployRequest) -> str:
-    return (
+    lines = [
         "# hub-sse-sidecar v2 environment（由 Hub 代建生成）\n"
         f"HUB_URL={(req.hub_url or '').rstrip('/')}\n"
         f"CLAW_ID={int(req.openclaw_id)}\n"
@@ -632,7 +671,17 @@ def _render_sidecar_env(req: DeployRequest) -> str:
         "CONFIG_REFRESH_SEC=60\n"
         "TODO_LOOP_SEC=120\n"
         "PYTHONUNBUFFERED=1\n"
-    )
+    ]
+    lines.append(f"AGENT_TYPE={req.agent_type}\n")
+    if req.agent_type == 'codex':
+        lines.extend([
+            "CODEX_PROVIDER_ENABLED=true\n",
+            f"CODEX_HOME={req.codex_home_dir()}\n",
+            f"CODEX_WORKSPACE={req.codex_workspace or ''}\n",
+            f"CODEX_MODEL={req.codex_model or ''}\n",
+            f"CODEX_AUTH_MODE={req.codex_auth_mode}\n",
+        ])
+    return ''.join(lines)
 
 
 def _render_sidecar_unit(req: DeployRequest) -> str:
@@ -645,6 +694,49 @@ def _render_sidecar_unit(req: DeployRequest) -> str:
     read_only_paths = (
         f"ReadOnlyPaths={req.systemd_install_dir()}\n"
         if req.systemd_install_dir() != data else ""
+    )
+
+
+def _render_codex_sidecar_unit(req: DeployRequest) -> str:
+    """Render the Linux Codex provider service under its authenticated user."""
+    data = req.systemd_data_dir()
+    runtime = req.systemd_install_dir()
+    home = f"{data}/home"
+    codex_home = req.codex_home_dir()
+    workspace = req.codex_workspace or data
+    user = req.systemd_service_user()
+    py = req.codex_python or f"{runtime}/venv/bin/python"
+    env_path = f"{data}/scripts/sidecar.env"
+    script_path = f"{data}/scripts/sidecar_v2.py"
+    read_write_paths = ' '.join([data, AGENT_SHARE_DIR] + (req.work_dirs or []))
+    read_only = ' '.join(dict.fromkeys([runtime, workspace]))
+    return (
+        "[Unit]\n"
+        f"Description=OpenClaw Codex Provider Sidecar (claw {int(req.openclaw_id)})\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"User={user}\n"
+        f"Group={AGENT_SERVICE_GROUP}\n"
+        f"WorkingDirectory={workspace}\n"
+        f"Environment=\"HOME={home}\"\n"
+        f"Environment=\"CODEX_HOME={codex_home}\"\n"
+        f"EnvironmentFile={env_path}\n"
+        f"ExecStart={py} -u {script_path}\n"
+        "Restart=always\n"
+        "RestartSec=10\n"
+        "NoNewPrivileges=true\n"
+        "PrivateTmp=true\n"
+        "ProtectSystem=strict\n"
+        f"ReadWritePaths={read_write_paths}\n"
+        f"ReadOnlyPaths={read_only}\n"
+        "StandardOutput=journal\n"
+        "StandardError=journal\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
     )
     return (
         "[Unit]\n"
@@ -737,8 +829,9 @@ def _run_deploy(deployment_id: int, req: DeployRequest, app) -> None:
                 return
             status_text = '成功' if dep.status == 'success' else '失败'
             target_user = (claw.owner or '').strip() or '未配置 owner'
+            provider_name = 'Codex' if dep.agent_type == 'codex' else 'Hermes'
             desc_lines = [
-                f'OpenClaw「{claw.name}」的 Hermes Agent 部署已{status_text}。',
+                f'OpenClaw「{claw.name}」的 {provider_name} Agent 部署已{status_text}。',
                 '',
                 f'请给用户 `{target_user}` 发送企微通知。',
                 '',
@@ -755,7 +848,7 @@ def _run_deploy(deployment_id: int, req: DeployRequest, app) -> None:
             desc_lines.extend([
                 '',
                 '通知建议文案：',
-                f'Hermes Agent 部署已{status_text}：{claw.name}（OpenClaw #{claw.id}）。',
+                f'{provider_name} Agent 部署已{status_text}：{claw.name}（OpenClaw #{claw.id}）。',
             ])
             for admin in admin_claws:
                 exists = ClawTodo.query.filter_by(
@@ -767,7 +860,7 @@ def _run_deploy(deployment_id: int, req: DeployRequest, app) -> None:
                     continue
                 db.session.add(ClawTodo(
                     openclaw_id=admin.id,
-                    title=f'通知用户 Hermes Agent 部署{status_text}：{claw.name}',
+                    title=f'通知用户 {provider_name} Agent 部署{status_text}：{claw.name}',
                     description='\n'.join(desc_lines),
                     schedule_type='once',
                     urgency_level='interrupt',
@@ -815,7 +908,10 @@ def _run_deploy(deployment_id: int, req: DeployRequest, app) -> None:
 
         with _SSHRunner(req) as ssh:
             if req.deploy_method == 'systemd':
-                _deploy_systemd(ssh, req, steps, _flush)
+                if req.agent_type == 'codex':
+                    _deploy_codex_systemd(ssh, req, steps, _flush)
+                else:
+                    _deploy_systemd(ssh, req, steps, _flush)
             else:
                 _deploy_docker(ssh, req, steps, _flush)
     except Exception as e:
@@ -930,6 +1026,258 @@ def _deploy_docker(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) -
         _flush('failed', f'容器启动后未保持运行：{_tail(sr.stdout, 200)}')
         return
 
+    _flush('success')
+
+
+def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) -> None:
+    """Install and supervise the Linux Codex SDK provider with systemd.
+
+    Authentication is deliberately out-of-band: the CLI and SDK reuse the
+    service user's ``HOME/.codex`` state. Hub only checks ``codex login status``
+    and never reads, copies, or logs credential files.
+    """
+    runtime = req.systemd_install_dir()
+    data = req.systemd_data_dir()
+    workspace = req.codex_workspace or ''
+    requirements = req.codex_requirements or f"{runtime}/requirements-codex.lock"
+    wheelhouse = req.codex_wheelhouse or f"{runtime}/wheelhouse"
+    expected_sha = (req.codex_requirements_sha256 or '').lower()
+    py = req.codex_python or f"{runtime}/venv/bin/python"
+    cli = req.codex_cli or '/usr/local/bin/codex'
+    user = req.systemd_service_user()
+    home = f"{data}/home"
+    codex_home = req.codex_home_dir()
+    unit_name = req.container_name()
+    unit_path = f"/etc/systemd/system/{unit_name}"
+    sidecar_dir = f"{data}/scripts"
+    sidecar_script = f"{sidecar_dir}/sidecar_v2.py"
+    sidecar_env_path = f"{sidecar_dir}/sidecar.env"
+
+    if not all((runtime, data, workspace, requirements, wheelhouse, expected_sha)):
+        _flush('failed', 'Codex systemd 部署缺少 runtime/data/workspace/离线依赖锁文件参数')
+        return
+    if not _SHA256_RE.fullmatch(expected_sha):
+        _flush('failed', 'codex_requirements_sha256 必须是 64 位十六进制 SHA-256')
+        return
+
+    sr = ssh.run('command -v systemctl && systemctl --version | head -n1',
+                 timeout=20, name='systemctl --version')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', '目标机没有 systemctl，无法部署 Linux Codex provider。')
+        return
+
+    bootstrap = ssh.run(
+        "python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' "
+        "&& python3 -V",
+        timeout=20, name='python >= 3.10')
+    _record_step(steps, bootstrap)
+    if not bootstrap.ok:
+        _flush('failed', 'Linux Codex provider 需要 Python 3.10 或更高版本。')
+        return
+
+    artifact_check = ssh.run(
+        f"test -f {shlex.quote(requirements)} && "
+        f"test -d {shlex.quote(wheelhouse)} && "
+        f"test \"$(sha256sum {shlex.quote(requirements)} | awk '{{print $1}}')\" = "
+        f"{shlex.quote(expected_sha)}",
+        timeout=30, name='verify codex offline artifacts')
+    _record_step(steps, artifact_check)
+    if not artifact_check.ok:
+        _flush('failed', 'Codex 离线依赖制品不存在或 requirements SHA-256 不匹配；拒绝联网临时安装。')
+        return
+
+    install = ssh.run(
+        f"mkdir -p {shlex.quote(runtime)} && "
+        f"python3 -m venv {shlex.quote(runtime + '/venv')} && "
+        f"{shlex.quote(py)} -m pip install --disable-pip-version-check "
+        f"--no-index --find-links {shlex.quote(wheelhouse)} --only-binary=:all: "
+        f"--require-hashes -r {shlex.quote(requirements)} && "
+        f"{shlex.quote(py)} -c 'import openai_codex'",
+        timeout=600, name='install codex sdk from wheelhouse')
+    _record_step(steps, install)
+    if not install.ok:
+        _flush('failed', f'Codex SDK 离线安装失败：{_tail(install.stderr or install.stdout, 800)}')
+        return
+
+    setup = ssh.run(
+        f"groupadd -r {shlex.quote(AGENT_SERVICE_GROUP)} 2>/dev/null || true; "
+        f"id -u {shlex.quote(user)} >/dev/null 2>&1 || "
+        f"useradd -r -g {shlex.quote(AGENT_SERVICE_GROUP)} -d {shlex.quote(home)} "
+        f"-s /sbin/nologin {shlex.quote(user)}; "
+        f"mkdir -p {shlex.quote(AGENT_ROOT_DIR)} {shlex.quote(AGENT_SHARE_DIR)} "
+        f"{shlex.quote(data)} {shlex.quote(home)} {shlex.quote(codex_home)} "
+        f"{shlex.quote(sidecar_dir)}; "
+        f"test -d {shlex.quote(workspace)}; "
+        f"chown root:{shlex.quote(AGENT_SERVICE_GROUP)} {shlex.quote(AGENT_ROOT_DIR)} "
+        f"{shlex.quote(AGENT_SHARE_DIR)}; "
+        f"chmod 0755 {shlex.quote(AGENT_ROOT_DIR)}; "
+        f"chmod 2770 {shlex.quote(AGENT_SHARE_DIR)}; "
+        f"chown -R {shlex.quote(user)}:{shlex.quote(AGENT_SERVICE_GROUP)} {shlex.quote(data)}; "
+        f"chmod 0700 {shlex.quote(data)} {shlex.quote(home)} {shlex.quote(codex_home)} "
+        f"{shlex.quote(sidecar_dir)}",
+        timeout=60, name='create codex service user and private dirs')
+    _record_step(steps, setup)
+    if not setup.ok:
+        _flush('failed', f'创建 Codex 服务用户/目录失败：{_tail(setup.stderr, 500)}')
+        return
+
+    sr = ssh.run(_work_dir_setup_cmd(req), timeout=60, name='mkdir/chown work dirs')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', f'工作目录授权失败：{_tail(sr.stderr or sr.stdout, 500)}')
+        return
+
+    cli_check = ssh.run(f"test -x {shlex.quote(cli)} && {shlex.quote(cli)} --version",
+                        timeout=30, name='codex cli --version')
+    _record_step(steps, cli_check)
+    if not cli_check.ok:
+        _flush('failed', f'未找到 Codex CLI：{cli}；请先安装 CLI，或显式传 codex_cli 绝对路径。')
+        return
+
+    auth_cmd = (
+        f"runuser -u {shlex.quote(user)} -- env HOME={shlex.quote(home)} "
+        f"CODEX_HOME={shlex.quote(codex_home)} {shlex.quote(cli)} login status"
+    )
+    auth = ssh.run(auth_cmd, timeout=30, name='codex login status')
+    _record_step(steps, StepResult(
+        name='codex login status', exit_code=auth.exit_code,
+        stdout='authenticated' if auth.ok else '',
+        stderr='' if auth.ok else 'authentication required'))
+    if not auth.ok:
+        if req.codex_auth_mode == 'api_key':
+            action = (
+                f"以 {user} 用户设置临时 OPENAI_API_KEY，再通过 stdin 执行 "
+                f"{cli} login --with-api-key；完成后立即 unset"
+            )
+        elif req.codex_auth_mode == 'enterprise_access_token':
+            action = (
+                f"确认企业工作区和当前 CLI 已开放 Access Token 登录后，以 {user} 用户完成登录"
+            )
+        else:
+            action = (
+                f"执行 sudo -u {user} env HOME={home} CODEX_HOME={codex_home} "
+                f"{cli} login --device-auth，然后重新部署"
+            )
+        _flush('failed', f'Codex 运行用户尚未认证。{action}。Hub 不会接收或复制 auth.json。')
+        return
+
+    base_url = (req.hub_url or '').rstrip('/')
+    if not (base_url and req.claw_token):
+        _flush('failed', 'Codex provider 必须提供 hub_url 与 claw_token 才能部署 Sidecar。')
+        return
+
+    asset_root = f"{base_url}/static/skills/hub-sse-sidecar-v2/scripts"
+    download_cmd = (
+        f"ASSET_ROOT={shlex.quote(asset_root)} ASSET_DIR={shlex.quote(sidecar_dir)} "
+        f"{shlex.quote(py)} - <<'PY'\n"
+        "import os, urllib.request\n"
+        "root = os.environ['ASSET_ROOT'].rstrip('/')\n"
+        "dest = os.environ['ASSET_DIR']\n"
+        "checks = {\n"
+        "    'sidecar_v2.py': b'#!/usr/bin/env python3',\n"
+        "    'provider_runtime.py': b'class ProviderInvocation',\n"
+        "    'codex_sdk_provider.py': b'class CodexSdkProvider',\n"
+        "}\n"
+        "for name, marker in checks.items():\n"
+        "    with urllib.request.urlopen(root + '/' + name, timeout=30) as response:\n"
+        "        content = response.read()\n"
+        "    if marker not in content:\n"
+        "        raise SystemExit('unexpected provider asset: ' + name)\n"
+        "    with open(os.path.join(dest, name), 'wb') as handle:\n"
+        "        handle.write(content)\n"
+        "PY"
+    )
+    sr = ssh.run(download_cmd, timeout=90, name='download codex provider assets')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', f'下载 Codex provider 制品失败：{_tail(sr.stderr, 600)}')
+        return
+
+    sr = ssh.put_text(_render_sidecar_env(req), sidecar_env_path,
+                      mode='0600', name='write codex sidecar.env')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', '写 Codex sidecar.env 失败')
+        return
+
+    permissions = ssh.run(
+        f"chown -R {shlex.quote(user)}:{shlex.quote(AGENT_SERVICE_GROUP)} "
+        f"{shlex.quote(sidecar_dir)} && "
+        f"chmod 0700 {shlex.quote(sidecar_dir)} && "
+        f"chmod 0755 {shlex.quote(sidecar_script)} && "
+        f"chmod 0644 {shlex.quote(sidecar_dir + '/provider_runtime.py')} "
+        f"{shlex.quote(sidecar_dir + '/codex_sdk_provider.py')} && "
+        f"chmod 0600 {shlex.quote(sidecar_env_path)}",
+        timeout=30, name='secure codex provider assets')
+    _record_step(steps, permissions)
+    if not permissions.ok:
+        _flush('failed', f'Codex provider 文件权限设置失败：{_tail(permissions.stderr, 400)}')
+        return
+
+    import_check = ssh.run(
+        f"runuser -u {shlex.quote(user)} -- env HOME={shlex.quote(home)} "
+        f"CODEX_HOME={shlex.quote(codex_home)} PYTHONPATH={shlex.quote(sidecar_dir)} "
+        f"{shlex.quote(py)} -c 'from codex_sdk_provider import CodexSdkProvider; "
+        "assert CodexSdkProvider().capabilities().readiness != \"unavailable\"'",
+        timeout=30, name='import codex provider')
+    _record_step(steps, import_check)
+    if not import_check.ok:
+        _flush('failed', f'Codex provider 自检失败：{_tail(import_check.stderr, 600)}')
+        return
+
+    preflight_url = f"{base_url}/api/openclaws/{int(req.openclaw_id)}/sidecar-config?sidecar_version=2.6.0"
+    sr = ssh.run(
+        f"curl -fsS -H {shlex.quote('Authorization: Bearer ' + req.claw_token)} "
+        f"{shlex.quote(preflight_url)} >/tmp/openclaw-sidecar-preflight-{int(req.openclaw_id)}.json",
+        timeout=30, name='codex Hub config preflight')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', f'Codex sidecar Hub 连通/鉴权预检失败：{_tail(sr.stderr, 500)}')
+        return
+
+    sr = ssh.put_text(_render_codex_sidecar_unit(req), unit_path,
+                      mode='0644', name=f'write {unit_name}')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', f'写 Codex systemd unit 失败：{_tail(sr.stderr, 400)}')
+        return
+
+    sr = ssh.run(
+        f"systemctl daemon-reload && systemctl enable {shlex.quote(unit_name)} && "
+        f"systemctl restart {shlex.quote(unit_name)}",
+        timeout=90, name='enable/restart codex sidecar')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', f'Codex sidecar 启动失败：{_tail(sr.stderr, 600)}')
+        return
+
+    time.sleep(3)
+    sr = ssh.run(f"systemctl is-active {shlex.quote(unit_name)}",
+                 timeout=20, name='systemctl is-active codex sidecar')
+    _record_step(steps, sr)
+    if not (sr.ok and sr.stdout.strip() == 'active'):
+        logs = ssh.run(f"journalctl -u {shlex.quote(unit_name)} -n 80 --no-pager",
+                       timeout=30, name='journalctl codex sidecar')
+        _record_step(steps, logs)
+        _flush('failed', f'Codex sidecar 启动后未保持 active：{_tail(logs.stdout or logs.stderr, 800)}')
+        return
+
+    # Only activate the Hub-side provider identity after the local service is
+    # proven active, so a failed migration cannot disrupt a live Hermes worker.
+    selfcheck_url = (
+        f"{base_url}/api/openclaws/{int(req.openclaw_id)}/sidecar-config"
+        f"?sidecar_version=2.6.0&agent_type=codex"
+        f"&agent_name=main&agent_timeout=300"
+    )
+    sr = ssh.run(
+        f"curl -fsS -H {shlex.quote('Authorization: Bearer ' + req.claw_token)} "
+        f"{shlex.quote(selfcheck_url)} >/tmp/openclaw-sidecar-selfcheck-{int(req.openclaw_id)}.json",
+        timeout=30, name='activate codex sidecar config')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', f'Codex sidecar 已启动但 Hub provider 激活失败：{_tail(sr.stderr, 500)}')
+        return
     _flush('success')
 
 

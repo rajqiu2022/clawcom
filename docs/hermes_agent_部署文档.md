@@ -1,5 +1,7 @@
 # Hermes Agent 部署指南（Venus 大模型配置）
 
+> Hub 统一部署器同时支持 Linux systemd Hermes 与 Codex provider。Codex 不使用本页的 Hermes Gateway 合同，参见 [Linux Codex Provider 部署文档](codex_provider_linux_部署文档.md)。Pi provider 已退役。
+
 > 适用版本：Hermes Agent 最新版  
 > 最后更新：2026-05-01  
 > 适用平台：Linux (CentOS/Ubuntu)  

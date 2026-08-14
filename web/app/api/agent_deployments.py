@@ -24,14 +24,21 @@ from app.api.openclaws import (
     _actor_display_name,
     _can_own_claw,
     _get_user,
-    _has_registered_hermes_agent,
 )
 from app.models import AgentDeployment, OpenClawInstance
 from app.hermes_models import (
     DEFAULT_HERMES_LLM_PROVIDER,
     DEFAULT_HERMES_LLM_MODEL,
+    DEFAULT_TIMIAI_LLM_MODEL,
     normalize_hermes_model,
+    normalize_hermes_provider,
 )
+from app.services.hermes_timiai_projects import (
+    TIMIAI_PROJECTS,
+    normalize_timiai_project,
+    timiai_project_label,
+)
+from app.services.deployment_secrets import get_deployment_secret
 from app.services.agent_deployer import (
     AGENT_SERVICE_GROUP,
     AGENT_ROOT_DIR,
@@ -54,7 +61,13 @@ from app.services.agent_deployer import (
 
 logger = logging.getLogger(__name__)
 _SYSTEMD_USER_RE = re.compile(r'^[a-z_][a-z0-9_-]{0,30}$')
+_SENSITIVE_DEPLOY_ENV_RE = re.compile(
+    r'(?:API_?KEY|TOKEN|SECRET|PASSWORD|AUTHORIZATION|PRIVATE_?KEY)',
+    re.IGNORECASE,
+)
 DEFAULT_HERMES_INSTALL_DIR = '/opt/hermes-runtime'
+DEFAULT_CODEX_RUNTIME_DIR = '/opt/codex-runtime'
+_SHA256_RE = re.compile(r'^[0-9a-fA-F]{64}$')
 
 
 def _system_config_values(keys) -> dict:
@@ -74,33 +87,27 @@ def _system_config_values(keys) -> dict:
         return {}
 
 
-def _configured_venus_api_key() -> str:
-    """读取 Hub 服务端预置的 Hermes Venus API Key。"""
-    for env_name in (
-            'DEPLOY_DEFAULT_VENUS_API_KEY',
-            'HERMES_VENUS_API_KEY',
-            'VENUS_API_KEY'):
-        value = (os.getenv(env_name) or '').strip()
-        if value:
-            return value
-
-    try:
-        rows = _system_config_values((
-            'deploy_venus_api_key',
-            'hermes_venus_api_key',
-            'venus_api_key',
-            'llm_provider',
-            'llm_api_key',
+def _configured_timiai_api_key(project: str = '') -> str:
+    """从部署密钥箱读取按项目区分的 Hermes TimiAI API Key。"""
+    project_key = normalize_timiai_project(project)
+    meta = TIMIAI_PROJECTS[project_key]
+    keys = list(meta['config_keys'])
+    if project_key in ('gbt', 'qqspeed_pc'):
+        keys.extend((
+            'deploy_timiai_api_key',
+            'hermes_timiai_api_key',
+            'timiai_api_key',
         ))
-        for key in ('deploy_venus_api_key', 'hermes_venus_api_key', 'venus_api_key'):
-            value = (rows.get(key) or '').strip()
-            if value:
-                return value
-        # 兼容既有「系统 LLM API Key」配置：历史环境未单独维护 deploy_venus_api_key。
-        return (rows.get('llm_api_key') or '').strip()
-    except Exception:
-        logger.exception('读取服务端 Venus API Key 配置失败')
-    return ''
+    return get_deployment_secret(keys)
+
+
+def _configured_venus_api_key() -> str:
+    """从部署密钥箱读取共享的 Hermes Venus API Key。"""
+    return get_deployment_secret((
+        'deploy_venus_api_key',
+        'hermes_venus_api_key',
+        'venus_api_key',
+    ))
 
 
 def _default_hermes_install_dir() -> str:
@@ -142,15 +149,23 @@ def _deployment_defaults() -> dict:
         'deploy_default_host',
         'deploy_default_ssh_port',
         'deploy_default_ssh_user',
-        'deploy_default_ssh_password',
-        'deploy_default_ssh_key',
     ))
     return {
         'host': (os.getenv('DEPLOY_DEFAULT_HOST') or rows.get('deploy_default_host') or '').strip(),
         'ssh_port': (os.getenv('DEPLOY_DEFAULT_SSH_PORT') or rows.get('deploy_default_ssh_port') or '').strip(),
         'ssh_user': (os.getenv('DEPLOY_DEFAULT_SSH_USER') or rows.get('deploy_default_ssh_user') or 'root').strip(),
-        'ssh_password': os.getenv('DEPLOY_DEFAULT_SSH_PASSWORD') or rows.get('deploy_default_ssh_password') or None,
-        'ssh_private_key': os.getenv('DEPLOY_DEFAULT_SSH_KEY') or rows.get('deploy_default_ssh_key') or None,
+        'ssh_password': get_deployment_secret((
+            'deploy_default_ssh_password',
+            'deploy_ssh_password',
+        )) or None,
+        'ssh_private_key': get_deployment_secret((
+            'deploy_default_ssh_key',
+            'deploy_ssh_private_key',
+        )) or None,
+        'ssh_key_passphrase': get_deployment_secret((
+            'deploy_default_ssh_key_passphrase',
+            'deploy_ssh_key_passphrase',
+        )) or None,
     }
 
 
@@ -169,14 +184,13 @@ def _deployment_host_port(dep: AgentDeployment, defaults: dict) -> tuple[str, in
 
 
 def _restart_systemd_agent(claw: OpenClawInstance, actor_name: str) -> dict:
-    """Sync latest Hub settings to remote files, then restart Hermes services."""
+    """Restart the latest successful Hub-managed systemd provider."""
     dep = (AgentDeployment.query
-           .filter_by(openclaw_id=claw.id, agent_type='hermes',
-                      deploy_method='systemd', status='success')
+           .filter_by(openclaw_id=claw.id, deploy_method='systemd', status='success')
            .order_by(AgentDeployment.created_at.desc())
            .first())
     if not dep:
-        raise ValueError('该 OpenClaw 没有可重启的 Hub 代建 Hermes Agent')
+        raise ValueError('该 OpenClaw 没有可重启的 Hub 代建 Agent')
 
     defaults = _deployment_defaults()
     host, ssh_port = _deployment_host_port(dep, defaults)
@@ -199,9 +213,31 @@ def _restart_systemd_agent(claw: OpenClawInstance, actor_name: str) -> dict:
         ssh_port=ssh_port,
         ssh_password=ssh_password,
         ssh_private_key=ssh_private_key,
+        ssh_key_passphrase=defaults.get('ssh_key_passphrase'),
         deploy_method='systemd',
+        agent_type=dep.agent_type or 'hermes',
         triggered_by=actor_name,
     )
+
+    if dep.agent_type == 'codex':
+        with _SSHRunner(req) as ssh:
+            restart = ssh.run(
+                f"systemctl restart {shlex.quote(unit)} && "
+                f"systemctl is-active {shlex.quote(unit)}",
+                timeout=60, name='restart codex sidecar')
+            if not restart.ok or restart.stdout.strip() != 'active':
+                journal = ssh.run(
+                    f"journalctl -u {shlex.quote(unit)} --no-pager -n 80",
+                    timeout=30, name='journalctl codex sidecar')
+                raise RuntimeError(
+                    f'Codex sidecar 重启失败：{(journal.stdout or journal.stderr)[-1200:]}')
+        return {
+            'unit': unit,
+            'host': f'{host}:{ssh_port}' if ssh_port != 22 else host,
+            'status': 'active',
+            'agent_type': 'codex',
+            'config_synced': False,
+        }
 
     with _SSHRunner(req) as ssh:
         deploy_req = _parse_deploy_options(
@@ -328,7 +364,10 @@ def _restart_systemd_agent(claw: OpenClawInstance, actor_name: str) -> dict:
         'host': f'{host}:{ssh_port}' if ssh_port != 22 else host,
         'status': 'active',
         'config_synced': True,
-        'llm_model': normalize_hermes_model(claw.llm_model or DEFAULT_HERMES_LLM_MODEL),
+        'llm_provider': normalize_hermes_provider(claw.llm_provider or DEFAULT_HERMES_LLM_PROVIDER),
+        'llm_model': normalize_hermes_model(
+            claw.llm_model or DEFAULT_HERMES_LLM_MODEL,
+            claw.llm_provider or DEFAULT_HERMES_LLM_PROVIDER),
     }
 
 
@@ -369,34 +408,46 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
 
     deploy_method = (data.get('deploy_method') or 'systemd').strip().lower()
     if deploy_method != 'systemd':
-        raise ValueError('Hub 代建 Hermes Agent 当前仅支持 systemd 隔离部署，不再开放 Docker 模式')
+        raise ValueError('Hub 统一部署器当前仅支持 Linux systemd 隔离部署')
+    agent_type = (data.get('agent_type') or 'hermes').strip().lower()
+    if agent_type == 'pi':
+        raise ValueError('Pi provider 已退役；请选择 hermes 或 codex')
+    if agent_type not in ('hermes', 'codex'):
+        raise ValueError('agent_type 仅支持 hermes 或 codex')
 
     # 支持从环境变量 / system_config 读取默认部署配置（前端简化后不提交 host/ssh 信息）
     defaults = _deployment_defaults()
     host = (data.get('host') or defaults['host']).strip()
     ssh_user = (data.get('ssh_user') or defaults['ssh_user'] or 'root').strip()
-    ssh_password = data.get('ssh_password') or defaults['ssh_password'] or None
-    ssh_private_key = data.get('ssh_private_key') or defaults['ssh_private_key'] or None
-    ssh_key_passphrase = data.get('ssh_key_passphrase') or None
-    venus_api_key = (
-        (data.get('venus_api_key') or '').strip()
-        or _configured_venus_api_key()
-        or None
-    )
-    llm_provider = (data.get('llm_provider') or DEFAULT_HERMES_LLM_PROVIDER).strip().lower()
-    if llm_provider != DEFAULT_HERMES_LLM_PROVIDER:
-        raise ValueError('当前仅支持 Venus 平台')
+    ssh_password = defaults['ssh_password'] or None
+    ssh_private_key = defaults['ssh_private_key'] or None
+    ssh_key_passphrase = defaults['ssh_key_passphrase'] or None
+    venus_api_key = _configured_venus_api_key() or None
+    llm_provider = normalize_hermes_provider(
+        data.get('llm_provider') or getattr(claw, 'llm_provider', None)
+        or DEFAULT_HERMES_LLM_PROVIDER)
+    timiai_project = normalize_timiai_project(
+        data.get('timiai_project') or getattr(claw, 'timiai_project', None))
+    timiai_api_key = _configured_timiai_api_key(timiai_project) or None
+    default_model = (DEFAULT_HERMES_LLM_MODEL if llm_provider == 'venus'
+                     else DEFAULT_TIMIAI_LLM_MODEL)
     llm_model = normalize_hermes_model(
-        data.get('llm_model') or getattr(claw, 'llm_model', None) or DEFAULT_HERMES_LLM_MODEL)
+        data.get('llm_model') or getattr(claw, 'llm_model', None) or default_model,
+        llm_provider)
     image = (data.get('image') or '').strip() \
         or 'ccr.ccs.tencentyun.com/hermes/hermes-agent:latest'
 
     if not host:
-        raise ValueError('host 必填。如需简化部署表单，请在服务端环境变量中配置 DEPLOY_DEFAULT_HOST / DEPLOY_DEFAULT_SSH_PASSWORD')
+        raise ValueError('host 必填；可在服务端配置 DEPLOY_DEFAULT_HOST')
     if not ssh_password and not ssh_private_key:
-        raise ValueError('SSH 凭据必填：ssh_password 或 ssh_private_key 至少提供一个（可通过环境变量 DEPLOY_DEFAULT_SSH_PASSWORD 或 DEPLOY_DEFAULT_SSH_KEY 预设）')
-    if not venus_api_key:
-        raise ValueError('Venus API Key 未配置：请在 Hub 服务端配置 DEPLOY_DEFAULT_VENUS_API_KEY / HERMES_VENUS_API_KEY / VENUS_API_KEY')
+        raise ValueError('SSH 凭据未配置：请在 Hub 密钥箱配置 deploy_default_ssh_password 或 deploy_default_ssh_key')
+    if agent_type == 'hermes' and llm_provider == 'venus' and not venus_api_key:
+        raise ValueError(
+            'Venus API Key 未配置：请在 Hub 密钥箱配置 deploy_venus_api_key')
+    if agent_type == 'hermes' and llm_provider == 'timiai' and not timiai_api_key:
+        raise ValueError(
+            'TimiAI API Key 未配置：请在 Hub 密钥箱配置项目 %s 对应的密钥' %
+            timiai_project_label(timiai_project))
 
     hermes_home = (data.get('hermes_home') or '').strip().rstrip('/') or None
     hermes_install_dir = (data.get('hermes_install_dir') or '').strip().rstrip('/') or None
@@ -411,7 +462,48 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
     work_dirs = normalize_agent_work_dirs(
         data.get('work_dirs', getattr(claw, 'work_dirs', None) or []))
 
-    if deploy_method == 'systemd':
+    safe = claw.safe_name or ''
+    codex_runtime_dir = (data.get('codex_runtime_dir') or DEFAULT_CODEX_RUNTIME_DIR).strip().rstrip('/')
+    codex_data_dir = (data.get('codex_data_dir') or
+                      f"{_build_remote_base_dir_compat(claw, safe_name=safe)}/data").strip().rstrip('/')
+    codex_python = (data.get('codex_python') or '').strip() or None
+    codex_cli = (data.get('codex_cli') or '/usr/local/bin/codex').strip()
+    codex_workspace = (data.get('codex_workspace') or '').strip().rstrip('/') or None
+    codex_model = (data.get('codex_model') or '').strip()
+    codex_requirements = (data.get('codex_requirements') or
+                          f'{codex_runtime_dir}/requirements-codex.lock').strip()
+    codex_wheelhouse = (data.get('codex_wheelhouse') or
+                        f'{codex_runtime_dir}/wheelhouse').strip().rstrip('/')
+    codex_requirements_sha256 = (data.get('codex_requirements_sha256') or '').strip().lower()
+    codex_auth_mode = (data.get('codex_auth_mode') or 'chatgpt_subscription').strip().lower()
+
+    if deploy_method == 'systemd' and agent_type == 'codex':
+        if not codex_workspace:
+            raise ValueError('codex_workspace 必填，且必须是目标 Linux 主机上的工程绝对路径')
+        for path, label in (
+                (codex_runtime_dir, 'codex_runtime_dir'),
+                (codex_data_dir, 'codex_data_dir'),
+                (codex_cli, 'codex_cli'),
+                (codex_workspace, 'codex_workspace'),
+                (codex_requirements, 'codex_requirements'),
+                (codex_wheelhouse, 'codex_wheelhouse')):
+            if not path.startswith('/') or any(ch.isspace() for ch in path) or '%' in path:
+                raise ValueError(f'{label} 必须是不含空格或 % 的 Linux 绝对路径')
+        if codex_python and not codex_python.startswith('/'):
+            raise ValueError('codex_python 必须为 Linux 绝对路径')
+        if codex_model and not re.fullmatch(r'[A-Za-z0-9._:/-]{1,128}', codex_model):
+            raise ValueError('codex_model 只能包含字母、数字、点、下划线、冒号、斜杠或短横线')
+        if not _path_in_agent_root(codex_data_dir, claw):
+            raise ValueError(
+                f'codex_data_dir 必须位于 {_build_remote_base_dir_compat(claw, safe_name=safe)}/ 下')
+        normalize_agent_work_dirs([codex_workspace])
+        if not _SHA256_RE.fullmatch(codex_requirements_sha256):
+            raise ValueError('codex_requirements_sha256 必填，且必须是 64 位十六进制 SHA-256')
+        if codex_auth_mode not in (
+                'chatgpt_subscription', 'api_key', 'enterprise_access_token'):
+            raise ValueError(
+                'codex_auth_mode 仅支持 chatgpt_subscription、api_key、enterprise_access_token')
+    elif deploy_method == 'systemd':
         if not hermes_home and not hermes_install_dir:
             hermes_install_dir = _default_hermes_install_dir()
         # 优先使用已有的 hermes_data_dir（从数据库读取），避免重新生成导致目录名变化
@@ -479,6 +571,14 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
     extra_env = data.get('extra_env') or {}
     if not isinstance(extra_env, dict):
         extra_env = {}
+    blocked_env = sorted(
+        str(key) for key in extra_env if _SENSITIVE_DEPLOY_ENV_RE.search(str(key))
+    )
+    if blocked_env:
+        raise ValueError(
+            'extra_env 不允许传入敏感字段，请改存 Hub 密钥箱：%s' %
+            ', '.join(blocked_env)
+        )
 
     return DeployRequest(
         openclaw_id=claw.id,
@@ -492,6 +592,7 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
         ssh_private_key=ssh_private_key,
         ssh_key_passphrase=ssh_key_passphrase,
         deploy_method=deploy_method,
+        agent_type=agent_type,
         image=image,
         hermes_home=hermes_home,
         hermes_install_dir=hermes_install_dir,
@@ -500,7 +601,19 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
         hermes_module=hermes_module,
         hermes_start_mode=hermes_start_mode,
         systemd_user=systemd_user,
+        codex_runtime_dir=codex_runtime_dir,
+        codex_data_dir=codex_data_dir,
+        codex_python=codex_python,
+        codex_cli=codex_cli,
+        codex_workspace=codex_workspace,
+        codex_model=codex_model,
+        codex_requirements=codex_requirements,
+        codex_wheelhouse=codex_wheelhouse,
+        codex_requirements_sha256=codex_requirements_sha256,
+        codex_auth_mode=codex_auth_mode,
         venus_api_key=venus_api_key,
+        timiai_api_key=timiai_api_key,
+        timiai_project=timiai_project,
         llm_provider=llm_provider,
         llm_model=llm_model,
         wecom_bot_id=claw.wecom_bot_id or '',
@@ -530,7 +643,7 @@ def create_deployment_record(claw: OpenClawInstance, req: DeployRequest) -> Agen
         remote_base = f"{data} (venv:{inst})"
         if len(remote_base) > 500:
             remote_base = remote_base[:497] + '...'
-        container = build_systemd_unit_name(claw.id)
+        container = req.container_name()
         image = ''
     else:
         # 优先使用 claw.safe_name（数据库中存储的，第一次创建时生成，后续不变）
@@ -541,7 +654,7 @@ def create_deployment_record(claw: OpenClawInstance, req: DeployRequest) -> Agen
 
     dep = AgentDeployment(
         openclaw_id=claw.id,
-        agent_type='hermes',
+        agent_type=req.agent_type,
         deploy_method=req.deploy_method,
         host=f'{req.host}:{req.ssh_port}' if req.ssh_port and req.ssh_port != 22 else req.host,
         ssh_user=req.ssh_user,
@@ -568,7 +681,7 @@ def trigger_async_deployment(claw: OpenClawInstance, req: DeployRequest) -> Agen
 
 @api_bp.route('/openclaws/<int:claw_id>/agent-deployments', methods=['POST'])
 def create_agent_deployment(claw_id: int):
-    """重新部署一个 OpenClaw 对应的 Hermes Agent。
+    """重新部署一个 OpenClaw 对应的 Hermes/Codex Agent。
 
     OpenClaw 注册时如果已经选择了 ``create_agent``，第一次部署会从
     ``create_openclaw`` 内部直接触发；本接口主要用在「失败后重试」 /
@@ -581,7 +694,7 @@ def create_agent_deployment(claw_id: int):
     claw = OpenClawInstance.query.get_or_404(claw_id)
     user = _get_user()
     if not user or user.role != 'super_admin':
-        return jsonify({'error': '仅超级管理员可代建 / 重新部署 Hermes Agent'}), 403
+        return jsonify({'error': '仅超级管理员可代建 / 重新部署 Agent'}), 403
 
     data = request.get_json(silent=True) or {}
     deploy_opts = data.get('deploy') if isinstance(data.get('deploy'), dict) else data
@@ -608,24 +721,27 @@ def create_agent_deployment(claw_id: int):
 
 @api_bp.route('/openclaws/<int:claw_id>/agent/restart', methods=['POST'])
 def restart_openclaw_agent(claw_id: int):
-    """重启 Hub 代建的 Hermes Agent systemd 服务。"""
+    """重启 Hub 代建的 Hermes/Codex systemd 服务。"""
     claw = OpenClawInstance.query.get_or_404(claw_id)
     user = _get_user()
     if not _can_own_claw(user, claw):
-        return jsonify({'error': '仅本人 / 绑定 OpenClaw / 超级管理员可重启 Hermes Agent'}), 403
-    if not _has_registered_hermes_agent(claw):
-        return jsonify({'error': '仅通过 Hub 注册部署成功的 Hermes Agent 可重启'}), 403
+        return jsonify({'error': '仅本人 / 绑定 OpenClaw / 超级管理员可重启 Agent'}), 403
+    has_managed = (AgentDeployment.query
+                   .filter_by(openclaw_id=claw.id, deploy_method='systemd', status='success')
+                   .first())
+    if not has_managed:
+        return jsonify({'error': '仅通过 Hub 注册部署成功的 Agent 可重启'}), 403
 
     try:
         result = _restart_systemd_agent(claw, _actor_display_name(user))
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:
-        logger.exception('restart hermes agent failed for claw %s', claw_id)
+        logger.exception('restart managed agent failed for claw %s', claw_id)
         return jsonify({'error': str(e)}), 500
 
     return jsonify({
-        'message': 'Hermes Agent 已重启',
+        'message': 'Agent 已重启',
         'restart': result,
     }), 200
 

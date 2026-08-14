@@ -204,29 +204,44 @@ def _has_registered_hermes_agent(claw):
     return bool(dep and dep.deploy_method == 'systemd' and dep.status == 'success')
 
 
+def _has_registered_codex_agent(claw):
+    """是否通过 Hub 代建过 Linux Codex provider。"""
+    dep = (AgentDeployment.query
+           .filter_by(openclaw_id=claw.id, agent_type='codex')
+           .order_by(AgentDeployment.created_at.desc())
+           .first())
+    return bool(dep and dep.deploy_method == 'systemd' and dep.status == 'success')
+
+
 def _record_failed_agent_deployment(claw, error_message, actor_name, deploy_opts=None):
     """部署请求无法下发时也要落库，前端才能锁定卡片并允许重试。"""
     try:
         from app.services.agent_deployer import (
+            build_codex_unit_name,
             build_default_systemd_data_dir,
             build_systemd_unit_name,
         )
+        agent_type = 'hermes'
         host = ''
         ssh_user = ''
         if isinstance(deploy_opts, dict):
+            agent_type = (deploy_opts.get('agent_type') or 'hermes').strip().lower()
+            if agent_type not in ('hermes', 'codex'):
+                agent_type = 'hermes'
             host = (deploy_opts.get('host') or '').strip()
             if host and deploy_opts.get('ssh_port'):
                 host = f"{host}:{deploy_opts.get('ssh_port')}"
             ssh_user = (deploy_opts.get('ssh_user') or '').strip()
         dep = AgentDeployment(
             openclaw_id=claw.id,
-            agent_type='hermes',
+            agent_type=agent_type,
             deploy_method='systemd',
             host=host,
             ssh_user=ssh_user,
             remote_base_dir=build_default_systemd_data_dir(
                 claw.id, claw.name or f'claw-{claw.id}', safe_name=claw.safe_name or ''),
-            container_name=build_systemd_unit_name(claw.id),
+            container_name=(build_codex_unit_name(claw.id) if agent_type == 'codex'
+                            else build_systemd_unit_name(claw.id)),
             image='',
             status='failed',
             error_message=error_message,
@@ -303,12 +318,12 @@ def list_openclaws():
         d['today_submitted'] = today_submitted
         d['today_approved'] = today_approved
         latest_dep = (AgentDeployment.query
-                      .filter_by(openclaw_id=c.id, agent_type='hermes')
+                      .filter_by(openclaw_id=c.id)
                       .order_by(AgentDeployment.created_at.desc())
                       .first())
-        d['has_hermes_agent'] = bool(
-            latest_dep and latest_dep.deploy_method == 'systemd' and latest_dep.status == 'success'
-        )
+        d['has_hermes_agent'] = _has_registered_hermes_agent(c)
+        d['has_codex_agent'] = _has_registered_codex_agent(c)
+        d['agent_type'] = latest_dep.agent_type if latest_dep else ''
         d['agent_deployment_status'] = latest_dep.status if latest_dep else ''
         d['agent_deployment_id'] = latest_dep.id if latest_dep else None
         d['agent_deployment_error'] = latest_dep.error_message if latest_dep else ''
@@ -519,7 +534,7 @@ def create_openclaw():
 
     _ensure_sidecar_v2_enabled(claw)
 
-    # === 可选：Hub 代建 Hermes Agent（仅 super_admin） ===
+    # === 可选：Hub 代建 Hermes/Codex Agent（仅 super_admin） ===
     # 注意：部署失败不会回滚 OpenClaw 注册；状态写入 agent_deployments 表，
     # 前端通过 /openclaws/<id>/agent-deployments/latest 轮询。
     # 高危操作（远端 SSH + Docker 起容器）只允许超级管理员触发，
@@ -528,7 +543,7 @@ def create_openclaw():
     create_agent = bool(data.get('create_agent'))
     deploy_opts_raw = data.get('deploy') if isinstance(data.get('deploy'), dict) else None
     if create_agent and deploy_opts_raw and user and user.role != 'super_admin':
-        err = '仅超级管理员可代建 Hermes Agent，已忽略部署请求。'
+        err = '仅超级管理员可代建 Agent，已忽略部署请求。'
         dep = _record_failed_agent_deployment(
             claw, err, _actor_display_name(user), deploy_opts_raw)
         deployment_payload = dep.to_dict() if dep else {
@@ -681,6 +696,7 @@ def update_openclaw(claw_id):
     db.session.commit()
     payload = claw.to_dict()
     payload['has_hermes_agent'] = _has_registered_hermes_agent(claw)
+    payload['has_codex_agent'] = _has_registered_codex_agent(claw)
     return jsonify(payload)
 
 
@@ -1350,6 +1366,8 @@ def download_claw_skill_file(claw_id, skill_id, filename, claw=None):
         content_type = 'application/json; charset=utf-8'
     else:
         content_type = 'text/plain; charset=utf-8'
+    from app.services.skill_usage import record_skill_content_access
+    record_skill_content_access(skill_id, 'agent_file')
     return Response(
         item['content'],
         content_type=content_type,
@@ -1398,6 +1416,8 @@ def download_claw_skill_pack(claw_id, skill_id, claw=None):
     headers['Content-Disposition'] = (
         f'attachment; filename="{root}.zip"'
     )
+    from app.services.skill_usage import record_skill_content_access
+    record_skill_content_access(skill_id, 'agent_pack')
     return Response(
         buffer.getvalue(),
         content_type='application/zip',
