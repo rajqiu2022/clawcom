@@ -1,4 +1,5 @@
 import sys
+import os
 import types
 import unittest
 import json
@@ -171,6 +172,153 @@ class CodexLinuxDeployerTest(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / 'web' / 'app' /
                   'services' / 'agent_deployer.py').read_text(encoding='utf-8')
         self.assertIn("'codex_sdk_worker.py'", source)
+
+    def test_todo_prompt_hides_token_and_uses_todo_contract(self):
+        secret = 'hub-token-must-not-reach-codex'
+        captured = {}
+
+        def invoke(prompt, **kwargs):
+            captured['prompt'] = prompt
+            captured.update(kwargs)
+            return True, json.dumps({
+                'status': 'completed',
+                'result_summary': '只读分析完成',
+            }, ensure_ascii=False), ''
+
+        with patch.object(deployed_sidecar, 'CLAW_TOKEN', secret), patch.object(
+            deployed_sidecar, 'HUB_URL', 'https://hub.example'
+        ), patch.object(deployed_sidecar, 'CLAW_ID', '17'), patch.object(
+            deployed_sidecar, 'get_cfg',
+            side_effect=lambda _key, default=None: default,
+        ), patch.object(
+            deployed_sidecar, 'fetch_task_context', return_value={}
+        ), patch.object(
+            deployed_sidecar, 'call_llm', side_effect=invoke
+        ), patch.object(
+            deployed_sidecar, '_post_complete', return_value=True
+        ) as complete:
+            ok = deployed_sidecar.handle_todo({
+                'id': 42,
+                'title': '检查工程',
+                'description': '分析只读结果',
+            })
+
+        self.assertTrue(ok)
+        self.assertEqual('todo', captured['task_kind'])
+        self.assertEqual('todo:42', captured['session_key'])
+        self.assertNotIn(secret, captured['prompt'])
+        self.assertNotIn('Authorization: Bearer', captured['prompt'])
+        self.assertNotIn('/todos/42/complete', captured['prompt'])
+        self.assertNotIn('send_message', captured['prompt'])
+        complete.assert_called_once_with(42, '只读分析完成')
+
+    def test_todo_remains_incomplete_when_sidecar_callback_fails(self):
+        with patch.object(
+            deployed_sidecar, 'get_cfg',
+            side_effect=lambda _key, default=None: default,
+        ), patch.object(
+            deployed_sidecar, 'fetch_task_context', return_value={}
+        ), patch.object(
+            deployed_sidecar, 'call_llm',
+            return_value=(True, json.dumps({
+                'status': 'completed',
+                'result_summary': 'result',
+            }), ''),
+        ) as invoke, patch.object(
+            deployed_sidecar, '_post_complete', return_value=False
+        ) as complete:
+            ok = deployed_sidecar.handle_todo({'id': 43, 'title': '检查'})
+
+        self.assertFalse(ok)
+        self.assertEqual('todo', invoke.call_args.kwargs['task_kind'])
+        self.assertEqual('todo:43', invoke.call_args.kwargs['session_key'])
+        complete.assert_called_once_with(43, 'result')
+
+    def test_todo_blocked_result_never_completes_in_hub(self):
+        with patch.object(
+            deployed_sidecar, 'get_cfg',
+            side_effect=lambda _key, default=None: default,
+        ), patch.object(
+            deployed_sidecar, 'fetch_task_context', return_value={}
+        ), patch.object(
+            deployed_sidecar, 'call_llm',
+            return_value=(True, json.dumps({
+                'status': 'blocked',
+                'result_summary': '需要写权限',
+            }, ensure_ascii=False), ''),
+        ), patch.object(
+            deployed_sidecar, '_post_complete', return_value=True
+        ) as complete:
+            ok = deployed_sidecar.handle_todo({'id': 44, 'title': '修改配置'})
+
+        self.assertFalse(ok)
+        complete.assert_not_called()
+
+    def test_codex_choke_point_redacts_echoed_local_hub_token(self):
+        captured = {}
+
+        class Provider:
+            def invoke(self, invocation, _on_event, _cancel):
+                captured['invocation'] = invocation
+                return SimpleNamespace(
+                    ok=True, final_response='ok', error=None,
+                )
+
+        secret = 'local-hub-token-never-for-codex'
+        with patch.object(
+            deployed_sidecar, 'CLAW_TOKEN', secret
+        ), patch.object(
+            deployed_sidecar, '_codex_provider', Provider()
+        ), patch.dict(
+            os.environ,
+            {'CODEX_HOME': '/data/home/.codex', 'HOME': '/data/home'},
+            clear=True,
+        ):
+            ok, response, error = deployed_sidecar._call_codex_provider(
+                f'untrusted content echoed {secret}',
+                30,
+                'todo',
+                'todo:44',
+            )
+
+        self.assertEqual((True, 'ok', ''), (ok, response, error))
+        invocation = captured['invocation']
+        self.assertNotIn(secret, invocation.prompt)
+        self.assertIn('<redacted>', invocation.prompt)
+        self.assertNotIn('CLAW_TOKEN', invocation.environment)
+
+    def test_sidecar_complete_does_not_falsely_claim_wecom_notification(self):
+        captured = {}
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def open_request(request, timeout):
+            captured['request'] = request
+            captured['timeout'] = timeout
+            return Response()
+
+        with patch.object(
+            deployed_sidecar, 'HUB_URL', 'https://hub.example'
+        ), patch.object(
+            deployed_sidecar, 'CLAW_ID', '17'
+        ), patch.object(
+            deployed_sidecar, 'CLAW_TOKEN', 'sidecar-only-token'
+        ), patch.object(
+            deployed_sidecar.urllib.request, 'urlopen', side_effect=open_request
+        ):
+            ok = deployed_sidecar._post_complete(45, '已完成')
+
+        self.assertTrue(ok)
+        payload = json.loads(captured['request'].data.decode('utf-8'))
+        self.assertEqual({'result_summary': '已完成'}, payload)
+        self.assertEqual(30, captured['timeout'])
 
     def test_pi_is_explicitly_retired(self):
         with self.assertRaisesRegex(ValueError, 'Pi provider 已退役'):

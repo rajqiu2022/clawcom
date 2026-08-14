@@ -590,6 +590,10 @@ def _run_codex_process(cmd, prompt, timeout, env, cwd, stdout_mode='raw'):
 def _call_codex_provider(prompt, timeout, task_kind, session_key=None):
     """Invoke the SDK inside a timeout-bounded, secret-minimized process tree."""
     global _codex_provider
+    # Defense in depth: Hub-authored message/todo/workflow fields must not be
+    # able to echo the locally configured credential into the SDK prompt.
+    if CLAW_TOKEN:
+        prompt = prompt.replace(CLAW_TOKEN, '<redacted>')
     try:
         from codex_sdk_provider import CodexSdkProvider
         from provider_runtime import CancellationToken, ProviderInvocation
@@ -1195,7 +1199,6 @@ def _post_complete(todo_id, result_summary=''):
     """sidecar 直接回调 Hub 标记 todo 完成。"""
     url = f"{HUB_URL}/api/v1/openclaws/{CLAW_ID}/todos/{todo_id}/complete"
     data = json.dumps({
-        'notified': True,
         'result_summary': result_summary or '已处理',
     }).encode('utf-8')
     req = urllib.request.Request(url, data=data, method='POST')
@@ -1247,12 +1250,11 @@ def send_to_claw(target_claw_ids, content, msg_type='text'):
 
 
 def handle_todo(todo):
-    """处理一条 ClawTodo：LLM 跑业务逻辑并自行回调 complete。
+    """处理一条 ClawTodo；凭据与完成回调始终由 Sidecar 持有。
 
-    设计原则：sidecar 不代替 LLM 自动 complete！
-    - LLM 处理完后应自己调 Hub API 标记完成
-    - 如果 LLM 忘了调 complete，Hub 的 timeout_watcher 会兜底告警
-    - 这样保证只有 LLM 真正执行了业务逻辑后才标记完成
+    Codex 只接收任务上下文并返回最终结果，不会看到 Hub URL、Claw ID
+    或 CLAW_TOKEN。只有 Provider 成功返回后，Sidecar 才调用 complete；
+    回调失败会保持 todo 未完成并进入正常重试冷却。
     """
     todo_id = todo.get('id')
     title = todo.get('title', '')
@@ -1265,7 +1267,6 @@ def handle_todo(todo):
     if not todo_id:
         return
 
-    owner_wecom = get_cfg('owner_wecom_userid', '')
     claw_name = get_cfg('claw_name', '')
     prompt_lines = [
         f"[Hub待办任务]",
@@ -1315,29 +1316,46 @@ def handle_todo(todo):
     prompt_lines.extend([
         "",
         "你必须完成：",
-        f"1) 根据任务内容执行具体操作（如提交日报、审核资源、回复消息等）。",
-        f"2) 完成后，你必须调用 Hub API 标记此待办为完成：",
-        f"   POST {HUB_URL}/api/v1/openclaws/{CLAW_ID}/todos/{todo_id}/complete",
-        f"   Headers: Authorization: Bearer {CLAW_TOKEN}",
-        f'   Body: {{"result_summary": "<完成结果摘要>"}}',
+        "1) 在当前只读权限范围内处理任务并核对结果。",
+        "2) 最终只输出一个 JSON 对象，不要输出代码块或额外解释：",
+        '   {"status":"completed|blocked|failed",'
+        '"result_summary":"非空结果摘要"}',
+        "3) 只有任务确实完成时使用 completed；超出只读权限或无法完成时使用 blocked/failed。",
+        "4) 不要调用 Hub API 或企微接口，不要读取、索取、推断或输出任何凭据。",
         "",
-        "重要：只有你真正完成了任务操作后，才调用 complete 接口！",
-        "如果你无法完成或不确定如何处理，不要调用 complete，等待人工介入。",
+        "Sidecar 会在 Provider 成功返回后持久化结果并完成待办闭环。",
+        "如果任务超出只读权限，请在最终结果中明确说明阻断原因。",
     ])
 
-    if owner_wecom:
-        prompt_lines.extend([
-            "",
-            f"另外，完成后请调用 send_message(action='send', target='wecom', "
-            f"message='...') 发企微通知 owner；wecom home channel 已配置为 {owner_wecom}。",
-        ])
-
     log(f'[todo] 派发给 LLM id={todo_id} title={title!r}')
-    ok, resp, err = call_llm('\n'.join(prompt_lines))
+    ok, resp, err = call_llm(
+        '\n'.join(prompt_lines),
+        task_kind='todo',
+        session_key=f'todo:{todo_id}',
+    )
     if not ok:
         log(f'[todo] LLM 处理失败 id={todo_id} err={err}（Hub watcher 会兜底告警）')
         return False
-    log(f'[todo] LLM 已处理 id={todo_id} 等待 LLM 自行回调 complete '
+    try:
+        result = json.loads(resp)
+        status = result.get('status') if isinstance(result, dict) else None
+        result_summary = (
+            str(result.get('result_summary') or '').strip()[:4000]
+            if isinstance(result, dict) else ''
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        status = None
+        result_summary = ''
+    if status not in ('completed', 'blocked', 'failed') or not result_summary:
+        log(f'[todo] LLM 结果协议无效 id={todo_id}，保留为未完成等待重试')
+        return False
+    if status != 'completed':
+        log(f'[todo] LLM 未完成 id={todo_id} status={status}，保留为未完成等待人工处理')
+        return False
+    if not _post_complete(todo_id, result_summary):
+        log(f'[todo] complete 回调未确认 id={todo_id}，保留为未完成等待重试')
+        return False
+    log(f'[todo] LLM 已处理且 Sidecar 已完成闭环 id={todo_id} '
         f'resp_len={len(resp or "")}')
     return True
 

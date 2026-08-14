@@ -8,6 +8,8 @@ Hub 统一部署器支持 Linux systemd `hermes` 与 `codex` 两条独立路径�
 Codex 部署只托管 `openclaw-sidecar-v2-claw-<id>.service`。Sidecar 通过 Python
 Codex SDK 处理 `message`、`todo`、`workflow` 和企微消息，权限固定为
 `cognitive_only/repo_read`；有副作用的动作继续交给受控 Job Service。
+待办以 `task_kind=todo` 和独立 `todo:<id>` 会话调用 Codex；Codex 只返回结果摘要，
+Sidecar 使用本地凭据持久化并调用 complete，Hub URL、Claw ID 和令牌都不会进入 prompt。
 
 Codex turn 会进入单独的 Linux 进程组，并占用 Sidecar 全局执行槽。达到
 `agent_timeout` 后 Sidecar 会终止 SDK 及其 app-server 整棵进程树。子进程只继承
