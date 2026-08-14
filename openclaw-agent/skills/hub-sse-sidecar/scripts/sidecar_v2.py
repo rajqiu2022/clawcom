@@ -74,6 +74,9 @@ _queued_todos = set()
 _todo_cooldown_until = {}
 _codex_provider = None
 _codex_provider_lock = threading.Lock()
+_execution_slots = threading.BoundedSemaphore(
+    max(1, int(os.getenv('MAX_CONCURRENT_AGENT_TASKS', '2')))
+)
 _wecom_channel = None
 
 
@@ -520,8 +523,72 @@ def _cmd_for_log(cmd):
     return ' '.join(logged)
 
 
+_CODEX_ENV_ALLOWLIST = (
+    'CODEX_HOME', 'HOME', 'PATH', 'LANG', 'LC_ALL', 'LC_CTYPE',
+    'TMPDIR', 'TEMP', 'TMP', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
+    'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY',
+    'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+)
+
+
+def _codex_environment(source):
+    codex_home = str(source.get('CODEX_HOME') or '').strip()
+    if not codex_home:
+        raise ValueError('CODEX_HOME is required')
+    environment = {
+        name: str(source[name]) for name in _CODEX_ENV_ALLOWLIST
+        if name in source and str(source[name])
+    }
+    environment['CODEX_HOME'] = codex_home
+    environment['PYTHONIOENCODING'] = 'utf-8'
+    environment['PYTHONUTF8'] = '1'
+    return environment
+
+
+def _run_codex_process(cmd, prompt, timeout, env, cwd, stdout_mode='raw'):
+    """Run Codex in a Linux process group and kill all descendants on timeout."""
+    if stdout_mode != 'raw':
+        raise ValueError('Codex worker requires raw protocol output')
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd=cwd or None,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(
+            prompt.encode('utf-8'), timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
+        raise
+    limit = 2 * 1024 * 1024
+    if len(stdout) > limit or len(stderr) > limit:
+        raise ValueError('Codex worker output exceeds protocol limit')
+    return subprocess.CompletedProcess(
+        cmd,
+        proc.returncode,
+        stdout.decode('utf-8', errors='replace'),
+        stderr.decode('utf-8', errors='replace'),
+    )
+
+
 def _call_codex_provider(prompt, timeout, task_kind, session_key=None):
-    """Invoke the SDK in-process; credentials remain in the service user's home."""
+    """Invoke the SDK inside a timeout-bounded, secret-minimized process tree."""
     global _codex_provider
     try:
         from codex_sdk_provider import CodexSdkProvider
@@ -531,10 +598,17 @@ def _call_codex_provider(prompt, timeout, task_kind, session_key=None):
 
     with _codex_provider_lock:
         if _codex_provider is None:
-            _codex_provider = CodexSdkProvider(model=os.getenv('CODEX_MODEL', '').strip() or None)
+            _codex_provider = CodexSdkProvider(
+                model=os.getenv('CODEX_MODEL', '').strip() or None,
+                process_runner=_run_codex_process,
+            )
         provider = _codex_provider
 
     workspace = os.getenv('CODEX_WORKSPACE', '').strip() or None
+    try:
+        codex_environment = _codex_environment(os.environ)
+    except ValueError:
+        return False, '', 'provider_config_invalid'
     invocation = ProviderInvocation(
         invocation_id=str(uuid.uuid4()),
         task_kind=(task_kind if task_kind in ('message', 'todo', 'workflow', 'wecom')
@@ -546,13 +620,19 @@ def _call_codex_provider(prompt, timeout, task_kind, session_key=None):
         workspace=workspace,
         execution_scope='repo_read',
         result_schema=None,
+        environment=codex_environment,
     )
 
     def on_event(event):
         log(f'[codex] event={event.kind} message={event.message[:200]!r}')
 
     try:
-        result = provider.invoke(invocation, on_event, CancellationToken())
+        if not _execution_slots.acquire(blocking=False):
+            return False, '', 'provider_busy'
+        try:
+            result = provider.invoke(invocation, on_event, CancellationToken())
+        finally:
+            _execution_slots.release()
     except Exception as exc:
         return False, '', f'codex_provider_error:{type(exc).__name__}'
     if not result.ok:

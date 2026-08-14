@@ -2,6 +2,7 @@ import sys
 import types
 import unittest
 import json
+import subprocess
 import tempfile
 import time
 from contextlib import closing
@@ -55,6 +56,7 @@ from app.services.agent_deployer import (  # noqa: E402
 )
 from wecom_channel import WeComChannel  # noqa: E402
 from codex_sdk_provider import CodexSdkProvider  # noqa: E402
+import sidecar_v2 as deployed_sidecar  # noqa: E402
 
 
 class CodexLinuxDeployerTest(unittest.TestCase):
@@ -112,6 +114,63 @@ class CodexLinuxDeployerTest(unittest.TestCase):
             sandbox_factory=lambda: {'read_only': object()},
         )
         self.assertIn('wecom', provider.capabilities().task_kinds)
+
+    def test_linux_codex_uses_isolated_timeout_runner(self):
+        captured = {}
+
+        def runner(command, **kwargs):
+            captured.update(command=command, **kwargs)
+            return subprocess.CompletedProcess(
+                command, 0,
+                json.dumps({
+                    'ok': True,
+                    'thread_id': 'linux-thread',
+                    'final_response': 'done',
+                    'usage': {},
+                }), '',
+            )
+
+        provider = CodexSdkProvider(
+            provider_version='test',
+            process_runner=runner,
+            sandbox_factory=lambda: {'read_only': object()},
+            python_executable='/venv/bin/python',
+            worker_path='/sidecar/codex_sdk_worker.py',
+        )
+        from provider_runtime import CancellationToken, ProviderInvocation
+        result = provider.invoke(ProviderInvocation(
+            invocation_id='inv-1', task_kind='message', prompt='hello',
+            context={}, session_key='message:1', timeout_seconds=23,
+            workspace='/srv/project', execution_scope='repo_read',
+            result_schema=None, environment={'CODEX_HOME': '/data/.codex'},
+        ), lambda _event: None, CancellationToken())
+
+        self.assertTrue(result.ok)
+        self.assertEqual(23, captured['timeout'])
+        self.assertEqual({'CODEX_HOME': '/data/.codex'}, captured['env'])
+
+    def test_linux_codex_environment_excludes_hub_and_channel_secrets(self):
+        environment = deployed_sidecar._codex_environment({
+            'CODEX_HOME': '/data/home/.codex',
+            'HOME': '/data/home',
+            'PATH': '/usr/bin',
+            'CLAW_TOKEN': 'hub-secret',
+            'OPENAI_API_KEY': 'api-secret',
+            'CODEX_ACCESS_TOKEN': 'enterprise-secret',
+            'WECOM_BOT_SECRET': 'wecom-secret',
+        })
+        self.assertEqual('/data/home/.codex', environment['CODEX_HOME'])
+        self.assertEqual('/data/home', environment['HOME'])
+        for key in (
+            'CLAW_TOKEN', 'OPENAI_API_KEY', 'CODEX_ACCESS_TOKEN',
+            'WECOM_BOT_SECRET',
+        ):
+            self.assertNotIn(key, environment)
+
+    def test_deployer_downloads_the_isolated_codex_worker_asset(self):
+        source = (Path(__file__).resolve().parents[1] / 'web' / 'app' /
+                  'services' / 'agent_deployer.py').read_text(encoding='utf-8')
+        self.assertIn("'codex_sdk_worker.py'", source)
 
     def test_pi_is_explicitly_retired(self):
         with self.assertRaisesRegex(ValueError, 'Pi provider 已退役'):

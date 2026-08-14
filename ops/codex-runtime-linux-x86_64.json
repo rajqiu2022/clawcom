@@ -1,0 +1,7 @@
+{
+  "sdk_version": "0.144.4",
+  "platform": "manylinux_2_17_x86_64",
+  "python_version": "310",
+  "implementation": "cp",
+  "abi": "abi3"
+}
