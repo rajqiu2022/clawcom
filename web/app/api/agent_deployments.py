@@ -476,6 +476,12 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
                         f'{codex_runtime_dir}/wheelhouse').strip().rstrip('/')
     codex_requirements_sha256 = (data.get('codex_requirements_sha256') or '').strip().lower()
     codex_auth_mode = (data.get('codex_auth_mode') or 'chatgpt_subscription').strip().lower()
+    wecom_node_bin = (data.get('wecom_node_bin') or '/usr/bin/node').strip()
+    wecom_sdk_root = (data.get('wecom_sdk_root') or
+                      '/opt/wecom-runtime/node_modules/@wecom/aibot-node-sdk').strip().rstrip('/')
+    wecom_bot_id = claw.wecom_bot_id or ''
+    wecom_bot_secret = claw.get_wecom_bot_secret_plain() or ''
+    owner_wecom_userid = (claw.owner_wecom_userid or claw.owner or '').strip()
 
     if deploy_method == 'systemd' and agent_type == 'codex':
         if not codex_workspace:
@@ -503,6 +509,16 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
                 'chatgpt_subscription', 'api_key', 'enterprise_access_token'):
             raise ValueError(
                 'codex_auth_mode 仅支持 chatgpt_subscription、api_key、enterprise_access_token')
+        if bool(wecom_bot_id) != bool(wecom_bot_secret):
+            raise ValueError('启用企微通信时必须同时配置 wecom_bot_id 与 wecom_bot_secret')
+        if wecom_bot_id and not owner_wecom_userid:
+            raise ValueError('启用企微通信时必须配置 owner_wecom_userid/owner 作为默认私聊白名单')
+        if wecom_bot_id:
+            for path, label in (
+                    (wecom_node_bin, 'wecom_node_bin'),
+                    (wecom_sdk_root, 'wecom_sdk_root')):
+                if not path.startswith('/') or any(ch.isspace() for ch in path) or '%' in path:
+                    raise ValueError(f'{label} 必须是不含空格或 % 的 Linux 绝对路径')
     elif deploy_method == 'systemd':
         if not hermes_home and not hermes_install_dir:
             hermes_install_dir = _default_hermes_install_dir()
@@ -611,14 +627,16 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
         codex_wheelhouse=codex_wheelhouse,
         codex_requirements_sha256=codex_requirements_sha256,
         codex_auth_mode=codex_auth_mode,
+        wecom_node_bin=wecom_node_bin,
+        wecom_sdk_root=wecom_sdk_root,
         venus_api_key=venus_api_key,
         timiai_api_key=timiai_api_key,
         timiai_project=timiai_project,
         llm_provider=llm_provider,
         llm_model=llm_model,
-        wecom_bot_id=claw.wecom_bot_id or '',
-        wecom_bot_secret=claw.get_wecom_bot_secret_plain() or '',
-        owner_wecom_userid=(claw.owner_wecom_userid or claw.owner or '').strip(),
+        wecom_bot_id=wecom_bot_id,
+        wecom_bot_secret=wecom_bot_secret,
+        owner_wecom_userid=owner_wecom_userid,
         work_dirs=work_dirs,
         extra_env=extra_env,
         triggered_by=actor_name,

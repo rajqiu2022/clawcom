@@ -1,6 +1,10 @@
 import sys
 import types
 import unittest
+import json
+import tempfile
+import time
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,6 +13,10 @@ from unittest.mock import patch
 _WEB = Path(__file__).resolve().parents[1] / 'web'
 if str(_WEB) not in sys.path:
     sys.path.insert(0, str(_WEB))
+_SIDECAR = (Path(__file__).resolve().parents[1] / 'openclaw-agent' /
+            'skills' / 'hub-sse-sidecar' / 'scripts')
+if str(_SIDECAR) not in sys.path:
+    sys.path.insert(0, str(_SIDECAR))
 
 
 class _Noop:
@@ -39,10 +47,14 @@ for name, attrs in (
 from app.api import agent_deployments  # noqa: E402
 from app.services.agent_deployer import (  # noqa: E402
     DeployRequest,
+    _render_codex_wecom_credentials,
     _render_codex_sidecar_unit,
+    _render_sidecar_unit,
     _render_sidecar_env,
     build_codex_unit_name,
 )
+from wecom_channel import WeComChannel  # noqa: E402
+from codex_sdk_provider import CodexSdkProvider  # noqa: E402
 
 
 class CodexLinuxDeployerTest(unittest.TestCase):
@@ -94,6 +106,13 @@ class CodexLinuxDeployerTest(unittest.TestCase):
                          '/opt/openclaw-agents/claw-17-codex-worker/data/home/.codex')
         self.assertEqual(req.container_name(), build_codex_unit_name(17))
 
+    def test_linux_codex_capabilities_accept_sidecar_wecom_turns(self):
+        provider = CodexSdkProvider(
+            provider_version='test', sdk_factory=lambda: None,
+            sandbox_factory=lambda: {'read_only': object()},
+        )
+        self.assertIn('wecom', provider.capabilities().task_kinds)
+
     def test_pi_is_explicitly_retired(self):
         with self.assertRaisesRegex(ValueError, 'Pi provider 已退役'):
             agent_deployments._parse_deploy_options(
@@ -122,6 +141,108 @@ class CodexLinuxDeployerTest(unittest.TestCase):
         self.assertIn('User=oclaw_17', unit)
         self.assertIn('WorkingDirectory=/srv/projects/example', unit)
         self.assertIn('ReadOnlyPaths=/opt/codex-runtime /srv/projects/example', unit)
+
+    def test_hermes_sidecar_unit_renderer_still_returns_a_unit(self):
+        req = DeployRequest(
+            openclaw_id=17, claw_name='Hermes Worker', claw_token='hub-token',
+            hub_url='https://hub.example', host='linux.example', ssh_user='root',
+            agent_type='hermes', hermes_install_dir='/opt/hermes-agent',
+            hermes_data_dir='/opt/openclaw-agents/claw-17-hermes/data',
+        )
+        unit = _render_sidecar_unit(req)
+        self.assertIsInstance(unit, str)
+        self.assertIn('Description=OpenClaw Hub SSE Sidecar v2', unit)
+        self.assertIn('WorkingDirectory=/opt/openclaw-agents/claw-17-hermes/data', unit)
+
+    def test_wecom_secret_is_file_only_not_provider_environment(self):
+        req = DeployRequest(
+            openclaw_id=17, claw_name='Codex Worker', claw_token='hub-token',
+            hub_url='https://hub.example', host='linux.example', ssh_user='root',
+            agent_type='codex',
+            codex_data_dir='/opt/openclaw-agents/claw-17-codex-worker/data',
+            codex_workspace='/srv/projects/example',
+            codex_requirements_sha256='b' * 64,
+            wecom_bot_id='bot-id', wecom_bot_secret='top-secret',
+            owner_wecom_userid='alice',
+        )
+        env = _render_sidecar_env(req)
+        credentials = json.loads(_render_codex_wecom_credentials(req))
+        self.assertIn('WECOM_ENABLED=true', env)
+        self.assertIn('WECOM_NODE_BIN=', env)
+        self.assertNotIn('WECOM_CREDENTIALS_PATH', env)
+        self.assertNotIn('top-secret', env)
+        self.assertEqual(credentials['secret'], 'top-secret')
+        self.assertEqual(credentials['allowed_user_ids'], ['alice'])
+
+    def test_wecom_channel_deduplicates_before_codex_invocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            credentials = root / 'credentials.json'
+            credentials.write_text(json.dumps({
+                'schema': 2,
+                'bot_id': 'bot-id',
+                'secret': 'top-secret',
+                'owner_user_id': 'alice',
+                'allowed_user_ids': ['alice'],
+                'allowed_chat_ids': [],
+            }), encoding='utf-8')
+            calls = []
+            channel = WeComChannel(
+                credentials_path=str(credentials),
+                database_path=str(root / 'state.db'),
+                node_path='/usr/bin/node', bridge_script='/tmp/bridge.mjs',
+                sdk_root='/tmp/sdk',
+                invoke=lambda prompt, key: (
+                    calls.append((prompt, key)) or (True, 'Codex 回复', '')),
+                logger=lambda _message: None,
+            )
+
+            class FakeBridge:
+                def __init__(self):
+                    self.replies = []
+
+                def reply(self, event_id, text, stream=False):
+                    self.replies.append((event_id, text, stream))
+
+            channel.bridge = FakeBridge()
+            event = {
+                'event_id': 'event-1', 'sender_id': 'alice', 'text': '你好',
+                'conversation': {'kind': 'user', 'id': 'alice'},
+            }
+            channel._on_event(event)
+            channel._on_event(event)
+
+            self.assertEqual(len(calls), 1)
+            self.assertNotIn('alice', calls[0][0])
+            self.assertEqual(calls[0][1].split(':', 1)[0], 'wecom')
+            self.assertEqual(channel.bridge.replies[-1],
+                             ('event-1', 'Codex 回复', False))
+
+    def test_wecom_channel_reclaims_expired_processing_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            credentials = root / 'credentials.json'
+            credentials.write_text(json.dumps({
+                'schema': 2, 'bot_id': 'bot-id', 'secret': 'top-secret',
+                'owner_user_id': 'alice', 'allowed_user_ids': ['alice'],
+                'allowed_chat_ids': [],
+            }), encoding='utf-8')
+            channel = WeComChannel(
+                credentials_path=str(credentials),
+                database_path=str(root / 'state.db'), node_path='/usr/bin/node',
+                bridge_script='/tmp/bridge.mjs', sdk_root='/tmp/sdk',
+                invoke=lambda _prompt, _key: (True, 'ok', ''),
+                logger=lambda _message: None,
+            )
+            with closing(channel._connect()) as db:
+                with db:
+                    db.execute(
+                        'INSERT INTO wecom_events(event_id,status,created_at) VALUES(?,?,?)',
+                        ('expired', 'processing', time.time() - 7200),
+                    )
+            claimed, status, final = channel._claim('expired')
+            self.assertTrue(claimed)
+            self.assertEqual((status, final), ('processing', ''))
 
 
 if __name__ == '__main__':

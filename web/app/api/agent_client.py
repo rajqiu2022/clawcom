@@ -1092,8 +1092,16 @@ def claw_sidecar_config(claw_id, claw=None):
     payload = cfg.to_dict()
     payload['llm_provider'] = claw.llm_provider or payload.get('llm_provider') or 'venus'
     payload['llm_model'] = claw.llm_model or payload.get('llm_model') or 'venus'
-    payload['wecom_bot_id'] = claw.wecom_bot_id or ''
-    payload['wecom_bot_secret'] = claw.get_wecom_bot_secret_plain() or ''
+    runtime_agent_type = (request.args.get('runtime_agent_type') or '').strip().lower()
+    # Codex receives only sanitized conversational context. Its separately
+    # supervised WeCom bridge reads the ACL-protected local credential file.
+    payload['wecom_bot_secret'] = (
+        '' if runtime_agent_type == 'codex'
+        else claw.get_wecom_bot_secret_plain() or ''
+    )
+    payload['wecom_bot_id'] = (
+        '' if runtime_agent_type == 'codex' else claw.wecom_bot_id or ''
+    )
     payload['wecom_enabled'] = bool(claw.wecom_bot_id and claw.wecom_bot_secret)
     payload['owner_wecom_userid'] = owner_wecom_userid
     _la = _build_llm_apply(claw)

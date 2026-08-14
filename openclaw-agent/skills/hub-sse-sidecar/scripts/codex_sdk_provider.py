@@ -71,7 +71,7 @@ class CodexSdkProvider:
         return ProviderCapabilities(
             provider="codex",
             provider_version=self._provider_version,
-            task_kinds=frozenset({"message", "workflow"}),
+            task_kinds=frozenset({"message", "todo", "workflow", "wecom"}),
             execution_scopes=frozenset({"cognitive_only", "repo_read"}),
             structured_results=True,
             sessions=True,

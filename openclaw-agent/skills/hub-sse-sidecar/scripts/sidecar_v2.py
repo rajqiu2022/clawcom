@@ -46,7 +46,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-SIDECAR_VERSION = '2.6.0'
+SIDECAR_VERSION = '2.7.0'
 
 HUB_URL = os.getenv('HUB_URL', '').rstrip('/')
 CLAW_ID = os.getenv('CLAW_ID', '').strip()
@@ -74,6 +74,7 @@ _queued_todos = set()
 _todo_cooldown_until = {}
 _codex_provider = None
 _codex_provider_lock = threading.Lock()
+_wecom_channel = None
 
 
 def log(msg):
@@ -266,6 +267,9 @@ def format_task_context(tc):
 def fetch_config():
     """从 Hub 拉 sidecar 配置 + 心跳。"""
     query = {'sidecar_version': SIDECAR_VERSION}
+    local_agent_type = os.getenv('AGENT_TYPE', '').strip().lower()
+    if local_agent_type:
+        query['runtime_agent_type'] = local_agent_type
     code, body = http('GET', f'/api/openclaws/{CLAW_ID}/sidecar-config', query=query)
     if code != 200:
         log(f'[config] 拉取失败 code={code} body={body}')
@@ -516,7 +520,7 @@ def _cmd_for_log(cmd):
     return ' '.join(logged)
 
 
-def _call_codex_provider(prompt, timeout, task_kind):
+def _call_codex_provider(prompt, timeout, task_kind, session_key=None):
     """Invoke the SDK in-process; credentials remain in the service user's home."""
     global _codex_provider
     try:
@@ -533,10 +537,11 @@ def _call_codex_provider(prompt, timeout, task_kind):
     workspace = os.getenv('CODEX_WORKSPACE', '').strip() or None
     invocation = ProviderInvocation(
         invocation_id=str(uuid.uuid4()),
-        task_kind='workflow' if task_kind == 'workflow' else 'message',
+        task_kind=(task_kind if task_kind in ('message', 'todo', 'workflow', 'wecom')
+                   else 'message'),
         prompt=prompt,
         context={'claw_id': CLAW_ID, 'source': 'hub-sse-sidecar'},
-        session_key=f'hub-claw-{CLAW_ID}-{task_kind}',
+        session_key=session_key or f'hub-claw-{CLAW_ID}-{task_kind}',
         timeout_seconds=max(1, min(int(timeout), 3600)),
         workspace=workspace,
         execution_scope='repo_read',
@@ -555,7 +560,7 @@ def _call_codex_provider(prompt, timeout, task_kind):
     return True, result.final_response, ''
 
 
-def call_llm(prompt, task_kind='message'):
+def call_llm(prompt, task_kind='message', session_key=None):
     """根据当前 agent_type 调用对应 CLI，返回 (ok, response_text, err)。"""
     timeout = int(get_cfg('agent_timeout', 300))
     wecom_enabled = bool(get_cfg('wecom_enabled', False))
@@ -566,7 +571,7 @@ def call_llm(prompt, task_kind='message'):
                   or 'openclaw').strip().lower()
     if agent_type == 'codex':
         log(f'[llm] 调用 codex sdk timeout={timeout}s prompt_len={len(prompt)}')
-        return _call_codex_provider(prompt, timeout, task_kind)
+        return _call_codex_provider(prompt, timeout, task_kind, session_key)
     env = os.environ.copy()
     if wecom_enabled:
         wecom_key = get_cfg('wecom_bot_id', '')
@@ -1363,6 +1368,46 @@ def sse_loop():
 
 # ===================== 主流程 =====================
 
+def _start_codex_wecom_channel():
+    """Start the official WeCom SDK transport without exposing secrets to Codex."""
+    global _wecom_channel
+    agent_type = (os.getenv('AGENT_TYPE', '').strip()
+                  or get_cfg('agent_type', 'openclaw')).lower()
+    if agent_type != 'codex' or os.getenv('WECOM_ENABLED', '').lower() != 'true':
+        return None
+    from wecom_channel import WeComChannel
+    scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.dirname(scripts_dir)
+    ready_path = os.path.join(data_dir, 'wecom.ready')
+    try:
+        os.unlink(ready_path)
+    except FileNotFoundError:
+        pass
+    required = {
+        'WECOM_NODE_BIN': os.getenv('WECOM_NODE_BIN', '').strip(),
+        'WECOM_SDK_ROOT': os.getenv('WECOM_SDK_ROOT', '').strip(),
+    }
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        raise RuntimeError('missing WeCom runtime settings: ' + ','.join(missing))
+    _wecom_channel = WeComChannel(
+        credentials_path=os.path.join(data_dir, 'wecom-credentials.json'),
+        database_path=os.path.join(data_dir, 'wecom-state.db'),
+        node_path=required['WECOM_NODE_BIN'],
+        bridge_script=os.path.join(scripts_dir, 'wecom-bridge.mjs'),
+        sdk_root=required['WECOM_SDK_ROOT'],
+        invoke=lambda prompt, key: call_llm(
+            prompt, task_kind='wecom', session_key=key),
+        logger=log,
+    )
+    _wecom_channel.start()
+    descriptor = os.open(
+        ready_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+        json.dump({'version': 1, 'status': 'authenticated'}, handle)
+        handle.write('\n')
+    return _wecom_channel
+
 def main():
     if not (HUB_URL and CLAW_ID and CLAW_TOKEN):
         sys.stderr.write(
@@ -1404,6 +1449,12 @@ def main():
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
+    try:
+        _start_codex_wecom_channel()
+    except Exception as exc:
+        log(f'[wecom] startup failed error={type(exc).__name__}')
+        sys.exit(3)
+
     threading.Thread(target=config_refresh_loop, name='cfg', daemon=True).start()
     if TODO_WORKER_ENABLED:
         threading.Thread(target=todo_worker_loop, name='todo-worker', daemon=True).start()
@@ -1411,6 +1462,14 @@ def main():
         log('[todo] worker disabled by TODO_WORKER_ENABLED=false')
 
     sse_loop()
+    if _wecom_channel is not None:
+        _wecom_channel.close()
+        try:
+            os.unlink(os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'wecom.ready'))
+        except FileNotFoundError:
+            pass
     log('sidecar 已退出')
 
 

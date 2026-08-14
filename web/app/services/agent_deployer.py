@@ -223,6 +223,8 @@ class DeployRequest:
     codex_wheelhouse: Optional[str] = None
     codex_requirements_sha256: str = ''
     codex_auth_mode: str = 'chatgpt_subscription'
+    wecom_node_bin: str = '/usr/bin/node'
+    wecom_sdk_root: str = '/opt/wecom-runtime/node_modules/@wecom/aibot-node-sdk'
 
     venus_api_key: Optional[str] = None
     timiai_api_key: Optional[str] = None
@@ -681,7 +683,26 @@ def _render_sidecar_env(req: DeployRequest) -> str:
             f"CODEX_MODEL={req.codex_model or ''}\n",
             f"CODEX_AUTH_MODE={req.codex_auth_mode}\n",
         ])
+        if req.wecom_bot_id and req.wecom_bot_secret:
+            lines.extend([
+                "WECOM_ENABLED=true\n",
+                f"WECOM_NODE_BIN={req.wecom_node_bin}\n",
+                f"WECOM_SDK_ROOT={req.wecom_sdk_root}\n",
+            ])
     return ''.join(lines)
+
+
+def _render_codex_wecom_credentials(req: DeployRequest) -> str:
+    """Render the ACL-protected bridge credential file, never an env file."""
+    owner = (req.owner_wecom_userid or '').strip()
+    return json.dumps({
+        'schema': 2,
+        'bot_id': req.wecom_bot_id or '',
+        'secret': req.wecom_bot_secret or '',
+        'owner_user_id': owner,
+        'allowed_user_ids': [owner] if owner else [],
+        'allowed_chat_ids': [],
+    }, ensure_ascii=False, separators=(',', ':')) + '\n'
 
 
 def _render_sidecar_unit(req: DeployRequest) -> str:
@@ -694,6 +715,33 @@ def _render_sidecar_unit(req: DeployRequest) -> str:
     read_only_paths = (
         f"ReadOnlyPaths={req.systemd_install_dir()}\n"
         if req.systemd_install_dir() != data else ""
+    )
+    return (
+        "[Unit]\n"
+        f"Description=OpenClaw Hub SSE Sidecar v2 (claw {int(req.openclaw_id)})\n"
+        "After=network-online.target\n"
+        "Wants=network-online.target\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"User={user}\n"
+        f"Group={AGENT_SERVICE_GROUP}\n"
+        f"WorkingDirectory={data}\n"
+        f"Environment=\"HOME={home}\"\n"
+        f"EnvironmentFile={env_path}\n"
+        f"ExecStart=/usr/bin/python3 -u {script_path}\n"
+        "Restart=always\n"
+        "RestartSec=10\n"
+        "NoNewPrivileges=true\n"
+        "PrivateTmp=true\n"
+        "ProtectSystem=strict\n"
+        f"ReadWritePaths={read_write_paths}\n"
+        f"{read_only_paths}"
+        "StandardOutput=journal\n"
+        "StandardError=journal\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
     )
 
 
@@ -732,33 +780,6 @@ def _render_codex_sidecar_unit(req: DeployRequest) -> str:
         "ProtectSystem=strict\n"
         f"ReadWritePaths={read_write_paths}\n"
         f"ReadOnlyPaths={read_only}\n"
-        "StandardOutput=journal\n"
-        "StandardError=journal\n"
-        "\n"
-        "[Install]\n"
-        "WantedBy=multi-user.target\n"
-    )
-    return (
-        "[Unit]\n"
-        f"Description=OpenClaw Hub SSE Sidecar v2 (claw {int(req.openclaw_id)})\n"
-        "After=network-online.target\n"
-        "Wants=network-online.target\n"
-        "\n"
-        "[Service]\n"
-        "Type=simple\n"
-        f"User={user}\n"
-        f"Group={AGENT_SERVICE_GROUP}\n"
-        f"WorkingDirectory={data}\n"
-        f"Environment=\"HOME={home}\"\n"
-        f"EnvironmentFile={env_path}\n"
-        f"ExecStart=/usr/bin/python3 -u {script_path}\n"
-        "Restart=always\n"
-        "RestartSec=10\n"
-        "NoNewPrivileges=true\n"
-        "PrivateTmp=true\n"
-        "ProtectSystem=strict\n"
-        f"ReadWritePaths={read_write_paths}\n"
-        f"{read_only_paths}"
         "StandardOutput=journal\n"
         "StandardError=journal\n"
         "\n"
@@ -1052,6 +1073,8 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
     sidecar_dir = f"{data}/scripts"
     sidecar_script = f"{sidecar_dir}/sidecar_v2.py"
     sidecar_env_path = f"{sidecar_dir}/sidecar.env"
+    wecom_credentials_path = f"{data}/wecom-credentials.json"
+    wecom_enabled = bool(req.wecom_bot_id and req.wecom_bot_secret)
 
     if not all((runtime, data, workspace, requirements, wheelhouse, expected_sha)):
         _flush('failed', 'Codex systemd 部署缺少 runtime/data/workspace/离线依赖锁文件参数')
@@ -1135,6 +1158,25 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
         _flush('failed', f'未找到 Codex CLI：{cli}；请先安装 CLI，或显式传 codex_cli 绝对路径。')
         return
 
+    if wecom_enabled:
+        node_check_script = (
+            "const p=require(process.argv[1]);"
+            "if(p.name!=='@wecom/aibot-node-sdk'||p.version!=='1.0.7')process.exit(2)"
+        )
+        wecom_check = ssh.run(
+            f"test -x {shlex.quote(req.wecom_node_bin)} && "
+            f"test -f {shlex.quote(req.wecom_sdk_root + '/package.json')} && "
+            f"{shlex.quote(req.wecom_node_bin)} -e "
+            f"{shlex.quote(node_check_script)} "
+            f"{shlex.quote(req.wecom_sdk_root + '/package.json')}",
+            timeout=30, name='verify WeCom SDK 1.0.7')
+        _record_step(steps, wecom_check)
+        if not wecom_check.ok:
+            _flush('failed',
+                   '启用企微的 Codex Worker 需要目标机预装固定版本 '
+                   '@wecom/aibot-node-sdk@1.0.7，并通过 wecom_node_bin/wecom_sdk_root 指定。')
+            return
+
     auth_cmd = (
         f"runuser -u {shlex.quote(user)} -- env HOME={shlex.quote(home)} "
         f"CODEX_HOME={shlex.quote(codex_home)} {shlex.quote(cli)} login status"
@@ -1178,6 +1220,9 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
         "    'sidecar_v2.py': b'#!/usr/bin/env python3',\n"
         "    'provider_runtime.py': b'class ProviderInvocation',\n"
         "    'codex_sdk_provider.py': b'class CodexSdkProvider',\n"
+        "    'wecom_channel.py': b'class WeComChannel',\n"
+        "    'wecom-bridge.mjs': b'openws.work.weixin.qq.com',\n"
+        "    'wecom-protocol.mjs': b'normalizeTextFrame',\n"
         "}\n"
         "for name, marker in checks.items():\n"
         "    with urllib.request.urlopen(root + '/' + name, timeout=30) as response:\n"
@@ -1201,19 +1246,51 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
         _flush('failed', '写 Codex sidecar.env 失败')
         return
 
+    if wecom_enabled:
+        sr = ssh.put_text(
+            _render_codex_wecom_credentials(req), wecom_credentials_path,
+            mode='0600', name='write WeCom credentials')
+        _record_step(steps, sr)
+        if not sr.ok:
+            _flush('failed', '写企微凭据文件失败')
+            return
+    else:
+        cleanup = ssh.run(
+            f"rm -f {shlex.quote(wecom_credentials_path)} "
+            f"{shlex.quote(data + '/wecom.ready')}",
+            timeout=20, name='remove disabled WeCom credentials')
+        _record_step(steps, cleanup)
+        if not cleanup.ok:
+            _flush('failed', '清理已停用的企微凭据失败')
+            return
+
     permissions = ssh.run(
         f"chown -R {shlex.quote(user)}:{shlex.quote(AGENT_SERVICE_GROUP)} "
         f"{shlex.quote(sidecar_dir)} && "
         f"chmod 0700 {shlex.quote(sidecar_dir)} && "
         f"chmod 0755 {shlex.quote(sidecar_script)} && "
         f"chmod 0644 {shlex.quote(sidecar_dir + '/provider_runtime.py')} "
-        f"{shlex.quote(sidecar_dir + '/codex_sdk_provider.py')} && "
+        f"{shlex.quote(sidecar_dir + '/codex_sdk_provider.py')} "
+        f"{shlex.quote(sidecar_dir + '/wecom_channel.py')} "
+        f"{shlex.quote(sidecar_dir + '/wecom-bridge.mjs')} "
+        f"{shlex.quote(sidecar_dir + '/wecom-protocol.mjs')} && "
         f"chmod 0600 {shlex.quote(sidecar_env_path)}",
         timeout=30, name='secure codex provider assets')
     _record_step(steps, permissions)
     if not permissions.ok:
         _flush('failed', f'Codex provider 文件权限设置失败：{_tail(permissions.stderr, 400)}')
         return
+
+    if wecom_enabled:
+        permissions = ssh.run(
+            f"chown {shlex.quote(user)}:{shlex.quote(AGENT_SERVICE_GROUP)} "
+            f"{shlex.quote(wecom_credentials_path)} && "
+            f"chmod 0600 {shlex.quote(wecom_credentials_path)}",
+            timeout=20, name='secure WeCom credentials')
+        _record_step(steps, permissions)
+        if not permissions.ok:
+            _flush('failed', '企微凭据 ACL 设置失败')
+            return
 
     import_check = ssh.run(
         f"runuser -u {shlex.quote(user)} -- env HOME={shlex.quote(home)} "
@@ -1226,7 +1303,7 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
         _flush('failed', f'Codex provider 自检失败：{_tail(import_check.stderr, 600)}')
         return
 
-    preflight_url = f"{base_url}/api/openclaws/{int(req.openclaw_id)}/sidecar-config?sidecar_version=2.6.0"
+    preflight_url = f"{base_url}/api/openclaws/{int(req.openclaw_id)}/sidecar-config?sidecar_version=2.7.0"
     sr = ssh.run(
         f"curl -fsS -H {shlex.quote('Authorization: Bearer ' + req.claw_token)} "
         f"{shlex.quote(preflight_url)} >/tmp/openclaw-sidecar-preflight-{int(req.openclaw_id)}.json",
@@ -1243,7 +1320,11 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
         _flush('failed', f'写 Codex systemd unit 失败：{_tail(sr.stderr, 400)}')
         return
 
+    ready_reset = (
+        f"rm -f {shlex.quote(data + '/wecom.ready')} && " if wecom_enabled else ""
+    )
     sr = ssh.run(
+        ready_reset +
         f"systemctl daemon-reload && systemctl enable {shlex.quote(unit_name)} && "
         f"systemctl restart {shlex.quote(unit_name)}",
         timeout=90, name='enable/restart codex sidecar')
@@ -1263,11 +1344,27 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
         _flush('failed', f'Codex sidecar 启动后未保持 active：{_tail(logs.stdout or logs.stderr, 800)}')
         return
 
+    if wecom_enabled:
+        ready = ssh.run(
+            f"for i in $(seq 1 40); do "
+            f"test -s {shlex.quote(data + '/wecom.ready')} && exit 0; sleep 1; done; exit 1",
+            timeout=50, name='wait WeCom authenticated readiness')
+        _record_step(steps, ready)
+        if not ready.ok:
+            logs = ssh.run(
+                f"journalctl -u {shlex.quote(unit_name)} -n 80 --no-pager",
+                timeout=30, name='journalctl WeCom readiness')
+            _record_step(steps, logs)
+            _flush('failed',
+                   'Codex Sidecar 已启动，但企微 SDK 未在 40 秒内完成鉴权：'
+                   f'{_tail(logs.stdout or logs.stderr, 800)}')
+            return
+
     # Only activate the Hub-side provider identity after the local service is
     # proven active, so a failed migration cannot disrupt a live Hermes worker.
     selfcheck_url = (
         f"{base_url}/api/openclaws/{int(req.openclaw_id)}/sidecar-config"
-        f"?sidecar_version=2.6.0&agent_type=codex"
+        f"?sidecar_version=2.7.0&agent_type=codex"
         f"&agent_name=main&agent_timeout=300"
     )
     sr = ssh.run(

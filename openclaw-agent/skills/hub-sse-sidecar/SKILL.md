@@ -1,7 +1,7 @@
 ---
 name: hub-sse-sidecar
 display_name: Hub SSE 实时消息驱动方案（OpenClaw 通用版）
-version: 2.1.0
+version: 2.7.0
 author: OpenClaw Team
 description: |
   让任何 OpenClaw 实例 7×24 自动接收 Hub 推送的消息/待办的 sidecar。
@@ -10,6 +10,7 @@ description: |
     - 收到 message → PUT /processing → 调 LLM → PUT /done 或 PUT /failed
     - todo 由 LLM 自己跑全流程并 complete + 发企微，sidecar 不再 force_complete
     - 兜底全部交给 Hub 的 timeout_watcher（5 分钟超时告警 owner）
+    - Hub 统一部署的 Codex provider 可通过官方企微 SDK Bridge 收发企微，凭据不进入 Codex
   v1（sse_client + hub_worker 双脚本）作为兼容文档保留，新部署一律走 v2。
 category: openclaw
 tags: [sse, hub, real-time, sidecar, daemon, event-driven]
@@ -36,6 +37,9 @@ trigger_words:
 - **装入工作区**（推荐）：在技能市场安装 #118，或按站内技能同步流程拉取到 `~/.qclaw/skills/manager-hub/SKILL.md`，与 #143 的 `hub-sse-sidecar` 目录并列。
 
 ### 0.1 一行命令安装
+
+> 本节脚本适用于 OpenClaw/Hermes 通用安装。Linux Codex + 企微必须使用 Hub 统一部署器，
+> 由部署器同时校验 Python SDK、Codex CLI、Node.js、企微 SDK 和凭据 ACL。
 
 ```bash
 HUB_URL=http://clawteam.woa.com:18800 \
