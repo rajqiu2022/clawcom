@@ -1093,6 +1093,12 @@ def claw_sidecar_config(claw_id, claw=None):
     payload['llm_provider'] = claw.llm_provider or payload.get('llm_provider') or 'venus'
     payload['llm_model'] = claw.llm_model or payload.get('llm_model') or 'venus'
     runtime_agent_type = (request.args.get('runtime_agent_type') or '').strip().lower()
+    effective_runtime_agent_type = (
+        runtime_agent_type
+        if runtime_agent_type in ('openclaw', 'hermes', 'codex', 'custom')
+        else (payload.get('agent_type') or 'openclaw')
+    )
+    payload['runtime_agent_type'] = effective_runtime_agent_type
     # Codex receives only sanitized conversational context. Its separately
     # supervised WeCom bridge reads the ACL-protected local credential file.
     payload['wecom_bot_secret'] = (
@@ -1108,33 +1114,54 @@ def claw_sidecar_config(claw_id, claw=None):
     if _la:
         payload['llm_apply'] = _la
     payload['claw_name'] = claw.name
+    assignments = []
+    rule_links = []
+    context_warnings = []
     try:
         assignments = AgentPostAssignment.query.filter_by(
             claw_id=claw_id, status='active').all()
-        profiles = []
-        active_profile = None
-        for assignment in assignments:
-            post = assignment.post
-            profile = post.profile if post else None
-            if not post or not profile or post.status != 'active':
-                continue
-            item = {
-                'post_key': post.post_key,
-                'post_name': post.name,
-                'profile_version': assignment.profile_version or 1,
-                'required_profile_version': post.required_profile_version or 1,
-                'is_primary': bool(assignment.is_primary),
-                'profile': profile.to_dict(),
-            }
-            profiles.append(item)
-            if item['is_primary'] or active_profile is None:
-                active_profile = item
-        payload['agent_profiles'] = profiles
-        payload['active_agent_profile'] = active_profile
     except Exception:
         logger.exception('build agent profile config failed for claw %s', claw_id)
+        context_warnings.append('PROFILE_CONTEXT_UNAVAILABLE')
+    try:
+        from app.models import OpenClawRule
+        rule_links = OpenClawRule.query.filter_by(
+            openclaw_id=claw_id, enabled=True).all()
+    except Exception:
+        logger.exception('build agent rule config failed for claw %s', claw_id)
+        context_warnings.append('RULE_CONTEXT_UNAVAILABLE')
+    try:
+        from app.services.agent_system_context import build_agent_system_context
+        payload.update(build_agent_system_context(
+            claw,
+            effective_runtime_agent_type,
+            assignments,
+            rule_links,
+            warnings=context_warnings,
+        ))
+    except Exception:
+        logger.exception('build agent system context failed for claw %s', claw_id)
         payload['agent_profiles'] = []
         payload['active_agent_profile'] = None
+        payload['rules'] = []
+        payload['system_context'] = {
+            'schema_version': 1,
+            'identity': {
+                'claw_id': claw_id,
+                'claw_name': claw.name or '',
+                'provider': effective_runtime_agent_type,
+            },
+            'profile': None,
+            'rules': [],
+            'warnings': ['SYSTEM_CONTEXT_UNAVAILABLE'],
+            'policy': {
+                'profile_required_for_execution': False,
+                'missing_profile_behavior': 'continue_with_identity_and_rules',
+            },
+        }
+        payload['system_context_version'] = 1
+        payload['system_context_digest'] = ''
+        payload['context_warnings'] = ['SYSTEM_CONTEXT_UNAVAILABLE']
     # Hub 能力索引：sidecar 每次构 prompt 前注入，等价于"回复前先查 Rule #19"。
     try:
         from app.services.hub_capability import (
