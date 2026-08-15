@@ -6670,3 +6670,319 @@ class CollaborationSessionEvent(db.Model):
             'detail': self.detail_json or {},
             'created_at': str(self.created_at) if self.created_at else None,
         }
+
+
+# ============== Long-running Agent control plane pilot ==============
+
+
+class AgentGoal(db.Model):
+    """Durable objective that survives Worker and model-session restarts."""
+    __tablename__ = 'agent_goals'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(
+        db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    title = db.Column(db.String(255), nullable=False)
+    objective = db.Column(db.Text, nullable=False)
+    scope_json = db.Column(db.JSON)
+    non_goals_json = db.Column(db.JSON)
+    authority_sources_json = db.Column(db.JSON)
+    current_belief = db.Column(db.Text, default='')
+    next_action = db.Column(db.Text, default='')
+    status = db.Column(db.String(32), nullable=False, default='DRAFT', index=True)
+    priority = db.Column(db.String(16), nullable=False, default='P1', index=True)
+    compute_quota = db.Column(db.Integer, nullable=False, default=0)
+    control_mode = db.Column(
+        db.String(32), nullable=False, default='shadow', index=True)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    created_by_type = db.Column(db.String(24), nullable=False, default='user')
+    created_by_id = db.Column(db.Integer, nullable=False)
+    created_by_name = db.Column(db.String(160), default='')
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        db.Index('ix_agent_goal_project_status', 'project_id', 'status'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'title': self.title,
+            'objective': self.objective,
+            'scope': self.scope_json or {},
+            'non_goals': self.non_goals_json or [],
+            'authority_sources': self.authority_sources_json or [],
+            'current_belief': self.current_belief or '',
+            'next_action': self.next_action or '',
+            'status': self.status,
+            'priority': self.priority,
+            'compute_quota': self.compute_quota or 0,
+            'control_mode': self.control_mode or 'shadow',
+            'version': self.version,
+            'created_by': self.created_by_name or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class GoalTodo(db.Model):
+    """Versioned work item with a monotonic fencing generation."""
+    __tablename__ = 'goal_todos'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    goal_id = db.Column(
+        db.Integer, db.ForeignKey('agent_goals.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    title = db.Column(db.String(255), nullable=False)
+    description = db.Column(db.Text, default='')
+    task_class = db.Column(
+        db.String(32), nullable=False, default='advancement_task', index=True)
+    action_kind = db.Column(db.String(64), nullable=False, default='analyze')
+    priority = db.Column(db.String(16), nullable=False, default='P1', index=True)
+    status = db.Column(db.String(24), nullable=False, default='open', index=True)
+    assigned_agent_id = db.Column(db.Integer, index=True)
+    claimed_by_worker_id = db.Column(db.String(160), default='', index=True)
+    claimed_claw_id = db.Column(db.Integer, index=True)
+    claimed_at = db.Column(db.DateTime)
+    claim_expires_at = db.Column(db.DateTime, index=True)
+    claim_lease_seconds = db.Column(db.Integer, nullable=False, default=180)
+    fencing_token = db.Column(db.Integer, nullable=False, default=0)
+    authorization_envelope_json = db.Column(db.JSON)
+    required_capabilities_json = db.Column(db.JSON)
+    required_write_scopes_json = db.Column(db.JSON)
+    resume_when_json = db.Column(db.JSON)
+    completion_criteria_json = db.Column(db.JSON)
+    verification_policy_json = db.Column(db.JSON)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        db.Index(
+            'ix_goal_todo_frontier', 'goal_id', 'status', 'priority', 'id'),
+        db.Index(
+            'ix_goal_todo_claim_expiry', 'status', 'claim_expires_at'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'goal_id': self.goal_id,
+            'title': self.title,
+            'description': self.description or '',
+            'task_class': self.task_class,
+            'action_kind': self.action_kind,
+            'priority': self.priority,
+            'status': self.status,
+            'assigned_agent_id': self.assigned_agent_id,
+            'claimed_by_worker_id': self.claimed_by_worker_id or '',
+            'claimed_claw_id': self.claimed_claw_id,
+            'claimed_at': str(self.claimed_at) if self.claimed_at else None,
+            'claim_expires_at': (
+                str(self.claim_expires_at) if self.claim_expires_at else None),
+            'claim_lease_seconds': self.claim_lease_seconds or 180,
+            'fencing_token': self.fencing_token or 0,
+            'authorization_envelope': self.authorization_envelope_json or {},
+            'required_capabilities': self.required_capabilities_json or [],
+            'required_write_scopes': self.required_write_scopes_json or [],
+            'resume_when': self.resume_when_json or {},
+            'completion_criteria': self.completion_criteria_json or {},
+            'verification_policy': self.verification_policy_json or {},
+            'version': self.version,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class AgentControlGate(db.Model):
+    """Auditable user/authority decision scoped to one lane or work item."""
+    __tablename__ = 'agent_control_gates'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    goal_id = db.Column(
+        db.Integer, db.ForeignKey('agent_goals.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    work_item_type = db.Column(db.String(32), nullable=False, default='goal_todo')
+    work_item_id = db.Column(db.Integer, index=True)
+    turn_id = db.Column(db.String(80), index=True)
+    gate_type = db.Column(db.String(40), nullable=False, index=True)
+    policy_level = db.Column(db.String(16), nullable=False, default='hard')
+    status = db.Column(db.String(20), nullable=False, default='open', index=True)
+    blocking_scope = db.Column(
+        db.String(20), nullable=False, default='work_item')
+    question = db.Column(db.Text, nullable=False)
+    reason_code = db.Column(db.String(80), nullable=False)
+    requested_scope_json = db.Column(db.JSON)
+    safe_fallback_json = db.Column(db.JSON)
+    decision_options_json = db.Column(db.JSON)
+    requested_by = db.Column(db.String(160), nullable=False)
+    resolved_by = db.Column(db.String(160), default='')
+    resolution = db.Column(db.String(40), default='')
+    resolution_note = db.Column(db.Text, default='')
+    expires_at = db.Column(db.DateTime, index=True)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_hash = db.Column(db.String(64), nullable=False)
+    resolution_idempotency_key = db.Column(db.String(128))
+    resolution_request_hash = db.Column(db.String(64))
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+    resolved_at = db.Column(db.DateTime)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'goal_id', 'idempotency_key',
+            name='uq_agent_control_gate_goal_idempotency'),
+        db.Index(
+            'ix_agent_control_gate_active', 'goal_id', 'status',
+            'policy_level', 'work_item_id'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'goal_id': self.goal_id,
+            'work_item_type': self.work_item_type,
+            'work_item_id': self.work_item_id,
+            'turn_id': self.turn_id,
+            'gate_type': self.gate_type,
+            'policy_level': self.policy_level,
+            'status': self.status,
+            'blocking_scope': self.blocking_scope,
+            'question': self.question,
+            'reason_code': self.reason_code,
+            'requested_scope': self.requested_scope_json or {},
+            'safe_fallback': self.safe_fallback_json or {},
+            'decision_options': self.decision_options_json or [],
+            'requested_by': self.requested_by,
+            'resolved_by': self.resolved_by or '',
+            'resolution': self.resolution or '',
+            'resolution_note': self.resolution_note or '',
+            'expires_at': str(self.expires_at) if self.expires_at else None,
+            'version': self.version,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'resolved_at': str(self.resolved_at) if self.resolved_at else None,
+        }
+
+
+class AgentTurn(db.Model):
+    """One bounded dispatch result; unique per caller idempotency key."""
+    __tablename__ = 'agent_turns'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    turn_id = db.Column(db.String(80), nullable=False, unique=True, index=True)
+    goal_id = db.Column(
+        db.Integer, db.ForeignKey('agent_goals.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    todo_id = db.Column(
+        db.Integer, db.ForeignKey('goal_todos.id'), index=True)
+    # Non-NULL only while the Turn is active. The unique slot closes the
+    # cross-process should-run/claim race even when SELECT FOR UPDATE is weak.
+    active_todo_slot = db.Column(db.String(80), unique=True, index=True)
+    todo_version = db.Column(db.Integer)
+    claw_id = db.Column(db.Integer, index=True)
+    agent_id = db.Column(db.Integer, index=True)
+    worker_id = db.Column(db.String(160), nullable=False, index=True)
+    execution_mode = db.Column(
+        db.String(32), nullable=False, default='legacy_unmanaged')
+    route = db.Column(db.String(40), nullable=False)
+    status = db.Column(db.String(24), nullable=False, default='dispatched', index=True)
+    result_kind = db.Column(db.String(40), default='')
+    fencing_token = db.Column(db.Integer, nullable=False, default=0)
+    claim_expires_at = db.Column(db.DateTime)
+    schedule_version = db.Column(db.Integer, nullable=False, default=1)
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_hash = db.Column(db.String(64), nullable=False)
+    envelope_json = db.Column(db.JSON, nullable=False)
+    effect_manifest_json = db.Column(db.JSON)
+    authorization_payload_json = db.Column(db.JSON)
+    authorization_signature = db.Column(db.Text)
+    authorization_key_id = db.Column(db.String(80), default='')
+    authorization_idempotency_key = db.Column(db.String(128))
+    authorization_request_hash = db.Column(db.String(64))
+    quota_reserved = db.Column(db.Boolean, nullable=False, default=False)
+    deadline_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+    completed_at = db.Column(db.DateTime)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'goal_id', 'worker_id', 'idempotency_key',
+            name='uq_agent_turn_dispatch_idempotency'),
+    )
+
+    def to_dict(self):
+        return {
+            'turn_id': self.turn_id,
+            'goal_id': self.goal_id,
+            'todo_id': self.todo_id,
+            'todo_version': self.todo_version,
+            'claw_id': self.claw_id,
+            'agent_id': self.agent_id,
+            'worker_id': self.worker_id,
+            'execution_mode': self.execution_mode or 'legacy_unmanaged',
+            'route': self.route,
+            'status': self.status,
+            'result_kind': self.result_kind or '',
+            'fencing_token': self.fencing_token or 0,
+            'claim_expires_at': (
+                str(self.claim_expires_at) if self.claim_expires_at else None),
+            'schedule_version': self.schedule_version,
+            'idempotency_key': self.idempotency_key,
+            'envelope': self.envelope_json or {},
+            'effect_manifest': self.effect_manifest_json or {},
+            'authorization': self.authorization_payload_json or {},
+            'authorization_signature': self.authorization_signature or '',
+            'authorization_key_id': self.authorization_key_id or '',
+            'effect_authorization_ready': bool(
+                self.authorization_payload_json and self.authorization_signature),
+            'quota_reserved': bool(self.quota_reserved),
+            'deadline_at': str(self.deadline_at) if self.deadline_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'completed_at': str(self.completed_at) if self.completed_at else None,
+        }
+
+
+class AgentTransitionReceipt(db.Model):
+    """Append-only accepted state transition for one bounded turn."""
+    __tablename__ = 'agent_transition_receipts'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    transition_id = db.Column(db.String(128), nullable=False, unique=True, index=True)
+    request_hash = db.Column(db.String(64), nullable=False)
+    turn_id = db.Column(
+        db.String(80), db.ForeignKey('agent_turns.turn_id'),
+        nullable=False, index=True)
+    goal_id = db.Column(db.Integer, nullable=False, index=True)
+    todo_id = db.Column(db.Integer, index=True)
+    todo_version = db.Column(db.Integer)
+    worker_id = db.Column(db.String(160), nullable=False)
+    fencing_token = db.Column(db.Integer, nullable=False, default=0)
+    from_state = db.Column(db.String(24), nullable=False)
+    to_state = db.Column(db.String(24), nullable=False)
+    result_kind = db.Column(db.String(40), nullable=False)
+    summary = db.Column(db.Text, default='')
+    verification_json = db.Column(db.JSON, nullable=False)
+    evidence_json = db.Column(db.JSON)
+    effect_receipts_json = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    def to_dict(self):
+        return {
+            'transition_id': self.transition_id,
+            'turn_id': self.turn_id,
+            'goal_id': self.goal_id,
+            'todo_id': self.todo_id,
+            'todo_version': self.todo_version,
+            'worker_id': self.worker_id,
+            'fencing_token': self.fencing_token,
+            'from_state': self.from_state,
+            'to_state': self.to_state,
+            'result_kind': self.result_kind,
+            'summary': self.summary or '',
+            'verification': self.verification_json or {},
+            'evidence': self.evidence_json or {},
+            'effect_receipts': self.effect_receipts_json or [],
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
