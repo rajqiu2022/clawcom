@@ -18,6 +18,13 @@ def _wheel(path: Path, name: str, version: str, payload: bytes = b'ok') -> None:
 
 
 class CodexRuntimeReleaseTest(unittest.TestCase):
+    def test_approved_linux_target_matches_unified_host(self):
+        config_path = (Path(__file__).resolve().parents[1] / 'ops' /
+                       'codex-runtime-linux-x86_64.json')
+        config = json.loads(config_path.read_text(encoding='utf-8'))
+        self.assertEqual('311', config['python_version'])
+        self.assertEqual('cp311', config['abi'])
+
     def _runtime(self, root: Path) -> Path:
         runtime = root / 'runtime'
         wheelhouse = runtime / 'wheelhouse'

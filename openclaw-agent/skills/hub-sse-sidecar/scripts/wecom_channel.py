@@ -15,6 +15,7 @@ from contextlib import closing
 
 MAX_LINE_BYTES = 256 * 1024
 MAX_REPLY_CHARS = 4000
+MAX_TRUSTED_CONTEXT_BYTES = 64 * 1024
 PROCESSING_LEASE_SECONDS = 65 * 60
 _BRIDGE_ENV_KEYS = {
     "LANG", "LC_ALL", "LC_CTYPE", "TZ",
@@ -138,11 +139,15 @@ class WeComChannel:
     def __init__(self, *, credentials_path: str, database_path: str,
                  node_path: str, bridge_script: str, sdk_root: str,
                  invoke: Callable[[str, str], tuple[bool, str, str]],
-                 logger: Callable[[str], None]):
+                 logger: Callable[[str], None],
+                 context_lines: Callable[[], list[str]] | None = None,
+                 command_handler: Callable[[dict], str | None] | None = None):
         self.credentials_path = credentials_path
         self.database_path = database_path
         self.credentials = load_credentials(credentials_path)
         self.invoke = invoke
+        self.context_lines = context_lines or (lambda: [])
+        self.command_handler = command_handler or (lambda _event: None)
         self.logger = logger
         self.bridge = _Bridge(node_path, bridge_script, sdk_root,
                               credentials_path, self._on_event, logger)
@@ -240,10 +245,27 @@ class WeComChannel:
             )
             return
         try:
+            command_reply = self.command_handler(event)
+            if command_reply is not None:
+                final = self._safe_reply(command_reply)
+                self._finish(event_id, "completed", final)
+                self.bridge.reply(event_id, final, stream=False)
+                return
             self.bridge.reply(event_id, "正在处理…", stream=True)
             conversation = event.get("conversation") or {}
             conversation_ref = _hashed(str(conversation.get("id") or ""))
+            trusted_context = "\n".join(
+                str(line)[:16000] for line in self.context_lines()
+            )
+            trusted_bytes = trusted_context.encode("utf-8", errors="replace")
+            if len(trusted_bytes) > MAX_TRUSTED_CONTEXT_BYTES:
+                trusted_context = trusted_bytes[
+                    :MAX_TRUSTED_CONTEXT_BYTES
+                ].decode("utf-8", errors="ignore")
             prompt = (
+                ("[HUB_CONTEXT]\n" + trusted_context + "\n[/HUB_CONTEXT]\n\n")
+                if trusted_context else ""
+            ) + (
                 "你正在回复一条企业微信消息。只输出给用户看的最终回复，不要输出推理过程、"
                 "协议说明或凭据。\n"
                 f"会话类型：{conversation.get('kind', 'unknown')}\n"

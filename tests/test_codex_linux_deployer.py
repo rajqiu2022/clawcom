@@ -57,6 +57,7 @@ from app.services.agent_deployer import (  # noqa: E402
 )
 from wecom_channel import WeComChannel  # noqa: E402
 from codex_sdk_provider import CodexSdkProvider  # noqa: E402
+from claw_hub_mcp import tool_definitions  # noqa: E402
 import sidecar_v2 as deployed_sidecar  # noqa: E402
 
 
@@ -107,14 +108,27 @@ class CodexLinuxDeployerTest(unittest.TestCase):
         self.assertEqual(req.codex_auth_mode, 'chatgpt_subscription')
         self.assertEqual(req.codex_home_dir(),
                          '/opt/openclaw-agents/claw-17-codex-worker/data/home/.codex')
+        self.assertEqual(req.codex_cli,
+                         '/opt/codex-runtime/venv/bin/codex')
+        self.assertIn('/srv/projects/example', req.work_dirs)
         self.assertEqual(req.container_name(), build_codex_unit_name(17))
+
+    def test_codex_deployer_uses_bundled_cli_and_cp311_runtime(self):
+        source = (Path(__file__).resolve().parents[1] / 'web' / 'app' /
+                  'services' / 'agent_deployer.py').read_text(encoding='utf-8')
+        self.assertIn("sys.version_info[:2] == (3, 11)", source)
+        self.assertIn("import codex_cli_bin", source)
+        self.assertIn("venv/bin/codex", source)
 
     def test_linux_codex_capabilities_accept_sidecar_wecom_turns(self):
         provider = CodexSdkProvider(
             provider_version='test', sdk_factory=lambda: None,
-            sandbox_factory=lambda: {'read_only': object()},
+            sandbox_factory=lambda: {
+                'read_only': object(), 'workspace_write': object(),
+            },
         )
         self.assertIn('wecom', provider.capabilities().task_kinds)
+        self.assertIn('repo_write', provider.capabilities().execution_scopes)
 
     def test_linux_codex_uses_isolated_timeout_runner(self):
         captured = {}
@@ -171,7 +185,22 @@ class CodexLinuxDeployerTest(unittest.TestCase):
     def test_deployer_downloads_the_isolated_codex_worker_asset(self):
         source = (Path(__file__).resolve().parents[1] / 'web' / 'app' /
                   'services' / 'agent_deployer.py').read_text(encoding='utf-8')
-        self.assertIn("'codex_sdk_worker.py'", source)
+        for asset in (
+            'codex_sdk_worker.py', 'codex_permissions.py', 'hub_proxy.py',
+            'hub_plugin.py', 'claw_hub_mcp.py',
+        ):
+            self.assertIn(repr(asset), source)
+
+        worker_source = (Path(__file__).resolve().parents[1] /
+                         'openclaw-agent' / 'skills' / 'hub-sse-sidecar' /
+                         'scripts' / 'codex_sdk_worker.py').read_text(encoding='utf-8')
+        provider_source = (Path(__file__).resolve().parents[1] /
+                           'openclaw-agent' / 'skills' / 'hub-sse-sidecar' /
+                           'scripts' / 'codex_sdk_provider.py').read_text(encoding='utf-8')
+        self.assertIn('options["cwd"] = workspace', worker_source)
+        self.assertIn('options["cwd"] = invocation.workspace', provider_source)
+        self.assertNotIn('options["working_directory"]', worker_source)
+        self.assertNotIn('options["working_directory"]', provider_source)
 
     def test_todo_prompt_hides_token_and_uses_todo_contract(self):
         secret = 'hub-token-must-not-reach-codex'
@@ -286,6 +315,7 @@ class CodexLinuxDeployerTest(unittest.TestCase):
         self.assertNotIn(secret, invocation.prompt)
         self.assertIn('<redacted>', invocation.prompt)
         self.assertNotIn('CLAW_TOKEN', invocation.environment)
+        self.assertEqual('repo_write', invocation.execution_scope)
 
     def test_sidecar_complete_does_not_falsely_claim_wecom_notification(self):
         captured = {}
@@ -344,10 +374,18 @@ class CodexLinuxDeployerTest(unittest.TestCase):
         self.assertIn('AGENT_TYPE=codex', env)
         self.assertIn('CODEX_AUTH_MODE=chatgpt_subscription', env)
         self.assertIn('CODEX_HOME=/opt/openclaw-agents/claw-17-codex-worker/data/home/.codex', env)
+        self.assertIn('PROVIDER_ALLOWED_DIRS=', env)
+        self.assertIn(
+            'SIDECAR_INSTANCE_DIR=/opt/openclaw-agents/claw-17-codex-worker/data',
+            env,
+        )
         self.assertNotIn('OPENAI_API_KEY', env)
         self.assertIn('User=oclaw_17', unit)
         self.assertIn('WorkingDirectory=/srv/projects/example', unit)
-        self.assertIn('ReadOnlyPaths=/opt/codex-runtime /srv/projects/example', unit)
+        self.assertIn(
+            'ReadWritePaths=/opt/openclaw-agents/claw-17-codex-worker/data '
+            '/opt/agent_share /srv/projects/example', unit)
+        self.assertIn('ReadOnlyPaths=/opt/codex-runtime', unit)
 
     def test_hermes_sidecar_unit_renderer_still_returns_a_unit(self):
         req = DeployRequest(
@@ -380,6 +418,109 @@ class CodexLinuxDeployerTest(unittest.TestCase):
         self.assertNotIn('top-secret', env)
         self.assertEqual(credentials['secret'], 'top-secret')
         self.assertEqual(credentials['allowed_user_ids'], ['alice'])
+
+    def test_mcp_exposes_hub_and_bound_owner_reply_tools(self):
+        definitions = tool_definitions((12, 25), wecom_reply_enabled=True)
+        self.assertEqual(
+            ['hub_api', 'wecom_reply'],
+            [item['name'] for item in definitions],
+        )
+        self.assertNotIn('target_userid', json.dumps(definitions))
+
+    def test_cycle_repair_runs_before_verified_child_flow(self):
+        config = {
+            'session_key': 'orchestrator:project',
+            'allowed_next_flows': (25,),
+            'max_retries': 2,
+            'review_success': True,
+        }
+        item = {
+            'run_id': 198, 'cycle_id': 'cycle-198',
+            'session_key': 'orchestrator:project',
+            'parent_run_id': None, 'retry_index': 0,
+        }
+        calls = []
+
+        def invoke(prompt, **kwargs):
+            calls.append((prompt, kwargs))
+            if prompt.startswith('[CODEX_CYCLE_REVIEW]'):
+                return True, json.dumps({
+                    'classification': 'RECOVERABLE',
+                    'action': 'repair',
+                    'summary': '可恢复',
+                    'repair_operation': 'workspace_hygiene',
+                    'next_flow_id': 25,
+                    'human_required': False,
+                }, ensure_ascii=False), ''
+            return True, json.dumps({
+                'status': 'repaired', 'summary': '已修复',
+                'changes': ['moved generated files'],
+                'validation': ['git status clean'],
+                'restart_allowed': True,
+            }, ensure_ascii=False), ''
+
+        def hub_http(method, path, body=None, **_kwargs):
+            if method == 'POST':
+                self.assertEqual(25, body['definition_id'])
+                return 201, {'id': 199, 'status': 'pending'}
+            return 200, {
+                'id': 199, 'definition_id': 25, 'status': 'pending',
+            }
+
+        with patch.object(
+            deployed_sidecar, 'call_llm', side_effect=invoke
+        ), patch.object(
+            deployed_sidecar, 'http', side_effect=hub_http
+        ), patch.object(
+            deployed_sidecar, '_register_cycle_run', return_value=True
+        ) as register, patch.object(
+            deployed_sidecar, '_complete_cycle_run'
+        ) as complete, patch.object(
+            deployed_sidecar, '_codex_wecom_reply', return_value={'queued': True}
+        ):
+            deployed_sidecar._process_cycle_terminal(
+                item, {'id': 198, 'status': 'blocked'}, config
+            )
+
+        self.assertEqual(2, len(calls))
+        self.assertEqual(
+            ['orchestrator:project', 'orchestrator:project'],
+            [call[1]['session_key'] for call in calls],
+        )
+        register.assert_called_once()
+        complete.assert_called_once_with(198, 'blocked')
+
+    def test_owner_can_approve_permission_once(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            deployed_sidecar, '_sidecar_data_dir', return_value=tmp
+        ), patch.object(
+            deployed_sidecar, 'get_cfg',
+            side_effect=lambda key, default=None: (
+                'alice' if key == 'owner_wecom_userid' else default
+            ),
+        ):
+            with deployed_sidecar._codex_state_connection() as db:
+                deployed_sidecar._init_codex_permission_tables(db)
+                db.execute(
+                    'INSERT INTO codex_permission_requests('
+                    'request_id,fingerprint,request_json,session_key,state,'
+                    'expires_at,created_at) VALUES(?,?,?,?,?,?,?)',
+                    (
+                        'cp-12345678', 'fingerprint', '{}', 'session',
+                        'pending', time.time() + 60, time.time(),
+                    ),
+                )
+            reply = deployed_sidecar._handle_codex_permission_command({
+                'sender_id': 'alice',
+                'text': '/codex-allow-once cp-12345678',
+            })
+            with deployed_sidecar._codex_state_connection() as db:
+                state = db.execute(
+                    'SELECT state FROM codex_permission_requests '
+                    'WHERE request_id=?', ('cp-12345678',)
+                ).fetchone()[0]
+        self.assertIn('一次授权', reply)
+        self.assertEqual('approved_once', state)
 
     def test_wecom_channel_deduplicates_before_codex_invocation(self):
         with tempfile.TemporaryDirectory() as tmp:

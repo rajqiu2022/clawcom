@@ -32,10 +32,13 @@ vs v1（hub_worker.py）
     2 - 启动配置加载失败（HUB_URL/CLAW_ID/CLAW_TOKEN 不全 或 Hub 不可达）
 """
 
+import hashlib
 import json
 import os
 import queue
+import re
 import signal
+import sqlite3
 import shutil
 import subprocess
 import sys
@@ -46,7 +49,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-SIDECAR_VERSION = '2.7.0'
+SIDECAR_VERSION = '2.8.0'
 
 HUB_URL = os.getenv('HUB_URL', '').rstrip('/')
 CLAW_ID = os.getenv('CLAW_ID', '').strip()
@@ -74,6 +77,7 @@ _queued_todos = set()
 _todo_cooldown_until = {}
 _codex_provider = None
 _codex_provider_lock = threading.Lock()
+_codex_call_context = threading.local()
 _execution_slots = threading.BoundedSemaphore(
     max(1, int(os.getenv('MAX_CONCURRENT_AGENT_TASKS', '2')))
 )
@@ -84,7 +88,7 @@ def log(msg):
     print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {msg}', flush=True)
 
 
-def http(method, path, body=None, timeout=30, query=None):
+def http(method, path, body=None, timeout=30, query=None, headers=None):
     """HTTP 调用 Hub，统一带 Bearer Token。
 
     Returns: (status_code: int, body: dict)  status=0 表示连接异常
@@ -95,6 +99,9 @@ def http(method, path, body=None, timeout=30, query=None):
     data = json.dumps(body).encode('utf-8') if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header('Authorization', f'Bearer {CLAW_TOKEN}')
+    for name, value in dict(headers or {}).items():
+        if str(name).lower() not in ('authorization', 'host', 'content-length'):
+            req.add_header(str(name), str(value))
     if data is not None:
         req.add_header('Content-Type', 'application/json')
     try:
@@ -168,8 +175,12 @@ def agent_profile_lines():
     if not isinstance(item, dict):
         return []
     profile = item.get('profile') or {}
-    if not isinstance(profile, dict):
-        return []
+    if not isinstance(profile, dict) or not profile:
+        return [
+            '=== Hub Agent Profile ===',
+            '- 当前 Hub 未下发有效 Agent Profile；不得自行编造岗位职责。',
+            '=== Hub Agent Profile 结束 ===',
+        ]
     lines = [
         '=== Hub Agent 岗位说明书（必须遵守）===',
         f"- 工位：{item.get('post_name') or item.get('post_key') or ''}",
@@ -180,7 +191,7 @@ def agent_profile_lines():
     required_skills = profile.get('required_skills') or []
     if required_skills:
         lines.append(
-            '- 建议 Skills（可用时优先加载）：'
+            '- 建议 Skills（可用时优先加载；缺失本身不阻断）：'
             + ', '.join(str(x) for x in required_skills)
         )
     blocking_skills = profile.get('blocking_skills') or []
@@ -195,6 +206,32 @@ def agent_profile_lines():
         lines.extend(['', '工作规范：', workflow_config])
     lines.append('=== 岗位说明书结束 ===')
     return lines
+
+
+def wecom_context_lines():
+    """Build the trusted, non-secret context for every Codex WeCom turn."""
+    claw_name = str(get_cfg('claw_name', '') or '').strip() or '未命名 Claw'
+    agent_type = (
+        os.getenv('AGENT_TYPE', '').strip()
+        or str(get_cfg('agent_type', '') or '').strip()
+        or '未配置'
+    ).lower()
+    lines = [
+        '=== Hub 身份（由 Sidecar 注入）===',
+        f'- 当前身份：Claw #{CLAW_ID} / {claw_name}',
+        f'- 当前 Provider：{agent_type}',
+        '- 你必须以该 Hub 身份和岗位职责处理当前对话，不得声称身份未注册。',
+        '- Hub 凭证只由 Sidecar 持有；不得索取、读取、输出或转发 Hub Token。',
+        '=== Hub 身份结束 ===',
+        *agent_profile_lines(),
+        *capability_digest_lines(),
+        *memo_index_lines(),
+        '=== Hub API 受控接口 ===',
+        '- 需要查询或操作 Hub 时，只能使用 Sidecar 提供的受控接口。',
+        '- 当前 Provider 未获得受控接口时，应明确报告能力受限，不得用 curl/Bash 直连 Hub。',
+        '=== Hub API 受控接口结束 ===',
+    ]
+    return [str(line)[:16000] for line in lines]
 
 
 # ===================== 任务上下文（记忆路由注入） =====================
@@ -523,11 +560,741 @@ def _cmd_for_log(cmd):
     return ' '.join(logged)
 
 
+def _sidecar_data_dir():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class _ClosingSqliteConnection(sqlite3.Connection):
+    """Commit or roll back a context-managed connection, then close it."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
+def _codex_state_connection():
+    path = os.path.join(_sidecar_data_dir(), 'codex-state.db')
+    db = sqlite3.connect(
+        path,
+        timeout=10,
+        factory=_ClosingSqliteConnection,
+    )
+    db.execute(
+        'CREATE TABLE IF NOT EXISTS codex_sessions ('
+        'session_key TEXT PRIMARY KEY, thread_id TEXT NOT NULL, '
+        'updated_at REAL NOT NULL)'
+    )
+    db.commit()
+    return db
+
+
+def _load_codex_session(session_key):
+    with _codex_state_connection() as db:
+        row = db.execute(
+            'SELECT thread_id FROM codex_sessions WHERE session_key=?',
+            (str(session_key),),
+        ).fetchone()
+    return str(row[0]) if row else None
+
+
+def _save_codex_session(session_key, thread_id):
+    with _codex_state_connection() as db:
+        db.execute(
+            'INSERT OR REPLACE INTO codex_sessions('
+            'session_key,thread_id,updated_at) VALUES(?,?,?)',
+            (str(session_key), str(thread_id), time.time()),
+        )
+
+
+def _clear_codex_session(session_key):
+    with _codex_state_connection() as db:
+        db.execute(
+            'DELETE FROM codex_sessions WHERE session_key=?',
+            (str(session_key),),
+        )
+
+
+def _codex_policy():
+    context = get_cfg('system_context', {})
+    if not isinstance(context, dict):
+        return {}
+    policy = context.get('policy') or {}
+    return dict(policy) if isinstance(policy, dict) else {}
+
+
+def _workflow_create_definition_ids():
+    values = _codex_policy().get(
+        'allowed_workflow_create_definition_ids', []
+    )
+    if not isinstance(values, list):
+        return ()
+    return tuple(sorted({
+        int(item) for item in values
+        if isinstance(item, int) and not isinstance(item, bool) and item > 0
+    }))
+
+
+def _codex_trusted_context():
+    return {
+        'kind': 'message',
+        'identity': {
+            'claw_id': str(CLAW_ID),
+            'claw_name': str(get_cfg('claw_name', '') or ''),
+            'provider': 'codex',
+        },
+        'system_context': get_cfg('system_context', {}) or {},
+        'profile': get_cfg('active_agent_profile', {}) or {},
+    }
+
+
+def _redact_codex_text(value):
+    text = str(value or '')
+    return text.replace(CLAW_TOKEN, '<redacted>') if CLAW_TOKEN else text
+
+
+def _codex_hub_http(method, path, **kwargs):
+    return http(method, path, **kwargs)
+
+
+def _codex_wecom_reply(payload):
+    if not get_cfg('owner_wecom_userid', ''):
+        return False
+    operation_id = str((payload or {}).get('operation_id') or '')
+    message = _redact_codex_text((payload or {}).get('message') or '').strip()
+    if not operation_id or not message:
+        return False
+    code, body = http('POST', '/api/v1/wecom/send', {
+        'claw_id': int(CLAW_ID),
+        'title': 'Codex Agent',
+        'content': message[:4000],
+        'related_type': 'codex_agent_reply',
+    }, timeout=30, headers={
+        'Idempotency-Key': 'codex-wecom-' + hashlib.sha256(
+            f'{CLAW_ID}:{operation_id}'.encode('utf-8')
+        ).hexdigest(),
+    })
+    return {
+        'queued': 200 <= int(code) < 300,
+        'status': int(code),
+        'log_id': body.get('log_id') if isinstance(body, dict) else None,
+    } if 200 <= int(code) < 300 else False
+
+
+def _register_codex_workflow_receipt(receipt):
+    # The durable Cycle watcher is installed below. Returning false would make
+    # a successfully created Run look failed to Codex, so only acknowledge an
+    # actual persisted registration.
+    register = globals().get('_register_cycle_run')
+    if not callable(register):
+        return False
+    context = getattr(_codex_call_context, 'value', {}) or {}
+    return register(receipt, context) is True
+
+
+def _create_codex_hub_plugin():
+    from hub_plugin import HubPluginConfig, create_hub_plugin
+    context = getattr(_codex_call_context, 'value', {}) or {}
+    orchestrator_enabled = _codex_orchestrator_config() is not None
+    return create_hub_plugin(
+        HubPluginConfig(
+            workflow_create_definition_ids=_workflow_create_definition_ids(),
+            workflow_run_receipt_callback=(
+                _register_codex_workflow_receipt
+                if orchestrator_enabled else None
+            ),
+            wecom_reply_callback=(
+                _codex_wecom_reply
+                if context.get('wecom_reply_enabled') is True else None
+            ),
+            allow_writes=True,
+        ),
+        http_func=_codex_hub_http,
+        redactor=_redact_codex_text,
+    )
+
+
+CODEX_PERMISSION_WAIT_SECONDS = max(
+    30, min(int(os.getenv('CODEX_PERMISSION_WAIT_SECONDS', '900')), 3600)
+)
+CODEX_PERMISSION_MAX_CHAIN = max(
+    1, min(int(os.getenv('CODEX_PERMISSION_MAX_CHAIN', '8')), 16)
+)
+_PERMISSION_COMMAND_RE = re.compile(
+    r'^/codex-(allow-once|allow-always|deny|revoke)\s+'
+    r'([A-Za-z0-9][A-Za-z0-9._:-]{7,127})\s*$'
+)
+
+
+def _init_codex_permission_tables(db):
+    db.execute(
+        'CREATE TABLE IF NOT EXISTS codex_permission_requests ('
+        'request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, '
+        'request_json TEXT NOT NULL, session_key TEXT NOT NULL, '
+        'state TEXT NOT NULL, expires_at REAL NOT NULL, created_at REAL NOT NULL)'
+    )
+    db.execute(
+        'CREATE TABLE IF NOT EXISTS codex_permission_grants ('
+        'fingerprint TEXT PRIMARY KEY, request_json TEXT NOT NULL, '
+        'created_at REAL NOT NULL)'
+    )
+
+
+def _permission_notification(request_id, request):
+    labels = {
+        'network_domain': '访问网络主机',
+        'filesystem_read': '读取额外路径',
+        'filesystem_write': '写入额外路径',
+        'hub_action': '执行 Hub 写操作',
+    }
+    return '\n'.join([
+        'Codex 请求额外权限，当前任务已暂停等待审批。',
+        f'申请编号：{request_id}',
+        f'权限：{labels.get(request["capability"], request["capability"])}',
+        f'资源：{request["resource"]}',
+        f'操作：{request["operation"]}',
+        f'原因：{request["reason"]}',
+        '',
+        f'一次授权：/codex-allow-once {request_id}',
+        f'永久授权：/codex-allow-always {request_id}',
+        f'拒绝：/codex-deny {request_id}',
+        '永久授权仅匹配完全相同的权限指纹。',
+    ])
+
+
+def _handle_codex_permission_request(
+    *, prompt, timeout, task_kind, session_key, call_context,
+    permission_request, permission_chain,
+):
+    from codex_permissions import (
+        normalize_permission_request,
+        permission_fingerprint,
+    )
+    if permission_chain >= CODEX_PERMISSION_MAX_CHAIN:
+        return False, '', 'permission_chain_exhausted'
+    if (
+        not get_cfg('owner_wecom_userid', '')
+        or os.getenv('WECOM_ENABLED', '').lower() != 'true'
+    ):
+        return False, '', 'wecom_binding_required'
+    try:
+        request = normalize_permission_request(
+            permission_request,
+            protected_roots=(
+                os.getenv('CODEX_HOME', ''),
+                _sidecar_data_dir(),
+            ),
+        )
+        fingerprint = permission_fingerprint(request)
+    except Exception:
+        return False, '', 'permission_request_invalid'
+    request_json = json.dumps(
+        request, ensure_ascii=False, sort_keys=True, separators=(',', ':')
+    )
+    now = time.time()
+    with _codex_state_connection() as db:
+        _init_codex_permission_tables(db)
+        permanent = db.execute(
+            'SELECT request_json FROM codex_permission_grants '
+            'WHERE fingerprint=?', (fingerprint,)
+        ).fetchone()
+        if permanent:
+            grant = json.loads(permanent[0])
+            return _call_codex_provider(
+                prompt, timeout, task_kind, session_key,
+                call_context=call_context,
+                permission_grant=grant,
+                permission_chain=permission_chain + 1,
+            )
+        request_id = 'cp-' + hashlib.sha256(
+            f'{session_key}:{fingerprint}:{now}:{uuid.uuid4()}'.encode('utf-8')
+        ).hexdigest()[:24]
+        db.execute(
+            'INSERT INTO codex_permission_requests('
+            'request_id,fingerprint,request_json,session_key,state,'
+            'expires_at,created_at) VALUES(?,?,?,?,?,?,?)',
+            (
+                request_id, fingerprint, request_json, str(session_key),
+                'pending', now + CODEX_PERMISSION_WAIT_SECONDS, now,
+            ),
+        )
+    notified = _codex_wecom_reply({
+        'operation_id': 'permission-' + request_id,
+        'message': _permission_notification(request_id, request),
+    })
+    if not notified:
+        return False, '', 'permission_notification_failed'
+    deadline = now + CODEX_PERMISSION_WAIT_SECONDS
+    state = 'pending'
+    while not _stop_event.is_set() and time.time() < deadline:
+        with _codex_state_connection() as db:
+            _init_codex_permission_tables(db)
+            row = db.execute(
+                'SELECT state FROM codex_permission_requests '
+                'WHERE request_id=?', (request_id,)
+            ).fetchone()
+        state = str(row[0]) if row else 'missing'
+        if state != 'pending':
+            break
+        _stop_event.wait(0.5)
+    if state == 'denied':
+        return False, '', 'permission_denied'
+    if state not in ('approved_once', 'approved_permanent'):
+        return False, '', 'permission_approval_timeout'
+    return _call_codex_provider(
+        prompt, timeout, task_kind, session_key,
+        call_context=call_context,
+        permission_grant=request,
+        permission_chain=permission_chain + 1,
+    )
+
+
+def _handle_codex_permission_command(event):
+    text = str((event or {}).get('text') or '').strip()
+    match = _PERMISSION_COMMAND_RE.fullmatch(text)
+    if match is None:
+        return None
+    owner = str(get_cfg('owner_wecom_userid', '') or '').strip()
+    if not owner or str((event or {}).get('sender_id') or '') != owner:
+        return '只有已绑定的 Owner 可以审批 Codex 权限。'
+    action, request_id = match.groups()
+    now = time.time()
+    with _codex_state_connection() as db:
+        _init_codex_permission_tables(db)
+        row = db.execute(
+            'SELECT fingerprint,request_json,state,expires_at '
+            'FROM codex_permission_requests WHERE request_id=?',
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            return '未找到该 Codex 权限申请。'
+        fingerprint, request_json, state, expires_at = row
+        if action == 'revoke':
+            db.execute(
+                'DELETE FROM codex_permission_grants WHERE fingerprint=?',
+                (fingerprint,),
+            )
+            return '已撤销该权限的永久授权。'
+        if state != 'pending' or float(expires_at) < now:
+            return '该 Codex 权限申请已处理或已过期。'
+        new_state = {
+            'allow-once': 'approved_once',
+            'allow-always': 'approved_permanent',
+            'deny': 'denied',
+        }[action]
+        db.execute(
+            'UPDATE codex_permission_requests SET state=? '
+            'WHERE request_id=? AND state=?',
+            (new_state, request_id, 'pending'),
+        )
+        if action == 'allow-always':
+            db.execute(
+                'INSERT OR REPLACE INTO codex_permission_grants('
+                'fingerprint,request_json,created_at) VALUES(?,?,?)',
+                (fingerprint, request_json, now),
+            )
+    return {
+        'allow-once': '已完成一次授权，Codex 将恢复原任务。',
+        'allow-always': '已保存永久授权，Codex 将恢复原任务。',
+        'deny': '已拒绝该 Codex 权限申请。',
+    }[action]
+
+
+WORKFLOW_RUN_WATCH_SEC = max(
+    5, int(os.getenv('WORKFLOW_RUN_WATCH_SEC', '10'))
+)
+WORKFLOW_RUN_TERMINAL_STATUSES = frozenset({
+    'blocked', 'cancelled', 'canceled', 'completed', 'done', 'failed',
+    'passed', 'skipped', 'succeeded', 'success', 'timeout', 'timed_out',
+})
+WORKFLOW_RUN_SUCCESS_STATUSES = frozenset({
+    'completed', 'done', 'passed', 'skipped', 'succeeded', 'success',
+})
+_CYCLE_DECISION_FIELDS = {
+    'action', 'classification', 'human_required', 'next_flow_id',
+    'repair_operation', 'summary',
+}
+_CYCLE_REPAIR_FIELDS = {
+    'changes', 'restart_allowed', 'status', 'summary', 'validation',
+}
+
+
+def _codex_orchestrator_config():
+    raw = _codex_policy().get('codex_orchestrator')
+    if not isinstance(raw, dict) or raw.get('enabled') is not True:
+        return None
+    session_key = str(raw.get('session_key') or '').strip()
+    allowed = raw.get('allowed_next_flows') or []
+    if (
+        not session_key
+        or not isinstance(allowed, list)
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or item <= 0
+            for item in allowed
+        )
+    ):
+        return None
+    return {
+        'session_key': 'orchestrator:' + session_key,
+        'allowed_next_flows': tuple(sorted(set(allowed))),
+        'max_retries': max(0, min(int(raw.get('max_retries', 0)), 5)),
+        'review_success': raw.get('review_success') is True,
+    }
+
+
+def _init_cycle_table(db):
+    db.execute(
+        'CREATE TABLE IF NOT EXISTS codex_cycle_runs ('
+        'run_id INTEGER PRIMARY KEY, cycle_id TEXT NOT NULL, '
+        'session_key TEXT NOT NULL, parent_run_id INTEGER, '
+        'retry_index INTEGER NOT NULL, state TEXT NOT NULL, '
+        'last_status TEXT NOT NULL DEFAULT "", next_poll REAL NOT NULL, '
+        'created_at REAL NOT NULL, updated_at REAL NOT NULL)'
+    )
+
+
+def _register_cycle_run(receipt, context):
+    config = _codex_orchestrator_config()
+    if config is None or not isinstance(receipt, dict):
+        return False
+    run_id = receipt.get('run_id')
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+        return False
+    cycle_id = str((context or {}).get('cycle_id') or '').strip()
+    if not cycle_id:
+        cycle_id = 'cycle-' + uuid.uuid4().hex
+    retry_index = int((context or {}).get('retry_index') or 0)
+    parent_run_id = (context or {}).get('parent_run_id')
+    if isinstance(parent_run_id, bool) or not isinstance(parent_run_id, int):
+        parent_run_id = None
+    now = time.time()
+    with _codex_state_connection() as db:
+        _init_cycle_table(db)
+        db.execute(
+            'INSERT OR IGNORE INTO codex_cycle_runs('
+            'run_id,cycle_id,session_key,parent_run_id,retry_index,state,'
+            'last_status,next_poll,created_at,updated_at) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?)',
+            (
+                run_id, cycle_id, config['session_key'], parent_run_id,
+                retry_index, 'pending', str(receipt.get('status') or ''),
+                now, now, now,
+            ),
+        )
+    return True
+
+
+def _claim_cycle_run():
+    now = time.time()
+    with _codex_state_connection() as db:
+        _init_cycle_table(db)
+        # Recover a process interrupted during review after five minutes.
+        db.execute(
+            'UPDATE codex_cycle_runs SET state="pending",next_poll=?,updated_at=? '
+            'WHERE state="reviewing" AND updated_at<?',
+            (now, now, now - 300),
+        )
+        row = db.execute(
+            'SELECT run_id,cycle_id,session_key,parent_run_id,retry_index '
+            'FROM codex_cycle_runs WHERE state="pending" AND next_poll<=? '
+            'ORDER BY next_poll,run_id LIMIT 1', (now,)
+        ).fetchone()
+        if row is None:
+            return None
+        changed = db.execute(
+            'UPDATE codex_cycle_runs SET state="reviewing",updated_at=? '
+            'WHERE run_id=? AND state="pending"', (now, row[0])
+        ).rowcount
+        if changed != 1:
+            return None
+    return {
+        'run_id': int(row[0]), 'cycle_id': str(row[1]),
+        'session_key': str(row[2]), 'parent_run_id': row[3],
+        'retry_index': int(row[4]),
+    }
+
+
+def _defer_cycle_run(run_id, status, delay=WORKFLOW_RUN_WATCH_SEC):
+    now = time.time()
+    with _codex_state_connection() as db:
+        _init_cycle_table(db)
+        db.execute(
+            'UPDATE codex_cycle_runs SET state="pending",last_status=?, '
+            'next_poll=?,updated_at=? WHERE run_id=?',
+            (str(status)[:64], now + max(1, int(delay)), now, int(run_id)),
+        )
+
+
+def _complete_cycle_run(run_id, status):
+    with _codex_state_connection() as db:
+        _init_cycle_table(db)
+        db.execute(
+            'UPDATE codex_cycle_runs SET state="completed",last_status=?, '
+            'updated_at=? WHERE run_id=?',
+            (str(status)[:64], time.time(), int(run_id)),
+        )
+
+
+def _parse_cycle_decision(text, config):
+    try:
+        value = json.loads(str(text or ''))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError('cycle decision must be JSON') from exc
+    if not isinstance(value, dict) or set(value) != _CYCLE_DECISION_FIELDS:
+        raise ValueError('cycle decision fields are invalid')
+    action = value.get('action')
+    classification = value.get('classification')
+    summary = value.get('summary')
+    next_flow = value.get('next_flow_id')
+    repair = value.get('repair_operation')
+    human = value.get('human_required')
+    if (
+        action not in ('accept', 'stop', 'human_gate', 'repair', 'start_flow')
+        or classification not in (
+            'FINAL_SUCCESS', 'FINAL_FAILURE', 'RECOVERABLE',
+            'FLOW_NEXT', 'HUMAN_GATE',
+        )
+        or not isinstance(summary, str) or not summary.strip()
+        or not isinstance(human, bool)
+        or not isinstance(repair, str)
+    ):
+        raise ValueError('cycle decision values are invalid')
+    if action in ('repair', 'start_flow'):
+        if next_flow not in config['allowed_next_flows']:
+            raise ValueError('cycle next Flow is not allowed')
+        if action == 'repair' and re.fullmatch(
+            r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', repair
+        ) is None:
+            raise ValueError('cycle repair operation is invalid')
+        if action == 'start_flow' and repair:
+            raise ValueError('cycle start_flow cannot include repair')
+    elif next_flow is not None or repair:
+        raise ValueError('terminal cycle decision contains transition')
+    return dict(value, summary=summary.strip())
+
+
+def _parse_cycle_repair(text):
+    try:
+        value = json.loads(str(text or ''))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError('cycle repair must be JSON') from exc
+    if not isinstance(value, dict) or set(value) != _CYCLE_REPAIR_FIELDS:
+        raise ValueError('cycle repair fields are invalid')
+    status = value.get('status')
+    if (
+        status not in ('repaired', 'blocked', 'human_required')
+        or not isinstance(value.get('summary'), str)
+        or not value['summary'].strip()
+        or not isinstance(value.get('changes'), list)
+        or not isinstance(value.get('validation'), list)
+        or not isinstance(value.get('restart_allowed'), bool)
+        or (status == 'repaired') != value['restart_allowed']
+        or any(not isinstance(item, str) for item in (
+            value['changes'] + value['validation']
+        ))
+    ):
+        raise ValueError('cycle repair values are invalid')
+    return value
+
+
+def _cycle_review_prompt(item, run, config):
+    context = {
+        'cycle_id': item['cycle_id'],
+        'run_id': item['run_id'],
+        'retry_index': item['retry_index'],
+        'max_retries': config['max_retries'],
+        'run': run,
+        'configured_workspace': os.getenv('CODEX_WORKSPACE', ''),
+        'additional_workspaces': [
+            path for path in os.getenv('PROVIDER_ALLOWED_DIRS', '').split(os.pathsep)
+            if path
+        ],
+    }
+    return (
+        '[CODEX_CYCLE_REVIEW]\n'
+        '你是当前 Linux Codex Worker 的主协调 Agent。读取 Hub Run、日志和工程现场，'
+        '不要把原始 blocker 直接当最终结论。若可在配置工程根内修复，选择 repair；'
+        '若只需启动固定后续 Flow，选择 start_flow。不要在本阶段直接创建 Run。\n'
+        '只输出一个 JSON：'
+        '{"classification":"FINAL_SUCCESS|FINAL_FAILURE|RECOVERABLE|FLOW_NEXT|HUMAN_GATE",'
+        '"action":"accept|stop|human_gate|repair|start_flow",'
+        '"summary":"用户可见中文结论","repair_operation":"",'
+        '"next_flow_id":null,"human_required":false}。\n'
+        f'<cycle_context>{json.dumps(context, ensure_ascii=False, sort_keys=True)}'
+        '</cycle_context>'
+    )
+
+
+def _bounded_cycle_run(run):
+    if not isinstance(run, dict):
+        return {}
+    result = {
+        key: run.get(key) for key in (
+            'id', 'definition_id', 'run_name', 'status', 'summary',
+            'business_conclusion', 'blocked_step', 'blocker', 'outputs',
+            'created_at', 'updated_at',
+        ) if key in run
+    }
+    steps = run.get('steps') or []
+    if isinstance(steps, list):
+        result['steps'] = [
+            {
+                key: step.get(key) for key in (
+                    'id', 'step_id', 'name', 'status', 'summary', 'blocker',
+                    'outputs', 'error', 'started_at', 'finished_at',
+                ) if key in step
+            }
+            for step in steps[-64:] if isinstance(step, dict)
+        ]
+    encoded = json.dumps(result, ensure_ascii=False, default=str)
+    if len(encoded.encode('utf-8', 'replace')) > 128 * 1024:
+        result.pop('steps', None)
+        result['context_truncated'] = True
+    return result
+
+
+def _cycle_repair_prompt(item, run, decision):
+    return (
+        '[CODEX_CYCLE_REPAIR]\n'
+        '继续同一协调会话。你现在是本轮修复的主执行 Agent：直接检查现场、修改配置'
+        '工程目录、执行命令和本地 Git、运行验证，把问题修到可以安全重启 Flow。'
+        '不得只复述 blocker 或只给建议；不要在本阶段直接创建 Run。缺少网络或额外路径时'
+        '使用 permission_request，Worker会通过已绑定企微 Owner审批并恢复本会话。\n'
+        '完成后只输出一个 JSON：'
+        '{"status":"repaired|blocked|human_required","summary":"修复结论",'
+        '"changes":["实际变更"],"validation":["已执行验证"],'
+        '"restart_allowed":true}。只有修复并验证通过才能为 true。\n'
+        f'<repair_context>{json.dumps({"cycle": item, "run": run, "decision": decision}, ensure_ascii=False, sort_keys=True)}'
+        '</repair_context>'
+    )
+
+
+def _start_cycle_flow(item, decision, config):
+    if item['retry_index'] >= config['max_retries']:
+        raise RuntimeError('cycle retry budget exhausted')
+    flow_id = int(decision['next_flow_id'])
+    operation = 'codex-cycle-' + hashlib.sha256(
+        f'{item["cycle_id"]}:{item["run_id"]}:{flow_id}'.encode('utf-8')
+    ).hexdigest()[:32]
+    code, created = http(
+        'POST', '/api/v1/workflow-runs',
+        {'definition_id': flow_id, 'trigger_source': 'codex_cycle'},
+        timeout=30, headers={'Idempotency-Key': operation},
+    )
+    if code not in (200, 201) or not isinstance(created, dict):
+        raise RuntimeError(f'cycle Flow create failed: http_{code}')
+    child = created.get('id')
+    if isinstance(child, bool) or not isinstance(child, int):
+        raise RuntimeError('cycle Flow create returned no id')
+    verify_code, verified = http(
+        'GET', f'/api/v1/workflow-runs/{child}', timeout=15
+    )
+    if (
+        verify_code != 200 or not isinstance(verified, dict)
+        or int(verified.get('id') or 0) != child
+        or int(verified.get('definition_id') or 0) != flow_id
+    ):
+        raise RuntimeError('cycle Flow readback failed')
+    if not _register_cycle_run(
+        {'run_id': child, 'status': verified.get('status') or 'created'},
+        {
+            'cycle_id': item['cycle_id'],
+            'retry_index': item['retry_index'] + 1,
+            'parent_run_id': item['run_id'],
+        },
+    ):
+        raise RuntimeError('cycle child registration failed')
+    return child
+
+
+def _process_cycle_terminal(item, run, config):
+    common_context = {
+        'wecom_reply_enabled': bool(get_cfg('owner_wecom_userid', '')),
+        'source': 'workflow_cycle',
+        'cycle_id': item['cycle_id'],
+        'retry_index': item['retry_index'],
+        'parent_run_id': item['run_id'],
+    }
+    ok, response, error = call_llm(
+        _cycle_review_prompt(item, run, config),
+        task_kind='message', session_key=item['session_key'],
+        call_context=common_context,
+    )
+    if not ok:
+        raise RuntimeError(error or 'cycle review failed')
+    decision = _parse_cycle_decision(response, config)
+    repair = None
+    child = None
+    if decision['action'] == 'repair':
+        ok, response, error = call_llm(
+            _cycle_repair_prompt(item, run, decision),
+            task_kind='message', session_key=item['session_key'],
+            call_context=common_context,
+        )
+        if not ok:
+            raise RuntimeError(error or 'cycle repair failed')
+        repair = _parse_cycle_repair(response)
+        if repair['status'] == 'repaired':
+            child = _start_cycle_flow(item, decision, config)
+    elif decision['action'] == 'start_flow':
+        child = _start_cycle_flow(item, decision, config)
+    message = f'Codex 已完成 Run #{item["run_id"]} 复盘：{decision["summary"]}'
+    if repair:
+        message += f'\n修复结果：{repair["summary"]}'
+    if child:
+        message += f'\n已启动后续 Run #{child}。'
+    _codex_wecom_reply({
+        'operation_id': f'cycle-{item["run_id"]}-final',
+        'message': message,
+    })
+    _complete_cycle_run(item['run_id'], str(run.get('status') or 'terminal'))
+
+
+def workflow_cycle_watcher_loop():
+    while not _stop_event.wait(WORKFLOW_RUN_WATCH_SEC):
+        if not HUB_URL or not CLAW_TOKEN:
+            continue
+        item = _claim_cycle_run()
+        if item is None:
+            continue
+        try:
+            code, run = http(
+                'GET', f'/api/v1/workflow-runs/{item["run_id"]}', timeout=10
+            )
+            if code != 200 or not isinstance(run, dict):
+                _defer_cycle_run(item['run_id'], f'http_{code}', 30)
+                continue
+            status = str(run.get('status') or '').strip().lower()
+            if status not in WORKFLOW_RUN_TERMINAL_STATUSES:
+                _defer_cycle_run(item['run_id'], status or 'running')
+                continue
+            config = _codex_orchestrator_config()
+            if config is None:
+                _complete_cycle_run(item['run_id'], status)
+                continue
+            if status in WORKFLOW_RUN_SUCCESS_STATUSES and not config['review_success']:
+                _codex_wecom_reply({
+                    'operation_id': f'cycle-{item["run_id"]}-success',
+                    'message': f'Run #{item["run_id"]} 已完成。',
+                })
+                _complete_cycle_run(item['run_id'], status)
+                continue
+            _process_cycle_terminal(item, _bounded_cycle_run(run), config)
+        except Exception as exc:
+            log(
+                f'[cycle-watcher] run={item["run_id"]} '
+                f'error={type(exc).__name__}'
+            )
+            _defer_cycle_run(item['run_id'], type(exc).__name__, 60)
+
+
 _CODEX_ENV_ALLOWLIST = (
     'CODEX_HOME', 'HOME', 'PATH', 'LANG', 'LC_ALL', 'LC_CTYPE',
     'TMPDIR', 'TEMP', 'TMP', 'SSL_CERT_FILE', 'SSL_CERT_DIR',
     'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY',
     'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+    'PROVIDER_ALLOWED_DIRS',
 )
 
 
@@ -587,7 +1354,10 @@ def _run_codex_process(cmd, prompt, timeout, env, cwd, stdout_mode='raw'):
     )
 
 
-def _call_codex_provider(prompt, timeout, task_kind, session_key=None):
+def _call_codex_provider(
+    prompt, timeout, task_kind, session_key=None, call_context=None,
+    permission_grant=None, permission_chain=0,
+):
     """Invoke the SDK inside a timeout-bounded, secret-minimized process tree."""
     global _codex_provider
     # Defense in depth: Hub-authored message/todo/workflow fields must not be
@@ -605,6 +1375,14 @@ def _call_codex_provider(prompt, timeout, task_kind, session_key=None):
             _codex_provider = CodexSdkProvider(
                 model=os.getenv('CODEX_MODEL', '').strip() or None,
                 process_runner=_run_codex_process,
+                hub_plugin_factory=_create_codex_hub_plugin,
+                hub_mcp_entry=os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    'claw_hub_mcp.py',
+                ),
+                session_loader=_load_codex_session,
+                session_saver=_save_codex_session,
+                session_clearer=_clear_codex_session,
             )
         provider = _codex_provider
 
@@ -613,16 +1391,20 @@ def _call_codex_provider(prompt, timeout, task_kind, session_key=None):
         codex_environment = _codex_environment(os.environ)
     except ValueError:
         return False, '', 'provider_config_invalid'
+    invocation_context = _codex_trusted_context()
+    invocation_context['kind'] = task_kind
+    if isinstance(permission_grant, dict):
+        invocation_context['permission_grant'] = dict(permission_grant)
     invocation = ProviderInvocation(
         invocation_id=str(uuid.uuid4()),
         task_kind=(task_kind if task_kind in ('message', 'todo', 'workflow', 'wecom')
                    else 'message'),
         prompt=prompt,
-        context={'claw_id': CLAW_ID, 'source': 'hub-sse-sidecar'},
+        context=invocation_context,
         session_key=session_key or f'hub-claw-{CLAW_ID}-{task_kind}',
         timeout_seconds=max(1, min(int(timeout), 3600)),
         workspace=workspace,
-        execution_scope='repo_read',
+        execution_scope='repo_write',
         result_schema=None,
         environment=codex_environment,
     )
@@ -634,17 +1416,47 @@ def _call_codex_provider(prompt, timeout, task_kind, session_key=None):
         if not _execution_slots.acquire(blocking=False):
             return False, '', 'provider_busy'
         try:
-            result = provider.invoke(invocation, on_event, CancellationToken())
+            previous = getattr(_codex_call_context, 'value', None)
+            _codex_call_context.value = dict(call_context or {})
+            _codex_call_context.value.setdefault(
+                'session_key', invocation.session_key
+            )
+            try:
+                result = provider.invoke(
+                    invocation, on_event, CancellationToken()
+                )
+            finally:
+                if previous is None:
+                    try:
+                        del _codex_call_context.value
+                    except AttributeError:
+                        pass
+                else:
+                    _codex_call_context.value = previous
         finally:
             _execution_slots.release()
     except Exception as exc:
         return False, '', f'codex_provider_error:{type(exc).__name__}'
+    permission_request = getattr(result, 'permission_request', None)
+    if permission_request is not None:
+        handler = globals().get('_handle_codex_permission_request')
+        if callable(handler):
+            return handler(
+                prompt=prompt,
+                timeout=timeout,
+                task_kind=task_kind,
+                session_key=invocation.session_key,
+                call_context=dict(call_context or {}),
+                permission_request=dict(permission_request),
+                permission_chain=permission_chain,
+            )
+        return False, '', 'permission_broker_unavailable'
     if not result.ok:
         return False, '', result.error or 'codex_provider_failed'
     return True, result.final_response, ''
 
 
-def call_llm(prompt, task_kind='message', session_key=None):
+def call_llm(prompt, task_kind='message', session_key=None, call_context=None):
     """根据当前 agent_type 调用对应 CLI，返回 (ok, response_text, err)。"""
     timeout = int(get_cfg('agent_timeout', 300))
     wecom_enabled = bool(get_cfg('wecom_enabled', False))
@@ -655,7 +1467,9 @@ def call_llm(prompt, task_kind='message', session_key=None):
                   or 'openclaw').strip().lower()
     if agent_type == 'codex':
         log(f'[llm] 调用 codex sdk timeout={timeout}s prompt_len={len(prompt)}')
-        return _call_codex_provider(prompt, timeout, task_kind, session_key)
+        return _call_codex_provider(
+            prompt, timeout, task_kind, session_key, call_context
+        )
     env = os.environ.copy()
     if wecom_enabled:
         wecom_key = get_cfg('wecom_bot_id', '')
@@ -823,7 +1637,15 @@ def handle_message(msg):
             "- 禁止发送协议说明（如'我已收到消息''根据通信协议'）",
         ])
 
-        ok, resp, err = call_llm('\n'.join(prompt_lines))
+        ok, resp, err = call_llm(
+            '\n'.join(prompt_lines),
+            task_kind='message',
+            session_key=f'hub-message:{msg_id}',
+            call_context={
+                'wecom_reply_enabled': bool(owner_wecom),
+                'source': 'hub_message',
+            },
+        )
 
         # 3. done / failed
         if ok:
@@ -1089,7 +1911,20 @@ def handle_task(task):
             percent=1,
             heartbeat=True,
         )
-        ok, resp, err = call_llm(_workflow_agent_prompt(task, payload), task_kind='workflow')
+        ok, resp, err = call_llm(
+            _workflow_agent_prompt(task, payload),
+            task_kind='workflow',
+            session_key=(
+                f'workflow:{payload.get("run_id")}:{payload.get("step_id")}'
+            ),
+            call_context={
+                'wecom_reply_enabled': bool(
+                    get_cfg('owner_wecom_userid', '')
+                ),
+                'source': 'workflow_agent_task',
+                'run_id': payload.get('run_id'),
+            },
+        )
         result = _normalize_workflow_result(resp, ok, err)
     except Exception as exc:
         result = {
@@ -1316,15 +2151,15 @@ def handle_todo(todo):
     prompt_lines.extend([
         "",
         "你必须完成：",
-        "1) 在当前只读权限范围内处理任务并核对结果。",
+        "1) 你是主执行 Agent；在配置工程根内直接检查、修改、执行命令并验证结果。",
         "2) 最终只输出一个 JSON 对象，不要输出代码块或额外解释：",
         '   {"status":"completed|blocked|failed",'
         '"result_summary":"非空结果摘要"}',
-        "3) 只有任务确实完成时使用 completed；超出只读权限或无法完成时使用 blocked/failed。",
-        "4) 不要调用 Hub API 或企微接口，不要读取、索取、推断或输出任何凭据。",
+        "3) 只有任务确实完成时使用 completed；缺少额外路径或网络权限时先走企微权限申请。",
+        "4) 可通过 claw_hub MCP 查询/调度授权 Hub资源并向绑定 Owner汇报；不得读取或输出凭据。",
         "",
         "Sidecar 会在 Provider 成功返回后持久化结果并完成待办闭环。",
-        "如果任务超出只读权限，请在最终结果中明确说明阻断原因。",
+        "只有经过诊断、可用修复和权限申请后仍无法完成，才返回 blocked/failed。",
     ])
 
     log(f'[todo] 派发给 LLM id={todo_id} title={title!r}')
@@ -1332,6 +2167,12 @@ def handle_todo(todo):
         '\n'.join(prompt_lines),
         task_kind='todo',
         session_key=f'todo:{todo_id}',
+        call_context={
+            'wecom_reply_enabled': bool(
+                get_cfg('owner_wecom_userid', '')
+            ),
+            'source': 'todo',
+        },
     )
     if not ok:
         log(f'[todo] LLM 处理失败 id={todo_id} err={err}（Hub watcher 会兜底告警）')
@@ -1495,8 +2336,17 @@ def _start_codex_wecom_channel():
         bridge_script=os.path.join(scripts_dir, 'wecom-bridge.mjs'),
         sdk_root=required['WECOM_SDK_ROOT'],
         invoke=lambda prompt, key: call_llm(
-            prompt, task_kind='wecom', session_key=key),
+            prompt,
+            task_kind='wecom',
+            session_key=key,
+            call_context={
+                'wecom_reply_enabled': True,
+                'source': 'wecom',
+            },
+        ),
         logger=log,
+        context_lines=wecom_context_lines,
+        command_handler=_handle_codex_permission_command,
     )
     _wecom_channel.start()
     descriptor = os.open(
@@ -1554,6 +2404,11 @@ def main():
         sys.exit(3)
 
     threading.Thread(target=config_refresh_loop, name='cfg', daemon=True).start()
+    threading.Thread(
+        target=workflow_cycle_watcher_loop,
+        name='codex-cycle-watcher',
+        daemon=True,
+    ).start()
     if TODO_WORKER_ENABLED:
         threading.Thread(target=todo_worker_loop, name='todo-worker', daemon=True).start()
     else:

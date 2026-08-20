@@ -216,7 +216,7 @@ class DeployRequest:
     codex_runtime_dir: str = '/opt/codex-runtime'
     codex_data_dir: Optional[str] = None
     codex_python: Optional[str] = None
-    codex_cli: str = '/usr/local/bin/codex'
+    codex_cli: str = ''
     codex_workspace: Optional[str] = None
     codex_model: str = ''
     codex_requirements: Optional[str] = None
@@ -680,6 +680,8 @@ def _render_sidecar_env(req: DeployRequest) -> str:
             "CODEX_PROVIDER_ENABLED=true\n",
             f"CODEX_HOME={req.codex_home_dir()}\n",
             f"CODEX_WORKSPACE={req.codex_workspace or ''}\n",
+            f"PROVIDER_ALLOWED_DIRS={':'.join(req.work_dirs or [])}\n",
+            f"SIDECAR_INSTANCE_DIR={req.systemd_data_dir()}\n",
             f"CODEX_MODEL={req.codex_model or ''}\n",
             f"CODEX_AUTH_MODE={req.codex_auth_mode}\n",
         ])
@@ -756,8 +758,10 @@ def _render_codex_sidecar_unit(req: DeployRequest) -> str:
     py = req.codex_python or f"{runtime}/venv/bin/python"
     env_path = f"{data}/scripts/sidecar.env"
     script_path = f"{data}/scripts/sidecar_v2.py"
-    read_write_paths = ' '.join([data, AGENT_SHARE_DIR] + (req.work_dirs or []))
-    read_only = ' '.join(dict.fromkeys([runtime, workspace]))
+    read_write_paths = ' '.join(dict.fromkeys(
+        [data, AGENT_SHARE_DIR, workspace] + (req.work_dirs or [])
+    ))
+    read_only = runtime
     return (
         "[Unit]\n"
         f"Description=OpenClaw Codex Provider Sidecar (claw {int(req.openclaw_id)})\n"
@@ -1064,7 +1068,11 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
     wheelhouse = req.codex_wheelhouse or f"{runtime}/wheelhouse"
     expected_sha = (req.codex_requirements_sha256 or '').lower()
     py = req.codex_python or f"{runtime}/venv/bin/python"
-    cli = req.codex_cli or '/usr/local/bin/codex'
+    cli = req.codex_cli or f"{runtime}/venv/bin/codex"
+    codex_bin_resolver = (
+        'from pathlib import Path; import codex_cli_bin; '
+        'print(Path(codex_cli_bin.__file__).parent / "bin" / "codex")'
+    )
     user = req.systemd_service_user()
     home = f"{data}/home"
     codex_home = req.codex_home_dir()
@@ -1091,12 +1099,12 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
         return
 
     bootstrap = ssh.run(
-        "python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' "
+        "python3 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' "
         "&& python3 -V",
-        timeout=20, name='python >= 3.10')
+        timeout=20, name='python == 3.11')
     _record_step(steps, bootstrap)
     if not bootstrap.ok:
-        _flush('failed', 'Linux Codex provider 需要 Python 3.10 或更高版本。')
+        _flush('failed', '当前批准的 Linux Codex runtime 需要 Python 3.11。')
         return
 
     artifact_check = ssh.run(
@@ -1116,7 +1124,11 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
         f"{shlex.quote(py)} -m pip install --disable-pip-version-check "
         f"--no-index --find-links {shlex.quote(wheelhouse)} --only-binary=:all: "
         f"--require-hashes -r {shlex.quote(requirements)} && "
-        f"{shlex.quote(py)} -c 'import openai_codex'",
+        f"{shlex.quote(py)} -c 'import openai_codex' && "
+        f"CODEX_BIN=$({shlex.quote(py)} -c "
+        f"{shlex.quote(codex_bin_resolver)}) && "
+        f"test -x \"$CODEX_BIN\" && "
+        f"ln -sfn \"$CODEX_BIN\" {shlex.quote(runtime + '/venv/bin/codex')}",
         timeout=600, name='install codex sdk from wheelhouse')
     _record_step(steps, install)
     if not install.ok:
@@ -1221,6 +1233,10 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
         "    'provider_runtime.py': b'class ProviderInvocation',\n"
         "    'codex_sdk_provider.py': b'class CodexSdkProvider',\n"
         "    'codex_sdk_worker.py': b'One-shot Codex SDK worker',\n"
+        "    'codex_permissions.py': b'Validated, resource-scoped Codex permission grants',\n"
+        "    'hub_proxy.py': b'class EphemeralHubProxy',\n"
+        "    'hub_plugin.py': b'class HubPluginConfig',\n"
+        "    'claw_hub_mcp.py': b'class ClawHubMcpServer',\n"
         "    'wecom_channel.py': b'class WeComChannel',\n"
         "    'wecom-bridge.mjs': b'openws.work.weixin.qq.com',\n"
         "    'wecom-protocol.mjs': b'normalizeTextFrame',\n"
@@ -1273,6 +1289,10 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
         f"chmod 0644 {shlex.quote(sidecar_dir + '/provider_runtime.py')} "
         f"{shlex.quote(sidecar_dir + '/codex_sdk_provider.py')} "
         f"{shlex.quote(sidecar_dir + '/codex_sdk_worker.py')} "
+        f"{shlex.quote(sidecar_dir + '/codex_permissions.py')} "
+        f"{shlex.quote(sidecar_dir + '/hub_proxy.py')} "
+        f"{shlex.quote(sidecar_dir + '/hub_plugin.py')} "
+        f"{shlex.quote(sidecar_dir + '/claw_hub_mcp.py')} "
         f"{shlex.quote(sidecar_dir + '/wecom_channel.py')} "
         f"{shlex.quote(sidecar_dir + '/wecom-bridge.mjs')} "
         f"{shlex.quote(sidecar_dir + '/wecom-protocol.mjs')} && "

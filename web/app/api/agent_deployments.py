@@ -467,7 +467,8 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
     codex_data_dir = (data.get('codex_data_dir') or
                       f"{_build_remote_base_dir_compat(claw, safe_name=safe)}/data").strip().rstrip('/')
     codex_python = (data.get('codex_python') or '').strip() or None
-    codex_cli = (data.get('codex_cli') or '/usr/local/bin/codex').strip()
+    codex_cli = (data.get('codex_cli') or
+                 f'{codex_runtime_dir}/venv/bin/codex').strip()
     codex_workspace = (data.get('codex_workspace') or '').strip().rstrip('/') or None
     codex_model = (data.get('codex_model') or '').strip()
     codex_requirements = (data.get('codex_requirements') or
@@ -502,7 +503,9 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
         if not _path_in_agent_root(codex_data_dir, claw):
             raise ValueError(
                 f'codex_data_dir 必须位于 {_build_remote_base_dir_compat(claw, safe_name=safe)}/ 下')
-        normalize_agent_work_dirs([codex_workspace])
+        work_dirs = normalize_agent_work_dirs(
+            list(work_dirs) + [codex_workspace]
+        )
         if not _SHA256_RE.fullmatch(codex_requirements_sha256):
             raise ValueError('codex_requirements_sha256 必填，且必须是 64 位十六进制 SHA-256')
         if codex_auth_mode not in (
