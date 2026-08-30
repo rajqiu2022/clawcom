@@ -175,6 +175,31 @@ class WorkflowRunAssignmentBindingTest(unittest.TestCase):
             }, has_blocked=True),
         )
 
+    def test_composite_outcomes_do_not_downgrade_executed_or_published_truth(self):
+        outcomes = merge_workflow_run_outcomes({
+            'business': 'FAILED',
+            'automation': 'PARTIAL',
+            'evidence': 'COMPLETE',
+            'report': 'PUBLISHED',
+            'notification': 'SENT',
+            'review': 'COMPLETED',
+        }, {
+            'outputs': {
+                'business_outcome': 'NOT_EXECUTED',
+                'automation_outcome': 'SUCCEEDED',
+                'evidence_outcome': 'ANALYSIS_INCOMPLETE',
+                'report_outcome': 'FAILED',
+                'notification_outcome': 'FAILED',
+                'review_outcome': 'FAILED',
+            },
+        })
+        self.assertEqual('FAILED', outcomes['business'])
+        self.assertEqual('PARTIAL', outcomes['automation'])
+        self.assertEqual('COMPLETE', outcomes['evidence'])
+        self.assertEqual('PUBLISHED', outcomes['report'])
+        self.assertEqual('SENT', outcomes['notification'])
+        self.assertEqual('COMPLETED', outcomes['review'])
+
     def test_definition_normalization_preserves_composite_outcome_mode(self):
         normalized = normalize_workflow_definition({
             'key': 'composite-outcomes',
@@ -244,6 +269,7 @@ class WorkflowRunAssignmentApiTest(unittest.TestCase):
                 'key': 'assignment-flow',
                 'name': 'Assignment Flow',
                 'require_worker_binding': True,
+                'context': {'template_revision': 'flow12-v21-stable'},
                 'start_vars_schema': {
                     'worker_claw_id': {
                         'type': 'integer', 'required': True},
@@ -310,6 +336,12 @@ class WorkflowRunAssignmentApiTest(unittest.TestCase):
         self.assertEqual(7, snapshot['reviewer_claw_id'])
         self.assertEqual(21, run.context_json[
             'workflow_definition_snapshot']['version'])
+        self.assertEqual(
+            'flow12-v21-stable',
+            run.context_json['workflow_definition_snapshot'][
+                'template_revision'
+            ],
+        )
         execution_snapshot = run.context_json['execution_input_snapshot']
         self.assertEqual(
             'df-release-sha', execution_snapshot['deepflow_release_sha'])

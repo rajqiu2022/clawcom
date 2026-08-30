@@ -191,6 +191,55 @@ class AgentSystemContextTests(unittest.TestCase):
             payload['system_context']['policy']['remote_source_ids'],
         )
 
+    def test_flow12_worker_bindings_transitions_and_release_gate_are_downlinked(self):
+        configured_policy = {
+            'allowed_workflow_create_definition_ids': [12, 25, 39],
+            'workflow_start_bindings': {
+                '12': {
+                    'executor_claw_ids': [11],
+                    'start_vars': {'reviewer_claw_id': 7},
+                },
+            },
+            'deepflow_release_required_definition_ids': [12, 25],
+            'codex_orchestrator': {
+                'enabled': True,
+                'session_key': 'racinggo:flow-orchestrator',
+                'resume_on': ['blocked', 'failed'],
+                'allowed_next_flows': [12, 25, 39],
+                'transitions': {'12': [25, 39], '25': [12]},
+                'max_retries': 2,
+                'review_success': True,
+            },
+        }
+
+        payload = agent_system_context.build_agent_system_context(
+            self.claw,
+            'codex',
+            [],
+            [],
+            workflow_create_definition_ids=[12, 25, 39],
+            configured_policy=configured_policy,
+        )
+
+        policy = payload['system_context']['policy']
+        self.assertEqual(
+            [11],
+            policy['workflow_start_bindings']['12']['executor_claw_ids'],
+        )
+        self.assertEqual(
+            7,
+            policy['workflow_start_bindings']['12']['start_vars'][
+                'reviewer_claw_id'
+            ],
+        )
+        self.assertEqual(
+            [12, 25], policy['deepflow_release_required_definition_ids']
+        )
+        self.assertEqual(
+            {'12': [25, 39], '25': [12]},
+            policy['codex_orchestrator']['transitions'],
+        )
+
     def test_remote_source_policy_rejects_path_or_secret_fields(self):
         for value in (
             ['../ssh'],
@@ -317,6 +366,16 @@ class AgentSystemContextTests(unittest.TestCase):
                     'max_retries': 1,
                     'review_success': True,
                     'thread_id': 'must-not-be-stored',
+                },
+            })
+        with self.assertRaises(ValueError):
+            agent_system_context.validate_system_context_policy({
+                'allowed_workflow_create_definition_ids': [12],
+                'workflow_start_bindings': {
+                    '12': {
+                        'executor_claw_ids': [11],
+                        'start_vars': {'hub_token': 'must-not-downlink'},
+                    },
                 },
             })
 

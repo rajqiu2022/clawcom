@@ -3145,7 +3145,11 @@ def create_workflow_run():
         'version': int(definition.version or 1),
         'sha256': definition_snapshot_hash,
         'template_revision': str(
-            (definition.definition_json or {}).get('template_revision') or ''),
+            (definition.definition_json or {}).get('template_revision')
+            or (
+                (definition.definition_json or {}).get('context') or {}
+            ).get('template_revision')
+            or ''),
     }
     if assignment:
         context['assignment_snapshot'] = {

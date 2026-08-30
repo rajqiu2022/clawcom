@@ -19,12 +19,14 @@ _RULE_BUDGET_WARNING = 'RULE_CONTENT_OMITTED_FOR_CONTEXT_BUDGET'
 _SYSTEM_CONTEXT_POLICY_FIELDS = {
     'allowed_workflow_create_definition_ids',
     'codex_orchestrator',
+    'workflow_start_bindings',
+    'deepflow_release_required_definition_ids',
     'remote_source_id',
     'remote_source_ids',
 }
 _CODEX_ORCHESTRATOR_FIELDS = {
     'enabled', 'session_key', 'resume_on', 'allowed_next_flows',
-    'max_retries', 'review_success',
+    'transitions', 'max_retries', 'review_success',
 }
 _WORKFLOW_TERMINAL_STATUSES = {
     'blocked', 'cancelled', 'canceled', 'completed', 'done', 'failed',
@@ -250,6 +252,39 @@ def validate_system_context_policy(value: Any) -> dict[str, Any]:
         remote_source_ids.extend(plural)
     if remote_source_ids:
         result['remote_source_ids'] = sorted(set(remote_source_ids))
+    if 'workflow_start_bindings' in value:
+        bindings = value.get('workflow_start_bindings')
+        if not isinstance(bindings, dict):
+            raise ValueError('workflow_start_bindings must be an object')
+        normalized_bindings = {}
+        for raw_definition_id, raw_binding in bindings.items():
+            if not str(raw_definition_id).isdigit() or int(raw_definition_id) <= 0:
+                raise ValueError('workflow_start_bindings contains invalid definition id')
+            if (not isinstance(raw_binding, dict)
+                    or set(raw_binding) - {'executor_claw_ids', 'start_vars'}):
+                raise ValueError('workflow_start_bindings contains invalid binding')
+            executor_ids = _definition_ids(
+                raw_binding.get('executor_claw_ids') or [],
+                field='workflow_start_bindings.executor_claw_ids')
+            start_vars = raw_binding.get('start_vars') or {}
+            if (not executor_ids or not isinstance(start_vars, dict)
+                    or any(not isinstance(name, str)
+                           or re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,63}', name) is None
+                           or re.search(r'(?i)(?:token|secret|password|private_key|api_key)', name)
+                           or isinstance(item, (dict, list))
+                           or isinstance(item, str)
+                           and len(item.encode('utf-8', 'replace')) > 1024
+                           for name, item in start_vars.items())):
+                raise ValueError('workflow_start_bindings contains invalid binding values')
+            normalized_bindings[str(int(raw_definition_id))] = {
+                'executor_claw_ids': executor_ids,
+                'start_vars': dict(start_vars),
+            }
+        result['workflow_start_bindings'] = normalized_bindings
+    if 'deepflow_release_required_definition_ids' in value:
+        result['deepflow_release_required_definition_ids'] = _definition_ids(
+            value.get('deepflow_release_required_definition_ids'),
+            field='deepflow_release_required_definition_ids')
     if 'codex_orchestrator' not in value:
         return result
     raw = value.get('codex_orchestrator')
@@ -279,6 +314,19 @@ def validate_system_context_policy(value: Any) -> dict[str, Any]:
         raise ValueError('codex_orchestrator.allowed_next_flows must not be empty')
     if not set(allowed_next).issubset(allowed):
         raise ValueError('allowed_next_flows must be covered by workflow create grants')
+    raw_transitions = raw.get('transitions') or {}
+    if not isinstance(raw_transitions, dict):
+        raise ValueError('codex_orchestrator.transitions must be an object')
+    transitions = {}
+    for raw_source, raw_targets in raw_transitions.items():
+        if not str(raw_source).isdigit() or int(raw_source) <= 0:
+            raise ValueError('codex_orchestrator.transitions contains invalid source')
+        targets = _definition_ids(
+            raw_targets,
+            field='codex_orchestrator.transitions targets')
+        if not set(targets).issubset(allowed_next):
+            raise ValueError('transition targets must be covered by allowed_next_flows')
+        transitions[str(int(raw_source))] = targets
     max_retries = raw.get('max_retries')
     if type(max_retries) is not int or not 0 <= max_retries <= 5:
         raise ValueError('codex_orchestrator.max_retries must be between 0 and 5')
@@ -290,6 +338,7 @@ def validate_system_context_policy(value: Any) -> dict[str, Any]:
         'session_key': session_key,
         'resume_on': sorted(set(normalized_resume_on)),
         'allowed_next_flows': allowed_next,
+        'transitions': transitions,
         'max_retries': max_retries,
         'review_success': review_success,
     }
@@ -329,6 +378,19 @@ def _resolve_workflow_policy(
     if configured.get('remote_source_ids'):
         result['remote_source_ids'] = list(
             configured['remote_source_ids'])
+    bindings = configured.get('workflow_start_bindings') or {}
+    effective_bindings = {
+        key: dict(binding)
+        for key, binding in bindings.items()
+        if int(key) in effective_ids
+    }
+    if effective_bindings:
+        result['workflow_start_bindings'] = effective_bindings
+    required_releases = sorted(set(
+        configured.get('deepflow_release_required_definition_ids') or []
+    ).intersection(effective_ids))
+    if required_releases:
+        result['deepflow_release_required_definition_ids'] = required_releases
     warnings = []
     orchestrator = configured.get('codex_orchestrator')
     if orchestrator:
@@ -337,8 +399,19 @@ def _resolve_workflow_policy(
         if next_flows != orchestrator['allowed_next_flows']:
             warnings.append('CODEX_ORCHESTRATOR_FLOWS_FILTERED')
         if next_flows:
+            transitions = {
+                source: sorted(set(targets).intersection(next_flows))
+                for source, targets in orchestrator.get('transitions', {}).items()
+            }
+            transitions = {
+                source: targets for source, targets in transitions.items()
+                if targets
+            }
             result['codex_orchestrator'] = dict(
-                orchestrator, allowed_next_flows=next_flows)
+                orchestrator,
+                allowed_next_flows=next_flows,
+                transitions=transitions,
+            )
         else:
             warnings.append('CODEX_ORCHESTRATOR_DISABLED_NO_ALLOWED_FLOW')
     return result, warnings

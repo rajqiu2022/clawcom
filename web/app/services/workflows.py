@@ -462,10 +462,35 @@ def merge_workflow_run_outcomes(current, result, step_config=None):
         status = str(result.get('status') or '').lower()
         candidates['review'] = (
             'COMPLETED' if status in ('passed', 'skipped') else 'FAILED')
+    severity = {
+        'business': {
+            '': -1, 'NOT_EXECUTED': 0, 'INCONCLUSIVE': 1,
+            'PASSED': 2, 'FAILED': 3,
+        },
+        'automation': {
+            '': -1, 'SUCCEEDED': 0, 'PARTIAL': 1,
+            'BLOCKED': 2, 'FAILED': 3,
+        },
+    }
+    sticky_success = {
+        'evidence': 'COMPLETE',
+        'report': 'PUBLISHED',
+        'notification': 'SENT',
+        'review': 'COMPLETED',
+    }
     for domain, value in candidates.items():
         canonical = _canonical_outcome(domain, value)
-        if canonical:
-            merged[domain] = canonical
+        if not canonical:
+            continue
+        current_value = merged.get(domain) or ''
+        if domain in severity:
+            if severity[domain].get(canonical, -1) >= severity[domain].get(
+                    current_value, -1):
+                merged[domain] = canonical
+            continue
+        if current_value == sticky_success.get(domain):
+            continue
+        merged[domain] = canonical
     return merged
 
 
