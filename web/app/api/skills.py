@@ -118,6 +118,7 @@ def list_skills():
     show_off_shelf = request.args.get('show_off_shelf', 'false').lower() == 'true'  # 管理员可查看下架
     search_keyword = request.args.get('search', '').strip()
     semantic_search = request.args.get('semantic_search', '').strip()
+    summary_only = request.args.get('summary', 'false').lower() == 'true'
     query = Skill.query
     if category_filter:
         query = query.filter(Skill.category == category_filter)
@@ -211,10 +212,24 @@ def list_skills():
     if semantic_search and not skills and not search_keyword:
         skills = _semantic_search_skills(semantic_search, user, review_filter, show_deleted)
 
+    from app.services.skill_usage import (
+        recent_skill_usage_counts,
+        record_skill_content_accesses,
+    )
+    # 兼容原有完整列表 API；市场页面显式请求 summary=true，避免仅浏览卡片就计数。
+    if not summary_only:
+        record_skill_content_accesses([skill.id for skill in skills], 'list_full')
+    usage_counts = recent_skill_usage_counts([skill.id for skill in skills])
     result = []
     for s in skills:
         d = s.to_dict()
+        if summary_only:
+            # 市场列表只返回摘要。完整正文由详情接口按需读取并计入热度。
+            d.pop('template_content', None)
+            d.pop('mirror_content', None)
+            d.pop('content_history', None)
         d['market_status'] = _skill_market_status(s)
+        d['recent_usage_count'] = usage_counts.get(s.id, 0)
         # 查出正在使用的 OpenClaw 名单 + 区分 fresh / stale
         # stale 判定：installed_at IS NULL 或 installed_at < skill.updated_at
         # 即「skill 修改过但 claw 还没重装」
@@ -330,6 +345,12 @@ def get_skill(skill_id):
         return jsonify({'error': 'Skill 不存在'}), 404
     data = skill.to_dict()
     data['market_status'] = _skill_market_status(skill)
+    from app.services.skill_usage import (
+        recent_skill_usage_counts,
+        record_skill_content_access,
+    )
+    record_skill_content_access(skill.id, 'detail')
+    data['recent_usage_count'] = recent_skill_usage_counts([skill.id]).get(skill.id, 0)
     return jsonify(data)
 
 
@@ -1586,6 +1607,8 @@ def get_skill_raw(skill_id):
     if skill.trigger_phrase:
         md += f"**触发短语**：{skill.trigger_phrase}\n\n---\n\n"
     md += content
+    from app.services.skill_usage import record_skill_content_access
+    record_skill_content_access(skill.id, 'raw')
     return Response(md, mimetype='text/markdown; charset=utf-8',
                     headers={'Content-Disposition': f'inline; filename="skill-{skill.id}.md"'})
 
@@ -1638,6 +1661,8 @@ def list_skill_files(skill_id):
     """列出 Skill 文档包所有文件"""
     skill = Skill.query.get_or_404(skill_id)
     files = SkillFile.query.filter_by(skill_id=skill_id).order_by(SkillFile.filename).all()
+    from app.services.skill_usage import record_skill_content_access
+    record_skill_content_access(skill.id, 'file_list')
     return jsonify({
         'skill_id': skill_id,
         'skill_name': skill.name,
@@ -1653,6 +1678,8 @@ def get_skill_file(skill_id, filename):
     if not sf:
         return jsonify({'error': f'文件 {filename} 不存在'}), 404
 
+    from app.services.skill_usage import record_skill_content_access
+    record_skill_content_access(skill_id, 'file')
     fmt = request.args.get('format', 'raw')
     if fmt == 'json':
         return jsonify(sf.to_dict())
@@ -1800,6 +1827,8 @@ def download_skill_pack(skill_id):
             zf.writestr(f'{skill.name}/{f.filename}', f.content or '')
 
     buf.seek(0)
+    from app.services.skill_usage import record_skill_content_access
+    record_skill_content_access(skill.id, 'pack')
     return Response(buf.getvalue(),
                     mimetype='application/zip',
                     headers={'Content-Disposition': f'attachment; filename="{skill.name}.zip"'})

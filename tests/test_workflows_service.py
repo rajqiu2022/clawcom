@@ -11,6 +11,116 @@ _SPEC.loader.exec_module(workflows)
 
 
 class WorkflowServiceTest(unittest.TestCase):
+    def test_controlled_worker_contract_rejects_unknown_runner_operation_and_commands(self):
+        base = {
+            'key': 'flow25-candidate',
+            'name': 'Flow 25 candidate',
+            'context': {'executor_operation_policy': {
+                'mode': 'workflow_run_executor',
+                'require_worker_binding': True,
+                'worker_contract_version': 'deepflow.racinggo.flow25_worker@1',
+            }},
+            'steps': [{
+                'id': 'editor_health',
+                'name': 'Editor health',
+                'type': 'worker_task',
+                'runner': 'deepflow.racinggo.flow25_worker_v1',
+                'inputs': {'operation': 'editor_health'},
+            }],
+        }
+        normalized = workflows.normalize_workflow_definition(base)
+        self.assertTrue(normalized['steps'][0]['require_fencing_token'])
+
+        bad_runner = dict(base, steps=[dict(
+            base['steps'][0], runner='deepflow.shell')])
+        with self.assertRaisesRegex(ValueError, 'controlled runner'):
+            workflows.normalize_workflow_definition(bad_runner)
+
+        bad_operation = dict(base, steps=[dict(
+            base['steps'][0], inputs={'operation': 'arbitrary_shell'})])
+        with self.assertRaisesRegex(ValueError, 'unsupported operation'):
+            workflows.normalize_workflow_definition(bad_operation)
+
+        arbitrary_command = dict(base, steps=[dict(
+            base['steps'][0], inputs={
+                'operation': 'editor_health',
+                'exec_cmd': 'powershell whoami',
+            })])
+        with self.assertRaisesRegex(ValueError, 'arbitrary command'):
+            workflows.normalize_workflow_definition(arbitrary_command)
+
+    def test_flow25_candidate_adds_bootstrap_and_dynamic_runtime_contract(self):
+        definition = {
+            'key': 'flow25',
+            'name': 'Flow 25',
+            'context': {
+                'mcp_url': '{start_vars.mcp_url}',
+                'mobile_bridge_port': '{start_vars.mobile_bridge_port}',
+                'ui_bridge_port': '{start_vars.ui_bridge_port}',
+            },
+            'steps': [
+                {'id': 'merge_latest_dev2', 'name': 'Merge', 'type': 'agent_task'},
+                {'id': 'precheck', 'name': 'Precheck', 'type': 'agent_task',
+                 'depends_on': ['merge_latest_dev2'],
+                 'inputs': {'mcp_url': '{context.mcp_url}'}},
+                {'id': 'dev2_source_guard', 'name': 'Source guard', 'type': 'agent_task',
+                 'depends_on': ['precheck']},
+                {'id': 'editor_health', 'name': 'Health', 'type': 'worker_task',
+                 'runner': 'deepflow.unity.health', 'depends_on': ['dev2_source_guard'],
+                 'inputs': {'exec_cmd': 'python legacy.py --port 8091'}},
+                {'id': 'playmode_bootstrap', 'name': 'Playmode', 'type': 'worker_task',
+                 'runner': 'deepflow.old', 'depends_on': ['editor_health'], 'inputs': {}},
+                {'id': 'bridge_ping', 'name': 'Bridge ping', 'type': 'worker_task',
+                 'runner': 'deepflow.old', 'depends_on': ['playmode_bootstrap'], 'inputs': {}},
+                {'id': 'bridge_snapshot', 'name': 'Bridge snapshot', 'type': 'worker_task',
+                 'runner': 'deepflow.old', 'depends_on': ['bridge_ping'], 'inputs': {}},
+                {'id': 'bridge_contract', 'name': 'Bridge contract', 'type': 'worker_task',
+                 'runner': 'deepflow.old', 'depends_on': ['bridge_snapshot'], 'inputs': {}},
+                {'id': 'login_lobby', 'name': 'Login', 'type': 'worker_task',
+                 'runner': 'deepflow.old', 'depends_on': ['bridge_contract'], 'inputs': {}},
+                {'id': 'load_library20', 'name': 'Load library', 'type': 'agent_task',
+                 'depends_on': ['login_lobby']},
+                {'id': 'library20_execute', 'name': 'Execute library', 'type': 'worker_task',
+                 'runner': 'deepflow.old', 'depends_on': ['load_library20'], 'inputs': {}},
+            ],
+        }
+
+        candidate = workflows.build_racinggo_flow25_controlled_worker_candidate(definition)
+        by_id = {step['id']: step for step in candidate['steps']}
+
+        self.assertEqual(
+            by_id['runtime_bootstrap']['depends_on'], ['merge_latest_dev2'])
+        self.assertEqual(by_id['merge_latest_dev2']['type'], 'worker_task')
+        self.assertEqual(
+            by_id['merge_latest_dev2']['inputs'], {
+                'operation': 'merge_latest_dev2',
+                'protected_target_id': 'racinggo-dev2',
+            })
+        self.assertEqual(
+            by_id['merge_latest_dev2']['outputs'],
+            list(workflows.RACINGGO_MERGE_OUTPUTS))
+        self.assertEqual(
+            by_id['runtime_bootstrap']['input_vars']['merge_commit'],
+            '{steps.merge_latest_dev2.outputs.merge_commit}')
+        self.assertEqual(
+            by_id['precheck']['depends_on'], ['runtime_bootstrap'])
+        self.assertEqual(
+            by_id['editor_health']['depends_on'], ['dev2_source_guard'])
+        for step_id in workflows.RACINGGO_FLOW25_WORKER_OPERATIONS:
+            step = by_id[step_id]
+            self.assertEqual(
+                step['runner'], workflows.RACINGGO_FLOW25_CONTROLLED_RUNNER)
+            self.assertEqual(step['inputs']['operation'], step_id)
+            self.assertTrue(step['require_fencing_token'])
+            self.assertNotIn('exec_cmd', step['inputs'])
+        self.assertEqual(
+            by_id['precheck']['inputs']['mcp_url'],
+            '{steps.runtime_bootstrap.outputs.mcp_url}')
+        serialized = __import__('json').dumps(candidate)
+        self.assertNotIn('8091', serialized)
+        self.assertNotIn('{context.mcp_url}', serialized)
+        self.assertNotIn('{start_vars.mcp_url}', serialized)
+
     def test_compute_step_health_for_running_heartbeat_states(self):
         now = datetime(2026, 7, 2, 19, 0, 0)
         healthy = workflows.compute_step_health(
@@ -322,6 +432,70 @@ class WorkflowServiceTest(unittest.TestCase):
                          'client_target_sha')
         self.assertNotIn('unexpected_secret', analysis['baseline_vars'])
 
+    def test_normalize_definition_round_trips_start_vars_schema(self):
+        schema = {
+            'type': 'object',
+            'required': ['library_id'],
+            'properties': {
+                'library_id': {'type': 'integer', 'minimum': 1},
+                'branch': {'type': 'string'},
+            },
+        }
+        definition = workflows.normalize_workflow_definition({
+            'key': 'schema_flow',
+            'name': 'Schema Flow',
+            'start_vars_schema': schema,
+            'steps': [{'id': 'run', 'name': 'Run'}],
+        })
+        self.assertEqual(definition['start_vars_schema'], schema)
+
+        updated = workflows.merge_workflow_definition_update(definition, {
+            'name': 'Schema Flow v2',
+        })
+        self.assertEqual(updated['start_vars_schema'], schema)
+
+    def test_normalize_step_validates_gate_metric_paths_against_schema(self):
+        definition = workflows.normalize_workflow_definition({
+            'key': 'metric_flow',
+            'name': 'Metric Flow',
+            'steps': [{
+                'id': 'verify',
+                'name': 'Verify',
+                'metrics_schema': {
+                    'type': 'object',
+                    'properties': {
+                        'failed': {'type': 'integer'},
+                        'remote': {
+                            'type': 'object',
+                            'properties': {'head': {'type': 'string'}},
+                        },
+                    },
+                },
+                'gates': [
+                    {'expression': 'metrics.failed == 0'},
+                    {'expression': "metrics.remote.head != ''"},
+                ],
+            }],
+        })
+        step = definition['steps'][0]
+        self.assertIn('metrics_schema', step)
+        self.assertEqual(len(step['gates']), 2)
+
+    def test_normalize_step_reports_precise_undeclared_gate_metric_path(self):
+        with self.assertRaisesRegex(
+                ValueError,
+                r"steps\[0\]\.gates\[0\]\.expression: metric path '"):
+            workflows.normalize_workflow_definition({
+                'key': 'bad_metric_flow',
+                'name': 'Bad Metric Flow',
+                'steps': [{
+                    'id': 'verify',
+                    'name': 'Verify',
+                    'metrics_schema': {'failed': 'integer'},
+                    'gates': [{'expression': 'metrics.fail_count == 0'}],
+                }],
+            })
+
     def test_ready_steps_only_include_dependency_satisfied_pending_steps(self):
         definition = workflows.normalize_workflow_definition({
             'key': 'demo',
@@ -337,6 +511,78 @@ class WorkflowServiceTest(unittest.TestCase):
         states = {'a': 'passed', 'b': 'pending', 'c': 'pending'}
         ready = workflows.ready_step_ids(definition, states)
         self.assertEqual(ready, ['b'])
+
+    def test_ready_step_accepts_blocked_upstream_with_advance_on_any_result(self):
+        definition = workflows.normalize_workflow_definition({
+            'key': 'cleanup_then_analysis',
+            'name': 'Cleanup then analysis',
+            'steps': [
+                {
+                    'id': 'safe_stop',
+                    'name': 'Safe stop',
+                    'inputs': {
+                        'advance_policy': 'advance_on_any_result',
+                    },
+                },
+                {
+                    'id': 'analysis',
+                    'name': 'Analysis',
+                    'depends_on': ['safe_stop'],
+                },
+            ],
+        })
+
+        self.assertEqual(workflows.ready_step_ids(
+            definition, {'safe_stop': 'blocked', 'analysis': 'pending'}),
+            ['analysis'])
+
+    def test_ready_step_accepts_failed_upstream_when_downstream_runs_on_blocker(self):
+        definition = workflows.normalize_workflow_definition({
+            'key': 'cleanup_then_report',
+            'name': 'Cleanup then report',
+            'steps': [
+                {'id': 'cleanup', 'name': 'Cleanup'},
+                {
+                    'id': 'report',
+                    'name': 'Report',
+                    'depends_on': ['cleanup'],
+                    'run_even_if_upstream_blocked': True,
+                },
+            ],
+        })
+
+        self.assertTrue(
+            definition['steps'][1]['run_even_if_upstream_blocked'])
+        self.assertEqual(workflows.ready_step_ids(
+            definition, {'cleanup': 'failed', 'report': 'pending'}),
+            ['report'])
+
+    def test_ready_step_remains_fail_closed_without_explicit_result_policy(self):
+        definition = workflows.normalize_workflow_definition({
+            'key': 'strict_cleanup',
+            'name': 'Strict cleanup',
+            'steps': [
+                {'id': 'cleanup', 'name': 'Cleanup'},
+                {'id': 'analysis', 'name': 'Analysis',
+                 'depends_on': ['cleanup']},
+            ],
+        })
+
+        self.assertEqual(workflows.ready_step_ids(
+            definition, {'cleanup': 'blocked', 'analysis': 'pending'}), [])
+
+    def test_normalize_step_preserves_top_level_result_policies(self):
+        step = workflows.normalize_step({
+            'id': 'analysis',
+            'name': 'Analysis',
+            'advance_policy': 'advance_on_any_result',
+            'advance_on_any_result': True,
+            'run_even_if_upstream_blocked': True,
+        }, 0)
+
+        self.assertEqual(step['advance_policy'], 'advance_on_any_result')
+        self.assertTrue(step['advance_on_any_result'])
+        self.assertTrue(step['run_even_if_upstream_blocked'])
 
     def test_update_definition_patch_preserves_key_and_replaces_steps(self):
         existing = workflows.normalize_workflow_definition({
@@ -448,6 +694,28 @@ class WorkflowServiceTest(unittest.TestCase):
         self.assertEqual(context['workflow_start']['variables']['device_pool'], 'android_smoke')
         self.assertEqual(context['workflow_start']['mode'], 'scheduled')
 
+    def test_build_start_context_binds_one_worker_explicitly(self):
+        context = workflows.build_workflow_start_context(
+            {},
+            {'workflow_start': {'worker_claw_id': 99}},
+            worker_claw_id=11,
+        )
+        self.assertEqual(context['workflow_start']['worker_claw_id'], 11)
+        self.assertEqual(
+            context['workflow_start']['worker_binding_mode'],
+            'single_flow_worker')
+
+    def test_build_start_context_rejects_nested_worker_binding(self):
+        context = workflows.build_workflow_start_context(
+            {},
+            {'workflow_start': {
+                'worker_claw_id': 99,
+                'worker_binding_mode': 'single_flow_worker',
+            }},
+        )
+        self.assertNotIn('worker_claw_id', context['workflow_start'])
+        self.assertNotIn('worker_binding_mode', context['workflow_start'])
+
     def test_agent_task_payload_exposes_start_vars_directly(self):
         payload = workflows.build_workflow_agent_task_payload(
             run={
@@ -473,6 +741,120 @@ class WorkflowServiceTest(unittest.TestCase):
         self.assertFalse(gate['passed'])
         self.assertEqual(gate['status'], 'blocked')
         self.assertIn('metrics.failed == 0', gate['failed_gates'][0]['expression'])
+
+    def test_legacy_warn_gate_is_valid_and_non_blocking(self):
+        step = workflows.normalize_step({
+            'id': 'legacy_flow12_precheck',
+            'name': 'Legacy Flow12 precheck',
+            'metrics_schema': {'env_ready': 'boolean'},
+            'gates': [{
+                'expression': 'metrics.env_ready == true',
+                'on_fail': 'warn',
+            }],
+        }, 0)
+
+        gate = workflows.evaluate_step_gates(step, {
+            'status': 'passed',
+            'metrics': {'env_ready': False},
+        })
+
+        self.assertEqual(step['gates'][0]['on_fail'], 'warn')
+        self.assertTrue(gate['passed'])
+        self.assertTrue(gate['warning_only'])
+        self.assertEqual(gate['status'], 'passed')
+        self.assertEqual(len(gate['failed_gates']), 1)
+
+    def test_warn_gate_does_not_mask_a_blocking_gate(self):
+        step = {'id': 'mixed', 'gates': [
+            {'expression': 'metrics.optional == true', 'on_fail': 'warn'},
+            {'expression': 'metrics.required == true', 'on_fail': 'blocked'},
+        ]}
+
+        gate = workflows.evaluate_step_gates(step, {
+            'status': 'passed',
+            'metrics': {'optional': False, 'required': False},
+        })
+
+        self.assertFalse(gate['passed'])
+        self.assertFalse(gate['warning_only'])
+        self.assertEqual(gate['status'], 'blocked')
+
+    def test_result_contract_requires_declared_metrics_evidence_and_outputs(self):
+        contract = workflows.validate_step_result_contract({
+            'required_metrics': ['failed', 'nested.count'],
+            'required_evidence': ['screenshots'],
+            'outputs': ['business_failure_confirmed', 'report.id'],
+        }, {
+            'metrics': {'failed': 0, 'nested': {'count': 0}},
+            'evidence': {},
+            'outputs': {'business_failure_confirmed': False},
+        })
+        self.assertFalse(contract['valid'])
+        self.assertEqual(contract['code'], 'CONTRACT_INVALID')
+        self.assertEqual(contract['missing']['evidence'], ['screenshots'])
+        self.assertEqual(contract['missing']['outputs'], ['report.id'])
+        self.assertNotIn('metrics', contract['missing'])
+
+    def test_result_contract_can_require_present_but_empty_output(self):
+        step = workflows.normalize_step({
+            'id': 'merge_latest_dev2',
+            'outputs': ['backup_branch', 'branch_swap_performed'],
+            'allow_empty_contract_fields': {
+                'outputs': ['backup_branch'],
+            },
+        }, 0)
+        valid = workflows.validate_step_result_contract(step, {
+            'outputs': {
+                'backup_branch': '',
+                'branch_swap_performed': False,
+            },
+        })
+        missing = workflows.validate_step_result_contract(step, {
+            'outputs': {'branch_swap_performed': False},
+        })
+
+        self.assertTrue(valid['valid'])
+        self.assertFalse(missing['valid'])
+        self.assertEqual(missing['missing']['outputs'], ['backup_branch'])
+
+    def test_warn_contract_policy_allows_progress_but_keeps_invalid_code(self):
+        step = workflows.normalize_step({
+            'id': 'legacy',
+            'outputs': ['required_output'],
+            'gates': [{'expression': 'metrics.ok == true', 'on_fail': 'warn'}],
+        }, 0)
+        contract = workflows.validate_step_result_contract(step, {
+            'metrics': {'ok': True}, 'evidence': {}, 'outputs': {},
+        })
+        self.assertEqual(contract['policy'], 'warn')
+        self.assertEqual(contract['code'], 'CONTRACT_INVALID')
+
+    def test_declared_outputs_are_collected_from_legacy_top_level_result(self):
+        outputs = workflows.collect_declared_step_outputs({
+            'outputs': ['business_conclusion', 'report.id'],
+        }, {
+            'outputs': {'business_conclusion': 'COMPLETED'},
+            'report': {'id': 77},
+        })
+        self.assertEqual(outputs['business_conclusion'], 'COMPLETED')
+        self.assertEqual(outputs['report']['id'], 77)
+
+    def test_notification_authorization_requires_all_business_and_report_checks(self):
+        outputs = {'judge': {
+            'business_failure_confirmed': True,
+            'notification_required': True,
+            'report_required': True,
+            'hub_report_id': 9,
+            'share_url': '/r/token',
+        }}
+        allowed = workflows.evaluate_notification_authorization(
+            outputs, report_readback=True)
+        denied = workflows.evaluate_notification_authorization(
+            dict(outputs, judge=dict(outputs['judge'], business_failure_confirmed=False)),
+            report_readback=True)
+        self.assertTrue(allowed['allowed'])
+        self.assertFalse(denied['allowed'])
+        self.assertEqual(denied['skip_reason'], 'business_pass_or_automation_only')
 
     def test_gate_supports_comparing_two_metric_paths(self):
         step = {'id': 'push_and_build', 'gates': [
@@ -528,6 +910,23 @@ class WorkflowServiceTest(unittest.TestCase):
         self.assertTrue(workflows.can_manage_workflow(
             'user', 3, acl, 'claw', 9, is_admin=True))
 
+    def test_workflow_editor_acl_allows_multiple_agents_without_management(self):
+        acl = workflows.normalize_editor_acl({
+            'claw_ids': [11, 12, 11],
+            'user_ids': [7],
+        })
+        self.assertEqual([11, 12], acl['claw_ids'])
+        self.assertTrue(workflows.can_edit_workflow(
+            'claw', 10, acl, 'claw', 11))
+        self.assertTrue(workflows.can_edit_workflow(
+            'claw', 10, acl, 'claw', 12))
+        self.assertTrue(workflows.can_edit_workflow(
+            'claw', 10, acl, 'user', 7))
+        self.assertFalse(workflows.can_edit_workflow(
+            'claw', 10, acl, 'claw', 13))
+        self.assertFalse(workflows.can_manage_workflow(
+            'claw', 10, {}, 'claw', 11))
+
     def test_project_visible_workflow_can_be_seen_by_project_member(self):
         self.assertTrue(workflows.can_view_workflow(
             'project', 'claw', 12, 9, 'claw', 13, [9]))
@@ -560,6 +959,71 @@ class WorkflowServiceTest(unittest.TestCase):
             'worker-a', now - timedelta(seconds=30), 'worker-b', now, 120))
         self.assertTrue(workflows.can_claim_step(
             'worker-a', now - timedelta(seconds=121), 'worker-b', now, 120))
+
+    def test_normalize_step_lease_seconds_clamps_bounds(self):
+        self.assertEqual(workflows.normalize_step_lease_seconds(None), 180)
+        self.assertEqual(workflows.normalize_step_lease_seconds(1), 30)
+        self.assertEqual(workflows.normalize_step_lease_seconds(9999), 900)
+        self.assertEqual(workflows.normalize_step_lease_seconds('bad'), 180)
+
+    def test_workflow_step_claim_requires_matching_claw_and_worker_until_expiry(self):
+        now = datetime(2026, 7, 2, 14, 0, 0)
+        active_until = now + timedelta(seconds=60)
+        self.assertTrue(workflows.can_claim_step_lease(
+            claimed_claw_id=7,
+            claimed_by='worker-a',
+            claim_expires_at=active_until,
+            claw_id=7,
+            worker_id='worker-a',
+            now=now,
+        )['allowed'])
+        self.assertEqual(workflows.can_claim_step_lease(
+            claimed_claw_id=7,
+            claimed_by='worker-a',
+            claim_expires_at=active_until,
+            claw_id=7,
+            worker_id='worker-b',
+            now=now,
+        )['reason'], 'claim_conflict')
+        self.assertEqual(workflows.can_claim_step_lease(
+            claimed_claw_id=7,
+            claimed_by='worker-a',
+            claim_expires_at=active_until,
+            claw_id=8,
+            worker_id='worker-a',
+            now=now,
+        )['reason'], 'claim_conflict')
+        self.assertTrue(workflows.can_claim_step_lease(
+            claimed_claw_id=7,
+            claimed_by='worker-a',
+            claim_expires_at=now - timedelta(seconds=1),
+            claw_id=8,
+            worker_id='worker-b',
+            now=now,
+        )['allowed'])
+
+    def test_active_step_claim_requires_owner_and_unexpired_lease(self):
+        now = datetime(2026, 7, 2, 14, 0, 0)
+        self.assertTrue(workflows.active_step_claim_state(
+            'worker_task', 7, 'worker-a', now + timedelta(seconds=30),
+            7, 'worker-a', now)['active'])
+        self.assertEqual(workflows.active_step_claim_state(
+            'worker_task', 7, 'worker-a', now + timedelta(seconds=30),
+            7, 'worker-b', now)['reason'], 'claim_owner_mismatch')
+        self.assertEqual(workflows.active_step_claim_state(
+            'worker_task', 7, 'worker-a', now - timedelta(seconds=1),
+            7, 'worker-a', now)['reason'], 'claim_expired')
+        self.assertTrue(workflows.active_step_claim_state(
+            'agent_task', None, '', None, 7, 'worker-a', now)['active'])
+
+    def test_validate_worker_result_status_is_strict(self):
+        self.assertEqual(workflows.validate_worker_result_status('passed'), 'passed')
+        with self.assertRaises(ValueError):
+            workflows.validate_worker_result_status(None)
+        with self.assertRaises(ValueError):
+            workflows.validate_worker_result_status('waiting_approval')
+        with self.assertRaises(ValueError):
+            workflows.validate_worker_result_status('done')
 
     def test_branch_selects_then_and_skips_else_from_outputs(self):
         step = workflows.normalize_step({

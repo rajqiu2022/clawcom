@@ -2,11 +2,14 @@
 
 from app import db
 from app.models import (
+    AutomationCaseCandidate,
     EngineeringTestImpactItem,
     TestCaseChangeLog,
     TestCaseLibraryReview,
     TestCaseLibraryShare,
     TestCaseSnapshot,
+    TestCaseLibraryPromotion,
+    TestCaseLibraryRevision,
     TestTask,
     Topic,
     TestCasePanoramaLink,
@@ -46,6 +49,12 @@ def cleanup_test_case_dependencies(case_ids):
     RequirementTestcaseLink.query.filter(
         RequirementTestcaseLink.test_case_id.in_(ids),
     ).delete(synchronize_session=False)
+    AutomationCaseCandidate.query.filter(
+        AutomationCaseCandidate.production_case_id.in_(ids),
+    ).update(
+        {'production_case_id': None},
+        synchronize_session=False,
+    )
 
     db.session.flush()
     return affected_module_ids
@@ -78,6 +87,20 @@ def cleanup_test_case_library_dependencies(library_id, case_ids):
         synchronize_session=False,
     )
     TestCaseLibraryReview.query.filter_by(library_id=library_id).delete(
+        synchronize_session=False,
+    )
+    # Formal promotion rows reference revisions only through audit strings, so
+    # remove audit operations first and immutable snapshots second.
+    TestCaseLibraryPromotion.query.filter_by(library_id=library_id).delete(
+        synchronize_session=False,
+    )
+    TestCaseLibraryRevision.query.filter_by(library_id=library_id).delete(
+        synchronize_session=False,
+    )
+    AutomationCaseCandidate.query.filter_by(
+        production_library_id=library_id,
+    ).update(
+        {'production_library_id': None, 'production_case_id': None},
         synchronize_session=False,
     )
 

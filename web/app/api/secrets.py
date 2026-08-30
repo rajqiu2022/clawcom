@@ -3,7 +3,7 @@
 权限模型：
 - 页面列表（GET /secrets）：只返回 owner 自己的密钥（自己user + 自己名下claw）
 - 读取明文（GET /secrets/{key}）：
-    - owner 自己的密钥：直接返回
+    - owner 用户及其名下 Agent 的 private 密钥：同一 owner 命名空间内可读
     - 共享密钥（share_scope=project/public）：只能通过 Bearer Token + key 读取，
       页面列表不可见，不可修改/删除
 - 修改/删除：仅 owner
@@ -68,6 +68,73 @@ def _apply_owner_filter(query):
     return query.filter(db.literal(False))
 
 
+def _owner_namespace_for_claw(claw):
+    """返回 Bearer Agent 所属 owner 用户及同 owner Agent ID。
+
+    该命名空间只用于读取 private secret；修改和删除仍走
+    ``_apply_owner_filter``，保持实际存储 owner 才能管理。
+    """
+    if not claw or not claw.owner:
+        return None, []
+    owner_user = User.query.filter_by(username=claw.owner).first()
+    sibling_ids = _get_visible_claw_ids_for_user(owner_user) if owner_user else [
+        row.id for row in OpenClawInstance.query.filter(
+            OpenClawInstance.owner == claw.owner,
+            OpenClawInstance.deleted_at.is_(None),
+        ).all()
+    ]
+    return owner_user, sibling_ids
+
+
+def _find_inherited_private_secret(query, claw):
+    """按 user-owned、sibling-claw 顺序读取同 owner 的 private secret。"""
+    owner_user, sibling_ids = _owner_namespace_for_claw(claw)
+    if owner_user:
+        inherited = query.filter(
+            ClawSecret.owner_user_id == owner_user.id,
+            ClawSecret.share_scope == 'private',
+        ).order_by(ClawSecret.id.asc()).first()
+        if inherited:
+            return inherited
+    sibling_ids = [cid for cid in sibling_ids if cid != claw.id]
+    if sibling_ids:
+        return query.filter(
+            ClawSecret.owner_claw_id.in_(sibling_ids),
+            ClawSecret.share_scope == 'private',
+        ).order_by(
+            ClawSecret.owner_claw_id.asc(), ClawSecret.id.asc()
+        ).first()
+    return None
+
+
+def _merge_inherited_private_secrets(result, keys, claw):
+    """把同 owner private secrets 按确定性优先级补入批量解析结果。"""
+    missing = [key for key in keys if key not in result]
+    if not missing:
+        return
+    owner_user, sibling_ids = _owner_namespace_for_claw(claw)
+    if owner_user:
+        rows = ClawSecret.query.filter(
+            ClawSecret.key.in_(missing),
+            ClawSecret.owner_user_id == owner_user.id,
+            ClawSecret.share_scope == 'private',
+        ).order_by(ClawSecret.id.asc()).all()
+        for secret in rows:
+            result.setdefault(secret.key, secret)
+    missing = [key for key in keys if key not in result]
+    sibling_ids = [cid for cid in sibling_ids if cid != claw.id]
+    if missing and sibling_ids:
+        rows = ClawSecret.query.filter(
+            ClawSecret.key.in_(missing),
+            ClawSecret.owner_claw_id.in_(sibling_ids),
+            ClawSecret.share_scope == 'private',
+        ).order_by(
+            ClawSecret.owner_claw_id.asc(), ClawSecret.id.asc()
+        ).all()
+        for secret in rows:
+            result.setdefault(secret.key, secret)
+
+
 def _find_readable_secret(key, secret_id=None):
     """查找当前请求可读取的 secret（含共享逻辑）。
 
@@ -91,6 +158,10 @@ def _find_readable_secret(key, secret_id=None):
     if not claw:
         return None, False
 
+    inherited = _find_inherited_private_secret(q, claw)
+    if inherited:
+        return inherited, False
+
     # public 共享
     pub = q.filter(ClawSecret.share_scope == 'public').first()
     if pub:
@@ -105,6 +176,35 @@ def _find_readable_secret(key, secret_id=None):
         if proj:
             return proj, False
 
+    return None, False
+
+
+def _find_readable_secret_by_id(secret_id):
+    """按 id 查找当前请求可读取的 secret。"""
+    q = ClawSecret.query.filter(ClawSecret.id == secret_id)
+
+    own = _apply_owner_filter(q).first()
+    if own:
+        return own, True
+
+    claw = get_current_claw()
+    if not claw:
+        return None, False
+    inherited = _find_inherited_private_secret(q, claw)
+    if inherited:
+        return inherited, False
+
+    secret = q.first()
+    if not secret:
+        return None, False
+    if secret.share_scope == 'public':
+        return secret, False
+    if (
+        secret.share_scope == 'project'
+        and claw.project_id
+        and secret.share_project_id == claw.project_id
+    ):
+        return secret, False
     return None, False
 
 
@@ -129,6 +229,11 @@ def _find_readable_secrets_by_keys(keys):
     # 共享的（仅 Bearer Token）
     claw = get_current_claw()
     if not claw:
+        return result
+
+    _merge_inherited_private_secrets(result, keys, claw)
+    missing_keys = [k for k in keys if k not in result]
+    if not missing_keys:
         return result
 
     shared_q = ClawSecret.query.filter(ClawSecret.key.in_(missing_keys))
@@ -286,6 +391,31 @@ def upsert_secret():
 
 
 # ==================== 读取明文 ====================
+
+@api_bp.route('/secrets/<int:secret_id>', methods=['GET'])
+def get_secret_detail_by_id(secret_id):
+    """按 id 获取 secret 元信息（不含明文）。"""
+    if not _current_actor_display():
+        return jsonify({'error': '未认证'}), 401
+    secret, _is_owner = _find_readable_secret_by_id(secret_id)
+    if not secret:
+        return jsonify({'error': f'secret #{secret_id} 不存在或无权限'}), 404
+    return jsonify(secret.to_dict(include_value=False))
+
+
+@api_bp.route('/secrets/<int:secret_id>/value', methods=['GET'])
+def get_secret_value_by_id(secret_id):
+    """按 id 获取 secret 明文。"""
+    if not _current_actor_display():
+        return jsonify({'error': '未认证'}), 401
+    secret, _is_owner = _find_readable_secret_by_id(secret_id)
+    if not secret:
+        return jsonify({'error': f'secret #{secret_id} 不存在或无权限'}), 404
+    secret.last_used_at = datetime.now()
+    secret.use_count = (secret.use_count or 0) + 1
+    db.session.commit()
+    return jsonify(secret.to_dict(include_value=True))
+
 
 @api_bp.route('/secrets/<key>', methods=['GET'])
 def get_secret(key):

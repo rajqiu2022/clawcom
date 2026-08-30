@@ -2,7 +2,7 @@
 
 DEFAULT_HERMES_LLM_PROVIDER = "venus"
 DEFAULT_HERMES_LLM_MODEL = "venus"
-DEFAULT_TIMIAI_LLM_MODEL = "deepseek-v4-pro"
+DEFAULT_TIMIAI_LLM_MODEL = "deepseek-v4-pro-r1"
 
 HERMES_LLM_PROVIDERS = {
     "venus": {
@@ -107,12 +107,43 @@ TIMIAI_LLM_MODELS = {
     },
 }
 
+# TimiAI 的模型授权按项目隔离；相似的显示名在不同项目可能对应不同
+# upstream model key。服务端与前端必须共用同一语义，不能把 GBT 的 -r1
+# 模型写入 QQ飞车端游或魂斗罗实例。
+TIMIAI_MODEL_KEYS_BY_PROJECT = {
+    "gbt": (
+        "deepseek-v4-pro-r1",
+        "claude-sonnet-4.6",
+        "gemini-3.1-pro-preview-stb",
+        "deepseek-v4-flash-r1",
+        "kimi-k3",
+        "minimax-m3",
+    ),
+    "qqspeed_pc": (
+        "deepseek-v4-pro",
+        "glm-5.2",
+        "glm-5v-turbo",
+        "claude-sonnet-4.6",
+        "gemini-3.1-pro-preview",
+        "kimi-k3",
+        "minimax-m3",
+    ),
+    "contra": (
+        "deepseek-v4-pro",
+        "glm-5.2",
+        "glm-5v-turbo",
+        "claude-sonnet-4.6",
+        "gemini-3.1-pro-preview",
+        "minimax-m3",
+    ),
+}
+
 # 兼容旧 import
 HERMES_LLM_MODELS = VENUS_LLM_MODELS
 
 HERMES_VISION_DEFAULTS = {
     "venus": {"provider": "venus", "model": "glm-5.1"},
-    "timiai": {"provider": "timiai", "model": "deepseek-v4-pro"},
+    "timiai": {"provider": "timiai", "model": "deepseek-v4-pro-r1"},
 }
 
 _VENUS_ALIASES = {
@@ -180,6 +211,25 @@ def hermes_models_for_provider(provider: str) -> dict:
 def default_hermes_model(provider: str) -> str:
     provider = normalize_hermes_provider(provider)
     return DEFAULT_TIMIAI_LLM_MODEL if provider == "timiai" else DEFAULT_HERMES_LLM_MODEL
+
+
+def timiai_model_keys_for_project(project: str):
+    key = str(project or "").strip().lower().replace("-", "_")
+    if key not in TIMIAI_MODEL_KEYS_BY_PROJECT:
+        raise ValueError(f"不支持的 TimiAI 项目：{project}")
+    return TIMIAI_MODEL_KEYS_BY_PROJECT[key]
+
+
+def default_timiai_model_for_project(project: str) -> str:
+    return timiai_model_keys_for_project(project)[0]
+
+
+def normalize_timiai_model_for_project(value: str, project: str) -> str:
+    model = normalize_hermes_model(value, "timiai")
+    if model not in timiai_model_keys_for_project(project):
+        raise ValueError(
+            f"TimiAI 项目 {project} 不支持模型：{value}")
+    return model
 
 
 def normalize_hermes_model(value: str, provider: str = None) -> str:

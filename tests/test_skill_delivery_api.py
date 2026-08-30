@@ -40,7 +40,8 @@ from flask import Flask  # noqa: E402
 from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
 from app.models import (AgentTask, OpenClawInstance, OpenClawSkill,  # noqa: E402
-                        Project, Skill, SkillFile, hash_token)
+                        Project, Skill, SkillFile, SkillUsageEvent,
+                        hash_token)
 
 
 class SkillDeliveryApiTest(unittest.TestCase):
@@ -219,6 +220,9 @@ class SkillDeliveryApiTest(unittest.TestCase):
         self.assertEqual(first.headers['Cache-Control'], 'private, max-age=60')
         self.assertTrue(first.headers['X-Skill-Content-Version'])
         self.assertEqual(cached.status_code, 304)
+        events = SkillUsageEvent.query.filter_by(skill_id=self.skill.id).all()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].access_type, 'agent_file')
 
     def test_authorized_pack_contains_normalized_skill_directory(self):
         manifest = self.client.get(
@@ -240,6 +244,8 @@ class SkillDeliveryApiTest(unittest.TestCase):
                 archive.read('demo-skill/SKILL.md').decode('utf-8'),
                 '# Demo',
             )
+        event = SkillUsageEvent.query.filter_by(skill_id=self.skill.id).one()
+        self.assertEqual(event.access_type, 'agent_pack')
 
     def test_unassigned_skill_download_is_forbidden(self):
         response = self.client.get(

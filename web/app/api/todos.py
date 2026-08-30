@@ -15,6 +15,12 @@ from sqlalchemy import func
 from app import db
 from app.models import ClawTodo, ClawTodoLog, OpenClawInstance, User, SystemConfig, Project
 from app.api import api_bp
+from app.services.todo_schedule import (
+    TERMINAL_TODO_STATUSES,
+    cst_iso,
+    cst_now_naive,
+    todo_schedule_state,
+)
 
 
 def _is_admin_user():
@@ -153,7 +159,7 @@ def _notify_registration_pass(claw_id: int, gate: dict) -> None:
         'role': claw.role if claw else None,
         'project_name': claw.project_name if claw else None,
         'gate': gate,
-        'approved_at': datetime.now().isoformat(),
+        'approved_at': cst_iso(),
     }
     try:
         req = urllib.request.Request(
@@ -176,9 +182,16 @@ def list_todos(claw_id):
       category:     按类别筛选（routine/init/onboard）
       urgency:      按紧急度筛选（interrupt/flexible/background/periodic/retry）
       enabled_only: 是否只返回启用的（默认 true）
+      include_not_due: 是否包含尚未到期/已完成/已禁用定义（管理页面使用，默认 false）
     """
     OpenClawInstance.query.get_or_404(claw_id)
     enabled_only = request.args.get('enabled_only', 'true').lower() == 'true'
+    include_not_due_arg = request.args.get('include_not_due')
+    include_not_due = (
+        include_not_due_arg.lower() == 'true'
+        if include_not_due_arg is not None
+        else _get_session_user() is not None
+    )
     category = request.args.get('category')
     urgency = request.args.get('urgency')
 
@@ -191,7 +204,12 @@ def list_todos(claw_id):
         q = q.filter_by(urgency_level=urgency)
 
     todos = q.order_by(ClawTodo.created_at.desc()).all()
-    return jsonify([t.to_dict(with_today_status=True) for t in todos])
+    items = [todo.to_dict(with_today_status=True) for todo in todos]
+    if not include_not_due:
+        # Agent 默认只获得当前可执行任务。管理页面显式 include_not_due=true
+        # 查看完整定义，避免“已启用”被误解为“现在可执行”。
+        items = [item for item in items if item.get('is_due')]
+    return jsonify(items)
 
 
 @api_bp.route('/openclaws/<int:claw_id>/todos', methods=['POST'])
@@ -299,12 +317,26 @@ def complete_todo(claw_id, todo_id):
     """
     todo = ClawTodo.query.filter_by(id=todo_id, openclaw_id=claw_id).first_or_404()
     data = request.get_json() or {}
-    today = date.today()
+    now_cst = cst_now_naive()
+    today = now_cst.date()
     status = data.get('status', 'submitted')
 
     log = ClawTodoLog.query.filter_by(todo_id=todo_id, log_date=today).first()
+    state = todo_schedule_state(todo, today_log=log, now=now_cst)
+    if not state['is_due']:
+        # 已经提交/完成的同周期重放保持幂等，不再次修改完成时间。
+        if log and log.status in TERMINAL_TODO_STATUSES:
+            return jsonify(log.to_dict())
+        return jsonify({
+            'error': '待办尚未到执行时间',
+            'code': 'TODO_NOT_DUE',
+            'todo_id': todo.id,
+            'today_status': state['today_status'],
+            'due_at': state['due_at'],
+            'timezone': state['timezone'],
+        }), 409
     if log:
-        log.completed_at = datetime.now()
+        log.completed_at = now_cst
         log.result_summary = data.get('result_summary', log.result_summary)
         log.status = status
         if status == 'retry_failed':
@@ -312,7 +344,7 @@ def complete_todo(claw_id, todo_id):
     else:
         log = ClawTodoLog(
             todo_id=todo_id, openclaw_id=claw_id, log_date=today,
-            completed_at=datetime.now(),
+            completed_at=now_cst,
             result_summary=data.get('result_summary'),
             status=status,
             retry_count=1 if status == 'retry_failed' else 0,
@@ -328,7 +360,7 @@ def complete_todo(claw_id, todo_id):
     if status == 'submitted':
         notified_flag = bool(data.get('notified'))
         if notified_flag:
-            log.notified_at = datetime.now()
+            log.notified_at = now_cst
             log.notified_strategy = 'agent_self'
 
     # once 类型提交后自动关闭
@@ -420,7 +452,8 @@ def list_submitted_todos():
     if days is None:
         days = 0 if is_global else 3
     limit = request.args.get('limit', 500, type=int)
-    since = None if days <= 0 else (date.today() - timedelta(days=max(1, days) - 1))
+    since = None if days <= 0 else (
+        cst_now_naive().date() - timedelta(days=max(1, days) - 1))
 
     logs_query = (ClawTodoLog.query
                   .filter(ClawTodoLog.status == 'submitted'))
@@ -492,7 +525,8 @@ def list_claw_submitted_todos(claw_id):
     if days is None:
         days = 0
     limit = request.args.get('limit', 500, type=int)
-    since = None if days <= 0 else (date.today() - timedelta(days=max(1, days) - 1))
+    since = None if days <= 0 else (
+        cst_now_naive().date() - timedelta(days=max(1, days) - 1))
 
     logs_query = (ClawTodoLog.query
                   .filter(ClawTodoLog.status == 'submitted',
@@ -537,7 +571,7 @@ def skip_todo(claw_id, todo_id):
     """
     todo = ClawTodo.query.filter_by(id=todo_id, openclaw_id=claw_id).first_or_404()
     data = request.get_json() or {}
-    today = date.today()
+    today = cst_now_naive().date()
 
     log = ClawTodoLog.query.filter_by(todo_id=todo_id, log_date=today).first()
     if log:
@@ -559,7 +593,7 @@ def skip_todo(claw_id, todo_id):
 def todo_summary(claw_id):
     """待办完成汇总（支持日期筛选）"""
     OpenClawInstance.query.get_or_404(claw_id)
-    target_date = request.args.get('date', date.today().isoformat())
+    target_date = request.args.get('date', cst_now_naive().date().isoformat())
     target = date.fromisoformat(target_date)
     todos = ClawTodo.query.filter_by(openclaw_id=claw_id, enabled=True).all()
     logs = {l.todo_id: l for l in ClawTodoLog.query.filter_by(
@@ -618,7 +652,7 @@ def list_completed_todos(claw_id):
     days = request.args.get('days', 3, type=int)
     limit = request.args.get('limit', 50, type=int)
 
-    since = date.today() - timedelta(days=max(days, 1) - 1)
+    since = cst_now_naive().date() - timedelta(days=max(days, 1) - 1)
 
     # 查询指定天数内的执行记录
     logs = (ClawTodoLog.query

@@ -139,6 +139,187 @@ class AgentSystemContextTests(unittest.TestCase):
             first['system_context_digest'], second['system_context_digest'])
         self.assertEqual(64, len(first['system_context_digest']))
 
+    def test_codex_orchestrator_is_intersected_with_workflow_acl(self):
+        configured_policy = {
+            'allowed_workflow_create_definition_ids': [12, 25, 26],
+            'codex_orchestrator': {
+                'enabled': True,
+                'session_key': 'racinggo:flow-orchestrator',
+                'resume_on': ['blocked', 'failed', 'timeout'],
+                'allowed_next_flows': [12, 25, 26],
+                'max_retries': 2,
+                'review_success': True,
+            },
+        }
+
+        payload = agent_system_context.build_agent_system_context(
+            self.claw,
+            'codex',
+            [],
+            [],
+            workflow_create_definition_ids=[12, 25],
+            configured_policy=configured_policy,
+        )
+
+        policy = payload['system_context']['policy']
+        self.assertEqual(
+            [12, 25], policy['allowed_workflow_create_definition_ids'])
+        self.assertEqual(
+            [12, 25], policy['codex_orchestrator']['allowed_next_flows'])
+        self.assertIn('CODEX_ORCHESTRATOR_FLOWS_FILTERED',
+                      payload['context_warnings'])
+
+    def test_codex_remote_source_ids_are_canonical_and_downlinked(self):
+        configured_policy = {
+            'allowed_workflow_create_definition_ids': [1, 41],
+            'remote_source_id': 'racinggo_server',
+            'remote_source_ids': [
+                'racinggo_unity', 'racinggo_server'],
+        }
+
+        payload = agent_system_context.build_agent_system_context(
+            self.claw,
+            'codex',
+            [],
+            [],
+            workflow_create_definition_ids=[1, 41],
+            configured_policy=configured_policy,
+        )
+
+        self.assertEqual(
+            ['racinggo_server', 'racinggo_unity'],
+            payload['system_context']['policy']['remote_source_ids'],
+        )
+
+    def test_remote_source_policy_rejects_path_or_secret_fields(self):
+        for value in (
+            ['../ssh'],
+            ['racinggo_unity', ''],
+            'racinggo_unity',
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    agent_system_context.validate_system_context_policy({
+                        'allowed_workflow_create_definition_ids': [1],
+                        'remote_source_ids': value,
+                    })
+
+    def test_active_mission_adds_autonomous_dispatch_rule(self):
+        payload = agent_system_context.build_agent_system_context(
+            self.claw,
+            'codex',
+            [],
+            [],
+            workflow_create_definition_ids=[12],
+            workflow_missions=[{
+                'id': 91,
+                'mission_key': 'mission-autonomous-91',
+                'project_id': 6,
+                'definitions_api': '/api/v1/workflow-missions/91/definitions',
+                'dispatch_api': '/api/v1/workflow-missions/91/dispatch',
+            }],
+        )
+
+        rules = payload['system_context']['rules']
+        mission_rule = next(
+            item for item in rules
+            if item['name'] == 'codex_workflow_mission_autonomy')
+        self.assertIn('下一步选择由你自主决策', mission_rule['content'])
+        self.assertIn('/api/v1/workflow-missions/91/dispatch',
+                      mission_rule['content'])
+        self.assertIn('不需要 verify', mission_rule['content'])
+        self.assertIn(
+            {'id': 91, 'control_mode': 'agent_autonomous'},
+            payload['system_context']['policy']['active_workflow_missions'])
+
+    def test_invalid_codex_policy_fails_closed(self):
+        payload = agent_system_context.build_agent_system_context(
+            self.claw,
+            'codex',
+            [],
+            [],
+            workflow_create_definition_ids=[12, 25],
+            configured_policy={
+                'allowed_workflow_create_definition_ids': [12, 25],
+                'codex_orchestrator': {
+                    'enabled': True,
+                    'session_key': 'contains secret token',
+                },
+            },
+        )
+
+        policy = payload['system_context']['policy']
+        self.assertEqual([], policy['allowed_workflow_create_definition_ids'])
+        self.assertNotIn('codex_orchestrator', policy)
+        self.assertIn('CODEX_ORCHESTRATOR_POLICY_INVALID',
+                      payload['context_warnings'])
+
+    def test_missing_acl_fails_closed_for_configured_codex_policy(self):
+        payload = agent_system_context.build_agent_system_context(
+            self.claw,
+            'codex',
+            [],
+            [],
+            workflow_create_definition_ids=None,
+            configured_policy={
+                'allowed_workflow_create_definition_ids': [12, 25],
+                'codex_orchestrator': {
+                    'enabled': True,
+                    'session_key': 'racinggo:flow-orchestrator',
+                    'resume_on': ['blocked'],
+                    'allowed_next_flows': [12, 25],
+                    'max_retries': 2,
+                    'review_success': True,
+                },
+            },
+        )
+
+        policy = payload['system_context']['policy']
+        self.assertEqual([], policy['allowed_workflow_create_definition_ids'])
+        self.assertNotIn('codex_orchestrator', policy)
+        self.assertIn('WORKFLOW_CREATE_GRANTS_UNAVAILABLE',
+                      payload['context_warnings'])
+
+    def test_hermes_ignores_codex_orchestrator_override(self):
+        payload = agent_system_context.build_agent_system_context(
+            self.claw,
+            'hermes',
+            [],
+            [],
+            workflow_create_definition_ids=[12, 25, 26],
+            configured_policy={
+                'allowed_workflow_create_definition_ids': [12],
+                'codex_orchestrator': {
+                    'enabled': True,
+                    'session_key': 'racinggo:flow-orchestrator',
+                    'resume_on': ['blocked'],
+                    'allowed_next_flows': [12],
+                    'max_retries': 1,
+                    'review_success': False,
+                },
+            },
+        )
+
+        policy = payload['system_context']['policy']
+        self.assertEqual(
+            [12, 25, 26], policy['allowed_workflow_create_definition_ids'])
+        self.assertNotIn('codex_orchestrator', policy)
+
+    def test_policy_validator_rejects_unknown_or_secret_fields(self):
+        with self.assertRaises(ValueError):
+            agent_system_context.validate_system_context_policy({
+                'allowed_workflow_create_definition_ids': [12],
+                'codex_orchestrator': {
+                    'enabled': True,
+                    'session_key': 'safe-key',
+                    'resume_on': ['blocked'],
+                    'allowed_next_flows': [12],
+                    'max_retries': 1,
+                    'review_success': True,
+                    'thread_id': 'must-not-be-stored',
+                },
+            })
+
 
 if __name__ == '__main__':
     unittest.main()

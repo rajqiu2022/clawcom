@@ -499,6 +499,22 @@ class Skill(db.Model):
         return data
 
 
+class SkillUsageEvent(db.Model):
+    """一次成功的 Skill 完整内容 API 读取事件。"""
+    __tablename__ = 'skill_usage_events'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    skill_id = db.Column(db.Integer, db.ForeignKey('skills.id', ondelete='CASCADE'),
+                         nullable=False)
+    access_type = db.Column(db.String(32), nullable=False,
+                            comment='完整内容读取入口，如 detail/list_full/raw/file/pack')
+    accessed_at = db.Column(db.DateTime, nullable=False, default=_now, index=True)
+
+    __table_args__ = (
+        db.Index('ix_skill_usage_recent', 'skill_id', 'accessed_at'),
+    )
+
+
 class SkillFile(db.Model):
     """Skill 文档包文件（内容存 MySQL）"""
     __tablename__ = 'skill_files'
@@ -959,6 +975,7 @@ class WorkflowDefinition(db.Model):
     owner_type = db.Column(db.String(20), default='', index=True)
     owner_id = db.Column(db.Integer)
     executor_acl_json = db.Column(db.JSON)
+    editor_acl_json = db.Column(db.JSON)
     visibility_scope = db.Column(db.String(20), default='project')
 
     project = db.relationship('Project', backref='workflow_definitions')
@@ -982,6 +999,8 @@ class WorkflowDefinition(db.Model):
             'owner_id': self.owner_id,
             'executor_acl': self.executor_acl_json or {},
             'executor_acl_json': self.executor_acl_json or {},
+            'editor_acl': self.editor_acl_json or {},
+            'editor_acl_json': self.editor_acl_json or {},
             'visibility_scope': self.visibility_scope,
         }
         if not brief:
@@ -1022,10 +1041,23 @@ class WorkflowRun(db.Model):
     status = db.Column(db.String(30), default='pending', index=True)
     current_step_id = db.Column(db.String(100), default='')
     project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), index=True)
+    goal_id = db.Column(
+        db.Integer, db.ForeignKey('agent_goals.id'), nullable=True, index=True)
     triggered_by = db.Column(db.String(100), default='')
+    # Optional Codex/controller metadata. Nullable fields keep all legacy Run
+    # creation paths byte-for-byte compatible at the database boundary.
+    idempotency_key = db.Column(db.String(128))
+    idempotency_request_hash = db.Column(db.String(64))
+    controller_run_id = db.Column(db.String(160), index=True)
+    correlation_id = db.Column(db.String(160), index=True)
+    trigger_source = db.Column(db.String(64), index=True)
     context_json = db.Column(db.JSON)
     summary = db.Column(db.Text)
     blocker_json = db.Column(db.JSON)
+    business_conclusion = db.Column(db.String(64), default='')
+    automation_conclusion = db.Column(db.String(64), default='')
+    evidence_ingest_status = db.Column(db.String(64), default='')
+    outcomes_json = db.Column(db.JSON)
     started_at = db.Column(db.DateTime)
     finished_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=_now, index=True)
@@ -1034,21 +1066,48 @@ class WorkflowRun(db.Model):
     definition = db.relationship('WorkflowDefinition', backref='runs')
     project = db.relationship('Project', backref='workflow_runs')
 
+    __table_args__ = (
+        db.UniqueConstraint(
+            'definition_id', 'idempotency_key',
+            name='uq_workflow_run_definition_idempotency'),
+        db.Index(
+            'ix_workflow_runs_controller_created',
+            'controller_run_id', 'created_at'),
+        db.Index(
+            'ix_workflow_runs_correlation_created',
+            'correlation_id', 'created_at'),
+    )
+
     def to_dict(self, with_steps=True):
         data = {
             'id': self.id,
             'definition_id': self.definition_id,
+            'workflow_definition_id': self.definition_id,
             'run_name': self.run_name,
             'name': self.run_name,
             'status': self.status,
             'current_step_id': self.current_step_id,
             'project_id': self.project_id,
+            'goal_id': self.goal_id,
             'triggered_by': self.triggered_by,
+            'idempotency_key': self.idempotency_key,
+            'controller_run_id': self.controller_run_id,
+            'correlation_id': self.correlation_id,
+            'trigger_source': self.trigger_source,
             'context': self.context_json or {},
             'context_json': self.context_json or {},
             'summary': self.summary,
             'blocker': self.blocker_json or {},
             'blocker_json': self.blocker_json or {},
+            'workflow_status': self.status,
+            'business_conclusion': self.business_conclusion or '',
+            'automation_conclusion': self.automation_conclusion or '',
+            'evidence_ingest_status': self.evidence_ingest_status or '',
+            'outcomes': self.outcomes_json or {},
+            'restart_api': f'/api/v1/workflow-runs/{self.id}/restart',
+            'restart_count': int(
+                (self.context_json or {}).get('restart_count') or 0)
+                if isinstance(self.context_json, dict) else 0,
             'started_at': str(self.started_at) if self.started_at else None,
             'finished_at': str(self.finished_at) if self.finished_at else None,
             'created_at': str(self.created_at) if self.created_at else None,
@@ -1057,10 +1116,875 @@ class WorkflowRun(db.Model):
         if self.definition:
             data['definition'] = self.definition.to_dict()
             data['workflow_key'] = self.definition.workflow_key
+        snapshot_meta = (
+            (self.context_json or {}).get('testcase_library_snapshot')
+            if isinstance(self.context_json, dict) else None)
+        if isinstance(snapshot_meta, dict):
+            data['testcase_library_snapshot'] = snapshot_meta
         if with_steps:
             steps = sorted(self.steps, key=lambda s: s.position or 0)
             data['steps'] = [step.to_dict() for step in steps]
         return data
+
+
+class WorkflowMission(db.Model):
+    """One run-scoped autonomy grant owned by a main Agent."""
+    __tablename__ = 'workflow_missions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    mission_key = db.Column(db.String(128), nullable=False, unique=True)
+    project_id = db.Column(
+        db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    main_claw_id = db.Column(
+        db.Integer, db.ForeignKey('openclaw_instances.id'),
+        nullable=False, index=True)
+    objective = db.Column(db.Text, nullable=False)
+    status = db.Column(db.String(24), nullable=False, default='active', index=True)
+    control_mode = db.Column(
+        db.String(32), nullable=False, default='agent_autonomous')
+    allowed_definition_ids_json = db.Column(db.JSON)
+    denied_definition_ids_json = db.Column(db.JSON)
+    max_child_runs = db.Column(db.Integer, nullable=False, default=20)
+    child_run_count = db.Column(db.Integer, nullable=False, default=0)
+    max_retries_per_flow = db.Column(db.Integer, nullable=False, default=3)
+    allow_external_notification = db.Column(
+        db.Boolean, nullable=False, default=False)
+    allow_destructive_actions = db.Column(
+        db.Boolean, nullable=False, default=False)
+    context_json = db.Column(db.JSON)
+    created_by_type = db.Column(db.String(16), nullable=False)
+    created_by_id = db.Column(db.Integer, nullable=False)
+    created_by_name = db.Column(db.String(160), default='')
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    completed_at = db.Column(db.DateTime)
+    cancelled_at = db.Column(db.DateTime)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(
+        db.DateTime, default=_now, onupdate=_now, nullable=False)
+
+    project = db.relationship('Project', backref='workflow_missions')
+    main_claw = db.relationship('OpenClawInstance', backref='workflow_missions')
+
+    __table_args__ = (
+        db.Index('ix_workflow_mission_main_status', 'main_claw_id', 'status'),
+        db.Index('ix_workflow_mission_project_status', 'project_id', 'status'),
+    )
+
+    def effective_status(self, now=None):
+        current = now or _now()
+        if self.status == 'active' and self.expires_at <= current:
+            return 'expired'
+        return self.status or 'active'
+
+    def to_dict(self, with_dispatches=False):
+        data = {
+            'id': self.id,
+            'mission_key': self.mission_key,
+            'project_id': self.project_id,
+            'main_claw_id': self.main_claw_id,
+            'main_claw_name': self.main_claw.name if self.main_claw else '',
+            'objective': self.objective,
+            'status': self.status,
+            'effective_status': self.effective_status(),
+            'control_mode': self.control_mode or 'agent_autonomous',
+            'allowed_definition_ids': self.allowed_definition_ids_json or [],
+            'denied_definition_ids': self.denied_definition_ids_json or [],
+            'max_child_runs': self.max_child_runs or 20,
+            'child_run_count': self.child_run_count or 0,
+            'max_retries_per_flow': self.max_retries_per_flow or 3,
+            'allow_external_notification': bool(
+                self.allow_external_notification),
+            'allow_destructive_actions': bool(self.allow_destructive_actions),
+            'context': self.context_json or {},
+            'created_by_type': self.created_by_type,
+            'created_by_id': self.created_by_id,
+            'created_by_name': self.created_by_name or '',
+            'expires_at': str(self.expires_at) if self.expires_at else None,
+            'completed_at': str(self.completed_at) if self.completed_at else None,
+            'cancelled_at': str(self.cancelled_at) if self.cancelled_at else None,
+            'version': self.version or 1,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if with_dispatches:
+            data['dispatches'] = [
+                item.to_dict() for item in sorted(
+                    self.dispatches, key=lambda row: row.id or 0)]
+        return data
+
+
+class MissionStage(db.Model):
+    """Fenced, optimistically locked execution stage within a Mission."""
+    __tablename__ = 'mission_stages'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    mission_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_missions.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    stage_key = db.Column(db.String(80), nullable=False)
+    stage_version = db.Column(db.Integer, nullable=False, default=1)
+    role_key = db.Column(db.String(80), nullable=False)
+    assigned_claw_id = db.Column(
+        db.Integer, db.ForeignKey('openclaw_instances.id'), index=True)
+    workflow_run_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_runs.id'), index=True)
+    state = db.Column(db.String(32), nullable=False, default='ready', index=True)
+    input_snapshot_json = db.Column(db.JSON, nullable=False)
+    output_artifact_id = db.Column(
+        db.Integer, db.ForeignKey('agent_artifacts.id'), index=True)
+    active_handoff_id = db.Column(db.Integer, index=True)
+    evidence_refs_json = db.Column(db.JSON, nullable=False)
+    last_reason_code = db.Column(db.String(80), nullable=False, default='')
+    fencing_token = db.Column(db.Integer, nullable=False, default=0)
+    retry_count = db.Column(db.Integer, nullable=False, default=0)
+    repair_count = db.Column(db.Integer, nullable=False, default=0)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(
+        db.DateTime, default=_now, onupdate=_now, nullable=False)
+
+    mission = db.relationship(
+        'WorkflowMission', backref=db.backref(
+            'stages', cascade='all, delete-orphan'))
+    assigned_claw = db.relationship('OpenClawInstance')
+    workflow_run = db.relationship('WorkflowRun')
+    output_artifact = db.relationship(
+        'AgentArtifact', foreign_keys=[output_artifact_id])
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'mission_id', 'stage_key', 'stage_version',
+            name='uq_mission_stage_key_version'),
+        db.Index(
+            'ix_mission_stage_mission_state',
+            'mission_id', 'state', 'updated_at'),
+    )
+
+    def to_dict(self, include_input=False):
+        data = {
+            'id': self.id,
+            'mission_id': self.mission_id,
+            'stage_key': self.stage_key,
+            'stage_version': self.stage_version or 1,
+            'role_key': self.role_key,
+            'assigned_claw_id': self.assigned_claw_id,
+            'assigned_claw_name': (
+                self.assigned_claw.name if self.assigned_claw else ''),
+            'workflow_run_id': self.workflow_run_id,
+            'state': self.state,
+            'output_artifact_id': self.output_artifact_id,
+            'active_handoff_id': self.active_handoff_id,
+            'evidence_refs': self.evidence_refs_json or [],
+            'last_reason_code': self.last_reason_code or '',
+            'fencing_token': self.fencing_token or 0,
+            'retry_count': self.retry_count or 0,
+            'repair_count': self.repair_count or 0,
+            'version': self.version or 1,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if include_input:
+            data['input_snapshot'] = self.input_snapshot_json or {}
+        return data
+
+
+class MissionHandoff(db.Model):
+    """Immutable, versioned hand-off contract between two Mission Stages."""
+    __tablename__ = 'mission_handoffs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    mission_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_missions.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    mission_version = db.Column(db.Integer, nullable=False)
+    handoff_version = db.Column(db.Integer, nullable=False, default=1)
+    source_stage_record_id = db.Column(
+        db.Integer, db.ForeignKey('mission_stages.id'), nullable=False,
+        index=True)
+    target_stage_record_id = db.Column(
+        db.Integer, db.ForeignKey('mission_stages.id'), nullable=False,
+        index=True)
+    source_stage_key = db.Column(db.String(80), nullable=False)
+    target_stage_key = db.Column(db.String(80), nullable=False)
+    from_role = db.Column(db.String(80), nullable=False)
+    to_role = db.Column(db.String(80), nullable=False)
+    objective = db.Column(db.Text, nullable=False)
+    input_artifact_refs_json = db.Column(db.JSON, nullable=False)
+    accepted_findings_json = db.Column(db.JSON, nullable=False)
+    open_questions_json = db.Column(db.JSON, nullable=False)
+    constraints_json = db.Column(db.JSON, nullable=False)
+    acceptance_criteria_json = db.Column(db.JSON, nullable=False)
+    known_pitfalls_json = db.Column(db.JSON, nullable=False)
+    recommended_next_actions_json = db.Column(db.JSON, nullable=False)
+    evidence_refs_json = db.Column(db.JSON, nullable=False)
+    source_run_id = db.Column(db.Integer, index=True)
+    source_step_id = db.Column(db.String(100), nullable=False, default='')
+
+    producer_type = db.Column(db.String(16), nullable=False)
+    producer_id = db.Column(db.Integer, nullable=False)
+    producer_name = db.Column(db.String(160), nullable=False, default='')
+    producer_claw_id = db.Column(
+        db.Integer, db.ForeignKey('openclaw_instances.id'), index=True)
+    producer_role_key = db.Column(db.String(80), nullable=False, default='')
+    producer_provider = db.Column(db.String(50), nullable=False, default='')
+    producer_profile_version = db.Column(
+        db.Integer, nullable=False, default=1)
+
+    status = db.Column(
+        db.String(24), nullable=False, default='draft', index=True)
+    content_sha256 = db.Column(db.String(71), nullable=False, index=True)
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_sha256 = db.Column(db.String(71), nullable=False)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    decision_reason_code = db.Column(db.String(80), nullable=False, default='')
+    decision_comment = db.Column(db.Text)
+    decided_by_type = db.Column(db.String(16))
+    decided_by_id = db.Column(db.Integer)
+    decided_by_name = db.Column(db.String(160))
+    submitted_at = db.Column(db.DateTime)
+    accepted_at = db.Column(db.DateTime)
+    rejected_at = db.Column(db.DateTime)
+    superseded_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(
+        db.DateTime, default=_now, onupdate=_now, nullable=False)
+
+    mission = db.relationship('WorkflowMission', backref='handoffs')
+    source_stage = db.relationship(
+        'MissionStage', foreign_keys=[source_stage_record_id])
+    target_stage = db.relationship(
+        'MissionStage', foreign_keys=[target_stage_record_id])
+    producer_claw = db.relationship('OpenClawInstance')
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'mission_id', 'source_stage_key', 'target_stage_key',
+            'handoff_version', name='uq_mission_handoff_path_version'),
+        db.UniqueConstraint(
+            'mission_id', 'producer_type', 'producer_id', 'idempotency_key',
+            name='uq_mission_handoff_producer_idempotency'),
+        db.Index(
+            'ix_mission_handoff_target_status',
+            'mission_id', 'target_stage_record_id', 'status'),
+        db.Index(
+            'ix_mission_handoff_source_run_step',
+            'source_run_id', 'source_step_id'),
+    )
+
+    def to_dict(self):
+        return {
+            'schema': 1,
+            'handoff_id': self.id,
+            'id': self.id,
+            'handoff_version': self.handoff_version or 1,
+            'version': self.version or 1,
+            'mission_id': self.mission_id,
+            'mission_version': self.mission_version,
+            'source_stage_id': self.source_stage_key,
+            'target_stage_id': self.target_stage_key,
+            'from_role': self.from_role,
+            'to_role': self.to_role,
+            'objective': self.objective,
+            'input_artifact_refs': self.input_artifact_refs_json or [],
+            'accepted_findings': self.accepted_findings_json or [],
+            'open_questions': self.open_questions_json or [],
+            'constraints': self.constraints_json or [],
+            'acceptance_criteria': self.acceptance_criteria_json or [],
+            'known_pitfalls': self.known_pitfalls_json or [],
+            'recommended_next_actions': (
+                self.recommended_next_actions_json or []),
+            'evidence_refs': self.evidence_refs_json or [],
+            'source_run_id': self.source_run_id,
+            'source_step_id': self.source_step_id or '',
+            'producer': {
+                'type': self.producer_type,
+                'id': self.producer_id,
+                'name': self.producer_name or '',
+                'claw_id': self.producer_claw_id,
+                'role_key': self.producer_role_key or '',
+                'provider': self.producer_provider or '',
+                'profile_version': self.producer_profile_version or 1,
+            },
+            'status': self.status,
+            'content_sha256': self.content_sha256,
+            'request_sha256': self.request_sha256,
+            'decision': {
+                'reason_code': self.decision_reason_code or '',
+                'comment': self.decision_comment or '',
+                'decided_by_type': self.decided_by_type,
+                'decided_by_id': self.decided_by_id,
+                'decided_by_name': self.decided_by_name or '',
+            },
+            'submitted_at': (
+                str(self.submitted_at) if self.submitted_at else None),
+            'accepted_at': (
+                str(self.accepted_at) if self.accepted_at else None),
+            'rejected_at': (
+                str(self.rejected_at) if self.rejected_at else None),
+            'superseded_at': (
+                str(self.superseded_at) if self.superseded_at else None),
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class AgentEvalDataset(db.Model):
+    """Versioned evaluation dataset for one project and Agent role."""
+    __tablename__ = 'agent_eval_datasets'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(
+        db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    dataset_key = db.Column(db.String(100), nullable=False)
+    role_key = db.Column(db.String(80), nullable=False, index=True)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    split = db.Column(db.String(24), nullable=False, index=True)
+    status = db.Column(
+        db.String(24), nullable=False, default='draft', index=True)
+    rubric_version = db.Column(db.Integer, nullable=False, default=1)
+    dataset_sha256 = db.Column(db.String(71), nullable=False, default='')
+    review_policy_json = db.Column(db.JSON, nullable=False, default=dict)
+    review_status = db.Column(
+        db.String(24), nullable=False, default='not_required', index=True)
+    review_records_json = db.Column(db.JSON, nullable=False, default=list)
+    review_completed_at = db.Column(db.DateTime)
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_sha256 = db.Column(db.String(71), nullable=False)
+    created_by_type = db.Column(db.String(16), nullable=False)
+    created_by_id = db.Column(db.Integer, nullable=False)
+    created_by_name = db.Column(db.String(160), nullable=False, default='')
+    approved_by_type = db.Column(db.String(16))
+    approved_by_id = db.Column(db.Integer)
+    approved_by_name = db.Column(db.String(160))
+    frozen_at = db.Column(db.DateTime)
+    retired_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(
+        db.DateTime, default=_now, onupdate=_now, nullable=False)
+
+    project = db.relationship('Project', backref='agent_eval_datasets')
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'project_id', 'dataset_key', 'version',
+            name='uq_agent_eval_dataset_project_key_version'),
+        db.UniqueConstraint(
+            'project_id', 'created_by_type', 'created_by_id',
+            'idempotency_key', name='uq_agent_eval_dataset_idempotency'),
+        db.Index(
+            'ix_agent_eval_dataset_project_role_status',
+            'project_id', 'role_key', 'status'),
+    )
+
+    def to_dict(self, include_cases=False, include_hidden=False):
+        latest_reviews = {}
+        for item in (self.review_records_json or []):
+            if isinstance(item, dict) and item.get('reviewer_key'):
+                latest_reviews[str(item['reviewer_key'])] = item
+        data = {
+            'id': self.id,
+            'project_id': self.project_id,
+            'dataset_key': self.dataset_key,
+            'role_key': self.role_key,
+            'version': self.version or 1,
+            'split': self.split,
+            'status': self.status,
+            'rubric_version': self.rubric_version or 1,
+            'dataset_sha256': self.dataset_sha256 or '',
+            'review_policy': self.review_policy_json or {},
+            'review_status': self.review_status or 'not_required',
+            'review_records': self.review_records_json or [],
+            'approved_reviewer_count': sum(
+                1 for item in latest_reviews.values()
+                if item.get('decision') == 'approved'),
+            'review_completed_at': (
+                str(self.review_completed_at)
+                if self.review_completed_at else None),
+            'created_by': {
+                'type': self.created_by_type,
+                'id': self.created_by_id,
+                'name': self.created_by_name or '',
+            },
+            'approved_by': {
+                'type': self.approved_by_type,
+                'id': self.approved_by_id,
+                'name': self.approved_by_name or '',
+            } if self.approved_by_id else None,
+            'frozen_at': str(self.frozen_at) if self.frozen_at else None,
+            'retired_at': str(self.retired_at) if self.retired_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if include_cases:
+            rows = sorted(self.cases, key=lambda item: (item.case_key, item.id))
+            data['cases'] = [
+                row.to_dict(include_hidden=include_hidden) for row in rows]
+        return data
+
+
+class AgentEvalCase(db.Model):
+    """Immutable input and expected contract inside an Eval Dataset version."""
+    __tablename__ = 'agent_eval_cases'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    dataset_id = db.Column(
+        db.Integer, db.ForeignKey('agent_eval_datasets.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    case_key = db.Column(db.String(120), nullable=False)
+    input_snapshot_json = db.Column(db.JSON, nullable=False)
+    expected_contract_json = db.Column(db.JSON, nullable=False)
+    required_evidence_json = db.Column(db.JSON, nullable=False)
+    deterministic_checks_json = db.Column(db.JSON, nullable=False)
+    allowed_variance_json = db.Column(db.JSON, nullable=False)
+    hidden_tags_json = db.Column(db.JSON, nullable=False)
+    input_sha256 = db.Column(db.String(71), nullable=False, index=True)
+    status = db.Column(
+        db.String(24), nullable=False, default='active', index=True)
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_sha256 = db.Column(db.String(71), nullable=False)
+    created_by_type = db.Column(db.String(16), nullable=False)
+    created_by_id = db.Column(db.Integer, nullable=False)
+    created_by_name = db.Column(db.String(160), nullable=False, default='')
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+
+    dataset = db.relationship(
+        'AgentEvalDataset', backref=db.backref(
+            'cases', cascade='all, delete-orphan'))
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'dataset_id', 'case_key', name='uq_agent_eval_case_dataset_key'),
+        db.UniqueConstraint(
+            'dataset_id', 'created_by_type', 'created_by_id',
+            'idempotency_key', name='uq_agent_eval_case_idempotency'),
+    )
+
+    def to_dict(self, include_hidden=False):
+        data = {
+            'id': self.id,
+            'dataset_id': self.dataset_id,
+            'case_key': self.case_key,
+            'input_snapshot': self.input_snapshot_json or {},
+            'expected_contract': self.expected_contract_json or {},
+            'required_evidence': self.required_evidence_json or [],
+            'deterministic_checks': self.deterministic_checks_json or [],
+            'allowed_variance': self.allowed_variance_json or {},
+            'input_sha256': self.input_sha256,
+            'status': self.status,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+        if include_hidden:
+            data['hidden_tags'] = self.hidden_tags_json or []
+        return data
+
+
+class AgentEvalRun(db.Model):
+    """One reproducible execution of an Eval Case by a concrete Agent build."""
+    __tablename__ = 'agent_eval_runs'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(
+        db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    case_id = db.Column(
+        db.Integer, db.ForeignKey('agent_eval_cases.id'),
+        nullable=False, index=True)
+    dataset_version = db.Column(db.Integer, nullable=False)
+    case_input_sha256 = db.Column(db.String(71), nullable=False)
+    claw_id = db.Column(
+        db.Integer, db.ForeignKey('openclaw_instances.id'),
+        nullable=False, index=True)
+    profile_version = db.Column(db.Integer, nullable=False)
+    provider = db.Column(db.String(50), nullable=False)
+    model = db.Column(db.String(120), nullable=False)
+    worker_release = db.Column(db.String(160), nullable=False)
+    mission_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_missions.id'), index=True)
+    workflow_run_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_runs.id'), index=True)
+    artifact_id = db.Column(
+        db.Integer, db.ForeignKey('agent_artifacts.id'), index=True)
+    status = db.Column(db.String(32), nullable=False, index=True)
+    usage_json = db.Column(db.JSON, nullable=False)
+    timing_json = db.Column(db.JSON, nullable=False)
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_sha256 = db.Column(db.String(71), nullable=False)
+    created_by_type = db.Column(db.String(16), nullable=False)
+    created_by_id = db.Column(db.Integer, nullable=False)
+    created_by_name = db.Column(db.String(160), nullable=False, default='')
+    started_at = db.Column(db.DateTime)
+    finished_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(
+        db.DateTime, default=_now, onupdate=_now, nullable=False)
+
+    project = db.relationship('Project')
+    case = db.relationship('AgentEvalCase', backref='eval_runs')
+    claw = db.relationship('OpenClawInstance')
+    mission = db.relationship('WorkflowMission')
+    workflow_run = db.relationship('WorkflowRun')
+    artifact = db.relationship('AgentArtifact')
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'project_id', 'created_by_type', 'created_by_id',
+            'idempotency_key', name='uq_agent_eval_run_idempotency'),
+        db.Index(
+            'ix_agent_eval_run_project_status_created',
+            'project_id', 'status', 'created_at'),
+    )
+
+    def to_dict(self, include_scores=True):
+        data = {
+            'id': self.id,
+            'project_id': self.project_id,
+            'case_id': self.case_id,
+            'case_key': self.case.case_key if self.case else '',
+            'dataset_id': self.case.dataset_id if self.case else None,
+            'dataset_version': self.dataset_version,
+            'case_input_sha256': self.case_input_sha256,
+            'claw_id': self.claw_id,
+            'claw_name': self.claw.name if self.claw else '',
+            'profile_version': self.profile_version,
+            'provider': self.provider,
+            'model': self.model,
+            'worker_release': self.worker_release,
+            'mission_id': self.mission_id,
+            'workflow_run_id': self.workflow_run_id,
+            'artifact_id': self.artifact_id,
+            'status': self.status,
+            'usage': self.usage_json or {},
+            'timing': self.timing_json or {},
+            'started_at': str(self.started_at) if self.started_at else None,
+            'finished_at': str(self.finished_at) if self.finished_at else None,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if include_scores:
+            rows = sorted(self.scores, key=lambda item: item.id or 0)
+            data['scores'] = [row.to_dict() for row in rows]
+        return data
+
+
+class AgentEvalScore(db.Model):
+    """Version-preserving deterministic, human, or judge score."""
+    __tablename__ = 'agent_eval_scores'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    eval_run_id = db.Column(
+        db.Integer, db.ForeignKey('agent_eval_runs.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    scorer_type = db.Column(db.String(24), nullable=False, index=True)
+    scorer_version = db.Column(db.Integer, nullable=False)
+    scorer_actor_type = db.Column(db.String(16), nullable=False)
+    scorer_actor_id = db.Column(db.Integer, nullable=False)
+    scorer_name = db.Column(db.String(160), nullable=False, default='')
+    dimension_scores_json = db.Column(db.JSON, nullable=False)
+    fatal_violations_json = db.Column(db.JSON, nullable=False)
+    total_score = db.Column(db.Float, nullable=False)
+    review_comment = db.Column(db.Text)
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_sha256 = db.Column(db.String(71), nullable=False)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+
+    eval_run = db.relationship(
+        'AgentEvalRun', backref=db.backref(
+            'scores', cascade='all, delete-orphan'))
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'eval_run_id', 'scorer_type', 'scorer_actor_type',
+            'scorer_actor_id', 'scorer_version',
+            name='uq_agent_eval_score_scorer_version'),
+        db.UniqueConstraint(
+            'scorer_actor_type', 'scorer_actor_id', 'idempotency_key',
+            name='uq_agent_eval_score_idempotency'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'eval_run_id': self.eval_run_id,
+            'scorer_type': self.scorer_type,
+            'scorer_version': self.scorer_version,
+            'scorer': {
+                'type': self.scorer_actor_type,
+                'id': self.scorer_actor_id,
+                'name': self.scorer_name or '',
+            },
+            'dimension_scores': self.dimension_scores_json or {},
+            'fatal_violations': self.fatal_violations_json or [],
+            'total_score': float(self.total_score or 0),
+            'review_comment': self.review_comment or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class WorkflowMissionDispatch(db.Model):
+    """Idempotent child-Run decision made by the Mission main Agent."""
+    __tablename__ = 'workflow_mission_dispatches'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    mission_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_missions.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    definition_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_definitions.id'),
+        nullable=False, index=True)
+    # Deliberately not an FK: Mission audit/idempotency must survive a user
+    # deleting the child Run from the Workflow history page.
+    workflow_run_id = db.Column(
+        db.Integer, nullable=False, unique=True, index=True)
+    decision_key = db.Column(db.String(128), nullable=False)
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_hash = db.Column(db.String(64), nullable=False)
+    reason = db.Column(db.Text)
+    status = db.Column(db.String(24), nullable=False, default='created')
+    created_by_claw_id = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+
+    mission = db.relationship(
+        'WorkflowMission', backref=db.backref(
+            'dispatches', cascade='all, delete-orphan'))
+    definition = db.relationship('WorkflowDefinition')
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'mission_id', 'idempotency_key',
+            name='uq_workflow_mission_dispatch_idempotency'),
+        db.Index(
+            'ix_workflow_mission_dispatch_definition',
+            'mission_id', 'definition_id', 'created_at'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'mission_id': self.mission_id,
+            'workflow_definition_id': self.definition_id,
+            'definition_id': self.definition_id,
+            'workflow_run_id': self.workflow_run_id,
+            'decision_key': self.decision_key,
+            'idempotency_key': self.idempotency_key,
+            'reason': self.reason or '',
+            'status': self.status or 'created',
+            'created_by_claw_id': self.created_by_claw_id,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class WorkflowRunLibrarySnapshot(db.Model):
+    """Immutable testcase-library content frozen for one Workflow Run."""
+    __tablename__ = 'workflow_run_library_snapshots'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    workflow_run_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_runs.id', ondelete='CASCADE'),
+        nullable=False, unique=True, index=True)
+    # Deliberately not an FK: historical Runs must survive library deletion.
+    library_id = db.Column(db.Integer, nullable=False, index=True)
+    library_revision = db.Column(db.Integer, nullable=False)
+    snapshot_version = db.Column(db.Integer, nullable=False)
+    content_hash = db.Column(db.String(71), nullable=False, index=True)
+    case_ids_json = db.Column(db.JSON)
+    case_count = db.Column(db.Integer, nullable=False, default=0)
+    snapshot_json = db.Column(db.JSON, nullable=False)
+    frozen_by = db.Column(db.String(160), default='system')
+    frozen_at = db.Column(db.DateTime, default=_now, index=True)
+
+    run = db.relationship('WorkflowRun')
+
+    __table_args__ = (
+        db.Index(
+            'ix_workflow_run_library_snapshot_library_revision',
+            'library_id', 'library_revision'),
+    )
+
+    def to_dict(self, with_cases=False):
+        data = {
+            'id': self.id,
+            'workflow_run_id': self.workflow_run_id,
+            'library_id': self.library_id,
+            'revision': self.library_revision,
+            'snapshot_version': self.snapshot_version,
+            'content_hash': self.content_hash,
+            'case_ids': self.case_ids_json or [],
+            'case_count': self.case_count,
+            'frozen_by': self.frozen_by or 'system',
+            'frozen_at': str(self.frozen_at) if self.frozen_at else None,
+            'cases_api': (
+                f'/api/v1/workflow-runs/{self.workflow_run_id}/'
+                'testcase-library-snapshot'),
+        }
+        if with_cases:
+            case_ids = set(self.case_ids_json or [])
+            snapshot = self.snapshot_json or {}
+            data['mindmap'] = snapshot.get('mindmap')
+            data['cases'] = [
+                case for case in (snapshot.get('cases') or [])
+                if case.get('id') in case_ids
+            ]
+            data['snapshot_schema'] = snapshot.get('schema')
+        return data
+
+
+# ============== Shared execution resource leases (P0-E) ==============
+
+class ResourceLease(db.Model):
+    """Auditable TTL lease; one row per resource in an atomic lease group."""
+    __tablename__ = 'resource_leases'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    lease_group_id = db.Column(db.String(64), nullable=False, index=True)
+    resource_key = db.Column(db.String(255), nullable=False, index=True)
+    resource_type = db.Column(db.String(32), nullable=False, index=True)
+    # Equals resource_key only while active. UNIQUE makes cross-process
+    # acquisition race-safe while allowing unlimited historical NULL rows.
+    active_slot = db.Column(db.String(255), unique=True, index=True)
+    owner_type = db.Column(db.String(40), nullable=False, index=True)
+    owner_id = db.Column(db.String(160), nullable=False, index=True)
+    controller_run_id = db.Column(db.String(160), index=True)
+    priority = db.Column(db.Integer, nullable=False, default=0)
+    status = db.Column(db.String(24), nullable=False, default='active', index=True)
+    ttl_seconds = db.Column(db.Integer, nullable=False, default=900)
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_hash = db.Column(db.String(71), nullable=False)
+    holder_actor_type = db.Column(db.String(24), nullable=False)
+    holder_actor_id = db.Column(db.Integer, nullable=False)
+    holder_actor_name = db.Column(db.String(160), default='')
+    metadata_json = db.Column(db.JSON)
+    acquired_at = db.Column(db.DateTime, default=_now, index=True)
+    heartbeat_at = db.Column(db.DateTime, default=_now)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    released_at = db.Column(db.DateTime)
+    release_reason = db.Column(db.String(255), default='')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'owner_type', 'owner_id', 'idempotency_key', 'resource_key',
+            name='uq_resource_lease_owner_idempotency_resource'),
+        db.Index(
+            'ix_resource_lease_owner_status',
+            'owner_type', 'owner_id', 'status'),
+        db.Index(
+            'ix_resource_lease_status_expiry', 'status', 'expires_at'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'lease_group_id': self.lease_group_id,
+            'resource_key': self.resource_key,
+            'resource_type': self.resource_type,
+            'owner_type': self.owner_type,
+            'owner_id': self.owner_id,
+            'controller_run_id': self.controller_run_id,
+            'priority': self.priority,
+            'status': self.status,
+            'ttl_seconds': self.ttl_seconds,
+            'idempotency_key': self.idempotency_key,
+            'holder_actor_type': self.holder_actor_type,
+            'holder_actor_id': self.holder_actor_id,
+            'holder_actor_name': self.holder_actor_name or '',
+            'metadata': self.metadata_json or {},
+            'acquired_at': str(self.acquired_at) if self.acquired_at else None,
+            'heartbeat_at': str(self.heartbeat_at) if self.heartbeat_at else None,
+            'expires_at': str(self.expires_at) if self.expires_at else None,
+            'released_at': str(self.released_at) if self.released_at else None,
+            'release_reason': self.release_reason or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class ResourceLeaseEvent(db.Model):
+    """Append-only acquisition, heartbeat, release and expiry audit."""
+    __tablename__ = 'resource_lease_events'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    lease_id = db.Column(
+        db.Integer, db.ForeignKey('resource_leases.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    lease_group_id = db.Column(db.String(64), nullable=False, index=True)
+    event_type = db.Column(db.String(32), nullable=False, index=True)
+    actor_type = db.Column(db.String(24), nullable=False)
+    actor_id = db.Column(db.Integer)
+    actor_name = db.Column(db.String(160), default='')
+    payload_json = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    lease = db.relationship(
+        'ResourceLease', backref=db.backref(
+            'events', lazy='dynamic', cascade='all, delete-orphan'))
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'lease_id': self.lease_id,
+            'lease_group_id': self.lease_group_id,
+            'event_type': self.event_type,
+            'actor_type': self.actor_type,
+            'actor_id': self.actor_id,
+            'actor_name': self.actor_name or '',
+            'payload': self.payload_json or {},
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+# ============== Generic entity lineage (P0-F) ==============
+
+class EntityRelation(db.Model):
+    """Project-scoped, idempotent directed edge between arbitrary Hub entities."""
+    __tablename__ = 'entity_relations'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(
+        db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    from_type = db.Column(db.String(64), nullable=False, index=True)
+    from_id = db.Column(db.String(500), nullable=False, index=True)
+    relation_type = db.Column(db.String(64), nullable=False, index=True)
+    to_type = db.Column(db.String(64), nullable=False, index=True)
+    to_id = db.Column(db.String(500), nullable=False, index=True)
+    # SHA-256 of the project and five natural-key fields avoids oversized
+    # utf8mb4 composite indexes while retaining cross-process idempotency.
+    relation_key = db.Column(db.String(71), nullable=False, unique=True)
+    metadata_json = db.Column(db.JSON)
+    created_by = db.Column(db.String(160), default='system')
+    updated_by = db.Column(db.String(160), default='system')
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now, index=True)
+
+    project = db.relationship('Project')
+
+    __table_args__ = (
+        db.Index(
+            'ix_entity_relation_from',
+            'project_id', 'from_type', 'from_id'),
+        db.Index(
+            'ix_entity_relation_to',
+            'project_id', 'to_type', 'to_id'),
+        db.Index(
+            'ix_entity_relation_project_updated',
+            'project_id', 'updated_at'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'from_type': self.from_type,
+            'from_id': self.from_id,
+            'relation_type': self.relation_type,
+            'to_type': self.to_type,
+            'to_id': self.to_id,
+            'metadata': self.metadata_json or {},
+            'created_by': self.created_by or 'system',
+            'updated_by': self.updated_by or 'system',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
 
 
 class WorkflowRunStep(db.Model):
@@ -1091,6 +2015,7 @@ class WorkflowRunStep(db.Model):
     logs_json = db.Column(db.JSON)
     blocker_json = db.Column(db.JSON)
     gate_result_json = db.Column(db.JSON)
+    contract_result_json = db.Column(db.JSON)
     dispatched_at = db.Column(db.DateTime)
     started_at = db.Column(db.DateTime)
     finished_at = db.Column(db.DateTime)
@@ -1099,6 +2024,10 @@ class WorkflowRunStep(db.Model):
     updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
     claimed_by = db.Column(db.String(120), default='', index=True)
     claimed_at = db.Column(db.DateTime)
+    claimed_claw_id = db.Column(db.Integer, index=True)
+    claim_expires_at = db.Column(db.DateTime, index=True)
+    claim_lease_seconds = db.Column(db.Integer, default=180)
+    claim_fencing_token = db.Column(db.Integer, nullable=False, default=0)
     outputs_json = db.Column(db.JSON)
     branch_result_json = db.Column(db.JSON)
     heartbeat_at = db.Column(db.DateTime)
@@ -1141,7 +2070,7 @@ class WorkflowRunStep(db.Model):
             'prompt': config.get('prompt', '') if isinstance(config, dict) else '',
             'references': config.get('references', []) if isinstance(config, dict) else [],
             'input_vars': config.get('input_vars', {}) if isinstance(config, dict) else {},
-            'outputs': config.get('outputs', []) if isinstance(config, dict) else [],
+            'declared_outputs': config.get('outputs', []) if isinstance(config, dict) else [],
             'attempt_no': self.attempt_no,
             'summary': self.summary or '',
             'metrics': self.metrics_json or {},
@@ -1154,6 +2083,12 @@ class WorkflowRunStep(db.Model):
             'blocker_json': self.blocker_json or {},
             'gate_result': self.gate_result_json or {},
             'gate_result_json': self.gate_result_json or {},
+            'contract_result': self.contract_result_json or {},
+            'contract_result_json': self.contract_result_json or {},
+            'result_code': (
+                (self.contract_result_json or {}).get('code')
+                if isinstance(self.contract_result_json, dict) else ''),
+            'outputs': self.outputs_json or {},
             'outputs_json': self.outputs_json or {},
             'branch_result_json': self.branch_result_json or {},
             'dispatched_at': str(self.dispatched_at) if self.dispatched_at else None,
@@ -1164,6 +2099,10 @@ class WorkflowRunStep(db.Model):
             'updated_at': str(self.updated_at) if self.updated_at else None,
             'claimed_by': self.claimed_by,
             'claimed_at': str(self.claimed_at) if self.claimed_at else None,
+            'claimed_claw_id': self.claimed_claw_id,
+            'claim_expires_at': str(self.claim_expires_at) if self.claim_expires_at else None,
+            'claim_lease_seconds': self.claim_lease_seconds or 180,
+            'claim_fencing_token': self.claim_fencing_token or 0,
             'heartbeat_at': str(self.heartbeat_at) if self.heartbeat_at else None,
             'heartbeat_by': self.heartbeat_by,
             'heartbeat_count': self.heartbeat_count or 0,
@@ -1266,6 +2205,419 @@ class WorkflowArtifact(db.Model):
             'test_report_id': self.test_report_id,
             'metadata': self.metadata_json or {},
             'metadata_json': self.metadata_json or {},
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class AgentArtifact(db.Model):
+    """Versioned, reviewable hand-off between Agents within one project."""
+    __tablename__ = 'agent_artifacts'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(
+        db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    mission_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_missions.id'),
+        nullable=False, index=True)
+    stage_id = db.Column(db.String(80), nullable=False)
+    workflow_run_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_runs.id'), index=True)
+    artifact_type = db.Column(db.String(80), nullable=False, index=True)
+    schema_version = db.Column(db.Integer, nullable=False, default=1)
+    artifact_version = db.Column(db.Integer, nullable=False, default=1)
+
+    producer_type = db.Column(db.String(16), nullable=False)
+    producer_id = db.Column(db.Integer, nullable=False)
+    producer_name = db.Column(db.String(160), nullable=False, default='')
+    producer_claw_id = db.Column(
+        db.Integer, db.ForeignKey('openclaw_instances.id'), index=True)
+    producer_role_key = db.Column(db.String(80), nullable=False, default='')
+    producer_provider = db.Column(db.String(50), nullable=False, default='')
+    producer_profile_version = db.Column(
+        db.Integer, nullable=False, default=1)
+
+    input_baseline_sha256 = db.Column(db.String(71), nullable=False, default='')
+    content_json = db.Column(db.JSON, nullable=False)
+    content_sha256 = db.Column(db.String(71), nullable=False, index=True)
+    contract_validation_json = db.Column(
+        db.JSON, nullable=False,
+        default=lambda: {'mode': 'legacy_generic', 'valid': True, 'errors': []})
+    validated_at = db.Column(db.DateTime)
+    status = db.Column(
+        db.String(24), nullable=False, default='draft', index=True)
+
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_sha256 = db.Column(db.String(64), nullable=False)
+    review_comment = db.Column(db.Text)
+    reviewed_by_type = db.Column(db.String(16))
+    reviewed_by_id = db.Column(db.Integer)
+    reviewed_by_name = db.Column(db.String(160))
+    submitted_at = db.Column(db.DateTime)
+    reviewed_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(
+        db.DateTime, default=_now, onupdate=_now, nullable=False)
+
+    project = db.relationship('Project', backref='agent_artifacts')
+    mission = db.relationship('WorkflowMission', backref='agent_artifacts')
+    workflow_run = db.relationship('WorkflowRun', backref='agent_artifacts')
+    producer_claw = db.relationship('OpenClawInstance')
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'mission_id', 'stage_id', 'artifact_type', 'artifact_version',
+            name='uq_agent_artifact_mission_stage_type_version'),
+        db.UniqueConstraint(
+            'project_id', 'producer_type', 'producer_id', 'idempotency_key',
+            name='uq_agent_artifact_producer_idempotency'),
+        db.Index(
+            'ix_agent_artifact_mission_status_created',
+            'mission_id', 'status', 'created_at'),
+    )
+
+    def to_dict(self):
+        return {
+            'schema': 1,
+            'artifact_id': self.id,
+            'id': self.id,
+            'project_id': self.project_id,
+            'mission_id': self.mission_id,
+            'stage_id': self.stage_id,
+            'run_id': self.workflow_run_id,
+            'workflow_run_id': self.workflow_run_id,
+            'artifact_type': self.artifact_type,
+            'schema_version': self.schema_version or 1,
+            'artifact_version': self.artifact_version or 1,
+            'input_baseline_sha256': self.input_baseline_sha256 or '',
+            'content': self.content_json or {},
+            'content_sha256': self.content_sha256,
+            'validation': self.contract_validation_json or {},
+            'validated_at': (
+                str(self.validated_at) if self.validated_at else None),
+            'status': self.status,
+            'producer': {
+                'type': self.producer_type,
+                'id': self.producer_id,
+                'name': self.producer_name or '',
+                'claw_id': self.producer_claw_id,
+                'role_key': self.producer_role_key or '',
+                'provider': self.producer_provider or '',
+                'profile_version': self.producer_profile_version or 1,
+            },
+            'review': {
+                'comment': self.review_comment or '',
+                'reviewed_by_type': self.reviewed_by_type,
+                'reviewed_by_id': self.reviewed_by_id,
+                'reviewed_by_name': self.reviewed_by_name or '',
+                'reviewed_at': (
+                    str(self.reviewed_at) if self.reviewed_at else None),
+            },
+            'submitted_at': (
+                str(self.submitted_at) if self.submitted_at else None),
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+# ============== Automation closed-loop candidates (P0-B) ==============
+
+class AutomationCaseCandidate(db.Model):
+    """A proposed automation case that has not entered a production library."""
+    __tablename__ = 'automation_case_candidates'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(
+        db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    title = db.Column(db.String(300), nullable=False)
+    module_key = db.Column(db.String(200), default='', index=True)
+    source_type = db.Column(db.String(64), default='manual', index=True)
+    source_refs_json = db.Column(db.JSON)
+    case_draft_json = db.Column(db.JSON)
+    required_capabilities_json = db.Column(db.JSON)
+    state = db.Column(db.String(40), nullable=False, default='DISCOVERED', index=True)
+    qualification_outcome = db.Column(db.String(48), index=True)
+    qualification_run_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_runs.id'), index=True)
+    qualification_evidence_json = db.Column(db.JSON)
+    production_library_id = db.Column(
+        db.Integer, db.ForeignKey('test_case_libraries.id'), index=True)
+    production_case_id = db.Column(
+        db.Integer, db.ForeignKey('test_cases.id'), index=True)
+    capability_gap_id = db.Column(
+        db.Integer, db.ForeignKey('capability_gaps.id'), index=True)
+    dedupe_key = db.Column(db.String(255), nullable=False)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    created_by = db.Column(db.String(160), default='system')
+    updated_by = db.Column(db.String(160), default='system')
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now, index=True)
+
+    project = db.relationship('Project', backref='automation_case_candidates')
+    qualification_run = db.relationship(
+        'WorkflowRun', backref='qualified_case_candidates')
+    production_library = db.relationship(
+        'TestCaseLibrary', foreign_keys=[production_library_id])
+    production_case = db.relationship('TestCase', foreign_keys=[production_case_id])
+    capability_gap = db.relationship(
+        'CapabilityGap', foreign_keys=[capability_gap_id],
+        backref='case_candidates')
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'project_id', 'dedupe_key',
+            name='uq_automation_candidate_project_dedupe'),
+        db.Index(
+            'ix_automation_candidate_project_state_updated',
+            'project_id', 'state', 'updated_at'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'title': self.title,
+            'module_key': self.module_key or '',
+            'source_type': self.source_type or 'manual',
+            'source_refs': self.source_refs_json or [],
+            'case_draft': self.case_draft_json or {},
+            'required_capabilities': self.required_capabilities_json or [],
+            'state': self.state,
+            'qualification_outcome': self.qualification_outcome,
+            'qualification_run_id': self.qualification_run_id,
+            'qualification_evidence': self.qualification_evidence_json or {},
+            'production_library_id': self.production_library_id,
+            'production_case_id': self.production_case_id,
+            'capability_gap_id': self.capability_gap_id,
+            'dedupe_key': self.dedupe_key,
+            'version': self.version,
+            'created_by': self.created_by,
+            'updated_by': self.updated_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class AutomationCaseCandidateEvent(db.Model):
+    """Append-only audit history for candidate changes and qualification."""
+    __tablename__ = 'automation_case_candidate_events'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    candidate_id = db.Column(
+        db.Integer, db.ForeignKey('automation_case_candidates.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    event_type = db.Column(db.String(48), nullable=False, index=True)
+    from_state = db.Column(db.String(40))
+    to_state = db.Column(db.String(40))
+    version_before = db.Column(db.Integer)
+    version_after = db.Column(db.Integer)
+    payload_json = db.Column(db.JSON)
+    actor_type = db.Column(db.String(24), nullable=False)
+    actor_id = db.Column(db.Integer, nullable=False)
+    actor_name = db.Column(db.String(160), default='')
+    request_id = db.Column(db.String(128), index=True)
+    idempotency_key = db.Column(db.String(128))
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    candidate = db.relationship(
+        'AutomationCaseCandidate', backref=db.backref(
+            'events', cascade='all, delete-orphan', order_by='AutomationCaseCandidateEvent.id'))
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'candidate_id', 'event_type', 'actor_type', 'actor_id',
+            'idempotency_key',
+            name='uq_candidate_event_actor_idempotency'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'candidate_id': self.candidate_id,
+            'event_type': self.event_type,
+            'from_state': self.from_state,
+            'to_state': self.to_state,
+            'version_before': self.version_before,
+            'version_after': self.version_after,
+            'payload': self.payload_json or {},
+            'actor_type': self.actor_type,
+            'actor_id': self.actor_id,
+            'actor_name': self.actor_name or '',
+            'request_id': self.request_id,
+            'idempotency_key': self.idempotency_key,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class AutomationCapability(db.Model):
+    """Versioned project-scoped automation capability catalog entry."""
+    __tablename__ = 'automation_capabilities'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(
+        db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    capability_key = db.Column(db.String(255), nullable=False)
+    name = db.Column(db.String(300), nullable=False)
+    operations_json = db.Column(db.JSON)
+    observables_json = db.Column(db.JSON)
+    reset_hooks_json = db.Column(db.JSON)
+    platforms_json = db.Column(db.JSON)
+    status = db.Column(
+        db.String(32), nullable=False, default='available', index=True)
+    implementation_version = db.Column(db.String(80), default='')
+    health_checked_at = db.Column(db.DateTime, index=True)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    created_by = db.Column(db.String(160), default='system')
+    updated_by = db.Column(db.String(160), default='system')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'project_id', 'capability_key',
+            name='uq_automation_capability_project_key'),
+        db.Index(
+            'ix_automation_capability_project_status',
+            'project_id', 'status'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'key': self.capability_key,
+            'name': self.name,
+            'operations': self.operations_json or [],
+            'observables': self.observables_json or [],
+            'reset_hooks': self.reset_hooks_json or [],
+            'platforms': self.platforms_json or [],
+            'status': self.status,
+            'implementation_version': self.implementation_version or '',
+            'health_checked_at': (
+                str(self.health_checked_at) if self.health_checked_at else None),
+            'version': self.version,
+            'created_by': self.created_by or 'system',
+            'updated_by': self.updated_by or 'system',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class CapabilityGap(db.Model):
+    """Missing automation capability tracked through delivery and requeue."""
+    __tablename__ = 'capability_gaps'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(
+        db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    gap_key = db.Column(db.String(255), nullable=False)
+    title = db.Column(db.String(300), nullable=False)
+    missing_capabilities_json = db.Column(db.JSON)
+    required_operations_json = db.Column(db.JSON)
+    required_observables_json = db.Column(db.JSON)
+    required_reset_hooks_json = db.Column(db.JSON)
+    evidence_json = db.Column(db.JSON)
+    status = db.Column(db.String(32), nullable=False, default='open', index=True)
+    candidate_requeue_pending = db.Column(db.Boolean, default=False, index=True)
+    owner = db.Column(db.String(160), default='', index=True)
+    development_requirement_ref = db.Column(db.String(500), default='', index=True)
+    development_requirement_url = db.Column(db.String(1000), default='')
+    development_requirement_status = db.Column(db.String(64), default='')
+    resolution_json = db.Column(db.JSON)
+    resolved_by = db.Column(db.String(160), default='')
+    resolved_at = db.Column(db.DateTime)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    created_by = db.Column(db.String(160), default='system')
+    updated_by = db.Column(db.String(160), default='system')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    project = db.relationship('Project', backref='capability_gaps')
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'project_id', 'gap_key', name='uq_capability_gap_project_key'),
+        db.Index(
+            'ix_capability_gap_project_status', 'project_id', 'status'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'gap_key': self.gap_key,
+            'title': self.title,
+            'missing_capabilities': self.missing_capabilities_json or [],
+            'required_operations': self.required_operations_json or [],
+            'required_observables': self.required_observables_json or [],
+            'required_reset_hooks': self.required_reset_hooks_json or [],
+            'evidence': self.evidence_json or {},
+            'status': self.status,
+            'candidate_requeue_pending': bool(self.candidate_requeue_pending),
+            'owner': self.owner or '',
+            'development_requirement': {
+                'ref': self.development_requirement_ref or '',
+                'url': self.development_requirement_url or '',
+                'status': self.development_requirement_status or '',
+            },
+            'resolution': self.resolution_json or {},
+            'resolved_by': self.resolved_by or '',
+            'resolved_at': str(self.resolved_at) if self.resolved_at else None,
+            'version': self.version,
+            'created_by': self.created_by,
+            'updated_by': self.updated_by,
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class CapabilityGapEvent(db.Model):
+    """Append-only Capability Gap lifecycle and candidate requeue audit."""
+    __tablename__ = 'capability_gap_events'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    capability_gap_id = db.Column(
+        db.Integer, db.ForeignKey('capability_gaps.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    event_type = db.Column(db.String(48), nullable=False, index=True)
+    from_status = db.Column(db.String(32))
+    to_status = db.Column(db.String(32))
+    version_before = db.Column(db.Integer)
+    version_after = db.Column(db.Integer)
+    payload_json = db.Column(db.JSON)
+    actor_type = db.Column(db.String(24), nullable=False)
+    actor_id = db.Column(db.Integer, nullable=False)
+    actor_name = db.Column(db.String(160), default='')
+    request_id = db.Column(db.String(128), index=True)
+    idempotency_key = db.Column(db.String(128))
+    request_hash = db.Column(db.String(64))
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    capability_gap = db.relationship(
+        'CapabilityGap', backref=db.backref(
+            'events', cascade='all, delete-orphan',
+            order_by='CapabilityGapEvent.id'))
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'capability_gap_id', 'event_type', 'actor_type', 'actor_id',
+            'idempotency_key', name='uq_gap_event_actor_idempotency'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'capability_gap_id': self.capability_gap_id,
+            'event_type': self.event_type,
+            'from_status': self.from_status,
+            'to_status': self.to_status,
+            'version_before': self.version_before,
+            'version_after': self.version_after,
+            'payload': self.payload_json or {},
+            'actor_type': self.actor_type,
+            'actor_id': self.actor_id,
+            'actor_name': self.actor_name or '',
+            'request_id': self.request_id,
+            'idempotency_key': self.idempotency_key,
             'created_at': str(self.created_at) if self.created_at else None,
         }
 
@@ -1636,6 +2988,9 @@ class TestCaseLibrary(db.Model):
                            comment='创建人 username/claw_name')
     updated_by = db.Column(db.String(100), default='',
                            comment='最后修改人 username/claw_name')
+    # Formal immutable revision chain used by automation candidate promotion.
+    revision = db.Column(db.Integer, nullable=False, default=0)
+    content_hash = db.Column(db.String(71), nullable=False, default='')
 
     # 脑图结构（JSON格式）
     mindmap = db.Column(db.JSON, comment='脑图结构')
@@ -1662,6 +3017,8 @@ class TestCaseLibrary(db.Model):
                                  if self.review_status_at else None),
             'created_by': self.created_by or self.owner or '',
             'updated_by': self.updated_by or '',
+            'revision': int(self.revision or 0),
+            'content_hash': self.content_hash or '',
             'case_count': self.cases.count(),
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
@@ -1736,6 +3093,116 @@ class TestCase(db.Model):
             'tapd_story_title': self.tapd_story_title or '',
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+# ============== Formal testcase-library revisions (P0-C) ==============
+
+class TestCaseLibraryRevision(db.Model):
+    """Append-only, full-content snapshot of one production library revision."""
+    __tablename__ = 'testcase_library_revisions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    library_id = db.Column(
+        db.Integer, db.ForeignKey('test_case_libraries.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    revision = db.Column(db.Integer, nullable=False)
+    content_hash = db.Column(db.String(71), nullable=False, index=True)
+    case_count = db.Column(db.Integer, nullable=False, default=0)
+    snapshot_json = db.Column(db.JSON, nullable=False)
+    source_type = db.Column(db.String(32), nullable=False, default='baseline')
+    source_reference = db.Column(db.String(160), default='')
+    rollback_from_revision = db.Column(db.Integer)
+    message = db.Column(db.String(500), default='')
+    created_by = db.Column(db.String(160), default='system')
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    library = db.relationship(
+        'TestCaseLibrary', backref=db.backref(
+            'formal_revisions', lazy='dynamic', cascade='all, delete-orphan'))
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'library_id', 'revision', name='uq_testcase_library_revision'),
+        db.Index(
+            'ix_testcase_library_revision_created',
+            'library_id', 'created_at'),
+    )
+
+    def to_dict(self, with_snapshot=False):
+        data = {
+            'id': self.id,
+            'library_id': self.library_id,
+            'revision': self.revision,
+            'content_hash': self.content_hash,
+            'case_count': self.case_count,
+            'source_type': self.source_type,
+            'source_reference': self.source_reference or '',
+            'rollback_from_revision': self.rollback_from_revision,
+            'message': self.message or '',
+            'created_by': self.created_by or 'system',
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+        if with_snapshot:
+            data['snapshot'] = self.snapshot_json or {}
+        return data
+
+
+class TestCaseLibraryPromotion(db.Model):
+    """Idempotency and audit record for promotion and rollback mutations."""
+    __tablename__ = 'testcase_library_promotions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    library_id = db.Column(
+        db.Integer, db.ForeignKey('test_case_libraries.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    operation_type = db.Column(
+        db.String(24), nullable=False, default='promotion', index=True)
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_hash = db.Column(db.String(71), nullable=False)
+    before_revision = db.Column(db.Integer, nullable=False)
+    after_revision = db.Column(db.Integer, nullable=False)
+    content_hash = db.Column(db.String(71), nullable=False)
+    rollback_from_revision = db.Column(db.Integer)
+    candidate_ids_json = db.Column(db.JSON)
+    created_case_ids_json = db.Column(db.JSON)
+    updated_case_ids_json = db.Column(db.JSON)
+    source_run_ids_json = db.Column(db.JSON)
+    message = db.Column(db.String(500), default='')
+    response_json = db.Column(db.JSON, nullable=False)
+    created_by = db.Column(db.String(160), default='system')
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    library = db.relationship(
+        'TestCaseLibrary', backref=db.backref(
+            'formal_promotions', lazy='dynamic', cascade='all, delete-orphan'))
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'library_id', 'idempotency_key',
+            name='uq_testcase_library_promotion_idempotency'),
+        db.Index(
+            'ix_testcase_library_promotion_created',
+            'library_id', 'created_at'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'library_id': self.library_id,
+            'operation_type': self.operation_type,
+            'idempotency_key': self.idempotency_key,
+            'before_revision': self.before_revision,
+            'after_revision': self.after_revision,
+            'content_hash': self.content_hash,
+            'rollback_from_revision': self.rollback_from_revision,
+            'candidate_ids': self.candidate_ids_json or [],
+            'created_case_ids': self.created_case_ids_json or [],
+            'updated_case_ids': self.updated_case_ids_json or [],
+            'source_run_ids': self.source_run_ids_json or [],
+            'message': self.message or '',
+            'created_by': self.created_by or 'system',
+            'created_at': str(self.created_at) if self.created_at else None,
         }
 
 
@@ -2032,6 +3499,237 @@ class ClawMessage(db.Model):
         }
 
 
+# ============== 主题聊天室模型 ==============
+
+class ChatRoom(db.Model):
+    """多人主题聊天室。与 ClawMessage 点对点链路完全隔离。"""
+    __tablename__ = 'chat_rooms'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True, index=True)
+    title = db.Column(db.String(160), nullable=False)
+    description = db.Column(db.Text)
+    status = db.Column(db.String(20), nullable=False, default='active', index=True)
+    agent_policy = db.Column(db.String(30), nullable=False, default='mention_only')
+    created_by_type = db.Column(db.String(20), nullable=False)
+    created_by_id = db.Column(db.Integer, nullable=False)
+    owner_member_id = db.Column(db.Integer, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now, nullable=False)
+    deleted_at = db.Column(db.DateTime)
+
+    members = db.relationship(
+        'ChatRoomMember', backref='room', lazy='dynamic',
+        cascade='all, delete-orphan', foreign_keys='ChatRoomMember.room_id')
+    messages = db.relationship(
+        'ChatRoomMessage', backref='room', lazy='dynamic',
+        cascade='all, delete-orphan')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'title': self.title,
+            'description': self.description or '',
+            'status': self.status,
+            'agent_policy': self.agent_policy or 'mention_only',
+            'owner_member_id': self.owner_member_id,
+            'created_by': {'type': self.created_by_type, 'id': self.created_by_id},
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class ChatRoomGuestIdentity(db.Model):
+    """外部成员的稳定身份；短期访问 Token 到期后身份与历史仍保留。"""
+    __tablename__ = 'chat_room_guest_identities'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    display_name = db.Column(db.String(80), nullable=False)
+    resume_secret_hash = db.Column(db.String(64), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='active')
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now, nullable=False)
+
+
+class ChatRoomMember(db.Model):
+    """聊天室成员，member_id 是消息归属的稳定主体。"""
+    __tablename__ = 'chat_room_members'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    room_id = db.Column(db.Integer, db.ForeignKey('chat_rooms.id'), nullable=False, index=True)
+    member_type = db.Column(db.String(20), nullable=False)  # user / agent / guest
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True, index=True)
+    claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'), nullable=True, index=True)
+    guest_identity_id = db.Column(
+        db.Integer, db.ForeignKey('chat_room_guest_identities.id'), nullable=True, index=True)
+    display_name = db.Column(db.String(80), nullable=False)
+    role = db.Column(db.String(20), nullable=False, default='member')  # owner/admin/member
+    status = db.Column(db.String(20), nullable=False, default='active', index=True)
+    last_read_message_id = db.Column(db.Integer, nullable=True)
+    invitation_notified_at = db.Column(db.DateTime)
+    last_event_id = db.Column(db.Integer, nullable=True)
+    joined_at = db.Column(db.DateTime, default=_now, nullable=False)
+    removed_at = db.Column(db.DateTime)
+
+    guest_identity = db.relationship('ChatRoomGuestIdentity')
+
+    __table_args__ = (
+        db.UniqueConstraint('room_id', 'user_id', name='uq_chat_room_member_user'),
+        db.UniqueConstraint('room_id', 'claw_id', name='uq_chat_room_member_claw'),
+        db.UniqueConstraint('room_id', 'guest_identity_id', name='uq_chat_room_member_guest'),
+        db.Index('ix_chat_room_member_room_status', 'room_id', 'status'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'room_id': self.room_id,
+            'member_type': self.member_type,
+            'user_id': self.user_id,
+            'claw_id': self.claw_id,
+            'display_name': self.display_name,
+            'role': self.role,
+            'status': self.status,
+            'last_read_message_id': self.last_read_message_id,
+            'joined_at': str(self.joined_at) if self.joined_at else None,
+        }
+
+
+class ChatRoomMessage(db.Model):
+    __tablename__ = 'chat_room_messages'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    room_id = db.Column(db.Integer, db.ForeignKey('chat_rooms.id'), nullable=False, index=True)
+    sender_member_id = db.Column(
+        db.Integer, db.ForeignKey('chat_room_members.id'), nullable=False, index=True)
+    client_message_id = db.Column(db.String(100), nullable=False)
+    message_type = db.Column(db.String(20), nullable=False, default='text')
+    content = db.Column(db.Text, nullable=False)
+    reply_to_message_id = db.Column(db.Integer, nullable=True)
+    origin_delivery_id = db.Column(db.Integer, nullable=True, index=True)
+    automation_depth = db.Column(db.Integer, nullable=False, default=0)
+    status = db.Column(db.String(20), nullable=False, default='active')
+    created_at = db.Column(db.DateTime, default=_now, nullable=False, index=True)
+    edited_at = db.Column(db.DateTime)
+    deleted_at = db.Column(db.DateTime)
+
+    sender = db.relationship('ChatRoomMember', foreign_keys=[sender_member_id])
+    __table_args__ = (
+        db.UniqueConstraint(
+            'room_id', 'sender_member_id', 'client_message_id',
+            name='uq_chat_room_message_idempotency'),
+        db.Index('ix_chat_room_message_room_id', 'room_id', 'id'),
+    )
+
+    def to_dict(self, mentions=None):
+        return {
+            'id': self.id,
+            'room_id': self.room_id,
+            'sender_member_id': self.sender_member_id,
+            'sender': self.sender.to_dict() if self.sender else None,
+            'client_message_id': self.client_message_id,
+            'message_type': self.message_type,
+            'content': self.content,
+            'reply_to_message_id': self.reply_to_message_id,
+            'origin_delivery_id': self.origin_delivery_id,
+            'automation_depth': int(self.automation_depth or 0),
+            'mentions': mentions or [],
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class ChatRoomEvent(db.Model):
+    """供 Agent SSE 消费的房间级可信事件。"""
+    __tablename__ = 'chat_room_events'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    room_id = db.Column(db.Integer, db.ForeignKey('chat_rooms.id'), nullable=False, index=True)
+    event_type = db.Column(db.String(40), nullable=False, index=True)
+    actor_member_id = db.Column(db.Integer, nullable=True)
+    payload_json = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+
+
+class ChatRoomMention(db.Model):
+    __tablename__ = 'chat_room_mentions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    message_id = db.Column(
+        db.Integer, db.ForeignKey('chat_room_messages.id'), nullable=False, index=True)
+    mention_type = db.Column(db.String(20), nullable=False)  # member / all
+    member_id = db.Column(db.Integer, db.ForeignKey('chat_room_members.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+
+
+class ChatRoomDelivery(db.Model):
+    __tablename__ = 'chat_room_deliveries'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    room_id = db.Column(db.Integer, db.ForeignKey('chat_rooms.id'), nullable=False, index=True)
+    message_id = db.Column(
+        db.Integer, db.ForeignKey('chat_room_messages.id'), nullable=False, index=True)
+    member_id = db.Column(
+        db.Integer, db.ForeignKey('chat_room_members.id'), nullable=False, index=True)
+    status = db.Column(db.String(20), nullable=False, default='unread', index=True)
+    notify_agent = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    delivered_at = db.Column(db.DateTime)
+    read_at = db.Column(db.DateTime)
+    processing_at = db.Column(db.DateTime)
+    done_at = db.Column(db.DateTime)
+    failed_reason = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('message_id', 'member_id', name='uq_chat_room_delivery_member'),
+        db.Index('ix_chat_room_delivery_member_status', 'member_id', 'status'),
+    )
+
+
+class ChatRoomInvite(db.Model):
+    __tablename__ = 'chat_room_invites'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    room_id = db.Column(db.Integer, db.ForeignKey('chat_rooms.id'), nullable=False, index=True)
+    token_hash = db.Column(db.String(64), nullable=False, unique=True)
+    label = db.Column(db.String(100))
+    status = db.Column(db.String(20), nullable=False, default='active')
+    max_joins = db.Column(db.Integer, nullable=True)
+    join_count = db.Column(db.Integer, nullable=False, default=0)
+    expires_at = db.Column(db.DateTime)
+    created_by_member_id = db.Column(
+        db.Integer, db.ForeignKey('chat_room_members.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    revoked_at = db.Column(db.DateTime)
+
+
+class ChatRoomGuestSession(db.Model):
+    __tablename__ = 'chat_room_guest_sessions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    room_id = db.Column(db.Integer, db.ForeignKey('chat_rooms.id'), nullable=False, index=True)
+    member_id = db.Column(db.Integer, db.ForeignKey('chat_room_members.id'), nullable=False, index=True)
+    access_token_hash = db.Column(db.String(64), nullable=False, unique=True)
+    status = db.Column(db.String(20), nullable=False, default='active', index=True)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    last_activity_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    revoked_at = db.Column(db.DateTime)
+
+
+class ChatRoomAudit(db.Model):
+    __tablename__ = 'chat_room_audits'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    room_id = db.Column(db.Integer, nullable=True, index=True)
+    actor_member_id = db.Column(db.Integer, nullable=True)
+    action = db.Column(db.String(50), nullable=False, index=True)
+    target_type = db.Column(db.String(30))
+    target_id = db.Column(db.Integer)
+    detail_json = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+
+
 class AuditLog(db.Model):
     """操作审计日志"""
     __tablename__ = 'audit_logs'
@@ -2139,14 +3837,19 @@ class ClawTodo(db.Model):
         }
         if with_today_status:
             from datetime import date as d, datetime as dt, time as t, timedelta
-            today = d.today()
+            from app.services.todo_schedule import (
+                cst_now_naive,
+                todo_schedule_state,
+            )
+            now_cst = cst_now_naive()
+            today = now_cst.date()
             today_log = ClawTodoLog.query.filter_by(
                 todo_id=self.id, log_date=today
             ).first()
 
             # ============ today_status / today_completed_at ============
+            effective_log = today_log
             if today_log:
-                data['today_status'] = today_log.status
                 data['today_completed_at'] = str(today_log.completed_at) if today_log.completed_at else None
             else:
                 # 跨天兜底：仅 once 类型保留"昨天 submitted 维持待审核"语义，
@@ -2160,14 +3863,15 @@ class ClawTodo(db.Model):
                                             ClawTodoLog.created_at.desc())
                                   .first())
                     if latest_log and latest_log.status == 'submitted':
-                        data['today_status'] = 'submitted'
+                        effective_log = latest_log
                         data['today_completed_at'] = str(latest_log.completed_at) if latest_log.completed_at else None
                     else:
-                        data['today_status'] = 'pending'
                         data['today_completed_at'] = None
                 else:
-                    data['today_status'] = 'pending'
                     data['today_completed_at'] = None
+
+            data.update(todo_schedule_state(
+                self, today_log=effective_log, now=now_cst))
 
             # ============ cycle_started_at / created_at 覆盖 ============
             # 解决「周期任务模板 created_at 是几个月前，OpenClaw 误判为旧任务、
@@ -2356,6 +4060,22 @@ class ClawSidecarConfig(db.Model):
                         comment='是否启用 sidecar；关闭后 sidecar 自停')
     config_version = db.Column(db.Integer, default=1,
                                comment='每次配置变更 +1，sidecar 拿到比本地大就 reload')
+    system_context_policy_json = db.Column(
+        db.JSON,
+        comment='Hub 管控的 trusted context 策略；原始值不直接下发',
+    )
+    runtime_config_json = db.Column(
+        db.JSON,
+        comment='无密钥的运行时身份：kind/provider/mode/platform/release 等',
+    )
+    config_owner = db.Column(
+        db.String(20), default='hub', nullable=False,
+        comment='运行配置归属：hub / worker；worker 时 Hub 不下发 llm_apply',
+    )
+    runtime_reported_at = db.Column(
+        db.DateTime,
+        comment='Worker 最近一次上报结构化运行时身份的时间',
+    )
     sidecar_version = db.Column(db.String(30), default='',
                                 comment='sidecar 上报的自身版本号')
     last_heartbeat_at = db.Column(db.DateTime,
@@ -2380,6 +4100,11 @@ class ClawSidecarConfig(db.Model):
             'wecom_enabled': bool(self.wecom_enabled),
             'enabled': bool(self.enabled),
             'config_version': self.config_version,
+            'config_owner': self.config_owner or 'hub',
+            'worker_runtime': self.runtime_config_json,
+            'runtime_reported_at': (
+                str(self.runtime_reported_at)
+                if self.runtime_reported_at else None),
             'sidecar_version': self.sidecar_version,
             'last_heartbeat_at': str(self.last_heartbeat_at) if self.last_heartbeat_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
@@ -2387,10 +4112,75 @@ class ClawSidecarConfig(db.Model):
         }
 
 
+class WorkerRelease(db.Model):
+    """Hub-imported immutable Claw Worker release candidate."""
+    __tablename__ = 'worker_releases'
+    __table_args__ = (
+        db.UniqueConstraint('release_id', 'platform',
+                            name='uq_worker_release_platform'),
+    )
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    release_id = db.Column(db.String(80), nullable=False)
+    source_repository = db.Column(db.String(500), default='')
+    source_ref = db.Column(db.String(120), default='')
+    source_commit = db.Column(db.String(40), nullable=False)
+    committed_at = db.Column(db.String(40), default='')
+    channel = db.Column(db.String(30), default='candidate')
+    signature_status = db.Column(db.String(30), default='unsigned')
+    release_manifest_sha256 = db.Column(db.String(64), nullable=False)
+    platform = db.Column(db.String(40), nullable=False,
+                         default='linux-x86_64')
+    platform_manifest_sha256 = db.Column(db.String(64), nullable=False)
+    package_manifest_sha256 = db.Column(db.String(64), nullable=False)
+    artifact_filename = db.Column(db.String(255), nullable=False)
+    artifact_sha256 = db.Column(db.String(64), nullable=False)
+    artifact_size = db.Column(db.BigInteger, nullable=False)
+    artifact_path = db.Column(db.String(1000), nullable=False,
+                              comment='Hub 本机私有制品路径，不通过 API 返回')
+    approval_status = db.Column(db.String(20), default='candidate',
+                                comment='candidate/approved/rejected')
+    is_default = db.Column(db.Boolean, default=False, nullable=False)
+    imported_by = db.Column(db.String(100), default='system')
+    imported_at = db.Column(db.DateTime, default=_now)
+    approved_by = db.Column(db.String(100), default='')
+    approved_at = db.Column(db.DateTime)
+    rejected_by = db.Column(db.String(100), default='')
+    rejected_at = db.Column(db.DateTime)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'release_id': self.release_id,
+            'source_repository': self.source_repository,
+            'source_ref': self.source_ref,
+            'source_commit': self.source_commit,
+            'committed_at': self.committed_at,
+            'channel': self.channel,
+            'signature_status': self.signature_status,
+            'release_manifest_sha256': self.release_manifest_sha256,
+            'platform': self.platform,
+            'platform_manifest_sha256': self.platform_manifest_sha256,
+            'package_manifest_sha256': self.package_manifest_sha256,
+            'artifact_filename': self.artifact_filename,
+            'artifact_sha256': self.artifact_sha256,
+            'artifact_size': self.artifact_size,
+            'approval_status': self.approval_status,
+            'is_default': bool(self.is_default),
+            'imported_by': self.imported_by,
+            'imported_at': str(self.imported_at) if self.imported_at else None,
+            'approved_by': self.approved_by,
+            'approved_at': str(self.approved_at) if self.approved_at else None,
+            'rejected_by': self.rejected_by,
+            'rejected_at': str(self.rejected_at) if self.rejected_at else None,
+        }
+
+
 class AgentDeployment(db.Model):
     """Hub 代建 Agent 的远端部署记录
 
-    每次 Hub 通过 SSH 在远端机器部署 / 重新部署一个 OpenClaw 对应的 agent（首期：Hermes Docker），
+    每次 Hub 通过 SSH 在远端机器部署 / 重新部署一个 OpenClaw 对应的 Hermes Agent
+    或 Claw Worker（Codex SDK），
     都会落一条记录。OpenClaw 创建本身不会因为部署失败回滚——部署状态独立追踪，
     支持后续重试和详情查看。
 
@@ -2402,7 +4192,7 @@ class AgentDeployment(db.Model):
     openclaw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
                             nullable=False, comment='关联 OpenClaw ID')
     agent_type = db.Column(db.String(20), default='hermes',
-                           comment='agent 类型：首期固定 hermes')
+                           comment='agent 类型：hermes / codex（Claw Worker）')
     deploy_method = db.Column(db.String(20), default='systemd',
                               comment='部署方式：Hub 代建当前固定 systemd')
     host = db.Column(db.String(255), default='', comment='远端目标机 host:port 或纯 host')
@@ -2413,6 +4203,11 @@ class AgentDeployment(db.Model):
                                comment='docker=容器名 hermes-agent-claw-12；systemd=unit hermes-gateway-claw-12.service')
     image = db.Column(db.String(255), default='',
                       comment='docker 模式使用的 Hermes 镜像；systemd 模式留空')
+    worker_release_record_id = db.Column(db.Integer,
+                                         db.ForeignKey('worker_releases.id'))
+    worker_release_id = db.Column(db.String(80), default='')
+    worker_source_commit = db.Column(db.String(40), default='')
+    worker_artifact_sha256 = db.Column(db.String(64), default='')
     status = db.Column(db.String(20), default='pending',
                        comment='pending/in_progress/success/failed/cancelled')
     log_tail = db.Column(db.Text, comment='最近一次 stdout/stderr 截尾，用于前端展示')
@@ -2425,6 +4220,7 @@ class AgentDeployment(db.Model):
     updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
 
     claw = db.relationship('OpenClawInstance', backref='agent_deployments')
+    worker_release = db.relationship('WorkerRelease')
 
     def to_dict(self):
         return {
@@ -2437,6 +4233,10 @@ class AgentDeployment(db.Model):
             'remote_base_dir': self.remote_base_dir,
             'container_name': self.container_name,
             'image': self.image,
+            'worker_release_record_id': self.worker_release_record_id,
+            'worker_release_id': self.worker_release_id,
+            'worker_source_commit': self.worker_source_commit,
+            'worker_artifact_sha256': self.worker_artifact_sha256,
             'status': self.status,
             'log_tail': self.log_tail,
             'error_message': self.error_message,
@@ -2469,6 +4269,13 @@ class WecomSendLog(db.Model):
     status = db.Column(db.String(20), default='pending',
                        comment='pending/sent/failed')
     error = db.Column(db.Text, comment='失败错误信息')
+    workflow_run_id = db.Column(db.Integer, index=True)
+    workflow_step_id = db.Column(db.String(100), default='')
+    request_summary_json = db.Column(db.JSON)
+    template_version = db.Column(db.String(64), default='')
+    message_hash = db.Column(db.String(64), default='', index=True)
+    receipt_json = db.Column(db.JSON)
+    gate_result_json = db.Column(db.JSON)
     created_at = db.Column(db.DateTime, default=_now)
     sent_at = db.Column(db.DateTime, comment='实际发送时间')
 
@@ -2485,6 +4292,13 @@ class WecomSendLog(db.Model):
             'strategy': self.strategy,
             'status': self.status,
             'error': self.error,
+            'workflow_run_id': self.workflow_run_id,
+            'workflow_step_id': self.workflow_step_id or '',
+            'request_summary': self.request_summary_json or {},
+            'template_version': self.template_version or '',
+            'message_hash': self.message_hash or '',
+            'receipt': self.receipt_json or {},
+            'gate_result': self.gate_result_json or {},
             'created_at': str(self.created_at) if self.created_at else None,
             'sent_at': str(self.sent_at) if self.sent_at else None,
         }
@@ -2665,9 +4479,10 @@ class CaseReviewRound(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
         }
         if with_comments:
-            comments = CaseReviewComment.query.filter_by(
-                round_id=self.id
-            ).order_by(CaseReviewComment.created_at).all()
+            comments = (CaseReviewComment.query.filter_by(round_id=self.id)
+                        .filter(db.or_(CaseReviewComment.status == 'active',
+                                       CaseReviewComment.status.is_(None)))
+                        .order_by(CaseReviewComment.created_at).all())
             data['comments'] = [c.to_dict() for c in comments]
             # 计算综合评分（有评分的评审意见取平均）
             scores = [c.score for c in comments if c.score is not None]
@@ -2687,6 +4502,9 @@ class CaseReviewComment(db.Model):
     author_name = db.Column(db.String(100), nullable=False, comment='评审人')
     author_claw_id = db.Column(db.Integer, nullable=True)
     author_user_id = db.Column(db.Integer, nullable=True)
+    collaboration_session_id = db.Column(
+        db.Integer, db.ForeignKey('collaboration_sessions.id'), nullable=True,
+        index=True, comment='Developer AI 临时协作会话 ID；用于评审记录所有权')
     content = db.Column(db.Text, nullable=False, comment='评审意见（Markdown）')
     verdict = db.Column(db.String(20), default='comment',
                         comment='comment=评论, approve=通过, reject=打回')
@@ -2694,7 +4512,11 @@ class CaseReviewComment(db.Model):
                       comment='评分（1-10分），可选')
     is_edited = db.Column(db.Boolean, default=False,
                           comment='是否已修改过（每人仅1次修改机会）')
+    status = db.Column(db.String(20), default='active', nullable=False,
+                       index=True, comment='active/deleted')
     created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+    deleted_at = db.Column(db.DateTime, nullable=True)
 
     round = db.relationship('CaseReviewRound', backref=db.backref(
         'comments', lazy='dynamic', order_by='CaseReviewComment.created_at'))
@@ -2710,11 +4532,15 @@ class CaseReviewComment(db.Model):
             'author_name': self.author_name or '',
             'author_claw_id': self.author_claw_id,
             'author_user_id': self.author_user_id,
+            'source_type': ('developer_ai' if self.collaboration_session_id
+                            else ('claw' if self.author_claw_id else 'user')),
             'content': self.content or '',
             'verdict': self.verdict or 'comment',
             'score': self.score,
             'is_edited': self.is_edited or False,
+            'status': self.status or 'active',
             'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
         }
 
 
@@ -2729,12 +4555,16 @@ class TopicReply(db.Model):
                                 nullable=True)
     author_user_id = db.Column(db.Integer, db.ForeignKey('users.id'),
                                 nullable=True)
-    author_name = db.Column(db.String(50), nullable=False)
+    author_name = db.Column(db.String(160), nullable=False)
+    collaboration_session_id = db.Column(
+        db.Integer, nullable=True, index=True,
+        comment='外部临时协作会话 ID；仅用于回复所有权，不级联会话')
     reply_to_id = db.Column(db.Integer, db.ForeignKey('topic_replies.id'),
                              nullable=True, comment='回复某条回复的 ID')
     status = db.Column(db.String(20), default='active',
                        comment='active/deleted')
     created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
 
     author_claw = db.relationship('OpenClawInstance', backref='topic_replies')
     author_user = db.relationship('User', backref='topic_replies')
@@ -2747,9 +4577,11 @@ class TopicReply(db.Model):
             'author_claw_id': self.author_claw_id,
             'author_user_id': self.author_user_id,
             'author_name': self.author_name,
+            'external_collaboration': bool(self.collaboration_session_id),
             'reply_to_id': self.reply_to_id,
             'status': self.status,
             'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
         }
 
 
@@ -4174,6 +6006,16 @@ class TestAccount(db.Model):
     current_purpose = db.Column(db.String(500), default='',
                                 comment='当前使用途径/备注（acquire 时上报）')
     last_login_at = db.Column(db.DateTime, comment='最近一次领用/登录时间')
+    lease_ttl_seconds = db.Column(db.Integer, default=1800,
+                                  comment='当前领用租期秒数')
+    lease_expires_at = db.Column(db.DateTime, index=True,
+                                 comment='当前领用到期时间')
+    lease_heartbeat_at = db.Column(db.DateTime,
+                                   comment='最近一次续租时间')
+    workflow_run_id = db.Column(db.Integer, index=True,
+                                comment='可选：关联 Workflow Run，不建外键以保留历史')
+    controller_run_id = db.Column(db.String(160), index=True,
+                                  comment='可选：Codex controller run ID')
     notes = db.Column(db.Text, default='', comment='账号备注（账号自身固有备注）')
 
     is_deleted = db.Column(db.Boolean, default=False,
@@ -4200,6 +6042,13 @@ class TestAccount(db.Model):
             'current_claw_id': self.current_claw_id,
             'current_purpose': self.current_purpose or '',
             'last_login_at': str(self.last_login_at) if self.last_login_at else None,
+            'lease_ttl_seconds': self.lease_ttl_seconds,
+            'lease_expires_at': (
+                str(self.lease_expires_at) if self.lease_expires_at else None),
+            'lease_heartbeat_at': (
+                str(self.lease_heartbeat_at) if self.lease_heartbeat_at else None),
+            'workflow_run_id': self.workflow_run_id,
+            'controller_run_id': self.controller_run_id,
             'notes': self.notes or '',
             'created_by': self.created_by or '',
             'created_at': str(self.created_at) if self.created_at else None,
@@ -4221,10 +6070,10 @@ class TestAccountUsageLog(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     account_id = db.Column(db.Integer, db.ForeignKey('test_accounts.id'),
                            nullable=False, index=True)
-    action = db.Column(db.Enum('acquire', 'release', 'mark_abnormal',
-                               'recover', 'create', 'delete'),
+    action = db.Column(db.Enum('acquire', 'renew', 'expire', 'release',
+                               'mark_abnormal', 'recover', 'create', 'delete'),
                        nullable=False, comment='动作类型')
-    actor_type = db.Column(db.Enum('claw', 'user'),
+    actor_type = db.Column(db.Enum('claw', 'user', 'system'),
                            nullable=False, default='claw',
                            comment='动作发起方类型')
     actor_name = db.Column(db.String(100), default='', comment='发起方名（claw 名或用户名）')
@@ -6416,6 +8265,68 @@ class ShiftLeftAnalysisRun(db.Model):
         }
 
 
+class WorkflowEvidenceManifest(db.Model):
+    """One revisioned evidence index and post-run verdict per Workflow Run."""
+    __tablename__ = 'workflow_evidence_manifests'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           nullable=False, index=True)
+    workflow_run_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_runs.id', ondelete='CASCADE'),
+        nullable=False, unique=True, index=True)
+    analysis_run_id = db.Column(
+        db.Integer, db.ForeignKey('shift_left_analysis_runs.id'), index=True)
+    coverage_json = db.Column(db.JSON, nullable=False)
+    artifacts_json = db.Column(db.JSON, nullable=False)
+    required_evidence_json = db.Column(db.JSON, nullable=False)
+    completeness_status = db.Column(
+        db.String(32), nullable=False, default='incomplete', index=True)
+    missing_required_json = db.Column(db.JSON)
+    classification = db.Column(db.String(40), index=True)
+    analysis_summary_json = db.Column(db.JSON)
+    finding_ids_json = db.Column(db.JSON)
+    analyzed_by = db.Column(db.String(160), default='')
+    analyzed_at = db.Column(db.DateTime)
+    revision = db.Column(db.Integer, nullable=False, default=1)
+    created_by = db.Column(db.String(160), default='system')
+    updated_by = db.Column(db.String(160), default='system')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now, index=True)
+
+    __table_args__ = (
+        db.Index(
+            'ix_workflow_evidence_project_status',
+            'project_id', 'completeness_status'),
+        db.Index(
+            'ix_workflow_evidence_project_updated',
+            'project_id', 'updated_at'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'workflow_run_id': self.workflow_run_id,
+            'analysis_run_id': self.analysis_run_id,
+            'coverage': self.coverage_json or {},
+            'artifacts': self.artifacts_json or [],
+            'required_evidence': self.required_evidence_json or [],
+            'completeness_status': self.completeness_status or 'incomplete',
+            'missing_required': self.missing_required_json or [],
+            'classification': self.classification,
+            'analysis_summary': self.analysis_summary_json or {},
+            'finding_ids': self.finding_ids_json or [],
+            'analyzed_by': self.analyzed_by or '',
+            'analyzed_at': str(self.analyzed_at) if self.analyzed_at else None,
+            'revision': self.revision or 1,
+            'created_by': self.created_by or 'system',
+            'updated_by': self.updated_by or 'system',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
 class ShiftLeftFinding(db.Model):
     """跨 Analysis Run 持续存在的结构化风险对象。"""
     __tablename__ = 'shift_left_findings'
@@ -6564,13 +8475,222 @@ class ShiftLeftAnalysisFinding(db.Model):
         }
 
 
+class ShiftLeftFindingFeedback(db.Model):
+    """Immutable normalized truth label attached to one Finding."""
+    __tablename__ = 'shift_left_finding_feedback'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(
+        db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    finding_id = db.Column(
+        db.Integer, db.ForeignKey('shift_left_findings.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    label = db.Column(db.String(48), nullable=False, index=True)
+    note = db.Column(db.Text)
+    evidence_refs_json = db.Column(db.JSON)
+    source_type = db.Column(db.String(40), default='human')
+    actor_type = db.Column(db.String(24), nullable=False)
+    actor_id = db.Column(db.Integer, nullable=False)
+    actor_key = db.Column(db.String(160), nullable=False)
+    actor_name = db.Column(db.String(160), default='')
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_hash = db.Column(db.String(64), nullable=False)
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    finding = db.relationship(
+        'ShiftLeftFinding', backref=db.backref(
+            'feedback_items', cascade='all, delete-orphan',
+            order_by='ShiftLeftFindingFeedback.id'))
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'finding_id', 'actor_key', 'idempotency_key',
+            name='uq_finding_feedback_actor_idempotency'),
+        db.Index(
+            'ix_finding_feedback_project_label', 'project_id', 'label'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'finding_id': self.finding_id,
+            'label': self.label,
+            'note': self.note or '',
+            'evidence_refs': self.evidence_refs_json or [],
+            'source_type': self.source_type or 'human',
+            'actor_type': self.actor_type,
+            'actor_id': self.actor_id,
+            'actor_name': self.actor_name or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
+class AnalysisRule(db.Model):
+    """Stable project-scoped identity for one learned analysis rule."""
+    __tablename__ = 'analysis_rules'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(
+        db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    rule_key = db.Column(db.String(255), nullable=False)
+    name = db.Column(db.String(300), nullable=False)
+    description = db.Column(db.Text)
+    status = db.Column(db.String(32), nullable=False, default='draft', index=True)
+    active_version_id = db.Column(db.Integer, index=True)
+    latest_version = db.Column(db.Integer, nullable=False, default=0)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    created_by = db.Column(db.String(160), default='system')
+    updated_by = db.Column(db.String(160), default='system')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now, index=True)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'project_id', 'rule_key', name='uq_analysis_rule_project_key'),
+        db.Index('ix_analysis_rule_project_status', 'project_id', 'status'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'project_id': self.project_id,
+            'rule_key': self.rule_key,
+            'name': self.name,
+            'description': self.description or '',
+            'status': self.status,
+            'active_version_id': self.active_version_id,
+            'latest_version': self.latest_version or 0,
+            'version': self.version or 1,
+            'created_by': self.created_by or 'system',
+            'updated_by': self.updated_by or 'system',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class AnalysisRuleVersion(db.Model):
+    """Immutable rule definition promoted only through replay gates."""
+    __tablename__ = 'analysis_rule_versions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    rule_id = db.Column(
+        db.Integer, db.ForeignKey('analysis_rules.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    version_no = db.Column(db.Integer, nullable=False)
+    status = db.Column(db.String(32), nullable=False, default='draft', index=True)
+    definition_json = db.Column(db.JSON, nullable=False)
+    thresholds_json = db.Column(db.JSON, nullable=False)
+    change_summary = db.Column(db.Text)
+    based_on_version_id = db.Column(
+        db.Integer, db.ForeignKey('analysis_rule_versions.id'), index=True)
+    source_finding_ids_json = db.Column(db.JSON)
+    definition_hash = db.Column(db.String(64), nullable=False, index=True)
+    activated_by = db.Column(db.String(160), default='')
+    activated_at = db.Column(db.DateTime)
+    retired_by = db.Column(db.String(160), default='')
+    retired_at = db.Column(db.DateTime)
+    created_by = db.Column(db.String(160), default='system')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    rule = db.relationship(
+        'AnalysisRule', backref=db.backref(
+            'versions', cascade='all, delete-orphan',
+            order_by='AnalysisRuleVersion.version_no'))
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'rule_id', 'version_no', name='uq_analysis_rule_version_no'),
+        db.UniqueConstraint(
+            'rule_id', 'definition_hash', name='uq_analysis_rule_definition_hash'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'rule_id': self.rule_id,
+            'version_no': self.version_no,
+            'status': self.status,
+            'definition': self.definition_json or {},
+            'thresholds': self.thresholds_json or {},
+            'change_summary': self.change_summary or '',
+            'based_on_version_id': self.based_on_version_id,
+            'source_finding_ids': self.source_finding_ids_json or [],
+            'definition_hash': self.definition_hash,
+            'activated_by': self.activated_by or '',
+            'activated_at': str(self.activated_at) if self.activated_at else None,
+            'retired_by': self.retired_by or '',
+            'retired_at': str(self.retired_at) if self.retired_at else None,
+            'created_by': self.created_by or 'system',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class AnalysisRuleReplay(db.Model):
+    """Audited historical replay metrics for one immutable rule version."""
+    __tablename__ = 'analysis_rule_replays'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    rule_version_id = db.Column(
+        db.Integer, db.ForeignKey('analysis_rule_versions.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    workflow_run_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_runs.id'), index=True)
+    dataset_snapshot_ref = db.Column(db.String(1000), nullable=False)
+    dataset_hash = db.Column(db.String(64), nullable=False, index=True)
+    metrics_json = db.Column(db.JSON, nullable=False)
+    impact_json = db.Column(db.JSON)
+    artifact_refs_json = db.Column(db.JSON)
+    gate_passed = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    gate_reasons_json = db.Column(db.JSON)
+    status = db.Column(db.String(32), nullable=False, default='completed')
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_hash = db.Column(db.String(64), nullable=False)
+    actor_type = db.Column(db.String(24), nullable=False)
+    actor_id = db.Column(db.Integer, nullable=False)
+    actor_name = db.Column(db.String(160), default='')
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    rule_version = db.relationship(
+        'AnalysisRuleVersion', backref=db.backref(
+            'replays', cascade='all, delete-orphan',
+            order_by='AnalysisRuleReplay.id'))
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'rule_version_id', 'actor_type', 'actor_id', 'idempotency_key',
+            name='uq_analysis_rule_replay_actor_idempotency'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'rule_version_id': self.rule_version_id,
+            'workflow_run_id': self.workflow_run_id,
+            'dataset_snapshot_ref': self.dataset_snapshot_ref,
+            'dataset_hash': self.dataset_hash,
+            'metrics': self.metrics_json or {},
+            'impact': self.impact_json or {},
+            'artifact_refs': self.artifact_refs_json or [],
+            'gate_passed': bool(self.gate_passed),
+            'gate_reasons': self.gate_reasons_json or [],
+            'status': self.status,
+            'actor_type': self.actor_type,
+            'actor_id': self.actor_id,
+            'actor_name': self.actor_name or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+
+
 class CollaborationSession(db.Model):
     """一次性邀请兑换的任务级短期 API 会话。"""
     __tablename__ = 'collaboration_sessions'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
-                           nullable=False, index=True)
+                           nullable=True, index=True)
     subject_type = db.Column(db.String(32), nullable=False, index=True)
     subject_id = db.Column(db.Integer, nullable=False, index=True)
     agent_identity = db.Column(db.String(160), nullable=False)

@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 import shlex
@@ -36,6 +37,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import StringIO
+from pathlib import Path
 from typing import Optional
 
 from app.hermes_models import (
@@ -123,6 +125,11 @@ def build_systemd_unit_name(claw_id: int) -> str:
 def build_codex_unit_name(claw_id: int) -> str:
     """Linux Codex provider 只托管 Hub Sidecar，不额外启动 Gateway。"""
     return f"openclaw-sidecar-v2-claw-{int(claw_id)}.service"
+
+
+def build_worker_unit_name(claw_id: int) -> str:
+    """Unit name owned by the immutable Worker Linux installer."""
+    return f"claw-worker-codex-{int(claw_id)}.service"
 
 
 def normalize_agent_work_dirs(raw) -> list[str]:
@@ -223,6 +230,19 @@ class DeployRequest:
     codex_wheelhouse: Optional[str] = None
     codex_requirements_sha256: str = ''
     codex_auth_mode: str = 'chatgpt_subscription'
+    worker_release_record_id: Optional[int] = None
+    worker_release_id: str = ''
+    worker_source_commit: str = ''
+    worker_release_manifest_sha256: str = ''
+    worker_platform_manifest_sha256: str = ''
+    worker_package_manifest_sha256: str = ''
+    worker_artifact_path: str = ''
+    worker_artifact_filename: str = ''
+    worker_artifact_sha256: str = ''
+    worker_artifact_size: int = 0
+    worker_install_root: str = ''
+    worker_instance_dir: str = ''
+    worker_runtime_mode: str = 'legacy_split'
     wecom_node_bin: str = '/usr/bin/node'
     wecom_sdk_root: str = '/opt/wecom-runtime/node_modules/@wecom/aibot-node-sdk'
 
@@ -262,18 +282,34 @@ class DeployRequest:
 
     def codex_home_dir(self) -> str:
         """CLI 与 SDK 共用的私有认证目录；Hub 永不读取其中内容。"""
-        return f"{self.systemd_data_dir()}/home/.codex"
+        return f"{self.codex_instance_dir()}/home/.codex"
+
+    def codex_instance_dir(self) -> str:
+        if self.worker_release_id:
+            return (self.worker_instance_dir
+                    or f'/var/lib/claw-worker/claw-{int(self.openclaw_id)}').rstrip('/')
+        return self.systemd_data_dir()
+
+    def codex_install_root(self) -> str:
+        if self.worker_release_id:
+            return (self.worker_install_root
+                    or f'/opt/claw-worker/claw-{int(self.openclaw_id)}').rstrip('/')
+        return self.systemd_install_dir()
 
     def systemd_service_user(self) -> str:
         """systemd 运行用户；root 会被收敛到 per-agent 用户。"""
         user = (self.systemd_user or '').strip()
         if not user or user == 'root':
+            if self.worker_release_id:
+                return f"clawcodex{int(self.openclaw_id)}"
             return build_default_systemd_user(self.openclaw_id)
         return user
 
     def remote_base_dir(self) -> str:
         """docker：per-claw 根目录；systemd：对外展示用数据目录（HERMES_HOME）。"""
         if self.deploy_method == 'systemd':
+            if self.worker_release_id:
+                return self.codex_instance_dir()
             return self.systemd_data_dir()
         # 优先使用 safe_name（数据库中存储的，第一次创建时生成，后续不变）
         safe = self.safe_name or ''
@@ -287,6 +323,8 @@ class DeployRequest:
         """
         if self.deploy_method == 'systemd':
             if self.agent_type == 'codex':
+                if self.worker_release_id:
+                    return build_worker_unit_name(self.openclaw_id)
                 return build_codex_unit_name(self.openclaw_id)
             return build_systemd_unit_name(self.openclaw_id)
         return build_container_name(self.openclaw_id)
@@ -398,6 +436,33 @@ class _SSHRunner:
         )
         return self.run(cmd, timeout=60,
                         name=name or f'put_text {remote_path}')
+
+    def put_file(self, local_path: str, remote_path: str,
+                 mode: str = '0600', name: str = '') -> StepResult:
+        """Upload one verified local artifact without embedding it in logs."""
+        assert self.client is not None
+        source = Path(local_path).resolve(strict=True)
+        if not source.is_file() or source.is_symlink():
+            return StepResult(name=name or 'put_file', exit_code=2,
+                              stdout='', stderr='local artifact is invalid')
+        parent = remote_path.rsplit('/', 1)[0]
+        prepared = self.run(
+            f"mkdir -p {shlex.quote(parent)} && chmod 0700 {shlex.quote(parent)}",
+            timeout=30, name='prepare artifact upload directory')
+        if not prepared.ok:
+            return prepared
+        try:
+            sftp = self.client.open_sftp()
+            try:
+                sftp.put(str(source), remote_path)
+                sftp.chmod(remote_path, int(mode, 8))
+            finally:
+                sftp.close()
+        except Exception as exc:
+            return StepResult(name=name or f'put_file {remote_path}', exit_code=1,
+                              stdout='', stderr=type(exc).__name__)
+        return StepResult(name=name or f'put_file {remote_path}', exit_code=0,
+                          stdout='', stderr='')
 
 
 # ---------- Hermes 配置生成 ----------
@@ -694,6 +759,85 @@ def _render_sidecar_env(req: DeployRequest) -> str:
     return ''.join(lines)
 
 
+def _toml_quote(value: str) -> str:
+    """Render a TOML basic string using JSON-compatible escaping."""
+    return json.dumps(str(value or ''), ensure_ascii=False)
+
+
+def _codex_timiai_credential_path(req: DeployRequest) -> str:
+    return f"{req.codex_instance_dir()}/credentials/timiai-api-key"
+
+
+def _codex_timiai_auth_helper_path(req: DeployRequest) -> str:
+    return f"{req.codex_instance_dir()}/scripts/codex_timiai_auth.py"
+
+
+def _render_codex_timiai_auth_helper(req: DeployRequest) -> str:
+    """Render a credential helper without embedding the TimiAI secret."""
+    credential_path = _codex_timiai_credential_path(req)
+    return (
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "from pathlib import Path\n"
+        "import stat\n"
+        "import sys\n"
+        f"path = Path({_toml_quote(credential_path)})\n"
+        "info = path.lstat()\n"
+        "if (not stat.S_ISREG(info.st_mode) or path.is_symlink() "
+        "or info.st_uid != os.geteuid() or info.st_mode & 0o077):\n"
+        "    raise SystemExit('invalid TimiAI credential permissions')\n"
+        "token = path.read_text(encoding='utf-8').strip()\n"
+        "if not token or len(token.encode('utf-8')) > 16384 "
+        "or '\\x00' in token or '\\n' in token or '\\r' in token:\n"
+        "    raise SystemExit('invalid TimiAI credential')\n"
+        "sys.stdout.write(token)\n"
+    )
+
+
+def _render_codex_config(req: DeployRequest) -> str:
+    """Render Hub-managed user-level Codex configuration.
+
+    Subscription authentication uses the built-in OpenAI provider and the
+    instance-private ``auth.json``.  TimiAI uses the official custom provider
+    contract plus command-backed auth, so the API key never enters the Sidecar
+    or Codex SDK subprocess environment.
+    """
+    model = str(req.codex_model or '').strip()
+    if req.codex_auth_mode != 'timiai':
+        lines = ['# Managed by OpenClaw Hub', 'model_provider = "openai"']
+        if model:
+            lines.append(f'model = {_toml_quote(model)}')
+        return '\n'.join(lines) + '\n'
+
+    provider = HERMES_LLM_PROVIDERS['timiai']
+    selected_model = normalize_hermes_model(
+        model or req.llm_model, 'timiai')
+    helper_path = _codex_timiai_auth_helper_path(req)
+    python_path = req.codex_python or f"{req.codex_install_root()}/venv/bin/python"
+    return '\n'.join([
+        '# Managed by OpenClaw Hub',
+        'model_provider = "timiai"',
+        f'model = {_toml_quote(selected_model)}',
+        f'model_context_window = {int(hermes_context_length(selected_model, "timiai"))}',
+        'web_search = "disabled"',
+        '',
+        '[model_providers.timiai]',
+        'name = "TimiAI"',
+        f'base_url = {_toml_quote(provider["base_url"])}',
+        'wire_api = "responses"',
+        'request_max_retries = 4',
+        'stream_max_retries = 6',
+        'stream_idle_timeout_ms = 300000',
+        '',
+        '[model_providers.timiai.auth]',
+        f'command = {_toml_quote(python_path)}',
+        f'args = [{_toml_quote(helper_path)}]',
+        'timeout_ms = 5000',
+        'refresh_interval_ms = 0',
+        '',
+    ])
+
+
 def _render_codex_wecom_credentials(req: DeployRequest) -> str:
     """Render the ACL-protected bridge credential file, never an env file."""
     owner = (req.owner_wecom_userid or '').strip()
@@ -917,6 +1061,48 @@ def _run_deploy(deployment_id: int, req: DeployRequest, app) -> None:
                 dep.error_message = error[:2000]
             if status in ('success', 'failed') and not dep.finished_at:
                 dep.finished_at = datetime.now()
+            if status == 'success' and req.worker_release_id:
+                # A release-backed install is a Claw Worker runtime, regardless
+                # of whether the hosted provider is Hermes or Codex.
+                from app.models import ClawSidecarConfig
+                from app.services.worker_runtime import validate_worker_runtime
+                runtime = validate_worker_runtime({
+                    'kind': 'claw_worker',
+                    'provider': req.agent_type,
+                    'runtime_mode': req.worker_runtime_mode or 'legacy_split',
+                    'platform': 'linux',
+                    'auth_mode': (
+                        req.codex_auth_mode if req.agent_type == 'codex' else ''),
+                    'llm_provider': (
+                        req.llm_provider if req.agent_type == 'hermes'
+                        else ('timiai' if req.codex_auth_mode == 'timiai' else 'openai')),
+                    'llm_model': (
+                        req.llm_model if req.agent_type == 'hermes'
+                        else req.codex_model),
+                    'timiai_project': (
+                        req.timiai_project
+                        if (req.agent_type == 'hermes'
+                            or req.codex_auth_mode == 'timiai') else ''),
+                    'release_id': req.worker_release_id,
+                    'source_commit': req.worker_source_commit,
+                    'artifact_sha256': req.worker_artifact_sha256,
+                    'source': 'deployment',
+                })
+                cfg = db.session.get(ClawSidecarConfig, req.openclaw_id)
+                if cfg is None:
+                    cfg = ClawSidecarConfig(
+                        claw_id=req.openclaw_id,
+                        config_version=1,
+                        enabled=True,
+                    )
+                    db.session.add(cfg)
+                if (cfg.runtime_config_json or {}) != runtime \
+                        or (cfg.config_owner or 'hub') != 'hub':
+                    cfg.runtime_config_json = runtime
+                    cfg.config_owner = 'hub'
+                    cfg.agent_type = req.agent_type
+                    cfg.config_version = int(cfg.config_version or 0) + 1
+                    cfg.updated_by = req.triggered_by or 'deployment'
             db.session.commit()
             if status in ('success', 'failed'):
                 _create_admin_deploy_notify_todos(dep)
@@ -934,7 +1120,10 @@ def _run_deploy(deployment_id: int, req: DeployRequest, app) -> None:
         with _SSHRunner(req) as ssh:
             if req.deploy_method == 'systemd':
                 if req.agent_type == 'codex':
-                    _deploy_codex_systemd(ssh, req, steps, _flush)
+                    if req.worker_release_id:
+                        _deploy_claw_worker_release(ssh, req, steps, _flush)
+                    else:
+                        _deploy_codex_systemd(ssh, req, steps, _flush)
                 else:
                     _deploy_systemd(ssh, req, steps, _flush)
             else:
@@ -1054,6 +1243,271 @@ def _deploy_docker(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) -
     _flush('success')
 
 
+def _deploy_claw_worker_release(ssh: '_SSHRunner', req: DeployRequest,
+                                steps: list, _flush) -> None:
+    """Deploy one approved immutable Worker release through its installer."""
+    artifact = Path(req.worker_artifact_path).resolve(strict=True)
+    if (not artifact.is_file() or artifact.is_symlink()
+            or artifact.name != req.worker_artifact_filename
+            or artifact.stat().st_size != int(req.worker_artifact_size or 0)):
+        _flush('failed', 'Hub Worker release artifact 不可用')
+        return
+    digest = hashlib.sha256()
+    with artifact.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    if digest.hexdigest() != req.worker_artifact_sha256:
+        _flush('failed', 'Hub Worker release artifact SHA-256 不匹配')
+        return
+
+    runtime = req.codex_runtime_dir.rstrip('/')
+    requirements = req.codex_requirements or f'{runtime}/requirements-codex.lock'
+    wheelhouse = req.codex_wheelhouse or f'{runtime}/wheelhouse'
+    expected_requirements_sha = req.codex_requirements_sha256.lower()
+    install_root = req.codex_install_root()
+    instance_dir = req.codex_instance_dir()
+    codex_home = req.codex_home_dir()
+    home = f'{instance_dir}/home'
+    user = req.systemd_service_user()
+    unit_name = req.container_name()
+    py = req.codex_python or f'{install_root}/venv/bin/python'
+    cli = req.codex_cli or f'{install_root}/venv/bin/codex'
+    staging = (
+        f'/tmp/claw-worker-staging-{int(req.openclaw_id)}-'
+        f'{req.worker_source_commit[:12]}'
+    )
+    remote_artifact = f'{staging}/{req.worker_artifact_filename}'
+    source_dir = f'{staging}/source/claw-worker'
+    token_path = f'{staging}/secrets/claw-token'
+    wecom_path = f'{staging}/secrets/wecom-credentials.json'
+    wecom_enabled = bool(req.wecom_bot_id and req.wecom_bot_secret)
+
+    sr = ssh.run(
+        "command -v systemctl && command -v tar && "
+        "python3 -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)' && "
+        f"test -f {shlex.quote(requirements)} && test -d {shlex.quote(wheelhouse)} && "
+        f"test \"$(sha256sum {shlex.quote(requirements)} | awk '{{print $1}}')\" = "
+        f"{shlex.quote(expected_requirements_sha)}",
+        timeout=30, name='verify Worker target prerequisites')
+    _record_step(steps, sr)
+    if not sr.ok:
+        _flush('failed', '目标机缺少 systemd/tar/Python 3.11 或 Codex runtime 锁文件不匹配')
+        return
+
+    hub_base = (req.hub_url or '').rstrip('/')
+    if not hub_base or not req.claw_token:
+        _flush('failed', 'Claw Worker 部署缺少 Hub URL 或 Claw Token')
+        return
+    preflight_url = (
+        f'{hub_base}/api/openclaws/{int(req.openclaw_id)}/sidecar-config'
+        '?sidecar_version=2.5.0&agent_type=codex'
+    )
+    preflight = ssh.run(
+        f"curl -fsS -H {shlex.quote('Authorization: Bearer ' + req.claw_token)} "
+        f"{shlex.quote(preflight_url)} >/dev/null",
+        timeout=30, name='Worker Hub config preflight')
+    _record_step(steps, preflight)
+    if not preflight.ok:
+        _flush('failed', 'Claw Worker Hub 连通或 Token 鉴权预检失败')
+        return
+
+    prepared = ssh.run(
+        f"rm -rf {shlex.quote(staging)} && mkdir -p "
+        f"{shlex.quote(staging + '/source')} {shlex.quote(staging + '/secrets')} && "
+        f"chmod 0700 {shlex.quote(staging)} {shlex.quote(staging + '/secrets')}",
+        timeout=30, name='prepare Worker release staging')
+    _record_step(steps, prepared)
+    if not prepared.ok:
+        _flush('failed', '创建 Worker release staging 失败')
+        return
+
+    uploaded = ssh.put_file(str(artifact), remote_artifact, mode='0600',
+                            name='upload approved Worker release')
+    _record_step(steps, uploaded)
+    if not uploaded.ok:
+        _flush('failed', '上传 Worker release artifact 失败')
+        return
+
+    inspect_script = (
+        "import pathlib,sys,tarfile\n"
+        "path=pathlib.Path(sys.argv[1])\n"
+        "with tarfile.open(path,'r:gz') as archive:\n"
+        " names=[]\n"
+        " for item in archive.getmembers():\n"
+        "  pure=pathlib.PurePosixPath(item.name)\n"
+        "  if pure.is_absolute() or '..' in pure.parts or not item.isfile() or item.name in names:\n"
+        "   raise SystemExit('unsafe Worker archive member')\n"
+        "  names.append(item.name)\n"
+        " if 'claw-worker/release/package-manifest.json' not in names:\n"
+        "  raise SystemExit('missing Worker package manifest')\n"
+    )
+    verified = ssh.run(
+        f"test \"$(stat -c %s {shlex.quote(remote_artifact)})\" = "
+        f"{int(req.worker_artifact_size)} && "
+        f"test \"$(sha256sum {shlex.quote(remote_artifact)} | awk '{{print $1}}')\" = "
+        f"{shlex.quote(req.worker_artifact_sha256)} && "
+        f"python3 -c {shlex.quote(inspect_script)} {shlex.quote(remote_artifact)} && "
+        f"tar -xzf {shlex.quote(remote_artifact)} -C {shlex.quote(staging + '/source')} && "
+        f"test \"$(sha256sum {shlex.quote(source_dir + '/release/package-manifest.json')} "
+        f"| awk '{{print $1}}')\" = {shlex.quote(req.worker_package_manifest_sha256)}",
+        timeout=60, name='verify and extract Worker release')
+    _record_step(steps, verified)
+    if not verified.ok:
+        _flush('failed', '目标机 Worker release 校验或安全解压失败')
+        return
+
+    token_write = ssh.put_text(req.claw_token + '\n', token_path,
+                               mode='0600', name='write temporary Claw token')
+    _record_step(steps, token_write)
+    if not token_write.ok:
+        _flush('failed', '写临时 Claw Token 失败')
+        return
+    if wecom_enabled:
+        wecom_write = ssh.put_text(
+            _render_codex_wecom_credentials(req), wecom_path,
+            mode='0600', name='write temporary WeCom credentials')
+        _record_step(steps, wecom_write)
+        if not wecom_write.ok:
+            ssh.run(f"rm -f {shlex.quote(token_path)} {shlex.quote(wecom_path)}",
+                    timeout=20, name='cleanup failed temporary credentials')
+            _flush('failed', '写临时企微凭据失败')
+            return
+
+    command = [
+        f'{source_dir}/scripts/install-linux.sh',
+        '--hub-url', (req.hub_url or '').rstrip('/'),
+        '--claw-id', str(int(req.openclaw_id)),
+        '--claw-token-file', token_path,
+        '--workspace', req.codex_workspace or '',
+        '--wheelhouse', wheelhouse,
+        '--requirements', requirements,
+        '--requirements-sha256', expected_requirements_sha,
+        '--runtime-mode', req.worker_runtime_mode or 'legacy_split',
+        '--service-user', user,
+        '--install-root', install_root,
+        '--instance-dir', instance_dir,
+        '--no-start',
+    ]
+    if req.codex_model:
+        command.extend(['--model', req.codex_model])
+    for directory in req.work_dirs or []:
+        if directory != req.codex_workspace:
+            command.extend(['--allowed-dir', directory])
+    if wecom_enabled:
+        command.extend([
+            '--wecom-credentials', wecom_path,
+            '--node-bin', req.wecom_node_bin,
+            '--wecom-sdk-root', req.wecom_sdk_root,
+        ])
+    install_cmd = ' '.join(shlex.quote(item) for item in command)
+    installed = ssh.run(
+        f"chmod 0755 {shlex.quote(command[0])}; "
+        f"{install_cmd}; code=$?; rm -f {shlex.quote(token_path)} "
+        f"{shlex.quote(wecom_path)}; exit $code",
+        timeout=900, name='run immutable Worker Linux installer')
+    _record_step(steps, installed)
+    if not installed.ok:
+        _flush('failed', f'Worker Linux installer 失败：{_tail(installed.stderr or installed.stdout, 900)}')
+        return
+
+    config_write = ssh.put_text(
+        _render_codex_config(req), f'{codex_home}/config.toml',
+        mode='0600', name='write managed Codex config')
+    _record_step(steps, config_write)
+    if not config_write.ok:
+        _flush('failed', '写 Worker Codex config.toml 失败')
+        return
+
+    if req.codex_auth_mode == 'timiai':
+        credential_path = _codex_timiai_credential_path(req)
+        helper_path = _codex_timiai_auth_helper_path(req)
+        credential_write = ssh.put_text(
+            (req.timiai_api_key or '') + '\n', credential_path,
+            mode='0600', name='write protected TimiAI credential')
+        helper_write = ssh.put_text(
+            _render_codex_timiai_auth_helper(req), helper_path,
+            mode='0500', name='write TimiAI auth helper')
+        _record_step(steps, credential_write)
+        _record_step(steps, helper_write)
+        if not credential_write.ok or not helper_write.ok:
+            _flush('failed', '写 Worker TimiAI 认证材料失败')
+            return
+        auth = ssh.run(
+            f"chown -R {shlex.quote(user)}:{shlex.quote(user)} "
+            f"{shlex.quote(instance_dir + '/credentials')} "
+            f"{shlex.quote(instance_dir + '/scripts')} "
+            f"{shlex.quote(codex_home + '/config.toml')} && "
+            f"chmod 0700 {shlex.quote(instance_dir + '/credentials')} "
+            f"{shlex.quote(instance_dir + '/scripts')} && "
+            f"chmod 0600 {shlex.quote(credential_path)} "
+            f"{shlex.quote(codex_home + '/config.toml')} && "
+            f"chmod 0500 {shlex.quote(helper_path)} && "
+            f"runuser -u {shlex.quote(user)} -- {shlex.quote(py)} "
+            f"{shlex.quote(helper_path)} >/dev/null",
+            timeout=30, name='secure and verify Worker TimiAI auth')
+    else:
+        auth = ssh.run(
+            f"rm -f {shlex.quote(_codex_timiai_credential_path(req))} "
+            f"{shlex.quote(_codex_timiai_auth_helper_path(req))} && "
+            f"chown {shlex.quote(user)}:{shlex.quote(user)} "
+            f"{shlex.quote(codex_home + '/config.toml')} && "
+            f"runuser -u {shlex.quote(user)} -- env HOME={shlex.quote(home)} "
+            f"CODEX_HOME={shlex.quote(codex_home)} {shlex.quote(cli)} login status",
+            timeout=30, name='verify Worker Codex subscription auth')
+    _record_step(steps, StepResult(
+        name=auth.name, exit_code=auth.exit_code,
+        stdout='authenticated' if auth.ok else '',
+        stderr='' if auth.ok else 'authentication required'))
+    if not auth.ok:
+        _flush('failed',
+               f'Worker Codex 订阅尚未认证。执行 sudo -u {user} env HOME={home} '
+               f'CODEX_HOME={codex_home} {cli} login --device-auth 后重新部署。')
+        return
+
+    attestation = json.dumps({
+        'schema_version': 1,
+        'release_id': req.worker_release_id,
+        'source_commit': req.worker_source_commit,
+        'release_manifest_sha256': req.worker_release_manifest_sha256,
+        'artifact_sha256': req.worker_artifact_sha256,
+        'runtime_mode': req.worker_runtime_mode,
+    }, ensure_ascii=False, sort_keys=True, indent=2) + '\n'
+    attestation_write = ssh.put_text(
+        attestation, f'{instance_dir}/worker-release.json',
+        mode='0600', name='write Worker release attestation')
+    _record_step(steps, attestation_write)
+    if not attestation_write.ok:
+        _flush('failed', '写 Worker release attestation 失败')
+        return
+    secured = ssh.run(
+        f"chown {shlex.quote(user)}:{shlex.quote(user)} "
+        f"{shlex.quote(instance_dir + '/worker-release.json')} && "
+        f"systemctl start {shlex.quote(unit_name)} && "
+        f"systemctl is-active --quiet {shlex.quote(unit_name)}",
+        timeout=90, name='start immutable Claw Worker')
+    _record_step(steps, secured)
+    if not secured.ok:
+        logs = ssh.run(
+            f"journalctl -u {shlex.quote(unit_name)} -n 100 --no-pager",
+            timeout=30, name='journalctl immutable Claw Worker')
+        _record_step(steps, logs)
+        _flush('failed', f'Claw Worker 启动失败：{_tail(logs.stdout or logs.stderr, 900)}')
+        return
+    if wecom_enabled:
+        ready = ssh.run(
+            f"for i in $(seq 1 40); do test -s "
+            f"{shlex.quote(instance_dir + '/wecom.ready')} && exit 0; sleep 1; done; exit 1",
+            timeout=50, name='wait Worker WeCom readiness')
+        _record_step(steps, ready)
+        if not ready.ok:
+            _flush('failed', 'Claw Worker 已启动，但企微未在 40 秒内完成鉴权')
+            return
+    cleanup = ssh.run(f"rm -rf {shlex.quote(staging)}", timeout=30,
+                      name='remove Worker release staging')
+    _record_step(steps, cleanup)
+    _flush('success')
+
+
 def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _flush) -> None:
     """Install and supervise the Linux Codex SDK provider with systemd.
 
@@ -1081,6 +1535,9 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
     sidecar_dir = f"{data}/scripts"
     sidecar_script = f"{sidecar_dir}/sidecar_v2.py"
     sidecar_env_path = f"{sidecar_dir}/sidecar.env"
+    codex_config_path = f"{codex_home}/config.toml"
+    timiai_credential_path = _codex_timiai_credential_path(req)
+    timiai_auth_helper_path = _codex_timiai_auth_helper_path(req)
     wecom_credentials_path = f"{data}/wecom-credentials.json"
     wecom_enabled = bool(req.wecom_bot_id and req.wecom_bot_secret)
 
@@ -1170,6 +1627,60 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
         _flush('failed', f'未找到 Codex CLI：{cli}；请先安装 CLI，或显式传 codex_cli 绝对路径。')
         return
 
+    config_write = ssh.put_text(
+        _render_codex_config(req), codex_config_path,
+        mode='0600', name='write managed Codex config')
+    _record_step(steps, config_write)
+    if not config_write.ok:
+        _flush('failed', '写 Codex config.toml 失败')
+        return
+
+    if req.codex_auth_mode == 'timiai':
+        if not req.timiai_api_key:
+            _flush('failed', 'TimiAI 认证缺少 Hub 密钥箱凭据')
+            return
+        credential_write = ssh.put_text(
+            req.timiai_api_key + '\n', timiai_credential_path,
+            mode='0600', name='write protected TimiAI credential')
+        _record_step(steps, credential_write)
+        if not credential_write.ok:
+            _flush('failed', '写 TimiAI 受保护凭据失败')
+            return
+        helper_write = ssh.put_text(
+            _render_codex_timiai_auth_helper(req), timiai_auth_helper_path,
+            mode='0500', name='write TimiAI credential helper')
+        _record_step(steps, helper_write)
+        if not helper_write.ok:
+            _flush('failed', '写 TimiAI 认证助手失败')
+            return
+        secure_auth = ssh.run(
+            f"chown {shlex.quote(user)}:{shlex.quote(AGENT_SERVICE_GROUP)} "
+            f"{shlex.quote(codex_config_path)} {shlex.quote(timiai_credential_path)} "
+            f"{shlex.quote(timiai_auth_helper_path)} && "
+            f"chmod 0700 {shlex.quote(data + '/credentials')} && "
+            f"chmod 0600 {shlex.quote(codex_config_path)} "
+            f"{shlex.quote(timiai_credential_path)} && "
+            f"chmod 0500 {shlex.quote(timiai_auth_helper_path)} && "
+            f"runuser -u {shlex.quote(user)} -- "
+            f"{shlex.quote(py)} {shlex.quote(timiai_auth_helper_path)} >/dev/null",
+            timeout=30, name='secure and verify TimiAI auth')
+        _record_step(steps, secure_auth)
+        if not secure_auth.ok:
+            _flush('failed', 'TimiAI 认证文件权限或认证助手自检失败')
+            return
+    else:
+        stale_auth = ssh.run(
+            f"rm -f {shlex.quote(timiai_credential_path)} "
+            f"{shlex.quote(timiai_auth_helper_path)} && "
+            f"chown {shlex.quote(user)}:{shlex.quote(AGENT_SERVICE_GROUP)} "
+            f"{shlex.quote(codex_config_path)} && "
+            f"chmod 0600 {shlex.quote(codex_config_path)}",
+            timeout=20, name='clear stale TimiAI auth')
+        _record_step(steps, stale_auth)
+        if not stale_auth.ok:
+            _flush('failed', '清理旧 TimiAI 认证材料失败')
+            return
+
     if wecom_enabled:
         node_check_script = (
             "const p=require(process.argv[1]);"
@@ -1189,13 +1700,18 @@ def _deploy_codex_systemd(ssh: '_SSHRunner', req: DeployRequest, steps: list, _f
                    '@wecom/aibot-node-sdk@1.0.7，并通过 wecom_node_bin/wecom_sdk_root 指定。')
             return
 
-    auth_cmd = (
-        f"runuser -u {shlex.quote(user)} -- env HOME={shlex.quote(home)} "
-        f"CODEX_HOME={shlex.quote(codex_home)} {shlex.quote(cli)} login status"
-    )
-    auth = ssh.run(auth_cmd, timeout=30, name='codex login status')
+    if req.codex_auth_mode == 'timiai':
+        auth = StepResult(
+            name='TimiAI command auth', exit_code=0,
+            stdout='authenticated', stderr='')
+    else:
+        auth_cmd = (
+            f"runuser -u {shlex.quote(user)} -- env HOME={shlex.quote(home)} "
+            f"CODEX_HOME={shlex.quote(codex_home)} {shlex.quote(cli)} login status"
+        )
+        auth = ssh.run(auth_cmd, timeout=30, name='codex login status')
     _record_step(steps, StepResult(
-        name='codex login status', exit_code=auth.exit_code,
+        name=auth.name, exit_code=auth.exit_code,
         stdout='authenticated' if auth.ok else '',
         stderr='' if auth.ok else 'authentication required'))
     if not auth.ok:

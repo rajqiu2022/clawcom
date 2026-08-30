@@ -1870,3 +1870,208 @@ Hub 契约相关测试：47 passed
 
 现有 Worker 长任务测试断言的是生产不存在的 `/api/v1/worker/tasks/...`，所以测试通过不能证明生产契约正确。长任务在完成本章必改项前不得开放。
 
+## 21. Hub 侧长任务强租约与 Verdict Verify 契约（2026-08-03）
+
+Hub 已按 `worker_task` 场景补齐强租约。强租约只约束确定性 Worker；现有 OpenClaw/Hermes `agent_task` sidecar 不执行 claim，继续沿用 Step 执行者鉴权，避免破坏当前认知任务链路。
+
+### 21.1 Claim 租约字段
+
+`WorkflowRunStep` 新增：
+
+```text
+claimed_claw_id
+claim_expires_at
+claim_lease_seconds
+```
+
+`POST /api/v1/workflow-runs/{run_id}/steps/{step_id}/claim` 请求：
+
+```json
+{
+  "worker_id": "windows-runner-01",
+  "lease_seconds": 300
+}
+```
+
+Hub 会把 `lease_seconds` 归一到 `30..900` 秒，默认 `180` 秒。活动租约由 `claimed_claw_id + claimed_by(worker_id) + claim_expires_at` 共同决定；Bearer Claw 和 `worker_id` 都必须匹配。
+
+成功响应继续返回 `step`，其中包含：
+
+```json
+{
+  "claimed_by": "windows-runner-01",
+  "claimed_claw_id": 12,
+  "claim_expires_at": "2026-08-03 23:55:00",
+  "claim_lease_seconds": 300
+}
+```
+
+### 21.2 Heartbeat / Progress / Result Owner 校验
+
+`worker_task` 写入规则：
+
+- `heartbeat` 必须由活动租约 owner 上报，成功后自动续租到 `now + claim_lease_seconds`。
+- `progress` 必须由活动租约 owner 上报；当 `heartbeat=true` 时同时续租。
+- `result` 必须由活动租约 owner 上报；终态写入后清理 claim 字段。
+- `status` 若由 Bearer Worker 调用，同样要求活动租约；Web 管理员/owner 的人工状态流转不受此限制。
+
+稳定错误码：
+
+```json
+{
+  "error": "Workflow Step claim owner 不匹配",
+  "code": "claim_owner_mismatch",
+  "claimed_by": "windows-runner-01",
+  "claimed_claw_id": 12,
+  "claim_expires_at": "2026-08-03 23:55:00",
+  "lease_seconds": 300
+}
+```
+
+`code` 可能为：
+
+```text
+claim_conflict
+claim_required
+claim_owner_mismatch
+claim_expired
+missing_worker_id
+```
+
+Worker 收到 `claim_expired` 或 `claim_required` 后应重新 claim；收到 `claim_conflict` 或 `claim_owner_mismatch` 应停止当前本地执行，避免多个 Worker 同时写同一 Step。
+
+### 21.3 Result Status 严格枚举
+
+`POST .../result` 的 `status` 必填，只允许：
+
+```text
+passed
+failed
+blocked
+skipped
+```
+
+缺失、`done`、`waiting_approval` 或其他未知状态返回 HTTP 400，不再默认兜底为 `passed`。Gate 仍可在 Hub 内部产生 `waiting_approval` 等内部状态，但 Worker 不得直接提交这些状态。
+
+### 21.4 Requirement Review Verdict Verify
+
+`/api/v1/ops/verify` 新增：
+
+```text
+resource_type = requirement_review_verdict
+```
+
+验证字段使用 API canonical payload，而不是 ORM 内部字段。可验证字段：
+
+```text
+id
+requirement_item_id
+iteration_id
+review_key
+verdict
+risk_level
+testability
+issues
+summary
+reviewer_name
+reviewer_claw_id
+created_at
+updated_at
+```
+
+示例：
+
+```json
+{
+  "resource_type": "requirement_review_verdict",
+  "resource_id": 501,
+  "expected": {
+    "review_key": "workflow-45",
+    "verdict": "risk",
+    "risk_level": "high",
+    "testability": "unclear",
+    "issues": [
+      {
+        "field": "scope",
+        "message": "验收边界不清晰"
+      }
+    ],
+    "summary": "需要补齐边界条件"
+  },
+  "token": "operation-id"
+}
+```
+
+Worker 侧仍应在生产 smoke 确认 `requirement_review_verdict` verify 可用前保持本地 fail closed；确认后再开放 review-verdict 写入策略。
+
+### 21.5 Idempotency-Key 持久化去重
+
+Hub 对 Workflow Worker 写接口新增持久化幂等记录表：
+
+```text
+workflow_operation_idempotencies
+```
+
+当前已接入：
+
+```text
+POST /api/v1/workflow-runs/{run_id}/steps/{step_id}/claim
+POST /api/v1/workflow-runs/{run_id}/steps/{step_id}/result
+```
+
+Worker 应在每次具有重试风险的写请求中带：
+
+```http
+Idempotency-Key: <operation-id>
+```
+
+Hub 的判定维度：
+
+```text
+actor_type + actor_id + Idempotency-Key
+```
+
+请求 hash 覆盖：
+
+```text
+method
+path
+query string
+raw body
+```
+
+语义：
+
+- 相同 actor、相同 key、相同请求：直接返回首次成功响应，不再二次执行。
+- 相同 actor、相同 key、不同请求：返回 HTTP 409。
+- key 最大 128 字符。
+- 记录默认保留 7 天。
+
+冲突示例：
+
+```json
+{
+  "error": "Idempotency-Key 已被不同请求复用",
+  "code": "IDEMPOTENCY_KEY_REUSED"
+}
+```
+
+典型场景：Worker 提交 `result` 后网络超时，重试同一个 key 时 Hub 会返回首次完整 Run 响应，即使 Step 已经进入终态、claim 已被清理，也不会因 `claim_required` 把重试误判为失败。
+
+### 21.6 服务重启后的任务恢复规则
+
+Hub 服务重启不清理正在运行的 Workflow Step，也不清理活动租约。恢复规则：
+
+- `/api/v1/workflow-runs/worker/tasks` 从数据库读取 `running/retrying` 的 Run 和 Step，因此服务重启后仍能列出未终结任务。
+- 活动租约未过期时，只允许原 `claimed_claw_id + worker_id` 继续 heartbeat/progress/result。
+- 租约过期后，合法执行者可以重新 `claim`，新 owner 接管该 Step。
+- 过期租约不能被 heartbeat 复活，必须重新 claim。
+- 终态、retry、resume、cancel 和 Hub 健康检查阻断都会清理 claim 字段。
+
+Worker 端恢复建议：
+
+1. 服务启动后先拉 `/workflow-runs/worker/tasks`。
+2. 对自己仍持有且未过期的 Step 继续 heartbeat/progress。
+3. 对 claim 已过期或 owner 不匹配的 Step 重新 claim 或停止本地执行。
+4. 对已提交过 result 的操作，优先使用原 `Idempotency-Key` 重放，避免重复写最终结果。
+

@@ -3,6 +3,40 @@
 {% block nav_skills %}active{% endblock %}
 {% block page_title %}Skills 市场{% endblock %}
 
+{% block head %}
+<style>
+.skill-id-heat {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: 4px;
+    white-space: nowrap;
+}
+.skill-heat {
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 7px;
+    border: 1px solid currentColor;
+    cursor: help;
+    transition: transform 140ms ease, box-shadow 140ms ease;
+}
+.skill-heat:hover {
+    transform: translateY(-1px) scale(1.08);
+    box-shadow: 0 4px 12px color-mix(in srgb, currentColor 24%, transparent);
+}
+.skill-heat svg { width: 12px; height: 12px; fill: currentColor; }
+.skill-heat--idle { color: #94a3b8; background: rgba(148, 163, 184, 0.10); }
+.skill-heat--light-green { color: #70b88c; background: rgba(112, 184, 140, 0.14); }
+.skill-heat--dark-green { color: #15803d; background: rgba(21, 128, 61, 0.14); }
+.skill-heat--blue { color: #2563eb; background: rgba(37, 99, 235, 0.13); }
+.skill-heat--orange { color: #ea580c; background: rgba(234, 88, 12, 0.13); }
+.skill-heat--red { color: #dc2626; background: rgba(220, 38, 38, 0.13); }
+</style>
+{% endblock %}
+
 {% block top_actions %}
 <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <div style="position:relative;flex:1;min-width:200px;max-width:400px">
@@ -245,6 +279,39 @@ function visibilityTag(s) {
     return '';
 }
 
+function skillHeatLevel(count) {
+    count = Number(count) || 0;
+    if (count <= 0) return 'idle';
+    if (count <= 5) return 'light-green';
+    if (count <= 10) return 'dark-green';
+    if (count <= 15) return 'blue';
+    if (count <= 20) return 'orange';
+    return 'red';
+}
+
+function skillHeatBadge(s) {
+    const count = Number(s.recent_usage_count) || 0;
+    const level = skillHeatLevel(count);
+    const label = `最近 3 天使用 ${count} 次`;
+    return `<span class="skill-heat skill-heat--${level}" title="${label}" aria-label="${label}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 2.2c.5 3.1-.8 4.5-2 5.8-1.1 1.1-2.1 2.2-2.1 4 0 1.4.8 2.6 2 3.2-.1-1.9.8-3.1 2-4.2.3 2.1 2.2 3.1 2.2 5.4 0 1.8-1.5 3.3-3.5 3.3-3.8 0-6.5-2.8-6.5-6.6 0-4.8 4-7.2 7.9-10.9Z"/></svg>
+    </span>`;
+}
+
+async function loadFullSkill(id) {
+    try {
+        const full = await API.getSkill(id);
+        const index = allSkills.findIndex(item => item.id === id);
+        if (index >= 0) allSkills[index] = { ...allSkills[index], ...full };
+        else allSkills.push(full);
+        renderSkills();
+        return index >= 0 ? allSkills[index] : full;
+    } catch (err) {
+        showToast('读取 Skill 完整内容失败: ' + err.message, 'error');
+        return null;
+    }
+}
+
 function scopeLabel(s) {
     const catLabels = {'peripheral':'外围系统','core_gameplay':'核心单局','commercialization':'商业化','client_performance':'客户端性能','server_special':'服务器专项','other':'其他专项'};
     if (s.scope === 'global') return '<span class="tag" style="background:#3498db;color:#fff;font-weight:600">通用</span>';
@@ -261,7 +328,7 @@ async function loadSkills() {
     try {
         if (searchKeyword) {
             // 如果有搜索关键词，先按标题搜索
-            allSkills = await API.request('GET', `/skills?search=${encodeURIComponent(searchKeyword)}`);
+            allSkills = await API.request('GET', `/skills?summary=true&search=${encodeURIComponent(searchKeyword)}`);
         } else {
             allSkills = await API.listSkills();
         }
@@ -445,14 +512,14 @@ async function doSearch() {
     isSemanticSearch = false;
     try {
         // 先标题搜索
-        const results = await API.request('GET', `/skills?search=${encodeURIComponent(q)}`);
+        const results = await API.request('GET', `/skills?summary=true&search=${encodeURIComponent(q)}`);
         allSkills = results;
         renderSkills();
         // 标题无结果时，自动触发语义搜索
         if (results.length === 0) {
             isSemanticSearch = true;
             showToast('标题无匹配，正在语义搜索...', 'info');
-            const semanticResults = await API.request('GET', `/skills?semantic_search=${encodeURIComponent(q)}`);
+            const semanticResults = await API.request('GET', `/skills?summary=true&semantic_search=${encodeURIComponent(q)}`);
             allSkills = semanticResults;
             renderSkills();
             if (semanticResults.length === 0) {
@@ -497,7 +564,10 @@ function renderSkills() {
         <div class="skill-card${s.category === 'evolved' ? ' skill-card-evolved' : ''}" style="cursor:pointer" onclick="previewSkill(${s.id})">
             <div class="skill-card-header">
                 <span class="skill-name">${s.display_name}</span>
-                <span style="font-size:0.75rem;color:var(--text-muted);margin-left:4px">#${s.id}</span>
+                <span class="skill-id-heat">
+                    <span style="font-size:0.75rem;color:var(--text-muted)">#${s.id}</span>
+                    ${skillHeatBadge(s)}
+                </span>
                 ${categoryTag(s)}
                 ${s.is_standard ? '<span class="tag" style="background:#e74c3c;color:#fff;font-weight:600">标准</span>' : ''}
                 ${reviewStatusTag(s)}
@@ -558,7 +628,7 @@ async function openCreateModal() {
 
 // 编辑
 async function editSkill(id) {
-    const s = allSkills.find(x => x.id === id);
+    const s = await loadFullSkill(id);
     if (!s) return;
     await loadProjectsAndModules();
 
@@ -769,8 +839,8 @@ async function submitAISkill() {
 }
 
 // 预览
-function previewSkill(id) {
-    const s = allSkills.find(x => x.id === id);
+async function previewSkill(id) {
+    const s = await loadFullSkill(id);
     if (!s) return;
     $('#preview-title').textContent = s.display_name;
     const contentHtml = s.template_content

@@ -11,6 +11,8 @@ PUBLIC_PATHS = [
     '/api/v1/test-reports/shared/',  # 测试报告分享外链匿名只读（MEMORY #134）
     '/api/v1/knowledge/shared/',    # 知识分享外链匿名只读与 Markdown 下载
     '/api/v1/collaboration-sessions/exchange',  # 一次性邀请码兑换短期 Token
+    '/api/v1/chat-room-invites/exchange',  # 聊天室外部邀请兑换
+    '/api/v1/chat-room-sessions/renew',     # 外部成员短期 Token 续期
 ]
 
 # Token 验证缓存（避免每次请求遍历所有 claw）
@@ -58,8 +60,8 @@ def require_auth():
     """全局 API 认证：所有 /api/v1/ 请求必须携带 Bearer Token 或 Web session 登录"""
     # 测试客户端可能在外层复用 app context；显式清除请求级临时身份，避免上一
     # 请求的协作 Token 泄漏到后续 Web session。真实 WSGI 请求中同样是安全 no-op。
-    for cache_key in ('_collaboration_session', '_auth_claw', '_auth_user',
-                      '_auth_user_super'):
+    for cache_key in ('_collaboration_session', '_chat_guest_session',
+                      '_auth_claw', '_auth_user', '_auth_user_super'):
         g.pop(cache_key, None)
     path = request.path
 
@@ -76,6 +78,24 @@ def require_auth():
     # OpenClaw Token 访问 Hub 其他 API。显式 Authorization 优先于 Web session，
     # 避免登录浏览器误把临时 Token 提升为用户权限。
     auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer room_cs_'):
+        if not current_app.config.get('CHAT_ROOM_ENABLED', False):
+            return jsonify({'error': '聊天室能力未开启',
+                            'code': 'CHAT_ROOM_DISABLED'}), 401
+        from app.services.chat_rooms import (
+            find_active_guest_session,
+            guest_path_allowed,
+        )
+        if not guest_path_allowed(path, request.method):
+            return jsonify({'error': '临时成员 Token 不允许访问该路径',
+                            'code': 'CHAT_ROOM_PATH_DENIED'}), 403
+        guest_session = find_active_guest_session(auth[7:])
+        if not guest_session:
+            return jsonify({'error': '临时成员 Token 无效、已过期或已撤销',
+                            'code': 'CHAT_ROOM_TOKEN_INVALID'}), 401
+        g._chat_guest_session = guest_session
+        return None
+
     if auth.startswith('Bearer hub_cs_'):
         if not current_app.config.get('SHIFT_LEFT_ENABLED', False):
             return jsonify({'error': '临时协作能力未开启',
@@ -167,7 +187,7 @@ def require_auth():
     return jsonify({'error': '未认证，请在 Header 中携带 Authorization: Bearer {TOKEN} 或先登录 Web'}), 401
 
 
-from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans, engineering, requirements, test_accounts, review_comments, wecom, agent_deployments, agent_templates, shared_articles, test_reports, panorama, testcase_panorama_links, exams, secrets, workflows, tasks_context, ops_verify, memories, shift_left, agent_control  # noqa: F401
+from app.api import openclaws, skills, knowledge, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans, engineering, requirements, test_accounts, review_comments, wecom, agent_deployments, agent_templates, shared_articles, test_reports, panorama, testcase_panorama_links, exams, secrets, workflows, workflow_missions, agent_artifacts, mission_stages, mission_handoffs, agent_eval, tasks_context, ops_verify, memories, shift_left, automation_candidates, automation_capabilities, testcase_promotions, resource_leases, entity_relations, analysis_rules, automation_closed_loop, agent_control, chat_rooms, worker_releases  # noqa: F401
 
 # 注册 Agent Hub 通信中心蓝图
 api_bp.register_blueprint(agent_hub.agent_hub_bp, url_prefix='/agent-hub')

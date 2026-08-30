@@ -72,6 +72,33 @@ Authorization: Bearer hub_cs_xxx
 
 Token 仍受对象范围、scope、有效期、调用预算、撤销和审计约束。
 
+### 外部 AI 零文档交接（收口版）
+
+用例评审邀请兑换成功后，响应同时返回 `case-review-bootstrap.v1`。任务包包含：
+
+- 临时 `access_token`、有效期、调用预算和 scopes；
+- `context`、`cases`、`comments`、`marks` 的绝对 API 地址；
+- 推荐执行顺序、评审维度、评论和节点标记请求格式；
+- 不得越权、不得持久化凭据、默认不得通过/驳回的约束。
+
+交接页提供“复制完整 AI 提示词”和“复制 JSON 任务包”，外部研发可直接粘贴给 Codex、Claude 或自研 Agent，无需预先阅读 Hub 文档。
+
+评审记录使用统一资源接口：
+
+- `GET /api/v1/shift-left/case-reviews/{topic_id}/reviews`：读取当前已提交记录；
+- `POST /api/v1/shift-left/case-reviews/{topic_id}/reviews`：创建评审记录；
+- `PATCH /api/v1/shift-left/case-reviews/{topic_id}/reviews/{review_id}`：修改自己的记录；
+- `DELETE /api/v1/shift-left/case-reviews/{topic_id}/reviews/{review_id}`：软删除自己的记录。
+
+每条 Developer AI 评审记录绑定签发它的 `collaboration_session_id`。读取响应用 `owned_by_me` 和 `can_modify` 明确标识所有权；显示名称相同也不能跨会话修改或删除。旧 `/comments` POST 保留为兼容别名。
+
+同一评审中的 `agent_identity` 必须能区分团队、人员或 AI 实例；通用占位身份会被拒绝，同一身份存在待兑换或生效会话时不能重复签发。课题页可通过：
+
+- `GET /api/v1/collaboration-sessions?subject_type=case_review&subject_id={topic_id}`
+- `POST /api/v1/collaboration-sessions/{session_id}/revoke`
+
+查看已签发会话、调用量、有效期和状态，并随时撤销。
+
 ## 用例评审 Developer AI API
 
 `case_review` 的 `subject_id` 是现有 `Topic.id`，不新增评审数据模型。

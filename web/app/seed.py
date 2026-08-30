@@ -1,6 +1,13 @@
 """种子数据：初始化标准 Skills、Rules 和默认项目"""
+import hashlib
+import json
+from pathlib import Path
+
 from app import db
-from app.models import Skill, Rule, Project, Module
+from app.models import (
+    AgentEvalCase, AgentEvalDataset, AgentPost, AgentProfile, Module, Project,
+    Rule, Skill, SkillFile,
+)
 
 
 STANDARD_SKILLS = [
@@ -1057,6 +1064,216 @@ def seed_skills():
     return created
 
 
+_MISSION_SKILLS = {
+    'agent-operating-protocol': (
+        'Agent 运转协议', '所有正式任务共用的上下文、执行和收尾协议'),
+    'mission-requirement-analysis': (
+        'Mission 需求分析', '产出 requirement_analysis v1 Artifact'),
+    'mission-engineering-analysis': (
+        'Mission 工程分析', '产出 engineering_analysis v1 Artifact'),
+    'mission-test-execution': (
+        'Mission 测试执行', '通过 typed Runner 产出 execution_record v1 Artifact'),
+}
+
+
+def seed_game_test_agent_team():
+    """导入P0三岗位Skill/Profile；不覆盖同版本人工配置，不自动分配Claw。"""
+    root = Path(__file__).resolve().parents[2]
+    skills_root = root / 'openclaw-agent' / 'skills'
+    profile_path = (
+        root / 'openclaw-agent' / 'profiles' / 'game-test-team-v1.json')
+    document = json.loads(profile_path.read_text(encoding='utf-8'))
+    if document.get('schema') != 1 or document.get('version') != 1:
+        raise ValueError('game test team seed schema is unsupported')
+
+    created_skills = 0
+    for skill_name, (display_name, description) in _MISSION_SKILLS.items():
+        skill_dir = skills_root / skill_name
+        content = (skill_dir / 'SKILL.md').read_text(encoding='utf-8')
+        relative_pack = str(skill_dir.relative_to(root)).replace('\\', '/')
+        reference_paths = sorted(
+            path for path in skill_dir.rglob('*')
+            if path.is_file() and path.name != 'SKILL.md')
+        manifest = [{
+            'name': str(path.relative_to(skill_dir)).replace('\\', '/'),
+            'description': '岗位Artifact合同参考',
+        } for path in reference_paths]
+        skill = Skill.query.filter_by(name=skill_name).first()
+        if not skill:
+            skill = Skill(
+                name=skill_name, display_name=display_name,
+                description=description, category='business_test',
+                trigger_phrase=skill_name, template_content=content,
+                pack_path=relative_pack, files=manifest, scope='global',
+                is_standard=False, created_by='system',
+                review_status='approved', last_modified_source='system')
+            db.session.add(skill)
+            db.session.flush()
+            created_skills += 1
+        elif (skill_name != 'agent-operating-protocol'
+              and skill.created_by == 'system'
+              and skill.last_modified_source == 'system'):
+            skill.display_name = display_name
+            skill.description = description
+            skill.template_content = content
+            skill.pack_path = relative_pack
+            skill.files = manifest
+        for path in reference_paths:
+            filename = str(path.relative_to(skill_dir)).replace('\\', '/')
+            entry = SkillFile.query.filter_by(
+                skill_id=skill.id, filename=filename).first()
+            if not entry:
+                db.session.add(SkillFile(
+                    skill_id=skill.id, filename=filename,
+                    content=path.read_text(encoding='utf-8'),
+                    file_type='markdown', description='岗位Artifact合同参考'))
+            elif (skill_name != 'agent-operating-protocol'
+                  and skill.created_by == 'system'
+                  and skill.last_modified_source == 'system'):
+                entry.content = path.read_text(encoding='utf-8')
+
+    created_profiles = 0
+    created_posts = 0
+    for item in document.get('profiles') or []:
+        profile = AgentProfile.query.filter_by(
+            profile_key=item['profile_key']).first()
+        values = {
+            'name': item['name'], 'description': item['description'],
+            'system_prompt': item['system_prompt'],
+            'workflow_config': item['workflow_config'],
+            'required_skills_json': item['required_skills'],
+            'contract_json': item['contract'], 'version': document['version'],
+            'status': 'active', 'created_by': 'system',
+        }
+        if not profile:
+            profile = AgentProfile(profile_key=item['profile_key'], **values)
+            db.session.add(profile)
+            db.session.flush()
+            created_profiles += 1
+        elif int(profile.version or 1) < int(document['version']):
+            for field, value in values.items():
+                setattr(profile, field, value)
+        post_data = item['post']
+        post = AgentPost.query.filter_by(
+            post_key=post_data['post_key'], project_id=None).first()
+        if not post:
+            db.session.add(AgentPost(
+                post_key=post_data['post_key'], name=post_data['name'],
+                description=item['description'], project_id=None,
+                profile_id=profile.id,
+                required_profile_version=post_data['required_profile_version'],
+                status='active', created_by='system'))
+            created_posts += 1
+
+    db.session.commit()
+    return {
+        'skills': created_skills,
+        'profiles': created_profiles,
+        'posts': created_posts,
+    }
+
+
+def _seed_sha256(value):
+    rendered = json.dumps(
+        value, ensure_ascii=False, sort_keys=True,
+        separators=(',', ':'), allow_nan=False).encode('utf-8')
+    return 'sha256:' + hashlib.sha256(rendered).hexdigest()
+
+
+def seed_game_test_eval_data():
+    """导入24个P0 Eval Case为draft；真实双评完成前不自动freeze。"""
+    root = Path(__file__).resolve().parents[2]
+    path = root / 'openclaw-agent' / 'eval' / 'game-test-team-v1.json'
+    document = json.loads(path.read_text(encoding='utf-8'))
+    if document.get('schema') != 1 or document.get('version') != 1:
+        raise ValueError('game test eval seed schema is unsupported')
+    project = Project.query.filter_by(name=document['project_name']).first()
+    if not project:
+        raise ValueError('game test eval seed project is missing')
+    review_policy = {
+        'required_reviewers': int(
+            document.get('review_policy', {}).get('required_reviewers') or 0),
+        'max_dimension_variance_percent': float(
+            document.get('review_policy', {}).get(
+                'max_dimension_variance_percent', 20)),
+    }
+    created_datasets = 0
+    created_cases = 0
+    for spec in document.get('datasets') or []:
+        dataset_seed_key = (
+            f'seed:{document["suite_key"]}:{spec["dataset_key"]}')
+        dataset = AgentEvalDataset.query.filter_by(
+            project_id=project.id, dataset_key=spec['dataset_key'],
+            version=document['version']).first()
+        if not dataset:
+            request = {
+                'project_id': project.id, 'dataset_key': spec['dataset_key'],
+                'role_key': spec['role_key'], 'version': document['version'],
+                'split': spec['split'],
+                'rubric_version': spec['rubric_version'],
+                'review_policy': review_policy,
+            }
+            dataset = AgentEvalDataset(
+                project_id=project.id, dataset_key=spec['dataset_key'],
+                role_key=spec['role_key'], version=document['version'],
+                split=spec['split'], rubric_version=spec['rubric_version'],
+                status='draft', dataset_sha256='',
+                review_policy_json=review_policy, review_status='pending',
+                review_records_json=[],
+                idempotency_key=dataset_seed_key,
+                request_sha256=_seed_sha256(request),
+                created_by_type='system', created_by_id=0,
+                created_by_name='system')
+            db.session.add(dataset)
+            db.session.flush()
+            created_datasets += 1
+        elif not (
+                dataset.created_by_type == 'system'
+                and int(dataset.created_by_id or 0) == 0
+                and dataset.idempotency_key == dataset_seed_key):
+            raise ValueError(
+                f'eval dataset key is owned by non-seed data: {spec["dataset_key"]}')
+        if dataset.status != 'draft':
+            continue
+        for case_spec in spec.get('cases') or []:
+            existing_case = AgentEvalCase.query.filter_by(
+                    dataset_id=dataset.id,
+                    case_key=case_spec['case_key']).first()
+            case_seed_key = f'seed:{case_spec["case_key"]}'
+            if existing_case:
+                if not (
+                        existing_case.created_by_type == 'system'
+                        and int(existing_case.created_by_id or 0) == 0
+                        and existing_case.idempotency_key == case_seed_key):
+                    raise ValueError(
+                        'eval case key is owned by non-seed data: '
+                        + case_spec['case_key'])
+                continue
+            request = {
+                key: case_spec[key] for key in (
+                    'case_key', 'input_snapshot', 'expected_contract',
+                    'required_evidence', 'deterministic_checks',
+                    'allowed_variance', 'hidden_tags')
+            }
+            db.session.add(AgentEvalCase(
+                dataset_id=dataset.id, case_key=case_spec['case_key'],
+                input_snapshot_json=case_spec['input_snapshot'],
+                expected_contract_json=case_spec['expected_contract'],
+                required_evidence_json=case_spec['required_evidence'],
+                deterministic_checks_json=case_spec['deterministic_checks'],
+                allowed_variance_json=case_spec['allowed_variance'],
+                hidden_tags_json=case_spec['hidden_tags'],
+                input_sha256=_seed_sha256(case_spec['input_snapshot']),
+                status='active',
+                idempotency_key=case_seed_key,
+                request_sha256=_seed_sha256(request),
+                created_by_type='system', created_by_id=0,
+                created_by_name='system'))
+            created_cases += 1
+    db.session.commit()
+    return {'datasets': created_datasets, 'cases': created_cases}
+
+
 def seed_rules():
     """初始化标准 Rules（跳过已存在的，但更新 scope/owner_claw_id）"""
     created = 0
@@ -1286,7 +1503,13 @@ def seed_all():
     rules_count = seed_rules()
     projects_count = seed_projects()
     modules_count = seed_modules()
+    agent_team = seed_game_test_agent_team()
+    eval_data = seed_game_test_eval_data()
     packs_count = seed_packs()
     return (f'创建了 {skills_count} 个标准 Skills，{rules_count} 个标准 Rules，'
             f'{projects_count} 个默认项目，{modules_count} 个默认模块，'
-            f'{packs_count} 个标准包')
+            f'{packs_count} 个标准包；Agent团队新增 '
+            f'{agent_team["skills"]} Skill / '
+            f'{agent_team["profiles"]} Profile / {agent_team["posts"]} Post；'
+            f'Eval新增 {eval_data["datasets"]} Dataset / '
+            f'{eval_data["cases"]} Case')

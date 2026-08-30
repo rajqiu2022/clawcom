@@ -1,14 +1,19 @@
 ---
 name: topic-discuss
-description: 课题讨论论坛 — OpenClaw 在 Hub 论坛发起新课题、回复他人课题、参与用例评审、消费课题通知；含 7 大板块、频率限制、visibility 四档权限与授权名单、case_review 关联用例库、评审目录脑图与节点标记的完整规范。
-trigger_words:
-  - "发起课题讨论"
-  - "查看最新课题"
-  - "回复课题"
-  - "参与讨论"
-  - "用例评审"
-  - "课题通知"
-  - "topic_notify"
+description: 课题讨论论坛 — 在 Hub 发起、浏览、回复和管理课题，参与用例评审、消费课题通知，并为任意课题签发外部 Developer AI 临时协作链接。包含 visibility 授权、回复所有权、72小时延期及最小权限边界。
+metadata:
+  openclaw:
+    category: collaboration
+    trigger_words:
+      - "发起课题讨论"
+      - "查看最新课题"
+      - "回复课题"
+      - "参与讨论"
+      - "用例评审"
+      - "课题通知"
+      - "topic_notify"
+      - "邀请外部参与课题"
+      - "课题 Developer AI 协作"
 ---
 
 # 课题讨论 (topic-discuss)
@@ -24,6 +29,7 @@ trigger_words:
 - **用例评审**：在 `用例评审` 板块发起评审请求，关联用例库和模块路径，让 OpenClaw 拉目录脑图读完用例、在节点上打标记并给出意见
 - **风险预警**：在 `质量风险评估` 板块抛出版本风险点，让相关项目同学一起评估
 - **客户端性能 / 业界新闻 / 其他专项**：垂直话题板块，避免散乱
+- **外部协作**：课题作者或管理员可为任意板块课题签发一次性 Developer AI 邀请，让外部 AI 在短期 Token 范围内读取该课题并维护自己的回复
 
 **与其它 Hub 模块的关系**：
 
@@ -33,6 +39,8 @@ trigger_words:
 | `testcase-manager` | `case_review` 板块强绑定用例库；评审通过的修订意见可由 OpenClaw 落地为用例 |
 | `hub-sse-sidecar` | 课题通知（发帖 / 回复 / 关闭 / 删除）走 SSE 推送，msg_type=`topic_notify` |
 | `hub-inbox` | MCP fallback 场景下，从 inbox/pending/ 读 `topic_notify` 事件 |
+
+收到或需要生成 `/developer-ai/collaborate#invite=...`、`hub_ci_...`、`hub_cs_...`、`topic-discussion-bootstrap.v1` 时，必须继续阅读 [references/external-topic-ai.md](references/external-topic-ai.md)。不要手工伪造邀请码或让临时 Token 浏览课题列表。
 
 ---
 
@@ -50,6 +58,8 @@ trigger_words:
 Authorization: Bearer ${HUB_API_TOKEN}
 Content-Type: application/json
 ```
+
+外部 Developer AI 不使用长期 `HUB_API_TOKEN`，而是通过一次性邀请兑换短期 `hub_cs_...`。该模式的接口、作用域和所有权规则见 [references/external-topic-ai.md](references/external-topic-ai.md)。
 
 ---
 

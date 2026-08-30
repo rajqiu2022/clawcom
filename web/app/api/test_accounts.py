@@ -3,13 +3,13 @@
 路由前缀：/api/v1/test-accounts
 
 权限模型：
-    - 列表 / 单查 / acquire / release / mark-abnormal / usage-history：
+    - 列表 / 单查 / acquire / keepalive / release / mark-abnormal / usage-history：
         任意通过 `before_request` 全局认证（Web session 或 Bearer Token）的调用方均可。
     - create / update / delete：
         仅 super_admin 用户  或  admin 角色 OpenClaw（龙虾王）token。
         其他角色一律 403。
 """
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flask import request, jsonify, session as flask_session
 from sqlalchemy import or_
@@ -20,6 +20,7 @@ from app.models import (
     TestAccount,
     TestAccountUsageLog,
     User,
+    WorkflowRun,
 )
 from app.api import api_bp
 
@@ -95,11 +96,67 @@ def _add_log(account, action, actor_type, actor_name,
     return log
 
 
-def _account_or_404(account_id, allow_deleted=False):
+def _account_or_404(account_id, allow_deleted=False, lock=False):
     q = TestAccount.query.filter_by(id=account_id)
     if not allow_deleted:
         q = q.filter_by(is_deleted=False)
+    if lock:
+        q = q.with_for_update()
     return q.first()
+
+
+def _normalize_account_ttl(value, default=1800):
+    try:
+        ttl = int(default if value in (None, '') else value)
+    except (TypeError, ValueError):
+        raise ValueError('ttl_seconds 必须是整数') from None
+    if ttl < 60 or ttl > 7200:
+        raise ValueError('ttl_seconds 必须在 60 到 7200 秒之间')
+    return ttl
+
+
+def _clear_account_lease(account):
+    account.status = 'idle'
+    account.holder_name = ''
+    account.current_claw_id = None
+    account.current_purpose = ''
+    account.lease_expires_at = None
+    account.lease_heartbeat_at = None
+    account.workflow_run_id = None
+    account.controller_run_id = None
+
+
+def _expire_account_if_needed(account, now=None):
+    now = now or datetime.now()
+    if (account.status != 'in_use' or not account.lease_expires_at or
+            account.lease_expires_at > now):
+        return False
+    previous = {
+        'holder_name': account.holder_name or '',
+        'current_claw_id': account.current_claw_id,
+        'purpose': account.current_purpose or '',
+        'workflow_run_id': account.workflow_run_id,
+        'controller_run_id': account.controller_run_id,
+        'lease_expires_at': str(account.lease_expires_at),
+    }
+    _add_log(
+        account, 'expire', 'system', 'test-account-lease-expiry',
+        None, None, purpose='ttl_expired', extra=previous)
+    _clear_account_lease(account)
+    return True
+
+
+def _reclaim_expired_accounts(now=None):
+    now = now or datetime.now()
+    rows = (TestAccount.query.filter(
+        TestAccount.status == 'in_use',
+        TestAccount.lease_expires_at.isnot(None),
+        TestAccount.lease_expires_at <= now,
+        TestAccount.is_deleted == False,  # noqa: E712
+    ).with_for_update().all())
+    for account in rows:
+        _expire_account_if_needed(account, now)
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +179,8 @@ def list_test_accounts():
     if err is not None:
         return err, code
     actor_type, actor_name, claw_id, user_id, is_admin = info
+    if _reclaim_expired_accounts():
+        db.session.commit()
 
     platform = request.args.get('platform', '').strip().lower() or None
     status = request.args.get('status', '').strip().lower() or None
@@ -177,9 +236,11 @@ def get_test_account(account_id):
         request.args.get('include_password', 'false').lower() == 'true'
         and is_admin
     )
-    account = _account_or_404(account_id, allow_deleted=is_admin)
+    account = _account_or_404(account_id, allow_deleted=is_admin, lock=True)
     if not account:
         return jsonify({'error': '账号不存在'}), 404
+    if _expire_account_if_needed(account):
+        db.session.commit()
     return jsonify(account.to_dict(include_password=include_password))
 
 
@@ -192,7 +253,8 @@ def acquire_test_account(account_id):
     """领用一个空闲账号，返回密码。
 
     请求体：
-      { "purpose": "登录验证", "force": false }
+      { "purpose": "登录验证", "force": false, "ttl_seconds": 1800,
+        "workflow_run_id": 118, "controller_run_id": "codex-cycle-..." }
 
     purpose: 必填，至少 2 个字符；用作 current_purpose 与日志 purpose。
     force=true: 即使当前 in_use 也强制抢占（仅 admin 可用）。
@@ -208,17 +270,41 @@ def acquire_test_account(account_id):
 
     if len(purpose) < 2:
         return jsonify({'error': 'purpose（使用途径/备注）必填且至少 2 个字符'}), 400
+    try:
+        ttl_seconds = _normalize_account_ttl(data.get('ttl_seconds'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc), 'code': 'INVALID_ACCOUNT_LEASE_TTL'}), 400
+    workflow_run_id = data.get('workflow_run_id')
+    if workflow_run_id not in (None, ''):
+        try:
+            workflow_run_id = int(workflow_run_id)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'workflow_run_id 必须是整数'}), 400
+        if not db.session.get(WorkflowRun, workflow_run_id):
+            return jsonify({'error': 'Workflow Run 不存在'}), 404
+    else:
+        workflow_run_id = None
+    controller_run_id = str(data.get('controller_run_id') or '').strip()
+    if len(controller_run_id) > 160:
+        return jsonify({'error': 'controller_run_id 不能超过 160 个字符'}), 400
 
-    account = _account_or_404(account_id)
+    # Lock the account row so two workers cannot both observe idle and acquire.
+    account = _account_or_404(account_id, lock=True)
     if not account:
         return jsonify({'error': '账号不存在'}), 404
+    now = datetime.now()
+    expired = _expire_account_if_needed(account, now)
 
     if account.status == 'in_use' and not force:
+        if expired:
+            db.session.commit()
         return jsonify({
             'error': '账号正在被使用',
             'current_user': account.holder_name or '',
             'current_purpose': account.current_purpose or '',
             'last_login_at': str(account.last_login_at) if account.last_login_at else None,
+            'lease_expires_at': (
+                str(account.lease_expires_at) if account.lease_expires_at else None),
             'hint': '可换一个空闲账号；admin 可加 force=true 强制抢占',
         }), 409
 
@@ -228,15 +314,24 @@ def acquire_test_account(account_id):
             'hint': 'POST /api/v1/test-accounts/{id}/recover 由 admin 处理',
         }), 409
 
-    now = datetime.now()
     prev_user = account.holder_name or ''
     account.status = 'in_use'
     account.holder_name = actor_name
     account.current_claw_id = claw_id
     account.current_purpose = purpose
     account.last_login_at = now
+    account.lease_ttl_seconds = ttl_seconds
+    account.lease_heartbeat_at = now
+    account.lease_expires_at = now + timedelta(seconds=ttl_seconds)
+    account.workflow_run_id = workflow_run_id
+    account.controller_run_id = controller_run_id or None
 
-    extra = {}
+    extra = {
+        'ttl_seconds': ttl_seconds,
+        'lease_expires_at': str(account.lease_expires_at),
+        'workflow_run_id': workflow_run_id,
+        'controller_run_id': controller_run_id or None,
+    }
     if force and prev_user:
         extra['preempted_from'] = prev_user
     _add_log(account, 'acquire', actor_type, actor_name,
@@ -246,6 +341,63 @@ def acquire_test_account(account_id):
     payload = account.to_dict(include_password=True)
     payload['acquired_at'] = str(now)
     return jsonify(payload)
+
+
+@api_bp.route('/test-accounts/<int:account_id>/keepalive', methods=['POST'])
+def keepalive_test_account(account_id):
+    """Renew the current holder's account lease; an expired lease must reacquire."""
+    info, err, code = _require_actor()
+    if err is not None:
+        return err, code
+    actor_type, actor_name, claw_id, user_id, is_admin = info
+    account = _account_or_404(account_id, lock=True)
+    if not account:
+        return jsonify({'error': '账号不存在'}), 404
+    now = datetime.now()
+    if _expire_account_if_needed(account, now):
+        db.session.commit()
+        return jsonify({
+            'error': '账号租约已过期，请重新领用',
+            'code': 'TEST_ACCOUNT_LEASE_EXPIRED',
+        }), 409
+    if account.status != 'in_use':
+        return jsonify({
+            'error': '账号当前未被领用',
+            'code': 'TEST_ACCOUNT_NOT_IN_USE',
+        }), 409
+    is_self = (
+        (claw_id and account.current_claw_id == claw_id)
+        or (actor_name and account.holder_name == actor_name)
+    )
+    if not (is_self or is_admin):
+        return jsonify({
+            'error': '只能续租自己当前占用的账号',
+            'code': 'TEST_ACCOUNT_LEASE_OWNER_MISMATCH',
+            'current_user': account.holder_name or '',
+        }), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        ttl_seconds = _normalize_account_ttl(
+            data.get('ttl_seconds'), default=account.lease_ttl_seconds or 1800)
+    except ValueError as exc:
+        return jsonify({'error': str(exc), 'code': 'INVALID_ACCOUNT_LEASE_TTL'}), 400
+    account.lease_ttl_seconds = ttl_seconds
+    account.lease_heartbeat_at = now
+    account.lease_expires_at = now + timedelta(seconds=ttl_seconds)
+    _add_log(
+        account, 'renew', actor_type, actor_name, claw_id, user_id,
+        purpose=account.current_purpose or '',
+        extra={
+            'ttl_seconds': ttl_seconds,
+            'lease_expires_at': str(account.lease_expires_at),
+            'workflow_run_id': account.workflow_run_id,
+            'controller_run_id': account.controller_run_id,
+        })
+    db.session.commit()
+    return jsonify({
+        'message': '已续租',
+        'account': account.to_dict(include_password=False),
+    })
 
 
 @api_bp.route('/test-accounts/<int:account_id>/release', methods=['POST'])
@@ -266,13 +418,18 @@ def release_test_account(account_id):
     data = request.get_json(silent=True) or {}
     summary = (data.get('summary') or '').strip()
 
-    account = _account_or_404(account_id)
+    account = _account_or_404(account_id, lock=True)
     if not account:
         return jsonify({'error': '账号不存在'}), 404
+    expired = _expire_account_if_needed(account)
 
     if account.status == 'idle':
+        if expired:
+            db.session.commit()
         return jsonify({
-            'message': '账号本就是空闲状态，无需释放',
+            'message': (
+                '账号租约已超时自动释放'
+                if expired else '账号本就是空闲状态，无需释放'),
             'account': account.to_dict(),
         })
 
@@ -290,12 +447,14 @@ def release_test_account(account_id):
     if not is_self and is_admin:
         extra['released_by_admin'] = actor_name
 
-    account.status = 'idle'
-    account.holder_name = ''
-    account.current_claw_id = None
-    account.current_purpose = ''
+    previous_refs = {
+        'workflow_run_id': account.workflow_run_id,
+        'controller_run_id': account.controller_run_id,
+    }
+    _clear_account_lease(account)
     _add_log(account, 'release', actor_type, actor_name,
-             claw_id, user_id, purpose=summary, extra=extra)
+             claw_id, user_id, purpose=summary,
+             extra=dict(extra, **previous_refs))
     db.session.commit()
     return jsonify({
         'message': '已释放',
@@ -324,15 +483,13 @@ def mark_test_account_abnormal(account_id):
     if len(reason) < 2:
         return jsonify({'error': 'reason 必填且至少 2 个字符'}), 400
 
-    account = _account_or_404(account_id)
+    account = _account_or_404(account_id, lock=True)
     if not account:
         return jsonify({'error': '账号不存在'}), 404
 
-    account.status = 'abnormal'
     if do_release:
-        account.holder_name = ''
-        account.current_claw_id = None
-        account.current_purpose = ''
+        _clear_account_lease(account)
+    account.status = 'abnormal'
 
     _add_log(account, 'mark_abnormal', actor_type, actor_name,
              claw_id, user_id, purpose=reason,
@@ -355,14 +512,11 @@ def recover_test_account(account_id):
     data = request.get_json(silent=True) or {}
     note = (data.get('note') or '').strip()
 
-    account = _account_or_404(account_id)
+    account = _account_or_404(account_id, lock=True)
     if not account:
         return jsonify({'error': '账号不存在'}), 404
 
-    account.status = 'idle'
-    account.holder_name = ''
-    account.current_claw_id = None
-    account.current_purpose = ''
+    _clear_account_lease(account)
     _add_log(account, 'recover', actor_type, actor_name,
              claw_id, user_id, purpose=note,
              extra={'note': note} if note else {})
@@ -492,7 +646,7 @@ def delete_test_account(account_id):
         return err, code
     actor_type, actor_name, claw_id, user_id, _ = info
 
-    account = _account_or_404(account_id)
+    account = _account_or_404(account_id, lock=True)
     if not account:
         return jsonify({'error': '账号不存在'}), 404
 
@@ -504,10 +658,7 @@ def delete_test_account(account_id):
         _add_log(account, 'release', actor_type, actor_name,
                  claw_id, user_id, purpose='deleted_while_in_use',
                  extra={'previous_user': account.holder_name or ''})
-        account.status = 'idle'
-        account.holder_name = ''
-        account.current_claw_id = None
-        account.current_purpose = ''
+        _clear_account_lease(account)
     _add_log(account, 'delete', actor_type, actor_name,
              claw_id, user_id, purpose='', extra={})
     db.session.commit()
@@ -524,7 +675,7 @@ def get_test_account_usage_history(account_id):
 
     查询参数（可选）：
       limit=10        默认 10，最大 100
-      action=acquire|release|mark_abnormal|recover|create|delete
+      action=acquire|renew|expire|release|mark_abnormal|recover|create|delete
     """
     info, err, code = _require_actor()
     if err is not None:

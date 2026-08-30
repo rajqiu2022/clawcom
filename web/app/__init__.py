@@ -62,7 +62,7 @@ def create_app(config_name=None):
     # 全局注入 hub_public_url 给所有模板使用。
     # 历史教训 #126b/#127：前端不能信 location.origin（浏览器可能从 https://clawteam.woa.com
     # 进，撞 lampp Apache 必 404；唯一对 claw 可达的真身入口是 http://your-hub-host:18800）。
-    # 模板里用 {{ hub_public_url }} 拼"发给 claw / Agent 用的"URL（IP+端口）。
+    # 模板里用 {{ hub_public_url }} 拼"发给 claw / Agent 用的"URL（域名+端口）。
     # {{ hub_web_url }} 拼"给用户浏览器访问的"URL（https 域名）。
     import os as _os_ctx
     import time as _time_ctx
@@ -1365,6 +1365,7 @@ def create_app(config_name=None):
                         ('safe_name', "VARCHAR(50) DEFAULT ''"),
                         ('llm_provider', "VARCHAR(50) DEFAULT 'venus'"),
                         ('llm_model', "VARCHAR(100) DEFAULT 'venus'"),
+                        ('system_context_policy_json', "LONGTEXT DEFAULT NULL"),
                     ]:
                         try:
                             conn.execute(text(
@@ -1440,6 +1441,53 @@ def create_app(config_name=None):
                         logger.info('agent_deployments 表已创建')
                     except Exception as e:
                         logger.info(f'agent_deployments 表创建跳过: {e}')
+
+                    # 5c-1) Claw Worker 不可变发布版本与部署溯源
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS worker_releases (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                release_id VARCHAR(80) NOT NULL,
+                                source_repository VARCHAR(500) DEFAULT '',
+                                source_ref VARCHAR(120) DEFAULT '',
+                                source_commit VARCHAR(40) NOT NULL,
+                                committed_at VARCHAR(40) DEFAULT '',
+                                channel VARCHAR(30) DEFAULT 'candidate',
+                                signature_status VARCHAR(30) DEFAULT 'unsigned',
+                                release_manifest_sha256 VARCHAR(64) NOT NULL,
+                                platform VARCHAR(40) NOT NULL DEFAULT 'linux-x86_64',
+                                platform_manifest_sha256 VARCHAR(64) NOT NULL,
+                                package_manifest_sha256 VARCHAR(64) NOT NULL,
+                                artifact_filename VARCHAR(255) NOT NULL,
+                                artifact_sha256 VARCHAR(64) NOT NULL,
+                                artifact_size BIGINT NOT NULL,
+                                artifact_path VARCHAR(1000) NOT NULL,
+                                approval_status VARCHAR(20) DEFAULT 'candidate',
+                                is_default BOOLEAN NOT NULL DEFAULT 0,
+                                imported_by VARCHAR(100) DEFAULT 'system',
+                                imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                approved_by VARCHAR(100) DEFAULT '',
+                                approved_at DATETIME DEFAULT NULL,
+                                rejected_by VARCHAR(100) DEFAULT '',
+                                rejected_at DATETIME DEFAULT NULL,
+                                UNIQUE KEY uq_worker_release_platform (release_id, platform),
+                                INDEX ix_worker_release_approval
+                                    (platform, approval_status, is_default)
+                            )
+                        """))
+                    except Exception as e:
+                        logger.info(f'worker_releases 表创建跳过: {e}')
+                    for col, coltype in [
+                        ('worker_release_record_id', 'INTEGER DEFAULT NULL'),
+                        ('worker_release_id', "VARCHAR(80) DEFAULT ''"),
+                        ('worker_source_commit', "VARCHAR(40) DEFAULT ''"),
+                        ('worker_artifact_sha256', "VARCHAR(64) DEFAULT ''"),
+                    ]:
+                        try:
+                            conn.execute(text(
+                                f'ALTER TABLE agent_deployments ADD COLUMN {col} {coltype}'))
+                        except Exception:
+                            pass
 
                     # 5d) Agent 模板库（超管管理，支持文件隔离存储）
                     try:

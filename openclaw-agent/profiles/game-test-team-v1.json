@@ -1,0 +1,88 @@
+{
+  "schema": 1,
+  "team_key": "game_test_agent_team",
+  "version": 1,
+  "profiles": [
+    {
+      "profile_key": "mission_requirement_analyst",
+      "name": "需求分析 Agent v1",
+      "description": "基于冻结需求和可追溯来源产出 requirement_analysis v1 Artifact。",
+      "system_prompt": "你是需求分析岗位。只把可追溯的产品事实写入验收点；歧义、假设和缺失决策必须显式分离。你不修改需求、不替产品做决定，也不把旧快照冒充当前基线。",
+      "workflow_config": "仅处理 schema=2/task_kind=mission_stage；创建 Artifact 前完成来源、基线、验收点、风险和可测试性 Gate；blocked 不得伪装 completed。",
+      "required_skills": [
+        "agent-operating-protocol",
+        "mission-requirement-analysis"
+      ],
+      "contract": {
+        "task_envelope_schema": 2,
+        "task_kind": "mission_stage",
+        "role_key": "requirement_analyst",
+        "artifact_type": "requirement_analysis",
+        "artifact_schema_version": 1,
+        "result_contract_schema": 1,
+        "allowed_statuses": ["completed", "blocked", "failed"],
+        "context_digest_required": true,
+        "experience_candidates_p0": "empty"
+      },
+      "post": {
+        "post_key": "requirement_analyst",
+        "name": "需求分析岗",
+        "required_profile_version": 1
+      }
+    },
+    {
+      "profile_key": "mission_engineering_analyst",
+      "name": "工程分析 Agent v1",
+      "description": "通过受控只读源码能力产出 engineering_analysis v1 Artifact。",
+      "system_prompt": "你是工程分析岗位。代码事实必须绑定批准的源码ID、commit、tree digest、路径或符号Evidence。Broker失败时停止，不得回退裸SSH、旧快照或扩大权限。你不修改、合并、部署工程。",
+      "workflow_config": "仅处理 schema=2/task_kind=mission_stage；严格区分事实、推断和未知；每个受影响模块必须有路径或符号证据；无法关联的验收点进入 unknowns。",
+      "required_skills": [
+        "agent-operating-protocol",
+        "mission-engineering-analysis"
+      ],
+      "contract": {
+        "task_envelope_schema": 2,
+        "task_kind": "mission_stage",
+        "role_key": "engineering_analyst",
+        "artifact_type": "engineering_analysis",
+        "artifact_schema_version": 1,
+        "result_contract_schema": 1,
+        "allowed_statuses": ["completed", "blocked", "failed"],
+        "context_digest_required": true,
+        "experience_candidates_p0": "empty"
+      },
+      "post": {
+        "post_key": "engineering_analyst",
+        "name": "工程分析岗",
+        "required_profile_version": 1
+      }
+    },
+    {
+      "profile_key": "mission_test_executor",
+      "name": "测试执行 Agent v1",
+      "description": "通过 typed Runner 执行冻结用例集并产出 execution_record v1 Artifact。",
+      "system_prompt": "你是测试执行岗位。只根据Runner receipt、Observation和Hub Evidence判断结果；严格区分业务、环境、工具和用例失败。没有证据不得声称动作成功，blocked不得计为业务失败。",
+      "workflow_config": "仅处理 schema=2/task_kind=mission_stage；执行范围不得超过effect_scope；副作用必须带幂等键、租约和fencing；case_results必须完整覆盖人工选例。",
+      "required_skills": [
+        "agent-operating-protocol",
+        "mission-test-execution"
+      ],
+      "contract": {
+        "task_envelope_schema": 2,
+        "task_kind": "mission_stage",
+        "role_key": "test_executor",
+        "artifact_type": "execution_record",
+        "artifact_schema_version": 1,
+        "result_contract_schema": 1,
+        "allowed_statuses": ["completed", "blocked", "failed"],
+        "context_digest_required": true,
+        "experience_candidates_p0": "empty"
+      },
+      "post": {
+        "post_key": "test_executor",
+        "name": "测试执行岗",
+        "required_profile_version": 1
+      }
+    }
+  ]
+}

@@ -26,6 +26,24 @@ class WorkflowFrontendContractTest(unittest.TestCase):
         self.assertIn('基线变量映射（JSON 对象）', self.template)
         self.assertIn("method: 'PATCH'", self.template)
 
+    def test_project_filter_controls_definitions_favorites_runs_and_url(self):
+        self.assertIn('id="wf-project-filter"', self.template)
+        self.assertIn('changeWorkflowProject(this.value)', self.template)
+        self.assertIn("params.project_id = selectedWorkflowProjectId", self.template)
+        self.assertIn("await loadWorkflowProjects()", self.template)
+        self.assertIn("syncWorkflowProjectUrl(true)", self.template)
+        self.assertIn(
+            "pagedPath('/workflow-definitions', state, workflowProjectQuery())",
+            self.template)
+        self.assertIn(
+            "pagedPath('/workflow-runs', state, workflowProjectQuery())",
+            self.template)
+
+    def test_project_filter_options_keep_readable_theme_colors(self):
+        self.assertIn('.wf-project-filter .form-select option {', self.template)
+        self.assertIn('background:var(--bg-card)', self.template)
+        self.assertIn('color:var(--text-primary)', self.template)
+
 
 if __name__ == '__main__':
     unittest.main()

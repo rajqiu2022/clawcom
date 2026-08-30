@@ -5,16 +5,21 @@ MVP scope:
 - Workers/Agents execute steps and report structured results.
 - Hub owns gates, approvals, retry/resume, evidence tracking.
 """
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import copy
+import hashlib
+import json
+from uuid import uuid4
 
 from flask import current_app, jsonify, request, session
+from sqlalchemy.exc import IntegrityError
 
 from app import db
 from app.api import api_bp
 from app.api.auth_utils import get_current_claw, get_current_user, is_admin_user
 from app.models import (
     AgentPostAssignment,
+    AuditLog,
     ClawTodo,
     ClawMessage,
     ExamSession,
@@ -32,32 +37,63 @@ from app.models import (
     WorkflowArtifact,
     WorkflowDefinition,
     WorkflowDefinitionFavorite,
+    WorkflowEvidenceManifest,
+    WorkflowOperationIdempotency,
     WorkflowRun,
+    WorkflowRunLibrarySnapshot,
     WorkflowRunStep,
+    WecomSendLog,
 )
 from app.services.post_resolver import resolve_post_candidate
 from app.services.requirement_coverage import summarize_requirement_coverage
+from app.services.workflow_library_snapshots import (
+    append_workflow_snapshot_warning,
+    freeze_workflow_run_library_snapshot,
+    resolve_workflow_library_id,
+)
 from app.services.workflows import (
+    RACINGGO_FLOW25_CONTROLLED_RUNNER,
+    RACINGGO_FLOW25_WORKER_OPERATIONS,
     build_heartbeat_fallback_notice,
     build_step_blocked_notice,
     build_workflow_agent_task_payload,
     build_workflow_start_context,
+    active_step_claim_state,
     can_claim_step,
+    can_claim_step_lease,
     can_accept_step_result_after_blocker,
     can_execute_workflow,
+    can_edit_workflow,
     can_manage_workflow,
     can_view_workflow,
     compute_step_health,
     evaluate_step_branches,
     evaluate_step_gates,
+    evaluate_notification_authorization,
+    validate_notification_result_contract,
+    collect_declared_step_outputs,
+    validate_step_result_contract,
     merge_workflow_definition_update,
+    normalize_step_lease_seconds,
     normalize_executor_acl,
+    normalize_editor_acl,
     paginate_items,
     normalize_workflow_definition,
     ready_step_ids,
+    resolve_workflow_run_assignment,
     resolve_start_var_claw_ids,
     resolve_workflow_step_claw_ids,
+    materialize_workflow_run_assignment,
+    merge_workflow_run_outcomes,
+    composite_workflow_terminal_status,
+    validate_worker_result_status,
+    validate_workflow_finalizer_result,
     workflow_step_display_state,
+)
+from app.services.workflow_result_ingestion import (
+    cleanup_workflow_result_records,
+    ingest_workflow_result,
+    link_report_to_evidence,
 )
 
 
@@ -352,6 +388,8 @@ def _definition_visible(definition):
         return False
     if _is_legacy_owner(definition, actor):
         return True
+    if _can_edit_definition(definition):
+        return True
     return can_view_workflow(
         definition.visibility_scope or 'project',
         definition.owner_type,
@@ -362,6 +400,14 @@ def _definition_visible(definition):
         _actor_project_ids(),
         is_admin=is_admin_user(),
     )
+
+
+def _run_visible_to_actor(run):
+    """Allow the bound Worker to read its Run without granting management."""
+    claw = get_current_claw()
+    if claw and _run_worker_claw_id(run) == claw.id:
+        return True
+    return not run.definition or _definition_visible(run.definition)
 
 
 def _require_actor():
@@ -375,6 +421,10 @@ def _definition_acl(definition):
     if definition.workflow_key in {w['key'] for w in BUILTIN_WORKFLOWS}:
         acl['all'] = True
     return acl
+
+
+def _definition_editor_acl(definition):
+    return normalize_editor_acl(definition.editor_acl_json or {})
 
 
 def _is_legacy_owner(definition, actor):
@@ -419,9 +469,29 @@ def _can_manage_definition(definition):
     )
 
 
+def _can_edit_definition(definition):
+    actor = _actor_identity()
+    if not actor:
+        return False
+    if (definition.owner_type == 'system'
+            or definition.workflow_key in {w['key'] for w in BUILTIN_WORKFLOWS}):
+        return is_admin_user()
+    if _is_legacy_owner(definition, actor):
+        return True
+    return can_edit_workflow(
+        definition.owner_type,
+        definition.owner_id,
+        _definition_editor_acl(definition),
+        actor['type'],
+        actor['id'],
+        is_admin=is_admin_user(),
+    )
+
+
 def _definition_payload(definition, brief=False):
     data = definition.to_dict(brief=brief)
     data['can_execute'] = _can_execute_definition(definition)
+    data['can_edit'] = _can_edit_definition(definition)
     data['can_manage'] = _can_manage_definition(definition)
     data['can_delete'] = data['can_manage'] and definition.owner_type != 'system'
     data['can_change_visibility'] = data['can_manage'] and definition.owner_type != 'system'
@@ -442,10 +512,256 @@ def _can_delete_run(run):
     return False
 
 
+def _workflow_request_id():
+    return str(request.headers.get('X-Request-ID') or uuid4().hex).strip()[:128]
+
+
+def _definition_requires_worker_binding(definition_json):
+    definition_json = (
+        definition_json if isinstance(definition_json, dict) else {})
+    if definition_json.get('require_worker_binding') is True:
+        return True
+    context = (
+        definition_json.get('context')
+        if isinstance(definition_json.get('context'), dict) else {})
+    if context.get('require_worker_binding') is True:
+        return True
+    policy = (
+        context.get('executor_operation_policy')
+        if isinstance(context.get('executor_operation_policy'), dict) else {})
+    return bool(
+        policy.get('mode') == 'workflow_run_executor'
+        and policy.get('require_worker_binding') is True)
+
+
+def _workflow_execution_input_snapshot(
+        definition_snapshot, start_vars, raw_context,
+        definition_context=None, testcase_library_id=None):
+    """Freeze the non-secret execution inputs used by a Workflow Run.
+
+    Only an explicit allowlist is copied. Credentials, tokens and arbitrary
+    caller context must never become part of the long-lived Run snapshot.
+    """
+    sources = [
+        value for value in (start_vars, raw_context, definition_context)
+        if isinstance(value, dict)
+    ]
+
+    def first(*names):
+        for source in sources:
+            for name in names:
+                if source.get(name) not in (None, ''):
+                    return copy.deepcopy(source.get(name))
+        return None
+
+    snapshot = {
+        'schema_version': 1,
+        'workflow_definition_id': definition_snapshot.get(
+            'workflow_definition_id'),
+        'workflow_definition_version': definition_snapshot.get('version'),
+        'workflow_definition_sha256': definition_snapshot.get('sha256'),
+        'template_revision': (
+            definition_snapshot.get('template_revision') or
+            first('template_revision')),
+        'deepflow_release_id': first('deepflow_release_id'),
+        'deepflow_release_sha': first(
+            'deepflow_release_sha', 'deepflow_release_hash'),
+        'baseline_receipt_id': first('baseline_receipt_id'),
+        'baseline_receipt_hash': first(
+            'baseline_receipt_hash', 'baseline_receipt_sha256'),
+        'testcase_library_id': (
+            testcase_library_id
+            if testcase_library_id is not None
+            else first('testcase_library_id', 'library_id')),
+        'testcase_library_revision': first(
+            'testcase_library_revision', 'library_revision'),
+        'testcase_library_hash': first(
+            'testcase_library_hash', 'library_hash',
+            'testcase_library_sha256'),
+        'adapter_capability_schema': first('adapter_capability_schema'),
+        'adapter_capability_schema_version': first(
+            'adapter_capability_schema_version'),
+        'adapter_capability_schema_hash': first(
+            'adapter_capability_schema_hash',
+            'adapter_capability_schema_sha256'),
+        'runner_policy_version': first('runner_policy_version'),
+        'runner_policy_hash': first(
+            'runner_policy_hash', 'runner_policy_sha256'),
+    }
+    return snapshot
+
+
+def _workflow_api_error(code, message, status=400, details=None):
+    """Return the new stable error envelope while retaining legacy `error`."""
+    payload = {
+        'error': message,
+        'code': code,
+        'message': message,
+        'details': details or {},
+        'request_id': _workflow_request_id(),
+    }
+    return jsonify(payload), status
+
+
+def _workflow_lifecycle_conflict(run, step=None, operation='write'):
+    """Return a stable, non-retryable contract for writes after Run terminal."""
+    return _workflow_api_error(
+        'HUB_LIFECYCLE_CONFLICT',
+        'Workflow Run is already terminal; stop retrying this write and '
+        'preserve the local receipt for reconciliation',
+        status=409,
+        details={
+            'workflow_run_id': run.id,
+            'run_status': run.status,
+            'step_id': step.step_id if step else '',
+            'step_status': step.status if step else '',
+            'operation': operation,
+            'retryable': False,
+            'worker_action': 'stop_and_reconcile',
+        },
+    )
+
+
 def _run_payload(run, with_steps=False):
     data = run.to_dict(with_steps=with_steps)
+    current_step = next(
+        (step for step in (run.steps or [])
+         if step.step_id == run.current_step_id),
+        None,
+    )
+    context = run.context_json if isinstance(run.context_json, dict) else {}
+    data['current_step_status'] = current_step.status if current_step else None
+    data['result_summary'] = (
+        context.get('result_summary')
+        if context.get('result_summary') is not None
+        else (run.summary or '')
+    )
+    data['output_refs'] = [
+        artifact.to_dict()
+        for artifact in sorted(
+            run.artifacts or [], key=lambda item: (item.created_at or datetime.min, item.id or 0))
+    ]
     data['can_delete'] = _can_delete_run(run)
+    manifest = WorkflowEvidenceManifest.query.filter_by(
+        workflow_run_id=run.id).first()
+    data['evidence_manifest'] = manifest.to_dict() if manifest else None
+    data['evidence_manifest_status'] = (
+        run.evidence_ingest_status
+        or ('EVIDENCE_INGEST_INCOMPLETE' if run.finished_at and not manifest else ''))
+    data['finding_count'] = len(manifest.finding_ids_json or []) if manifest else 0
     return data
+
+
+def _workflow_run_create_payload(run, compact=False, idempotent_replay=False):
+    """Build a bounded create receipt for Agent callers.
+
+    Definitions can carry large prompts and reference packs.  Returning every
+    step after a successful Agent/API start can exceed the Worker proxy limit
+    even though the Run was committed.  Web callers retain the historical full
+    payload; authenticated Claws receive a stable receipt plus a readback URL.
+    """
+    if not compact:
+        payload = _run_payload(run, with_steps=True)
+        payload['idempotent_replay'] = bool(idempotent_replay)
+        return payload
+    return {
+        'ok': True,
+        'id': run.id,
+        'run_id': run.id,
+        'workflow_run_id': run.id,
+        'workflow_definition_id': run.definition_id,
+        'run_name': run.run_name or '',
+        'status': run.status,
+        'current_step_id': run.current_step_id or '',
+        'worker_claw_id': _run_worker_claw_id(run),
+        'readback_url': '/api/v1/workflow-runs/%s' % run.id,
+        'steps_url': '/api/v1/workflow-runs/%s' % run.id,
+        'idempotent_replay': bool(idempotent_replay),
+        'created_at': str(run.created_at) if run.created_at else None,
+    }
+
+
+def _parse_workflow_datetime(value, field_name):
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError:
+        raise ValueError(
+            f'{field_name} must be an ISO-8601 datetime') from None
+    if parsed.tzinfo is not None:
+        cst = timezone(timedelta(hours=8))
+        parsed = parsed.astimezone(cst).replace(tzinfo=None)
+    return parsed
+
+
+def _workflow_run_query_from_request():
+    q = WorkflowRun.query
+    raw_definition_id = (
+        request.args.get('workflow_definition_id')
+        or request.args.get('definition_id')
+    )
+    if raw_definition_id not in (None, ''):
+        try:
+            q = q.filter(WorkflowRun.definition_id == int(raw_definition_id))
+        except (TypeError, ValueError):
+            return None, _workflow_api_error(
+                'INVALID_WORKFLOW_DEFINITION_ID',
+                'workflow_definition_id must be an integer')
+
+    statuses = [
+        value.strip() for value in str(request.args.get('status') or '').split(',')
+        if value.strip()
+    ]
+    if statuses:
+        q = q.filter(WorkflowRun.status.in_(statuses))
+    for field, column in (
+        ('controller_run_id', WorkflowRun.controller_run_id),
+        ('correlation_id', WorkflowRun.correlation_id),
+        ('trigger_source', WorkflowRun.trigger_source),
+    ):
+        value = str(request.args.get(field) or '').strip()
+        if value:
+            q = q.filter(column == value)
+    raw_project_id = request.args.get('project_id')
+    if raw_project_id not in (None, ''):
+        try:
+            q = q.filter(WorkflowRun.project_id == int(raw_project_id))
+        except (TypeError, ValueError):
+            return None, _workflow_api_error(
+                'INVALID_PROJECT_ID', 'project_id must be an integer')
+    for field, column in (
+        ('created_after', WorkflowRun.created_at),
+        ('updated_after', WorkflowRun.updated_at),
+    ):
+        raw = request.args.get(field)
+        if raw in (None, ''):
+            continue
+        try:
+            parsed = _parse_workflow_datetime(raw, field)
+        except ValueError as exc:
+            return None, _workflow_api_error(
+                'INVALID_DATETIME_FILTER', str(exc), details={'field': field})
+        q = q.filter(column > parsed)
+    visible_definition_ids = [
+        definition.id
+        for definition in WorkflowDefinition.query.filter(
+            WorkflowDefinition.status != 'deleted').all()
+        if _definition_visible(definition)
+    ]
+    q = q.filter(WorkflowRun.definition_id.in_(visible_definition_ids))
+    return q.order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc()), None
+
+
+def _workflow_run_create_hash(definition_id, intent):
+    canonical = {'workflow_definition_id': int(definition_id)}
+    canonical.update(intent)
+    encoded = json.dumps(
+        canonical, ensure_ascii=False, sort_keys=True,
+        separators=(',', ':'), default=str,
+    ).encode('utf-8')
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _resolve_definition_project_id(data):
@@ -574,6 +890,202 @@ def _workflow_outputs_context(run, current_step=None, current_outputs=None):
     return outputs
 
 
+def _nested_output_value(outputs, key):
+    found = None
+    def visit(value):
+        nonlocal found
+        if not isinstance(value, dict):
+            return
+        if key in value and value.get(key) not in (None, ''):
+            found = value.get(key)
+        for child in value.values():
+            if isinstance(child, dict):
+                visit(child)
+    visit(outputs if isinstance(outputs, dict) else {})
+    return found
+
+
+def _verified_notification_report(run, outputs):
+    raw_id = _nested_output_value(outputs, 'hub_report_id')
+    try:
+        report_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+    report = TestReport.query.get(report_id)
+    if (not report or report.is_deleted or report.project_id != run.project_id
+            or not report.is_shared or not report.share_token):
+        return None
+    expected = '/r/%s' % report.share_token
+    supplied = str(_nested_output_value(outputs, 'share_url') or '').strip()
+    if not supplied or not (supplied == expected or supplied.endswith(expected)):
+        return None
+    return report
+
+
+def _workflow_notification_gate(run):
+    outputs = _workflow_outputs_context(run)
+    report = _verified_notification_report(run, outputs)
+    gate = evaluate_notification_authorization(outputs, report_readback=bool(report))
+    gate['hub_report_id'] = report.id if report else None
+    gate['share_url'] = '/r/%s' % report.share_token if report else ''
+    gate['target'] = '大群2'
+    return gate
+
+
+def _notification_send_audited(run_id, step_id):
+    rows = WecomSendLog.query.filter_by(
+        workflow_run_id=run_id,
+        workflow_step_id=step_id,
+        status='sent',
+    ).order_by(WecomSendLog.id.desc()).limit(20).all()
+    return any(
+        isinstance(row.gate_result_json, dict)
+        and row.gate_result_json.get('allowed') is True
+        and bool(row.request_summary_json)
+        and bool(row.template_version)
+        and bool(row.message_hash)
+        and bool(row.receipt_json)
+        for row in rows
+    )
+
+
+def _skip_step_descendants(run, root_step_id, reason):
+    rows = WorkflowRunStep.query.filter_by(run_id=run.id).all()
+    skipped = {root_step_id}
+    changed = True
+    while changed:
+        changed = False
+        for row in rows:
+            if row.status != 'pending':
+                continue
+            if any(dep in skipped for dep in (row.depends_on_json or [])):
+                row.status = 'skipped'
+                row.summary = reason
+                row.finished_at = datetime.now()
+                row.updated_by = 'workflow-notification-gate'
+                skipped.add(row.step_id)
+                changed = True
+    return sorted(skipped - {root_step_id})
+
+
+def _sync_run_conclusions(run):
+    outputs = _workflow_outputs_context(run)
+    business = _nested_output_value(outputs, 'business_conclusion')
+    automation = _nested_output_value(outputs, 'automation_conclusion')
+    business_failure_confirmed = (
+        _nested_output_value(outputs, 'business_failure_confirmed') is True)
+    business_passed = (
+        _nested_output_value(outputs, 'business_passed') is True)
+    business_inconclusive = (
+        _nested_output_value(outputs, 'business_inconclusive') is True)
+    contract_invalid = WorkflowRunStep.query.filter_by(run_id=run.id).filter(
+        WorkflowRunStep.contract_result_json.isnot(None)).all()
+    has_contract_invalid = any(
+        isinstance(row.contract_result_json, dict)
+        and row.contract_result_json.get('code') == 'CONTRACT_INVALID'
+        for row in contract_invalid)
+    automation_error_count = _nested_output_value(outputs, 'automation_error_count')
+    try:
+        has_automation_error = float(automation_error_count or 0) > 0
+    except (TypeError, ValueError):
+        has_automation_error = bool(automation_error_count)
+    has_automation_error = bool(
+        has_automation_error
+        or _nested_output_value(outputs, 'automation_failure_confirmed') is True)
+    if business not in (None, ''):
+        run.business_conclusion = str(business)[:64]
+    elif business_failure_confirmed:
+        run.business_conclusion = 'CONFIRMED_BUSINESS_FAILURE'
+    elif business_passed:
+        run.business_conclusion = 'COMPLETED'
+    elif business_inconclusive or run.status in ('failed', 'blocked', 'cancelled'):
+        # A terminal orchestration/automation state is not proof that game
+        # business execution completed. Clear any legacy inferred COMPLETED
+        # value and fail closed until a business node reports a verdict.
+        run.business_conclusion = 'INCONCLUSIVE'
+    else:
+        # Generic successful Workflows may not have business semantics. Do not
+        # fabricate a business verdict merely because the Run is terminal.
+        run.business_conclusion = ''
+    if automation not in (None, ''):
+        run.automation_conclusion = str(automation)[:64]
+    elif (run.status in ('failed', 'blocked')
+          and business in (None, '')
+          and not business_failure_confirmed
+          and not business_passed):
+        run.automation_conclusion = 'AUTOMATION_ENV_BLOCKED'
+    elif (has_contract_invalid or has_automation_error
+          or run.evidence_ingest_status == 'EVIDENCE_INGEST_INCOMPLETE'):
+        run.automation_conclusion = 'COMPLETED_WITH_AUTOMATION_ERROR'
+    elif run.status in ('succeeded', 'failed', 'blocked', 'cancelled'):
+        run.automation_conclusion = run.automation_conclusion or 'COMPLETED'
+
+
+def _composite_outcomes_enabled(run):
+    definition = (
+        run.definition.definition_json
+        if run and run.definition
+        and isinstance(run.definition.definition_json, dict) else {})
+    return bool(
+        definition.get('outcome_status_mode') == 'composite'
+        or definition.get('composite_outcomes') is True)
+
+
+def _sync_run_outcomes(run, result=None, step=None, report=None, ingestion=None):
+    """Persist independent business/automation/evidence/report/etc outcomes."""
+    current = run.outcomes_json if isinstance(run.outcomes_json, dict) else {}
+    aggregate = {
+        'outputs': _workflow_outputs_context(run),
+        'evidence_ingest_status': run.evidence_ingest_status,
+    }
+    merged = merge_workflow_run_outcomes(current, aggregate)
+    if isinstance(result, dict):
+        merged = merge_workflow_run_outcomes(
+            merged,
+            result,
+            step.step_config_json if step else None,
+        )
+    if report is not None:
+        merged = merge_workflow_run_outcomes(merged, {
+            'report_outcome': (
+                'PUBLISHED'
+                if str(getattr(report, 'status', '') or '') == 'published'
+                else 'DRAFT'
+            ),
+            'outputs': {'hub_report_id': getattr(report, 'id', None)},
+        })
+    if isinstance(ingestion, dict):
+        ingestion_status = str(
+            ingestion.get('completeness_status')
+            or ingestion.get('status') or '').upper()
+        if ingestion_status:
+            merged = merge_workflow_run_outcomes(merged, {
+                'evidence_outcome': (
+                    'COMPLETE'
+                    if ingestion_status in {'COMPLETE', 'COMPLETED'}
+                    else 'ANALYSIS_INCOMPLETE'
+                )
+            })
+    run.outcomes_json = merged
+    legacy_business = {
+        'PASSED': 'COMPLETED',
+        'FAILED': 'CONFIRMED_BUSINESS_FAILURE',
+        'INCONCLUSIVE': 'INCONCLUSIVE',
+        'NOT_EXECUTED': 'INCONCLUSIVE',
+    }.get(merged.get('business'))
+    legacy_automation = {
+        'SUCCEEDED': 'COMPLETED',
+        'PARTIAL': 'COMPLETED_WITH_AUTOMATION_ERROR',
+        'BLOCKED': 'AUTOMATION_ENV_BLOCKED',
+        'FAILED': 'AUTOMATION_ENV_BLOCKED',
+    }.get(merged.get('automation'))
+    if legacy_business:
+        run.business_conclusion = legacy_business
+    if legacy_automation:
+        run.automation_conclusion = legacy_automation
+    return merged
+
+
 def _run_start_vars(run):
     context = run.context_json if run and isinstance(run.context_json, dict) else {}
     return context.get('start_vars') if isinstance(context.get('start_vars'), dict) else {}
@@ -585,6 +1097,36 @@ def _step_runtime_payload(step):
     data['context'] = context
     data['start_vars'] = context.get('start_vars') if isinstance(context.get('start_vars'), dict) else {}
     data['outputs'] = _workflow_outputs_context(step.run, current_step=step) if step.run else {}
+    snapshot_meta = context.get('testcase_library_snapshot')
+    if isinstance(snapshot_meta, dict):
+        data['testcase_library_snapshot'] = snapshot_meta
+    bound_worker_claw_id = _run_worker_claw_id(step.run if step else None)
+    if bound_worker_claw_id:
+        data['worker_claw_id'] = bound_worker_claw_id
+        data['execution_route'] = {
+            'mode': 'single_flow_worker',
+            'worker_claw_id': bound_worker_claw_id,
+            'acting_claw_id': step.target_claw_id,
+            'acting_agent': step.target_agent or '',
+            'acting_post': step.target_post or '',
+        }
+    if step.step_type == 'worker_task':
+        data['fencing_token'] = int(step.claim_fencing_token or 0)
+        config = (
+            step.step_config_json
+            if isinstance(step.step_config_json, dict) else {})
+        inputs = config.get('inputs') if isinstance(config.get('inputs'), dict) else {}
+        operation = str(inputs.get('operation') or '').strip()
+        if (step.runner == RACINGGO_FLOW25_CONTROLLED_RUNNER
+                and operation in set(RACINGGO_FLOW25_WORKER_OPERATIONS.values())):
+            data['worker_contract'] = {
+                'runner': RACINGGO_FLOW25_CONTROLLED_RUNNER,
+                'operation': operation,
+                'protected_target_id': str(
+                    inputs.get('protected_target_id') or '').strip(),
+                'require_fencing_token': bool(
+                    config.get('require_fencing_token')),
+            }
     return data
 
 
@@ -922,8 +1464,7 @@ def _refresh_workflow_step_health(run=None, commit=False):
         if health.get('failed'):
             step.status = 'blocked'
             step.finished_at = now
-            step.claimed_by = ''
-            step.claimed_at = None
+            _clear_step_claim(step)
             step.blocker_json = {
                 'type': 'workflow_step_heartbeat_lost',
                 'message': 'Workflow 节点连续 3 次未收到心跳，已判定执行失败',
@@ -953,8 +1494,10 @@ def _refresh_workflow_step_health(run=None, commit=False):
             # → 按 retry_max 有限重试，用尽则阻断，让 run 收敛、停止反复触发执行方。
             signal_at = _step_health_signal_at(step)
             signal_age = int((now - signal_at).total_seconds()) if signal_at else None
-            if signal_age is not None and signal_age > WORKFLOW_NO_RESPONSE_HARD_TIMEOUT_SEC:
-                cfg = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+            cfg = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+            hard_timeout_enabled = cfg.get('auto_block_on_no_response') is not False
+            if (hard_timeout_enabled and signal_age is not None
+                    and signal_age > WORKFLOW_NO_RESPONSE_HARD_TIMEOUT_SEC):
                 retry_max = int(cfg.get('retry_max') or 0)
                 attempts_used = int(step.attempt_no or 1)
                 timeout_min = WORKFLOW_NO_RESPONSE_HARD_TIMEOUT_SEC // 60
@@ -985,8 +1528,7 @@ def _refresh_workflow_step_health(run=None, commit=False):
                     # 重试用尽 → 阻断，停止无限挂起并关掉陈旧任务
                     step.status = 'blocked'
                     step.finished_at = now
-                    step.claimed_by = ''
-                    step.claimed_at = None
+                    _clear_step_claim(step)
                     step.blocker_json = {
                         'type': 'workflow_step_no_response',
                         'message': (
@@ -1058,6 +1600,23 @@ def _step_target_post(step):
 def _run_project_id(run):
     definition = getattr(run, 'definition', None) if run else None
     return getattr(definition, 'project_id', None)
+
+
+def _run_worker_claw_id(run):
+    """Return the one physical Worker bound to this Run, if enabled."""
+    context = (
+        run.context_json
+        if run and isinstance(run.context_json, dict) else {})
+    workflow_start = (
+        context.get('workflow_start')
+        if isinstance(context.get('workflow_start'), dict) else {})
+    if workflow_start.get('worker_binding_mode') != 'single_flow_worker':
+        return None
+    try:
+        worker_claw_id = int(workflow_start.get('worker_claw_id'))
+    except (TypeError, ValueError):
+        return None
+    return worker_claw_id if worker_claw_id > 0 else None
 
 
 def _active_step_counts(claw_ids, current_step_id=None):
@@ -1213,6 +1772,17 @@ def _dig_start_var(start_vars, path):
 
 def _step_allowed_claw_ids(step):
     config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+    if config.get('assignment_role') in ('executor', 'reviewer'):
+        assigned = resolve_workflow_step_claw_ids(
+            step.step_type,
+            target_claw_id=step.target_claw_id,
+            step_executor_claw_ids=config.get('executor_claw_ids'),
+        )
+        if assigned:
+            return assigned
+    bound_worker_claw_id = _run_worker_claw_id(step.run if step else None)
+    if bound_worker_claw_id:
+        return [bound_worker_claw_id]
     run_context = (
         step.run.context_json
         if step.run and isinstance(step.run.context_json, dict)
@@ -1239,6 +1809,149 @@ def _step_belongs_to_claw(step, claw_id):
         return int(claw_id) in allowed
     owner_claw_id = _owner_fallback_claw_id(step)
     return bool(owner_claw_id and int(claw_id) == int(owner_claw_id))
+
+
+def _worker_id_from_payload(data, claw):
+    return str((data or {}).get('worker_id') or f'claw:{claw.id}').strip()
+
+
+def _clear_step_claim(step):
+    step.claimed_by = ''
+    step.claimed_at = None
+    step.claimed_claw_id = None
+    step.claim_expires_at = None
+    step.claim_lease_seconds = None
+
+
+def _claim_error_response(code, step, status=409):
+    messages = {
+        'claim_conflict': 'Workflow Step 已被其他 worker 认领',
+        'claim_required': 'Workflow Step 必须先 claim 后才能写入',
+        'claim_owner_mismatch': 'Workflow Step claim owner 不匹配',
+        'claim_expired': 'Workflow Step claim 已过期，请重新 claim',
+        'missing_worker_id': 'worker_id 不能为空',
+        'fencing_token_required': 'Workflow Step 必须携带 fencing_token',
+        'fencing_token_stale': 'Workflow Step fencing_token 已失效，请重新 claim',
+    }
+    return jsonify({
+        'error': messages.get(code, code),
+        'code': code,
+        'claimed_by': step.claimed_by or '',
+        'claimed_claw_id': step.claimed_claw_id,
+        'claim_expires_at': str(step.claim_expires_at) if step.claim_expires_at else None,
+        'lease_seconds': step.claim_lease_seconds or 180,
+        'fencing_token': step.claim_fencing_token or 0,
+    }), status
+
+
+def _require_active_step_claim(step, claw, worker_id, fencing_token=None):
+    state = active_step_claim_state(
+        step.step_type,
+        getattr(step, 'claimed_claw_id', None),
+        step.claimed_by,
+        getattr(step, 'claim_expires_at', None),
+        claw.id,
+        worker_id,
+        datetime.now(),
+    )
+    if not state.get('active'):
+        return _claim_error_response(
+            state.get('reason') or 'claim_required', step)
+    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+    fencing_required = bool(
+        config.get('require_fencing_token')
+        or current_app.config.get('WORKFLOW_FENCING_REQUIRED', False))
+    if fencing_token in (None, ''):
+        if fencing_required:
+            return _claim_error_response('fencing_token_required', step)
+        # Compatibility path for old Workers. New/managed Workers include the
+        # token and receive stale-write protection without changing Flow #12.
+        return None
+    try:
+        provided = int(fencing_token)
+    except (TypeError, ValueError):
+        return _claim_error_response('fencing_token_stale', step)
+    if provided != int(step.claim_fencing_token or 0):
+        return _claim_error_response('fencing_token_stale', step)
+    return None
+
+
+def _renew_step_claim(step, now):
+    lease_seconds = normalize_step_lease_seconds(step.claim_lease_seconds)
+    step.claim_lease_seconds = lease_seconds
+    step.claim_expires_at = now + timedelta(seconds=lease_seconds)
+
+
+def _idempotency_actor():
+    claw = get_current_claw()
+    if claw:
+        return 'claw', int(claw.id)
+    user = get_current_user()
+    if user:
+        return 'user', int(user.id)
+    return None, None
+
+
+def _workflow_request_hash():
+    raw = request.get_data(cache=True) or b''
+    digest = hashlib.sha256()
+    digest.update(request.method.upper().encode('utf-8'))
+    digest.update(b'\n')
+    digest.update(request.path.encode('utf-8'))
+    digest.update(b'\n')
+    digest.update((request.query_string or b''))
+    digest.update(b'\n')
+    digest.update(raw)
+    return digest.hexdigest()
+
+
+def _workflow_idempotency_begin():
+    key = str(request.headers.get('Idempotency-Key') or '').strip()
+    if not key:
+        return None, None
+    if len(key) > 128:
+        return None, (jsonify({
+            'error': 'Idempotency-Key 长度不能超过 128',
+            'code': 'IDEMPOTENCY_KEY_TOO_LONG',
+        }), 400)
+    actor_type, actor_id = _idempotency_actor()
+    if not actor_type:
+        return None, None
+    request_hash = _workflow_request_hash()
+    record = WorkflowOperationIdempotency.query.filter_by(
+        actor_type=actor_type,
+        actor_id=actor_id,
+        idempotency_key=key,
+    ).first()
+    if record:
+        if record.request_hash != request_hash:
+            return None, (jsonify({
+                'error': 'Idempotency-Key 已被不同请求复用',
+                'code': 'IDEMPOTENCY_KEY_REUSED',
+            }), 409)
+        if record.response_status and record.response_body_json is not None:
+            return record, (jsonify(record.response_body_json), int(record.response_status))
+        return record, None
+    record = WorkflowOperationIdempotency(
+        actor_type=actor_type,
+        actor_id=actor_id,
+        idempotency_key=key,
+        method=request.method.upper(),
+        path=request.path,
+        request_hash=request_hash,
+        expires_at=datetime.now() + timedelta(days=7),
+    )
+    db.session.add(record)
+    db.session.flush()
+    return record, None
+
+
+def _workflow_idempotency_store(record, status_code, body):
+    if not record:
+        return
+    record.response_status = int(status_code)
+    record.response_body_json = body
+    record.updated_at = datetime.now()
 
 
 def _existing_claws_by_id(claw_ids):
@@ -1360,10 +2073,15 @@ def _dispatch_agent_task(step):
     )
     if not _shift_left_enabled():
         payload.pop('analysis', None)
-    for target_claw_id in target_claw_ids:
+    bound_worker_claw_id = _run_worker_claw_id(step.run)
+    delivery_claw_ids = (
+        target_claw_ids
+        if config.get('assignment_role') in ('executor', 'reviewer')
+        else [bound_worker_claw_id] if bound_worker_claw_id else target_claw_ids)
+    for target_claw_id in delivery_claw_ids:
         task_id = (
             base_task_id
-            if len(target_claw_ids) == 1
+            if len(delivery_claw_ids) == 1
             else _workflow_agent_task_id(step.run_id, step.step_id, step.attempt_no or 1, target_claw_id)
         )
         existing = AgentTask.query.filter_by(task_id=task_id, claw_id=target_claw_id).first()
@@ -1427,13 +2145,20 @@ def _dispatch_step_message(step):
 
 def _step_notice_target_claw_ids(step):
     """Resolve Agent ids that should receive step handling notices."""
+    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+    if config.get('assignment_role') in ('executor', 'reviewer'):
+        assigned = _step_allowed_claw_ids(step)
+        if assigned:
+            return assigned
+    bound_worker_claw_id = _run_worker_claw_id(step.run if step else None)
+    if bound_worker_claw_id:
+        return [bound_worker_claw_id]
     targets = []
     if step.target_claw_id:
         try:
             targets.append(int(step.target_claw_id))
         except (TypeError, ValueError):
             pass
-    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
     raw_ids = config.get('executor_claw_ids') if isinstance(config.get('executor_claw_ids'), list) else []
     for raw in raw_ids:
         try:
@@ -1500,47 +2225,157 @@ def _dispatch_step_blocked_notice(step):
             notify_claw(claw_id)
 
 
+def _run_definition_snapshot(run, steps):
+    """Build dependency policy from the immutable per-Run step snapshot."""
+    current = run.definition.definition_json or {}
+    current_by_id = {
+        step.get('id'): step
+        for step in (current.get('steps') or [])
+        if isinstance(step, dict) and step.get('id')
+    }
+    snapshot_steps = []
+    for row in steps:
+        stored = row.step_config_json if isinstance(
+            row.step_config_json, dict) else None
+        config = dict(stored or current_by_id.get(row.step_id) or {})
+        config['id'] = row.step_id
+        if isinstance(row.depends_on_json, list):
+            config['depends_on'] = list(row.depends_on_json)
+        else:
+            config['depends_on'] = list(config.get('depends_on') or [])
+        snapshot_steps.append(config)
+    return {'steps': snapshot_steps}
+
+
 def _recompute_run_status(run, actor='system'):
     """Advance pending steps whose dependencies are satisfied."""
     steps = WorkflowRunStep.query.filter_by(run_id=run.id).all()
     state = {s.step_id: s.status for s in steps}
-    definition = run.definition.definition_json or {}
+    definition = _run_definition_snapshot(run, steps)
 
-    if any(s.status == 'blocked' for s in steps):
-        run.status = 'blocked'
-        blocked = next((s for s in steps if s.status == 'blocked'), None)
-        run.current_step_id = blocked.step_id if blocked else ''
-        run.blocker_json = blocked.blocker_json if blocked else {}
+    for notification_step in steps:
+        if (notification_step.step_type != 'notification'
+                or notification_step.status != 'waiting_approval'):
+            continue
+        if not all(state.get(dep) in ('passed', 'skipped')
+                   for dep in (notification_step.depends_on_json or [])):
+            continue
+        notification_gate = _workflow_notification_gate(run)
+        if notification_gate.get('allowed'):
+            config = dict(notification_step.step_config_json or {})
+            config['notification_authorization'] = notification_gate
+            config['credential_mode'] = 'hub_brokered'
+            config.pop('webhook', None)
+            config.pop('webhook_url', None)
+            notification_step.step_config_json = config
+            continue
+        notification_step.status = 'skipped'
+        notification_step.outputs_json = {
+            'notification_skipped': True,
+            'wecom_sent': False,
+            'skip_reason': 'business_pass_or_automation_only',
+        }
+        notification_step.branch_result_json = {
+            'notification_gate': notification_gate,
+            'skipped_descendants': _skip_step_descendants(
+                run, notification_step.step_id,
+                '通知硬门禁未通过，业务通过或仅自动化问题，静默结束'),
+        }
+        notification_step.summary = '通知硬门禁未通过，静默结束'
+        notification_step.finished_at = datetime.now()
+        notification_step.updated_by = 'workflow-notification-gate'
+        _recompute_run_status(run, actor)
         return
-    if any(s.status == 'failed' for s in steps):
-        run.status = 'failed'
-        failed = next((s for s in steps if s.status == 'failed'), None)
-        run.current_step_id = failed.step_id if failed else ''
+
+    ready_ids = ready_step_ids(definition, state)
+    # A blocked/failed node is terminal for the Run only after explicitly
+    # permitted downstream work has drained. This lets safety cleanup retain
+    # its real failure result while analysis/reporting still collects evidence.
+    # Without a ready, active, or approval-waiting continuation the behavior
+    # remains fail-closed.
+    has_continuation_work = bool(ready_ids) or any(
+        s.status in ('running', 'retrying', 'waiting_approval') for s in steps)
+
+    has_blocked = any(s.status == 'blocked' for s in steps)
+    has_failed = any(s.status == 'failed' for s in steps)
+    if (has_blocked or has_failed) and not has_continuation_work:
+        outcomes = _sync_run_outcomes(run)
+        run.status = (
+            composite_workflow_terminal_status(
+                outcomes,
+                has_blocked=has_blocked,
+                has_failed=has_failed,
+            )
+            if _composite_outcomes_enabled(run)
+            else 'failed' if has_failed else 'blocked'
+        )
+        run.finished_at = run.finished_at or datetime.now()
+        problem = next((
+            s for s in steps if s.status == (
+                'failed' if has_failed else 'blocked')), None)
+        if run.status == 'succeeded':
+            run.current_step_id = ''
+            run.blocker_json = {}
+        else:
+            run.current_step_id = problem.step_id if problem else ''
+            run.blocker_json = problem.blocker_json if problem else {}
+        _sync_run_conclusions(run)
         return
     if any(s.status == 'waiting_approval' for s in steps):
         run.status = 'waiting_approval'
+        run.finished_at = None
         wait = next((s for s in steps if s.status == 'waiting_approval'), None)
         run.current_step_id = wait.step_id if wait else ''
         if wait:
             _create_approval_if_missing(run, wait, actor)
+        _sync_run_conclusions(run)
         return
     if steps and all(s.status in ('passed', 'skipped') for s in steps):
         run.status = 'succeeded'
         run.current_step_id = ''
-        run.finished_at = datetime.now()
+        run.finished_at = run.finished_at or datetime.now()
+        _sync_run_outcomes(run)
+        _sync_run_conclusions(run)
         return
 
-    ready_ids = ready_step_ids(definition, state)
     step_by_id = {s.step_id: s for s in steps}
     if ready_ids:
         run.status = 'running'
+        run.finished_at = None
         run.started_at = run.started_at or datetime.now()
         run.current_step_id = ready_ids[0]
+        notification_skipped_now = False
         for sid in ready_ids:
             step = step_by_id.get(sid)
             if not step:
                 continue
             config = step.step_config_json or {}
+            if step.step_type == 'notification':
+                notification_gate = _workflow_notification_gate(run)
+                if not notification_gate.get('allowed'):
+                    step.status = 'skipped'
+                    step.outputs_json = {
+                        'notification_skipped': True,
+                        'wecom_sent': False,
+                        'skip_reason': 'business_pass_or_automation_only',
+                    }
+                    step.branch_result_json = {
+                        'notification_gate': notification_gate,
+                        'skipped_descendants': _skip_step_descendants(
+                            run, step.step_id,
+                            '通知硬门禁未通过，业务通过或仅自动化问题，静默结束'),
+                    }
+                    step.summary = '通知硬门禁未通过，静默结束'
+                    step.finished_at = datetime.now()
+                    step.updated_by = 'workflow-notification-gate'
+                    notification_skipped_now = True
+                    continue
+                config = dict(config)
+                config['notification_authorization'] = notification_gate
+                config['credential_mode'] = 'hub_brokered'
+                config.pop('webhook', None)
+                config.pop('webhook_url', None)
+                step.step_config_json = config
             if config.get('approval_required'):
                 step.status = 'waiting_approval'
                 _create_approval_if_missing(run, step, actor)
@@ -1568,14 +2403,21 @@ def _recompute_run_status(run, actor='system'):
                 run.current_step_id = step.step_id
                 run.blocker_json = step.blocker_json or {}
                 break
+        if notification_skipped_now:
+            _recompute_run_status(run, actor)
+            return
+        _sync_run_conclusions(run)
         return
 
     if any(s.status in ('running', 'retrying') for s in steps):
         run.status = 'running'
+        run.finished_at = None
         run.current_step_id = next(
             s.step_id for s in steps if s.status in ('running', 'retrying'))
     else:
         run.status = 'pending'
+        run.finished_at = None
+    _sync_run_conclusions(run)
 
 
 @api_bp.route('/workflow-definitions', methods=['GET'])
@@ -1584,10 +2426,19 @@ def list_workflow_definitions():
     if err:
         return err
     _ensure_default_definition()
-    rows = WorkflowDefinition.query.filter(
-        WorkflowDefinition.status != 'deleted'
-    ).order_by(
-        WorkflowDefinition.updated_at.desc()).all()
+    query = WorkflowDefinition.query.filter(
+        WorkflowDefinition.status != 'deleted')
+    raw_project_id = request.args.get('project_id')
+    if raw_project_id not in (None, ''):
+        try:
+            project_id = int(raw_project_id)
+            if project_id <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return _workflow_api_error(
+                'INVALID_PROJECT_ID', 'project_id must be a positive integer')
+        query = query.filter(WorkflowDefinition.project_id == project_id)
+    rows = query.order_by(WorkflowDefinition.updated_at.desc()).all()
     favorite_only = request.args.get('favorite') in ('1', 'true', 'True')
     favorite_ids = _actor_favorite_definition_ids() if favorite_only else None
     visible = []
@@ -1644,13 +2495,24 @@ def update_workflow_definition(definition_id):
         return jsonify({'error': 'workflow definition 不存在'}), 404
     if not _definition_visible(row):
         return jsonify({'error': 'workflow definition 不存在'}), 404
-    if not _can_manage_definition(row):
-        return jsonify({'error': '只有 Workflow 创建者或管理员可以更新模板'}), 403
+    can_manage = _can_manage_definition(row)
+    if not _can_edit_definition(row):
+        return jsonify({'error': '只有 Workflow 创建者、编辑者或管理员可以更新模板'}), 403
     data = request.get_json() or {}
+    if not can_manage and ({'status', 'visibility_scope'} & set(data)):
+        return jsonify({'error': 'Workflow 编辑者不能修改状态或可见性'}), 403
+    before_version = int(row.version or 0)
+    before_hash = hashlib.sha256(json.dumps(
+        row.definition_json or {}, ensure_ascii=False, sort_keys=True,
+        separators=(',', ':')).encode('utf-8')).hexdigest()
     try:
         definition = merge_workflow_definition_update(row.definition_json or {}, data)
     except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
+        message = str(exc)
+        return _workflow_api_error(
+            'WORKFLOW_DEFINITION_SCHEMA_INVALID',
+            message,
+            details={'path': message.split(':', 1)[0]})
     row.name = data.get('name') or definition.get('name') or row.name
     row.description = data.get('description') if 'description' in data else definition.get('description', row.description)
     row.definition_json = definition
@@ -1665,6 +2527,25 @@ def update_workflow_definition(definition_id):
         if visibility_scope not in ('project', 'private'):
             return jsonify({'error': 'visibility_scope 必须是 project 或 private'}), 400
         row.visibility_scope = visibility_scope
+    after_hash = hashlib.sha256(json.dumps(
+        row.definition_json or {}, ensure_ascii=False, sort_keys=True,
+        separators=(',', ':')).encode('utf-8')).hexdigest()
+    db.session.add(AuditLog(
+        action='update',
+        resource_type='workflow_definition_content',
+        resource_id=row.id,
+        resource_name=row.name,
+        operator=_actor_name(),
+        ip_address=request.remote_addr,
+        detail=json.dumps({
+            'before_version': before_version,
+            'after_version': int(row.version or 0),
+            'before_definition_sha256': before_hash,
+            'after_definition_sha256': after_hash,
+            'changed_fields': sorted(data.keys()),
+            'actor_can_manage': can_manage,
+        }, ensure_ascii=False, sort_keys=True),
+    ))
     db.session.commit()
     return jsonify(_definition_payload(row))
 
@@ -1678,10 +2559,24 @@ def create_workflow_definition():
     if not actor:
         return jsonify({'error': '未认证'}), 401
     data = request.get_json() or {}
+    nested_definition = data.get('definition')
+    if isinstance(nested_definition, dict):
+        definition_input = copy.deepcopy(nested_definition)
+        for field in (
+                'key', 'id', 'name', 'description', 'version', 'steps',
+                'context', 'start_vars_schema'):
+            if field in data and field not in definition_input:
+                definition_input[field] = data[field]
+    else:
+        definition_input = data
     try:
-        definition = normalize_workflow_definition(data.get('definition') or data)
+        definition = normalize_workflow_definition(definition_input)
     except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
+        message = str(exc)
+        return _workflow_api_error(
+            'WORKFLOW_DEFINITION_SCHEMA_INVALID',
+            message,
+            details={'path': message.split(':', 1)[0]})
     if WorkflowDefinition.query.filter_by(workflow_key=definition['key']).first():
         return jsonify({'error': 'workflow_key 已存在'}), 409
     visibility_scope = data.get('visibility_scope') or definition.get('visibility_scope') or 'project'
@@ -1702,6 +2597,7 @@ def create_workflow_definition():
             'claw_ids': [actor['id']] if actor['type'] == 'claw' else [],
             'user_ids': [actor['id']] if actor['type'] == 'user' else [],
         }),
+        editor_acl_json=normalize_editor_acl({}),
         visibility_scope=visibility_scope,
     )
     db.session.add(row)
@@ -1869,27 +2765,129 @@ def add_workflow_definition_executor(definition_id):
     return jsonify(_definition_payload(row))
 
 
+@api_bp.route('/workflow-definitions/<int:definition_id>/editors',
+              methods=['PUT', 'POST'])
+def replace_workflow_definition_editors(definition_id):
+    """Replace the multi-Agent/user editor ACL; owner/admin only."""
+    err = _require_actor()
+    if err:
+        return err
+    definition = WorkflowDefinition.query.get_or_404(definition_id)
+    if not _definition_visible(definition):
+        return jsonify({'error': 'workflow definition 不存在'}), 404
+    if (definition.owner_type == 'system'
+            or definition.workflow_key in {w['key'] for w in BUILTIN_WORKFLOWS}):
+        return jsonify({'error': '系统内置 Workflow 模板不能添加编辑者'}), 403
+    if not _can_manage_definition(definition):
+        return jsonify({'error': '只有 Workflow 创建者或管理员可以管理编辑者'}), 403
+    data = request.get_json(silent=True) or {}
+    raw_claw_ids = data.get('claw_ids', [])
+    raw_user_ids = data.get('user_ids', [])
+    if not isinstance(raw_claw_ids, list) or not isinstance(raw_user_ids, list):
+        return jsonify({'error': 'claw_ids 和 user_ids 必须是整数数组'}), 400
+    try:
+        claw_ids = sorted({int(value) for value in raw_claw_ids})
+        user_ids = sorted({int(value) for value in raw_user_ids})
+    except (TypeError, ValueError):
+        return jsonify({'error': 'claw_ids 和 user_ids 必须是整数数组'}), 400
+    existing_claw_ids = {
+        item.id for item in OpenClawInstance.query.filter(
+            OpenClawInstance.id.in_(claw_ids),
+            OpenClawInstance.status != 'deleted').all()
+    } if claw_ids else set()
+    missing_claws = [value for value in claw_ids if value not in existing_claw_ids]
+    if missing_claws:
+        return jsonify({'error': 'OpenClaw 不存在：%s' %
+                        ','.join(map(str, missing_claws))}), 404
+    existing_user_ids = {
+        item.id for item in User.query.filter(User.id.in_(user_ids)).all()
+    } if user_ids else set()
+    missing_users = [value for value in user_ids if value not in existing_user_ids]
+    if missing_users:
+        return jsonify({'error': '用户不存在：%s' %
+                        ','.join(map(str, missing_users))}), 404
+
+    before = normalize_editor_acl(definition.editor_acl_json or {})
+    after = normalize_editor_acl({
+        'claw_ids': claw_ids,
+        'user_ids': user_ids,
+    })
+    definition.editor_acl_json = after
+    definition_json = copy.deepcopy(definition.definition_json or {})
+    definition.version = max(
+        int(definition.version or 0),
+        int(definition_json.get('version') or 0),
+    ) + 1
+    definition_json['version'] = definition.version
+    definition.definition_json = definition_json
+    db.session.add(AuditLog(
+        action='update',
+        resource_type='workflow_definition_editors',
+        resource_id=definition.id,
+        resource_name=definition.name,
+        operator=_actor_name(),
+        ip_address=request.remote_addr,
+        detail=json.dumps({
+            'before': before,
+            'after': after,
+            'version': definition.version,
+        }, ensure_ascii=False, sort_keys=True),
+    ))
+    db.session.commit()
+    return jsonify(_definition_payload(definition))
+
+
 @api_bp.route('/workflow-runs', methods=['GET'])
 def list_workflow_runs():
     err = _require_actor()
     if err:
         return err
     _refresh_workflow_step_health(commit=True)
-    q = WorkflowRun.query
-    status = request.args.get('status')
-    if status:
-        q = q.filter_by(status=status)
-    rows = q.order_by(WorkflowRun.created_at.desc()).limit(100).all()
-    rows = [r for r in rows if r.definition and _definition_visible(r.definition)]
-    payload = [_run_payload(r, with_steps=False) for r in rows]
-    if 'page' in request.args or 'per_page' in request.args:
-        page = paginate_items(
-            payload,
-            page=request.args.get('page'),
-            per_page=request.args.get('per_page'),
-        )
-        return jsonify(page)
-    return jsonify(payload)
+    q, query_error = _workflow_run_query_from_request()
+    if query_error:
+        return query_error
+    if any(key in request.args for key in ('page', 'page_size', 'per_page')):
+        try:
+            page_number = max(1, int(request.args.get('page') or 1))
+            page_size = int(
+                request.args.get('page_size')
+                or request.args.get('per_page')
+                or 50)
+        except (TypeError, ValueError):
+            return _workflow_api_error(
+                'INVALID_PAGINATION', 'page and page_size must be integers')
+        page_size = max(1, min(page_size, 200))
+        total = q.order_by(None).count()
+        start = (page_number - 1) * page_size
+        rows = q.offset(start).limit(page_size).all()
+        return jsonify({
+            'items': [_run_payload(row, with_steps=False) for row in rows],
+            'total': total,
+            'page': page_number,
+            'page_size': page_size,
+            'pages': (total + page_size - 1) // page_size,
+        })
+    # Preserve the historical bare-array response when pagination is omitted.
+    rows = q.limit(100).all()
+    return jsonify([_run_payload(row, with_steps=False) for row in rows])
+
+
+@api_bp.route('/workflow-runs/latest', methods=['GET'])
+def get_latest_workflow_run():
+    err = _require_actor()
+    if err:
+        return err
+    _refresh_workflow_step_health(commit=True)
+    q, query_error = _workflow_run_query_from_request()
+    if query_error:
+        return query_error
+    run = q.first()
+    if not run:
+        return _workflow_api_error(
+            'WORKFLOW_RUN_NOT_FOUND',
+            'No workflow run matches the requested filters',
+            status=404)
+    return jsonify(_run_payload(run, with_steps=False))
 
 
 @api_bp.route('/workflow-runs', methods=['POST'])
@@ -1899,8 +2897,26 @@ def create_workflow_run():
         return err
     data = request.get_json() or {}
     definition = None
-    if data.get('definition_id'):
-        definition = WorkflowDefinition.query.get(data.get('definition_id'))
+    legacy_definition_id = data.get('definition_id')
+    workflow_definition_id = data.get('workflow_definition_id')
+    if (legacy_definition_id not in (None, '')
+            and workflow_definition_id not in (None, '')
+            and str(legacy_definition_id) != str(workflow_definition_id)):
+        return _workflow_api_error(
+            'WORKFLOW_DEFINITION_ID_MISMATCH',
+            'definition_id and workflow_definition_id must refer to the same definition')
+    requested_definition_id = (
+        workflow_definition_id
+        if workflow_definition_id not in (None, '')
+        else legacy_definition_id
+    )
+    if requested_definition_id not in (None, ''):
+        try:
+            definition = WorkflowDefinition.query.get(int(requested_definition_id))
+        except (TypeError, ValueError):
+            return _workflow_api_error(
+                'INVALID_WORKFLOW_DEFINITION_ID',
+                'workflow_definition_id must be an integer')
     elif data.get('workflow_key'):
         definition = WorkflowDefinition.query.filter_by(
             workflow_key=data.get('workflow_key')).first()
@@ -1914,7 +2930,39 @@ def create_workflow_run():
         return jsonify({'error': 'workflow definition 不存在'}), 404
     if not _can_execute_definition(definition):
         return jsonify({'error': '无权启动此 Workflow，请联系创建者添加执行权限'}), 403
+    body_idempotency_key = str(data.get('idempotency_key') or '').strip()
+    header_idempotency_key = str(
+        request.headers.get('Idempotency-Key') or '').strip()
+    if (body_idempotency_key and header_idempotency_key
+            and body_idempotency_key != header_idempotency_key):
+        return _workflow_api_error(
+            'IDEMPOTENCY_KEY_MISMATCH',
+            'Body and header idempotency keys must match')
+    idempotency_key = body_idempotency_key or header_idempotency_key or None
+    if idempotency_key and len(idempotency_key) > 128:
+        return _workflow_api_error(
+            'IDEMPOTENCY_KEY_TOO_LONG',
+            'idempotency_key must not exceed 128 characters')
+    run_metadata = {}
+    for field, max_length in (
+        ('controller_run_id', 160),
+        ('correlation_id', 160),
+        ('trigger_source', 64),
+    ):
+        value = str(data.get(field) or '').strip() or None
+        if value and len(value) > max_length:
+            return _workflow_api_error(
+                'WORKFLOW_RUN_METADATA_TOO_LONG',
+                f'{field} must not exceed {max_length} characters',
+                details={'field': field, 'max_length': max_length})
+        run_metadata[field] = value
     normalized = copy.deepcopy(definition.definition_json or {})
+    definition_snapshot_hash = hashlib.sha256(json.dumps(
+        normalized,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+    ).encode('utf-8')).hexdigest()
     selected_claw_ids = []
     invalid_claw_ids = []
     for raw in (
@@ -1937,6 +2985,123 @@ def create_workflow_run():
             continue
     selected_user_ids = sorted(set(selected_user_ids))
 
+    caller_claw = get_current_claw()
+    raw_worker_claw_id = (
+        data.get('worker_claw_id')
+        if data.get('worker_claw_id') not in (None, '')
+        else data.get('executor_worker_claw_id'))
+    if caller_claw:
+        if raw_worker_claw_id not in (None, ''):
+            try:
+                requested_worker_claw_id = int(raw_worker_claw_id)
+            except (TypeError, ValueError):
+                return _workflow_api_error(
+                    'INVALID_WORKER_CLAW_ID',
+                    'worker_claw_id must be an integer')
+            if requested_worker_claw_id != caller_claw.id:
+                return _workflow_api_error(
+                    'WORKER_BINDING_MISMATCH',
+                    'A Claw-started Flow must bind to the initiating Worker',
+                    status=403,
+                    details={
+                        'initiating_claw_id': caller_claw.id,
+                        'requested_worker_claw_id': requested_worker_claw_id,
+                    })
+        worker_claw_id = caller_claw.id
+    elif raw_worker_claw_id not in (None, ''):
+        try:
+            worker_claw_id = int(raw_worker_claw_id)
+        except (TypeError, ValueError):
+            return _workflow_api_error(
+                'INVALID_WORKER_CLAW_ID',
+                'worker_claw_id must be an integer')
+    else:
+        worker_claw_id = None
+
+    if worker_claw_id:
+        worker_claw = OpenClawInstance.query.filter(
+            OpenClawInstance.id == worker_claw_id,
+            OpenClawInstance.status != 'deleted',
+        ).first()
+        if not worker_claw:
+            return _workflow_api_error(
+                'WORKER_CLAW_NOT_FOUND',
+                'The bound Flow Worker does not exist',
+                details={'worker_claw_id': worker_claw_id})
+    if (_definition_requires_worker_binding(normalized)
+            and not worker_claw_id):
+        return _workflow_api_error(
+            'WORKER_BINDING_REQUIRED',
+            'This Workflow requires one bound physical Worker',
+            details={'workflow_definition_id': definition.id})
+
+    start_vars = (
+        data.get('start_vars')
+        if isinstance(data.get('start_vars'), dict)
+        else data.get('variables')
+        if isinstance(data.get('variables'), dict)
+        else data.get('start_parameters')
+        if isinstance(data.get('start_parameters'), dict)
+        else {}
+    )
+    try:
+        assignment = resolve_workflow_run_assignment(
+            normalized,
+            start_vars,
+            worker_claw_id=worker_claw_id,
+            selected_executor_claw_ids=selected_claw_ids,
+        )
+    except ValueError as exc:
+        return _workflow_api_error(
+            'WORKFLOW_ASSIGNMENT_INVALID',
+            str(exc),
+            status=422,
+            details={'workflow_definition_id': definition.id},
+        )
+
+    assignment_claws = {}
+    if assignment:
+        assignment_ids = sorted({
+            int(assignment['executor_claw_id']),
+            *(
+                [int(assignment['reviewer_claw_id'])]
+                if assignment.get('reviewer_claw_id') else []
+            ),
+        })
+        rows = OpenClawInstance.query.filter(
+            OpenClawInstance.id.in_(assignment_ids),
+            OpenClawInstance.status != 'deleted',
+        ).all()
+        assignment_claws = {row.id: row for row in rows}
+        missing = [cid for cid in assignment_ids if cid not in assignment_claws]
+        if missing:
+            return _workflow_api_error(
+                'WORKFLOW_ASSIGNMENT_CLAW_NOT_FOUND',
+                'Assigned executor/reviewer does not exist',
+                status=422,
+                details={'missing_claw_ids': missing},
+            )
+        incompatible = [
+            claw.id for claw in rows
+            if definition.project_id is not None
+            and claw.project_id not in (None, definition.project_id)
+        ]
+        if incompatible:
+            return _workflow_api_error(
+                'WORKFLOW_ASSIGNMENT_PROJECT_MISMATCH',
+                'Assigned executor/reviewer is outside the Workflow project',
+                status=422,
+                details={'claw_ids': incompatible},
+            )
+        normalized = materialize_workflow_run_assignment(
+            normalized,
+            assignment,
+            {cid: claw.name for cid, claw in assignment_claws.items()},
+        )
+        selected_claw_ids = [int(assignment['executor_claw_id'])]
+        start_vars = assignment['start_vars']
+        worker_claw_id = int(assignment['worker_claw_id'])
+
     selected_claws = []
     if selected_claw_ids:
         selected_claws = OpenClawInstance.query.filter(
@@ -1948,7 +3113,8 @@ def create_workflow_run():
         if missing:
             return jsonify({'error': '执行 Agent 不存在：%s' % ','.join(map(str, missing))}), 400
         selected_claw_names = {c.id: c.name for c in selected_claws}
-        for step in normalized.get('steps') or []:
+        for step in (
+                (normalized.get('steps') or []) if not assignment else []):
             if step.get('type') != 'agent_task':
                 continue
             step['executor_claw_ids'] = selected_claw_ids
@@ -1965,15 +3131,6 @@ def create_workflow_run():
     start_mode = data.get('start_mode') or 'immediate'
     schedule_cron = (data.get('schedule_cron') or '').strip()
     raw_context = data.get('context') if isinstance(data.get('context'), dict) else {}
-    start_vars = (
-        data.get('start_vars')
-        if isinstance(data.get('start_vars'), dict)
-        else data.get('variables')
-        if isinstance(data.get('variables'), dict)
-        else data.get('start_parameters')
-        if isinstance(data.get('start_parameters'), dict)
-        else {}
-    )
     context = build_workflow_start_context(
         start_vars,
         raw_context,
@@ -1981,17 +3138,105 @@ def create_workflow_run():
         schedule_cron=schedule_cron,
         executor_claw_ids=selected_claw_ids,
         executor_user_ids=selected_user_ids,
+        worker_claw_id=worker_claw_id,
     )
+    context['workflow_definition_snapshot'] = {
+        'workflow_definition_id': definition.id,
+        'version': int(definition.version or 1),
+        'sha256': definition_snapshot_hash,
+        'template_revision': str(
+            (definition.definition_json or {}).get('template_revision') or ''),
+    }
+    if assignment:
+        context['assignment_snapshot'] = {
+            'schema': assignment['schema'],
+            'executor_claw_id': assignment['executor_claw_id'],
+            'reviewer_claw_id': assignment.get('reviewer_claw_id'),
+            'worker_claw_id': assignment['worker_claw_id'],
+            'step_roles': assignment['step_roles'],
+            'source': assignment['source'],
+        }
+    snapshot_library_id, snapshot_input_warning = resolve_workflow_library_id(
+        data, context, workflow_key=definition.workflow_key)
+    if snapshot_input_warning:
+        context = append_workflow_snapshot_warning(
+            context, snapshot_input_warning)
+    context['execution_input_snapshot'] = _workflow_execution_input_snapshot(
+        context['workflow_definition_snapshot'],
+        start_vars,
+        raw_context,
+        normalized.get('context'),
+        testcase_library_id=snapshot_library_id,
+    )
+    run_name = data.get('run_name') or normalized.get('name') or definition.name
+    run_project_id = data.get('project_id') or definition.project_id
+    idempotency_request_hash = None
+    if idempotency_key:
+        idempotency_request_hash = _workflow_run_create_hash(
+            definition.id,
+            {
+                'run_name': run_name,
+                'project_id': run_project_id,
+                'context': context,
+                'controller_run_id': run_metadata['controller_run_id'],
+                'correlation_id': run_metadata['correlation_id'],
+                'trigger_source': run_metadata['trigger_source'],
+            },
+        )
+        existing_run = WorkflowRun.query.filter_by(
+            definition_id=definition.id,
+            idempotency_key=idempotency_key,
+        ).first()
+        if existing_run:
+            if (existing_run.idempotency_request_hash
+                    and existing_run.idempotency_request_hash
+                    != idempotency_request_hash):
+                return _workflow_api_error(
+                    'IDEMPOTENCY_CONFLICT',
+                    'The idempotency key was already used with a different payload',
+                    status=409,
+                    details={'workflow_run_id': existing_run.id})
+            payload = _workflow_run_create_payload(
+                existing_run, compact=bool(caller_claw),
+                idempotent_replay=True)
+            return jsonify(payload), 200
     run = WorkflowRun(
         definition_id=definition.id,
-        run_name=data.get('run_name') or normalized.get('name') or definition.name,
+        run_name=run_name,
         status='pending',
-        project_id=data.get('project_id') or definition.project_id,
+        project_id=run_project_id,
         triggered_by=_actor_name(),
+        idempotency_key=idempotency_key,
+        idempotency_request_hash=idempotency_request_hash,
+        controller_run_id=run_metadata['controller_run_id'],
+        correlation_id=run_metadata['correlation_id'],
+        trigger_source=run_metadata['trigger_source'],
         context_json=context,
     )
     db.session.add(run)
-    db.session.flush()
+    try:
+        db.session.flush()
+    except IntegrityError:
+        db.session.rollback()
+        if idempotency_key:
+            existing_run = WorkflowRun.query.filter_by(
+                definition_id=definition.id,
+                idempotency_key=idempotency_key,
+            ).first()
+            if existing_run:
+                if (existing_run.idempotency_request_hash
+                        and existing_run.idempotency_request_hash
+                        != idempotency_request_hash):
+                    return _workflow_api_error(
+                        'IDEMPOTENCY_CONFLICT',
+                        'The idempotency key was already used with a different payload',
+                        status=409,
+                        details={'workflow_run_id': existing_run.id})
+                payload = _workflow_run_create_payload(
+                    existing_run, compact=bool(caller_claw),
+                    idempotent_replay=True)
+                return jsonify(payload), 200
+        raise
     for idx, step in enumerate(normalized.get('steps') or []):
         status = 'pending'
         if step.get('approval_required') and not step.get('depends_on'):
@@ -2013,8 +3258,43 @@ def create_workflow_run():
         db.session.add(row)
     db.session.flush()
     _recompute_run_status(run, _actor_name())
+    if snapshot_library_id is not None:
+        snapshot_record = None
+        snapshot_warning = None
+        try:
+            # A SAVEPOINT isolates missing migration tables, malformed legacy
+            # content and other snapshot failures from stable Flow creation.
+            with db.session.begin_nested():
+                snapshot_record, snapshot_warning = (
+                    freeze_workflow_run_library_snapshot(
+                        run, snapshot_library_id, _actor_name()))
+        except Exception as exc:
+            current_app.logger.warning(
+                'Workflow Run %s testcase library snapshot failed: %s',
+                run.id, exc, exc_info=True)
+            snapshot_warning = {
+                'code': 'TESTCASE_LIBRARY_SNAPSHOT_FAILED',
+                'message': (
+                    'Failed to freeze testcase library; Run continues with '
+                    'its legacy execution path'),
+                'details': {
+                    'library_id': snapshot_library_id,
+                    'error_type': type(exc).__name__,
+                },
+            }
+        run_context = (
+            copy.deepcopy(run.context_json)
+            if isinstance(run.context_json, dict) else {})
+        if snapshot_record is not None:
+            run_context['testcase_library_snapshot'] = snapshot_record.to_dict()
+        if snapshot_warning:
+            run_context = append_workflow_snapshot_warning(
+                run_context, snapshot_warning)
+        run.context_json = run_context
     db.session.commit()
-    return jsonify(run.to_dict(with_steps=True)), 201
+    payload = _workflow_run_create_payload(
+        run, compact=bool(caller_claw), idempotent_replay=False)
+    return jsonify(payload), 201
 
 
 @api_bp.route('/workflow-runs/<int:run_id>', methods=['GET'])
@@ -2023,10 +3303,31 @@ def get_workflow_run(run_id):
     if err:
         return err
     run = WorkflowRun.query.get_or_404(run_id)
-    if run.definition and not _definition_visible(run.definition):
+    if not _run_visible_to_actor(run):
         return jsonify({'error': 'workflow run 不存在'}), 404
     _refresh_workflow_step_health(run, commit=True)
     return jsonify(_run_payload(run, with_steps=True))
+
+
+@api_bp.route(
+    '/workflow-runs/<int:run_id>/testcase-library-snapshot', methods=['GET'])
+def get_workflow_run_testcase_library_snapshot(run_id):
+    err = _require_actor()
+    if err:
+        return err
+    run = WorkflowRun.query.get_or_404(run_id)
+    if not _run_visible_to_actor(run):
+        return jsonify({'error': 'workflow run 不存在'}), 404
+    snapshot = WorkflowRunLibrarySnapshot.query.filter_by(
+        workflow_run_id=run.id).first()
+    if not snapshot:
+        return _workflow_api_error(
+            'WORKFLOW_RUN_LIBRARY_SNAPSHOT_NOT_FOUND',
+            'Workflow Run does not have a frozen testcase library snapshot',
+            status=404)
+    include_cases = str(request.args.get('include_cases', 'true')).lower() in {
+        '1', 'true', 'yes'}
+    return jsonify(snapshot.to_dict(with_cases=include_cases))
 
 
 def _run_start_value(run, key):
@@ -2072,7 +3373,7 @@ def get_agent_team_delivery(run_id):
     if err:
         return err
     run = WorkflowRun.query.get_or_404(run_id)
-    if run.definition and not _definition_visible(run.definition):
+    if not _run_visible_to_actor(run):
         return jsonify({'error': 'workflow run 不存在'}), 404
     return jsonify(_agent_team_delivery_payload(run))
 
@@ -2121,12 +3422,23 @@ def delete_workflow_run(run_id):
         return jsonify({'error': 'workflow run 不存在'}), 404
     if not _can_delete_run(run):
         return jsonify({'error': '只有 Run 发起者、模板创建者或管理员可以删除运行记录'}), 403
+    try:
+        with db.session.begin_nested():
+            WorkflowRunLibrarySnapshot.query.filter_by(
+                workflow_run_id=run.id).delete(synchronize_session=False)
+    except Exception as exc:
+        # The snapshot table is an optional additive migration. A partially
+        # deployed environment must retain the historical Run deletion path.
+        current_app.logger.warning(
+            'Workflow Run %s snapshot cleanup skipped: %s',
+            run.id, exc, exc_info=True)
+    cleanup = cleanup_workflow_result_records(run.id)
     WorkflowArtifact.query.filter_by(run_id=run.id).delete()
     WorkflowApproval.query.filter_by(run_id=run.id).delete()
     WorkflowRunStep.query.filter_by(run_id=run.id).delete()
     db.session.delete(run)
     db.session.commit()
-    return jsonify({'ok': True, 'deleted_id': run_id})
+    return jsonify({'ok': True, 'deleted_id': run_id, 'cleanup': cleanup})
 
 
 @api_bp.route('/workflow-runs/worker/tasks', methods=['GET'])
@@ -2141,13 +3453,15 @@ def list_worker_workflow_tasks():
         WorkflowRun.id == WorkflowRunStep.run_id,
     ).filter(
         WorkflowRun.status.in_(('running', 'retrying')),
+        WorkflowRunStep.step_type == 'worker_task',
         WorkflowRunStep.status.in_(('running', 'retrying')),
-        db.or_(
-            WorkflowRunStep.target_claw_id == claw.id,
-            WorkflowRunStep.target_claw_id.is_(None),
-        ),
-    ).order_by(WorkflowRunStep.updated_at.asc()).limit(20).all()
-    rows = [row for row in rows if _step_belongs_to_claw(row, claw.id)]
+    ).order_by(WorkflowRunStep.updated_at.asc()).limit(1000).all()
+    # Production still runs MariaDB 5.5, which has no JSON_EXTRACT.  Keep the
+    # query relational-only and apply the run-level worker binding through the
+    # same Python authorization helper used by claim/result/progress routes.
+    rows = [
+        row for row in rows if _step_belongs_to_claw(row, claw.id)
+    ][:20]
     return jsonify([_step_runtime_payload(r) for r in rows])
 
 
@@ -2157,28 +3471,55 @@ def claim_workflow_step(run_id, step_id):
     claw = get_current_claw()
     if not claw:
         return jsonify({'error': '缺少 OpenClaw Token'}), 401
+    idem_record, idem_response = _workflow_idempotency_begin()
+    if idem_response:
+        return idem_response
     data = request.get_json() or {}
-    worker_id = (data.get('worker_id') or f'claw:{claw.id}').strip()
-    lease_seconds = int(data.get('lease_seconds') or 180)
+    worker_id = _worker_id_from_payload(data, claw)
+    lease_seconds = normalize_step_lease_seconds(data.get('lease_seconds'))
     now = datetime.now()
     run = WorkflowRun.query.get_or_404(run_id)
     if run.status not in ('running', 'retrying'):
         return jsonify({'error': 'Workflow Run 当前不可执行'}), 409
-    step = WorkflowRunStep.query.filter_by(run_id=run_id, step_id=step_id).first_or_404()
+    step = (WorkflowRunStep.query
+            .filter_by(run_id=run_id, step_id=step_id)
+            .with_for_update().first_or_404())
+    if step.step_type != 'worker_task':
+        return _workflow_api_error(
+            'INVALID_STEP_TYPE',
+            'Only worker_task steps can be claimed by Job Service',
+            status=409,
+            details={'step_id': step.step_id, 'step_type': step.step_type})
     if step.status not in ('running', 'retrying'):
         return jsonify({'error': 'Workflow Step 当前不可执行'}), 409
     if not _step_belongs_to_claw(step, claw.id):
         return jsonify({'error': '此 Step 不属于当前 OpenClaw'}), 403
-    if not can_claim_step(step.claimed_by, step.claimed_at, worker_id, now, lease_seconds):
-        return jsonify({
-            'error': 'Workflow Step 已被其他 worker 认领',
-            'claimed_by': step.claimed_by or '',
-            'claimed_at': str(step.claimed_at) if step.claimed_at else None,
-        }), 409
+    claim = can_claim_step_lease(
+        getattr(step, 'claimed_claw_id', None),
+        step.claimed_by,
+        getattr(step, 'claim_expires_at', None),
+        claw.id,
+        worker_id,
+        now,
+    )
+    if not claim.get('allowed'):
+        return _claim_error_response(claim.get('reason') or 'claim_conflict', step)
+    same_active_owner = bool(
+        step.claimed_claw_id == claw.id
+        and step.claimed_by == worker_id
+        and step.claim_expires_at
+        and step.claim_expires_at > now)
+    if not same_active_owner:
+        step.claim_fencing_token = int(step.claim_fencing_token or 0) + 1
     step.claimed_by = worker_id
     step.claimed_at = now
+    step.claimed_claw_id = claw.id
+    step.claim_lease_seconds = lease_seconds
+    step.claim_expires_at = now + timedelta(seconds=lease_seconds)
+    body = {'ok': True, 'step': _step_runtime_payload(step), 'lease_seconds': lease_seconds}
+    _workflow_idempotency_store(idem_record, 200, body)
     db.session.commit()
-    return jsonify({'ok': True, 'step': _step_runtime_payload(step), 'lease_seconds': lease_seconds})
+    return jsonify(body)
 
 
 @api_bp.route('/workflow-runs/<int:run_id>/steps/<step_id>/heartbeat', methods=['POST'])
@@ -2188,16 +3529,23 @@ def heartbeat_workflow_step(run_id, step_id):
     if not claw:
         return jsonify({'error': '缺少 OpenClaw Token'}), 401
     data = request.get_json() or {}
-    worker_id = (data.get('worker_id') or f'claw:{claw.id}').strip()
+    worker_id = _worker_id_from_payload(data, claw)
     run = WorkflowRun.query.get_or_404(run_id)
+    step = WorkflowRunStep.query.filter_by(
+        run_id=run_id, step_id=step_id).first_or_404()
     if run.status not in ('running', 'retrying'):
-        return jsonify({'error': 'Workflow Run 当前不可执行'}), 409
-    step = WorkflowRunStep.query.filter_by(run_id=run_id, step_id=step_id).first_or_404()
+        return _workflow_lifecycle_conflict(
+            run, step, operation='heartbeat')
     if step.status not in ('running', 'retrying'):
         return jsonify({'error': 'Workflow Step 当前不可执行'}), 409
     if not _step_belongs_to_claw(step, claw.id):
         return jsonify({'error': '此 Step 不属于当前 OpenClaw'}), 403
     now = datetime.now()
+    claim_error = _require_active_step_claim(
+        step, claw, worker_id,
+        data.get('fencing_token', data.get('claim_fencing_token')))
+    if claim_error:
+        return claim_error
     step.heartbeat_at = now
     step.heartbeat_by = worker_id
     step.heartbeat_count = (step.heartbeat_count or 0) + 1
@@ -2205,9 +3553,8 @@ def heartbeat_workflow_step(run_id, step_id):
     step.health_status = 'healthy'
     step.health_checked_at = now
     _apply_step_progress(step, data, worker_id, now)
-    if not step.claimed_by:
-        step.claimed_by = worker_id
-        step.claimed_at = now
+    if step.step_type == 'worker_task':
+        _renew_step_claim(step, now)
     db.session.commit()
     return jsonify({'ok': True, 'step': _step_runtime_payload(step)})
 
@@ -2219,16 +3566,23 @@ def progress_workflow_step(run_id, step_id):
     if not claw:
         return jsonify({'error': '缺少 OpenClaw Token'}), 401
     data = request.get_json() or {}
-    reporter = (data.get('worker_id') or data.get('reporter') or f'claw:{claw.id}').strip()
+    reporter = str(data.get('worker_id') or data.get('reporter') or f'claw:{claw.id}').strip()
     run = WorkflowRun.query.get_or_404(run_id)
+    step = WorkflowRunStep.query.filter_by(
+        run_id=run_id, step_id=step_id).first_or_404()
     if run.status not in ('running', 'retrying'):
-        return jsonify({'error': 'Workflow Run 当前不可执行'}), 409
-    step = WorkflowRunStep.query.filter_by(run_id=run_id, step_id=step_id).first_or_404()
+        return _workflow_lifecycle_conflict(
+            run, step, operation='progress')
     if step.status not in ('running', 'retrying'):
         return jsonify({'error': 'Workflow Step 当前不可执行'}), 409
     if not _step_belongs_to_claw(step, claw.id):
         return jsonify({'error': '此 Step 不属于当前 OpenClaw'}), 403
     now = datetime.now()
+    claim_error = _require_active_step_claim(
+        step, claw, reporter,
+        data.get('fencing_token', data.get('claim_fencing_token')))
+    if claim_error:
+        return claim_error
     updated = _apply_step_progress(step, data, reporter, now)
     if not updated:
         return jsonify({'error': '缺少 progress 字段：phase/message/percent/progress 至少一个'}), 400
@@ -2239,6 +3593,8 @@ def progress_workflow_step(run_id, step_id):
         step.missed_heartbeat_count = 0
         step.health_status = 'healthy'
         step.health_checked_at = now
+        if step.step_type == 'worker_task':
+            _renew_step_claim(step, now)
     db.session.commit()
     return jsonify({'ok': True, 'step': _step_runtime_payload(step)})
 
@@ -2309,8 +3665,7 @@ def _apply_manual_step_display_status(step, display_state, data, previous_displa
             step.outputs_json = data.get('outputs')
     step.summary = summary
     step.updated_by = actor
-    step.claimed_by = ''
-    step.claimed_at = None
+    _clear_step_claim(step)
 
 
 @api_bp.route('/workflow-runs/<int:run_id>/steps/<step_id>/status', methods=['POST'])
@@ -2327,9 +3682,32 @@ def update_workflow_step_display_status(run_id, step_id):
     if not _can_change_workflow_step_status(run, step):
         return jsonify({'error': '只有节点执行 Agent、owner 或管理员可以修改节点状态'}), 403
     data = request.get_json() or {}
+    claw = get_current_claw()
+    if claw and step.step_type == 'worker_task':
+        worker_id = _worker_id_from_payload(data, claw)
+        claim_error = _require_active_step_claim(
+            step, claw, worker_id,
+            data.get('fencing_token', data.get('claim_fencing_token')))
+        if claim_error:
+            return claim_error
     display_state = str(data.get('display_state') or data.get('state') or '').strip()
     if display_state not in ('todo', 'running', 'blocked', 'done'):
         return jsonify({'error': 'display_state 必须是 todo/running/blocked/done'}), 400
+    if display_state == 'done':
+        finalizer_contract = validate_workflow_finalizer_result(
+            step.step_config_json or {}, data)
+        if not finalizer_contract.get('valid'):
+            return _workflow_api_error(
+                'FINALIZER_RECEIPT_REQUIRED',
+                'Workflow finalizer must complete all side effects before '
+                'submitting its terminal result',
+                status=409,
+                details={
+                    'workflow_run_id': run.id,
+                    'step_id': step.step_id,
+                    'missing': finalizer_contract.get('missing') or [],
+                },
+            )
     previous_display_state = workflow_step_display_state(step.status)
     _apply_manual_step_display_status(step, display_state, data, previous_display_state)
     if display_state == 'running' and previous_display_state != 'running':
@@ -2358,17 +3736,48 @@ def report_workflow_step_result(run_id, step_id):
     err = _require_actor()
     if err:
         return err
+    idem_record, idem_response = _workflow_idempotency_begin()
+    if idem_response:
+        return idem_response
     run = WorkflowRun.query.get_or_404(run_id)
-    if run.status == 'cancelled':
-        return jsonify({'error': 'Workflow Run 已终止，不能回写步骤结果'}), 409
     step = WorkflowRunStep.query.filter_by(
         run_id=run_id,
         step_id=step_id,
     ).first_or_404()
     data = request.get_json() or {}
+    if (run.status in ('succeeded', 'failed', 'blocked', 'cancelled')
+            and not (run.status == 'blocked'
+                     and data.get('force_recover') is True)):
+        return _workflow_lifecycle_conflict(
+            run, step, operation='result')
+    try:
+        status = validate_worker_result_status(data.get('status'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
     claw = get_current_claw()
     if claw and not _step_belongs_to_claw(step, claw.id):
         return jsonify({'error': '此 Step 不属于当前 OpenClaw'}), 403
+    if claw and step.step_type == 'worker_task':
+        worker_id = _worker_id_from_payload(data, claw)
+        claim_error = _require_active_step_claim(
+            step, claw, worker_id,
+            data.get('fencing_token', data.get('claim_fencing_token')))
+        if claim_error:
+            return claim_error
+    finalizer_contract = validate_workflow_finalizer_result(
+        step.step_config_json or {}, data)
+    if not finalizer_contract.get('valid'):
+        return _workflow_api_error(
+            'FINALIZER_RECEIPT_REQUIRED',
+            'Workflow finalizer must complete all side effects before '
+            'submitting its terminal result',
+            status=409,
+            details={
+                'workflow_run_id': run.id,
+                'step_id': step.step_id,
+                'missing': finalizer_contract.get('missing') or [],
+            },
+        )
     accept = can_accept_step_result_after_blocker(
         step.status,
         step.blocker_json or {},
@@ -2404,19 +3813,65 @@ def report_workflow_step_result(run_id, step_id):
         step.progress_phase = 'agent_task_timeout'
         step.progress_message = 'AgentTask 执行通道超时，节点保持执行中；请 Agent 或 owner 继续处理'
         run.status = 'running'
+        run.finished_at = None
         run.current_step_id = step.step_id
         run.blocker_json = {}
+        body = _run_payload(run, with_steps=True)
+        _workflow_idempotency_store(idem_record, 200, body)
         db.session.commit()
-        return jsonify(_run_payload(run, with_steps=True))
+        return jsonify(body)
     step.summary = data.get('summary') or ''
     step.metrics_json = data.get('metrics') if isinstance(data.get('metrics'), dict) else {}
-    step.outputs_json = data.get('outputs') if isinstance(data.get('outputs'), dict) else {}
+    step.outputs_json = collect_declared_step_outputs(
+        step.step_config_json or {}, data)
     step.evidence_json = data.get('evidence') if isinstance(data.get('evidence'), dict) else {}
     step.logs_json = data.get('logs') if isinstance(data.get('logs'), dict) else {}
     step.blocker_json = data.get('blocker') if isinstance(data.get('blocker'), dict) else {}
     step.updated_by = _actor_name()
     step.finished_at = datetime.now()
-    status = data.get('status') or 'passed'
+    report, report_error = _resolve_workflow_report(run, step, data)
+    if report_error:
+        db.session.rollback()
+        return jsonify({'error': report_error}), 400
+    if report:
+        step.outputs_json.setdefault('hub_report_id', report.id)
+        if report.is_shared and report.share_token:
+            step.outputs_json.setdefault('share_url', '/r/%s' % report.share_token)
+    ingestion = ingest_workflow_result(run, step, dict(
+        data, outputs=step.outputs_json, evidence=step.evidence_json),
+        actor=step.updated_by or 'workflow')
+    contract = validate_step_result_contract(step.step_config_json or {}, {
+        'metrics': step.metrics_json or {},
+        'outputs': step.outputs_json or {},
+        'evidence': step.evidence_json or {},
+    })
+    notification_outputs = _workflow_outputs_context(
+        run, step, dict(step.outputs_json or {}, **(step.metrics_json or {})))
+    notification_report = _verified_notification_report(
+        run, notification_outputs)
+    notification_authorization = evaluate_notification_authorization(
+        notification_outputs, report_readback=bool(notification_report))
+    notification_contract = validate_notification_result_contract({
+        'metrics': step.metrics_json or {},
+        'outputs': step.outputs_json or {},
+    }, notification_authorization, sent_audit=_notification_send_audited(
+        run.id, step.step_id))
+    contract['notification'] = notification_contract
+    if not notification_contract['valid']:
+        contract.update({
+            'valid': False,
+            'code': 'CONTRACT_INVALID',
+            # Notification authorization is a platform hard gate and cannot be
+            # weakened by a legacy on_fail=warn contract policy.
+            'policy': 'blocked',
+        })
+        if not notification_authorization.get('allowed'):
+            step.outputs_json = dict(step.outputs_json or {}, **{
+                'notification_skipped': True,
+                'wecom_sent': False,
+                'skip_reason': 'business_pass_or_automation_only',
+            })
+    step.contract_result_json = dict(contract, evidence_ingestion=ingestion)
     gate = evaluate_step_gates(step.step_config_json or {}, {
         'status': status,
         'summary': step.summary,
@@ -2428,10 +3883,15 @@ def report_workflow_step_result(run_id, step_id):
         'context': run.context_json or {},
         'start_vars': _run_start_vars(run),
     })
+    gate['contract'] = contract
+    if not contract['valid']:
+        gate['warning_only'] = contract['policy'] == 'warn'
+        if contract['policy'] != 'warn':
+            gate['passed'] = False
+            gate['status'] = contract['policy']
     step.gate_result_json = gate
     step.status = gate['status'] if not gate['passed'] else status
-    step.claimed_by = ''
-    step.claimed_at = None
+    _clear_step_claim(step)
     step.health_status = 'idle'
     step.health_checked_at = datetime.now()
     step.progress_at = step.finished_at
@@ -2441,9 +3901,18 @@ def report_workflow_step_result(run_id, step_id):
     if status in ('passed', 'skipped'):
         step.progress_percent = 100
     if step.status not in ('passed', 'failed', 'blocked', 'skipped', 'waiting_approval'):
-        step.status = 'passed'
+        step.status = 'blocked'
     if step.status in ('blocked', 'failed') and not step.blocker_json:
-        step.blocker_json = {'message': step.summary or 'Workflow step 未通过门禁'}
+        if not contract['valid']:
+            step.blocker_json = {
+                'type': 'result_contract_invalid',
+                'code': 'CONTRACT_INVALID',
+                'message': '节点结果缺少必填字段',
+                'missing': contract['missing'],
+                'notification': contract.get('notification') or {},
+            }
+        else:
+            step.blocker_json = {'message': step.summary or 'Workflow step 未通过门禁'}
     if step.status in ('blocked', 'failed'):
         _dispatch_step_blocked_notice(step)
     if step.status in ('passed', 'skipped'):
@@ -2474,13 +3943,25 @@ def report_workflow_step_result(run_id, step_id):
                 url=str(item) if str(item).startswith(('http://', 'https://', '/')) else '',
                 local_path=str(item) if not str(item).startswith(('http://', 'https://', '/')) else '',
             ))
-    report, report_error = _resolve_workflow_report(run, step, data)
-    if report_error:
-        db.session.rollback()
-        return jsonify({'error': report_error}), 400
+    if report:
+        link_report_to_evidence(run, report, step.updated_by or 'workflow')
+    _sync_run_outcomes(
+        run,
+        result={
+            **data,
+            'status': step.status,
+            'outputs': step.outputs_json or {},
+            'metrics': step.metrics_json or {},
+        },
+        step=step,
+        report=report,
+        ingestion=ingestion,
+    )
     _recompute_run_status(run, _actor_name())
+    body = _run_payload(run, with_steps=True)
+    _workflow_idempotency_store(idem_record, 200, body)
     db.session.commit()
-    return jsonify(run.to_dict(with_steps=True))
+    return jsonify(body)
 
 
 @api_bp.route('/workflow-runs/<int:run_id>/steps/<step_id>/retry', methods=['POST'])
@@ -2498,6 +3979,7 @@ def retry_workflow_step(run_id, step_id):
     step.status = 'pending'
     step.blocker_json = {}
     step.gate_result_json = {}
+    step.contract_result_json = {}
     step.branch_result_json = {}
     step.heartbeat_at = None
     step.heartbeat_by = ''
@@ -2506,8 +3988,10 @@ def retry_workflow_step(run_id, step_id):
     step.health_status = 'idle'
     step.health_checked_at = None
     _reset_step_progress(step)
+    _clear_step_claim(step)
     step.finished_at = None
     run.status = 'pending'
+    run.finished_at = None
     run.blocker_json = {}
     _recompute_run_status(run, _actor_name())
     db.session.commit()
@@ -2534,6 +4018,7 @@ def resume_workflow_run(run_id):
                 step.status = 'pending'
                 step.blocker_json = {}
                 step.gate_result_json = {}
+                step.contract_result_json = {}
                 step.branch_result_json = {}
                 step.heartbeat_at = None
                 step.heartbeat_by = ''
@@ -2542,12 +4027,222 @@ def resume_workflow_run(run_id):
                 step.health_status = 'idle'
                 step.health_checked_at = None
                 _reset_step_progress(step)
+                _clear_step_claim(step)
                 step.finished_at = None
     run.status = 'pending'
+    run.finished_at = None
     run.blocker_json = {}
     _recompute_run_status(run, _actor_name())
     db.session.commit()
     return jsonify(run.to_dict(with_steps=True))
+
+
+def _workflow_restart_step_snapshot(step):
+    def digest(value):
+        encoded = json.dumps(
+            value or {}, ensure_ascii=False, sort_keys=True,
+            separators=(',', ':')).encode('utf-8')
+        return hashlib.sha256(encoded).hexdigest()
+    return {
+        'step_id': step.step_id,
+        'status': step.status,
+        'attempt_no': int(step.attempt_no or 0),
+        'summary': (step.summary or '')[:500],
+        'result_code': (
+            (step.contract_result_json or {}).get('code')
+            if isinstance(step.contract_result_json, dict) else ''),
+        'outputs_sha256': digest(step.outputs_json),
+        'evidence_sha256': digest(step.evidence_json),
+    }
+
+
+def _reset_workflow_step_for_full_restart(step, definition_step, actor):
+    _expire_workflow_agent_tasks_for_step(
+        step.run_id, step.step_id, reason='workflow_run_restarted')
+    config = copy.deepcopy(
+        step.step_config_json if isinstance(step.step_config_json, dict)
+        else {})
+    source = definition_step if isinstance(definition_step, dict) else {}
+    if 'approval_required' in source:
+        config['approval_required'] = bool(source.get('approval_required'))
+    config.pop('notification_authorization', None)
+    config.pop('webhook', None)
+    config.pop('webhook_url', None)
+    step.step_config_json = config
+    step.status = 'pending'
+    step.summary = ''
+    step.metrics_json = {}
+    step.evidence_json = {}
+    step.logs_json = {}
+    step.outputs_json = {}
+    step.blocker_json = {}
+    step.gate_result_json = {}
+    step.contract_result_json = {}
+    step.branch_result_json = {}
+    step.dispatched_at = None
+    step.started_at = None
+    step.finished_at = None
+    step.updated_by = actor
+    step.heartbeat_at = None
+    step.heartbeat_by = ''
+    step.heartbeat_count = 0
+    step.missed_heartbeat_count = 0
+    step.health_status = 'idle'
+    step.health_checked_at = None
+    _reset_step_progress(step)
+    _clear_step_claim(step)
+
+
+def _can_restart_workflow_run(run):
+    if run.definition and _can_execute_definition(run.definition):
+        return True
+    claw = get_current_claw()
+    mission = (
+        (run.context_json or {}).get('mission')
+        if isinstance(run.context_json, dict) else None)
+    return bool(
+        claw and run.trigger_source == 'mission_dispatch'
+        and isinstance(mission, dict)
+        and int(mission.get('main_claw_id') or 0) == int(claw.id))
+
+
+@api_bp.route('/workflow-runs/<int:run_id>/restart', methods=['POST'])
+def restart_workflow_run(run_id):
+    """Restart one blocked/failed Run in place instead of creating a new Run."""
+    err = _require_actor()
+    if err:
+        return err
+    key = str(request.headers.get('Idempotency-Key') or '').strip()
+    if not key:
+        return jsonify({
+            'error': '完整重启必须携带 Idempotency-Key',
+            'code': 'IDEMPOTENCY_KEY_REQUIRED',
+        }), 400
+    idem_record, idem_response = _workflow_idempotency_begin()
+    if idem_response:
+        return idem_response
+    run = (WorkflowRun.query.filter_by(id=run_id)
+           .with_for_update().first_or_404())
+    if not _can_restart_workflow_run(run):
+        return jsonify({'error': '无权重启该 Workflow Run'}), 403
+    if run.status not in ('blocked', 'failed'):
+        return jsonify({
+            'error': '只有 blocked/failed Run 可以完整重启',
+            'code': 'WORKFLOW_RUN_NOT_RESTARTABLE',
+            'status': run.status,
+        }), 409
+    data = request.get_json(silent=True) or {}
+    actor = _actor_name()
+    now = datetime.now()
+    reason = str(data.get('reason') or '失败修复完成，原 Run 从头重启').strip()[:1000]
+    steps = sorted(
+        WorkflowRunStep.query.filter_by(run_id=run.id).all(),
+        key=lambda row: row.position or 0)
+    previous_status = run.status
+    snapshot = [_workflow_restart_step_snapshot(step) for step in steps]
+    context = copy.deepcopy(run.context_json or {})
+    restart_count = int(context.get('restart_count') or 0) + 1
+    history = list(context.get('restart_history') or [])[-9:]
+    history.append({
+        'restart_no': restart_count,
+        'restarted_at': now.isoformat(),
+        'restarted_by': actor,
+        'reason': reason,
+        'previous_status': previous_status,
+        'step_count': len(snapshot),
+        'failed_steps': [
+            {
+                'step_id': item['step_id'],
+                'status': item['status'],
+                'result_code': item['result_code'],
+            }
+            for item in snapshot
+            if item['status'] in ('blocked', 'failed')
+        ],
+    })
+    context['restart_count'] = restart_count
+    context['restart_history'] = history
+    run.context_json = context
+
+    definition_steps = {
+        str(item.get('id')): item
+        for item in ((run.definition.definition_json or {}).get('steps') or [])
+        if isinstance(item, dict) and item.get('id')
+    } if run.definition else {}
+    for step in steps:
+        _reset_workflow_step_for_full_restart(
+            step, definition_steps.get(step.step_id), actor)
+
+    for approval in WorkflowApproval.query.filter_by(run_id=run.id).filter(
+            WorkflowApproval.status.in_(('pending', 'approved'))).all():
+        approval.status = 'superseded'
+        approval.comment = (
+            (approval.comment or '') +
+            '\n[完整重启 #%d] 原审批已失效' % restart_count).strip()
+
+    for artifact in WorkflowArtifact.query.filter_by(run_id=run.id).all():
+        metadata = copy.deepcopy(artifact.metadata_json or {})
+        archives = list(metadata.get('restart_archives') or [])[-9:]
+        archives.append({
+            'restart_no': restart_count,
+            'archived_at': now.isoformat(),
+            'reason': reason,
+        })
+        metadata['restart_archives'] = archives
+        metadata['archived_by_restart'] = True
+        artifact.metadata_json = metadata
+
+    manifest = WorkflowEvidenceManifest.query.filter_by(
+        workflow_run_id=run.id).first()
+    if manifest:
+        manifest.analysis_run_id = None
+        manifest.coverage_json = {}
+        manifest.artifacts_json = []
+        manifest.completeness_status = 'incomplete'
+        manifest.missing_required_json = list(
+            manifest.required_evidence_json or [])
+        manifest.classification = None
+        manifest.analysis_summary_json = {}
+        manifest.finding_ids_json = []
+        manifest.analyzed_by = ''
+        manifest.analyzed_at = None
+        manifest.revision = int(manifest.revision or 1) + 1
+        manifest.updated_by = actor
+
+    run.status = 'pending'
+    run.current_step_id = ''
+    run.summary = ''
+    run.blocker_json = {}
+    run.business_conclusion = ''
+    run.automation_conclusion = ''
+    run.evidence_ingest_status = 'EVIDENCE_INGEST_INCOMPLETE'
+    run.outcomes_json = {}
+    run.started_at = None
+    run.finished_at = None
+    db.session.add(AuditLog(
+        action='restart', resource_type='workflow_run',
+        resource_id=run.id, resource_name=run.run_name,
+        operator=actor, ip_address=request.remote_addr,
+        detail=json.dumps({
+            'restart_no': restart_count,
+            'previous_status': previous_status,
+            'reason': reason,
+            'same_run_id': True,
+            'step_count': len(steps),
+            'steps': snapshot,
+        }, ensure_ascii=False, sort_keys=True),
+    ))
+    _recompute_run_status(run, actor)
+    payload = run.to_dict(with_steps=True)
+    payload['restart'] = {
+        'restart_no': restart_count,
+        'previous_status': previous_status,
+        'same_run_id': True,
+        'reason': reason,
+    }
+    _workflow_idempotency_store(idem_record, 200, payload)
+    db.session.commit()
+    return jsonify(payload)
 
 
 @api_bp.route('/workflow-runs/<int:run_id>/approvals/<int:approval_id>/approve', methods=['POST'])
@@ -2606,6 +4301,7 @@ def cancel_workflow_run(run_id):
             step.progress_by = actor
             step.progress_phase = 'cancelled'
             step.progress_message = step.summary
+            _clear_step_claim(step)
     for approval in WorkflowApproval.query.filter_by(run_id=run.id, status='pending').all():
         approval.status = 'skipped'
         approval.approver = actor

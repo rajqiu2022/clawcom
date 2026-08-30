@@ -1,0 +1,60 @@
+CREATE TABLE IF NOT EXISTS workflow_missions (
+    id INT NOT NULL AUTO_INCREMENT,
+    mission_key VARCHAR(128) NOT NULL,
+    project_id INT NOT NULL,
+    main_claw_id INT NOT NULL,
+    objective LONGTEXT NOT NULL,
+    status VARCHAR(24) NOT NULL DEFAULT 'active',
+    control_mode VARCHAR(32) NOT NULL DEFAULT 'agent_autonomous',
+    allowed_definition_ids_json LONGTEXT NULL,
+    denied_definition_ids_json LONGTEXT NULL,
+    max_child_runs INT NOT NULL DEFAULT 20,
+    child_run_count INT NOT NULL DEFAULT 0,
+    max_retries_per_flow INT NOT NULL DEFAULT 3,
+    allow_external_notification TINYINT(1) NOT NULL DEFAULT 0,
+    allow_destructive_actions TINYINT(1) NOT NULL DEFAULT 0,
+    context_json LONGTEXT NULL,
+    created_by_type VARCHAR(16) NOT NULL,
+    created_by_id INT NOT NULL,
+    created_by_name VARCHAR(160) NULL,
+    expires_at DATETIME NOT NULL,
+    completed_at DATETIME NULL,
+    cancelled_at DATETIME NULL,
+    version INT NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_workflow_mission_key (mission_key),
+    KEY ix_workflow_mission_project_id (project_id),
+    KEY ix_workflow_mission_main_claw_id (main_claw_id),
+    KEY ix_workflow_mission_status (status),
+    KEY ix_workflow_mission_expires_at (expires_at),
+    KEY ix_workflow_mission_main_status (main_claw_id, status),
+    KEY ix_workflow_mission_project_status (project_id, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS workflow_mission_dispatches (
+    id INT NOT NULL AUTO_INCREMENT,
+    mission_id INT NOT NULL,
+    definition_id INT NOT NULL,
+    workflow_run_id INT NOT NULL,
+    decision_key VARCHAR(128) NOT NULL,
+    idempotency_key VARCHAR(128) NOT NULL,
+    request_hash VARCHAR(64) NOT NULL,
+    reason LONGTEXT NULL,
+    status VARCHAR(24) NOT NULL DEFAULT 'created',
+    created_by_claw_id INT NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_workflow_mission_dispatch_run (workflow_run_id),
+    UNIQUE KEY uq_workflow_mission_dispatch_idempotency (
+        mission_id, idempotency_key),
+    KEY ix_workflow_mission_dispatch_mission (mission_id),
+    KEY ix_workflow_mission_dispatch_definition_id (definition_id),
+    KEY ix_workflow_mission_dispatch_created_by (created_by_claw_id),
+    KEY ix_workflow_mission_dispatch_definition (
+        mission_id, definition_id, created_at),
+    CONSTRAINT fk_workflow_mission_dispatch_mission
+        FOREIGN KEY (mission_id) REFERENCES workflow_missions(id)
+        ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

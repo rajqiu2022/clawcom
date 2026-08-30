@@ -1,6 +1,7 @@
 import os
 import uuid
 import logging
+import json
 from datetime import datetime, date, time
 from functools import wraps
 from flask import request, jsonify, session
@@ -8,13 +9,25 @@ from app import db
 from app.hermes_models import (
     DEFAULT_HERMES_LLM_PROVIDER,
     DEFAULT_HERMES_LLM_MODEL,
+    default_hermes_model,
     normalize_hermes_model,
+    normalize_timiai_model_for_project,
+    default_timiai_model_for_project,
+    normalize_hermes_provider,
 )
+from app.services.hermes_timiai_projects import normalize_timiai_project
 from app.models import (OpenClawInstance, DailyReport, Project, Rule,
                         OpenClawRule, OpenClawSkill, Skill, ClawMessage,
                         ClawTodo, ClawTodoLog, User, AgentDeployment,
                         generate_api_token, hash_token, _simple_encrypt)
 from app.api import api_bp
+from app.services.todo_schedule import (
+    TERMINAL_TODO_STATUSES,
+    TODO_TIMEZONE,
+    cst_iso,
+    cst_now_naive,
+    todo_schedule_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -163,16 +176,31 @@ def _parse_project_id(raw):
     return v if v > 0 else None
 
 
-def _parse_llm_fields(data):
+def _parse_llm_fields(data, claw=None):
     """Parse model selection from top-level or deploy payload."""
     deploy = data.get('deploy') if isinstance(data.get('deploy'), dict) else {}
-    raw_model = data.get('llm_model') or deploy.get('llm_model') or DEFAULT_HERMES_LLM_MODEL
     raw_provider = (data.get('llm_provider') or deploy.get('llm_provider')
+                    or getattr(claw, 'llm_provider', None)
                     or DEFAULT_HERMES_LLM_PROVIDER)
-    provider = (raw_provider or DEFAULT_HERMES_LLM_PROVIDER).strip().lower()
-    if provider != DEFAULT_HERMES_LLM_PROVIDER:
-        raise ValueError('当前仅支持 Venus 平台')
-    return provider, normalize_hermes_model(raw_model)
+    provider = normalize_hermes_provider(raw_provider)
+    raw_model = data.get('llm_model') or deploy.get('llm_model')
+    current_provider = str(getattr(claw, 'llm_provider', '') or '').strip()
+    if not raw_model and current_provider == provider:
+        raw_model = getattr(claw, 'llm_model', None)
+    if provider == 'timiai':
+        project = _parse_timiai_project(data, claw)
+        raw_model = raw_model or default_timiai_model_for_project(project)
+        return provider, normalize_timiai_model_for_project(
+            raw_model, project)
+    return provider, normalize_hermes_model(
+        raw_model or default_hermes_model(provider), provider)
+
+
+def _parse_timiai_project(data, claw=None):
+    deploy = data.get('deploy') if isinstance(data.get('deploy'), dict) else {}
+    return normalize_timiai_project(
+        data.get('timiai_project') or deploy.get('timiai_project')
+        or getattr(claw, 'timiai_project', None))
 
 
 def _parse_work_dirs(data):
@@ -211,6 +239,23 @@ def _has_registered_codex_agent(claw):
            .order_by(AgentDeployment.created_at.desc())
            .first())
     return bool(dep and dep.deploy_method == 'systemd' and dep.status == 'success')
+
+
+def _worker_runtime_payload(claw, cfg=None, *, query_if_missing=True):
+    """Expose runtime identity independently from Hub deployment history."""
+    from app.models import ClawSidecarConfig
+    from app.services.worker_runtime import runtime_summary
+
+    if cfg is None and query_if_missing:
+        cfg = ClawSidecarConfig.query.get(claw.id)
+    summary = runtime_summary(
+        cfg.runtime_config_json if cfg else None,
+        cfg.config_owner if cfg else 'hub',
+    )
+    summary['runtime_reported_at'] = (
+        str(cfg.runtime_reported_at)
+        if cfg and cfg.runtime_reported_at else None)
+    return summary
 
 
 def _record_failed_agent_deployment(claw, error_message, actor_name, deploy_opts=None):
@@ -305,7 +350,29 @@ def list_openclaws():
             query = query.filter(OpenClawInstance.id == -1)
 
     claws = query.order_by(OpenClawInstance.created_at.desc()).all()
-    today = date.today()
+    claw_ids = [c.id for c in claws]
+    deployments = (AgentDeployment.query
+                   .filter(AgentDeployment.openclaw_id.in_(claw_ids))
+                   .order_by(AgentDeployment.created_at.desc())
+                   .all()) if claw_ids else []
+    latest_deployment_by_claw = {}
+    managed_hermes_ids = set()
+    managed_codex_ids = set()
+    for deployment in deployments:
+        latest_deployment_by_claw.setdefault(
+            deployment.openclaw_id, deployment)
+        if deployment.deploy_method == 'systemd' and deployment.status == 'success':
+            if deployment.agent_type == 'hermes':
+                managed_hermes_ids.add(deployment.openclaw_id)
+            elif deployment.agent_type == 'codex':
+                managed_codex_ids.add(deployment.openclaw_id)
+    from app.models import ClawSidecarConfig
+    runtime_cfg_by_claw = {
+        item.claw_id: item
+        for item in (ClawSidecarConfig.query
+                     .filter(ClawSidecarConfig.claw_id.in_(claw_ids)).all())
+    } if claw_ids else {}
+    today = cst_now_naive().date()
     result = []
     for c in claws:
         d = c.to_dict(brief=True)
@@ -317,13 +384,16 @@ def list_openclaws():
         d['total_todos'] = total_todos
         d['today_submitted'] = today_submitted
         d['today_approved'] = today_approved
-        latest_dep = (AgentDeployment.query
-                      .filter_by(openclaw_id=c.id)
-                      .order_by(AgentDeployment.created_at.desc())
-                      .first())
-        d['has_hermes_agent'] = _has_registered_hermes_agent(c)
-        d['has_codex_agent'] = _has_registered_codex_agent(c)
-        d['agent_type'] = latest_dep.agent_type if latest_dep else ''
+        latest_dep = latest_deployment_by_claw.get(c.id)
+        d['has_hermes_agent'] = c.id in managed_hermes_ids
+        d['has_codex_agent'] = c.id in managed_codex_ids
+        runtime_payload = _worker_runtime_payload(
+            c, runtime_cfg_by_claw.get(c.id), query_if_missing=False)
+        d.update(runtime_payload)
+        d['agent_type'] = (
+            runtime_payload['runtime_provider']
+            if runtime_payload['has_worker_runtime']
+            else (latest_dep.agent_type if latest_dep else ''))
         d['agent_deployment_status'] = latest_dep.status if latest_dep else ''
         d['agent_deployment_id'] = latest_dep.id if latest_dep else None
         d['agent_deployment_error'] = latest_dep.error_message if latest_dep else ''
@@ -360,6 +430,7 @@ def create_openclaw():
                     claw.project_id = _parse_project_id(data.get('project_id'))
                 try:
                     claw.llm_provider, claw.llm_model = _parse_llm_fields(data)
+                    claw.timiai_project = _parse_timiai_project(data)
                 except ValueError as e:
                     return jsonify({'error': str(e)}), 400
                 claw.last_modified_by = _actor_display_name(user)
@@ -411,6 +482,7 @@ def create_openclaw():
             existing.api_token_plain = _simple_encrypt(raw_token)
             try:
                 existing.llm_provider, existing.llm_model = _parse_llm_fields(data)
+                existing.timiai_project = _parse_timiai_project(data)
             except ValueError as e:
                 return jsonify({'error': str(e)}), 400
             existing.last_modified_by = _actor_display_name(user)
@@ -443,8 +515,13 @@ def create_openclaw():
 
     try:
         llm_provider, llm_model = _parse_llm_fields(data)
+        timiai_project = _parse_timiai_project(data)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+    wecom_bot_id = (data.get('wecom_bot_id') or '').strip()
+    wecom_bot_secret = (data.get('wecom_bot_secret') or '').strip()
+    if bool(wecom_bot_id) != bool(wecom_bot_secret):
+        return jsonify({'error': '企微 Bot ID / Key 和 Secret 必须同时填写'}), 400
 
     claw = OpenClawInstance(
         name=data['name'],
@@ -464,6 +541,10 @@ def create_openclaw():
         web_system_url=data.get('web_system_url'),
         llm_provider=llm_provider,
         llm_model=llm_model,
+        timiai_project=timiai_project,
+        wecom_bot_id=wecom_bot_id,
+        wecom_bot_secret=(_simple_encrypt(wecom_bot_secret)
+                          if wecom_bot_secret else ''),
         api_token_hash=token_hash,
         api_token_plain=token_encrypted,
         last_modified_by=_actor_display_name(user),
@@ -617,6 +698,8 @@ def get_openclaw(claw_id):
     payload = claw.to_dict()
     payload['can_own'] = _can_own_claw(user, claw)
     payload['has_hermes_agent'] = _has_registered_hermes_agent(claw)
+    payload['has_codex_agent'] = _has_registered_codex_agent(claw)
+    payload.update(_worker_runtime_payload(claw))
     return jsonify(payload)
 
 
@@ -627,7 +710,7 @@ def update_openclaw(claw_id):
     user = _get_user()
     data = request.get_json(silent=True) or {}
 
-    llm_keys = {'llm_provider', 'llm_model'}
+    llm_keys = {'llm_provider', 'llm_model', 'timiai_project'}
     wecom_keys = {'wecom_bot_id', 'wecom_bot_secret', 'clear_wecom_bot_secret'}
     work_dir_keys = {'work_dirs'}
     wants_llm_update = bool(llm_keys & set(data.keys()))
@@ -664,7 +747,8 @@ def update_openclaw(claw_id):
 
     if wants_llm_update:
         try:
-            claw.llm_provider, claw.llm_model = _parse_llm_fields(data)
+            claw.llm_provider, claw.llm_model = _parse_llm_fields(data, claw)
+            claw.timiai_project = _parse_timiai_project(data, claw)
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
 
@@ -697,7 +781,201 @@ def update_openclaw(claw_id):
     payload = claw.to_dict()
     payload['has_hermes_agent'] = _has_registered_hermes_agent(claw)
     payload['has_codex_agent'] = _has_registered_codex_agent(claw)
+    payload.update(_worker_runtime_payload(claw))
     return jsonify(payload)
+
+
+@api_bp.route('/openclaws/<int:claw_id>/worker-runtime',
+              methods=['GET', 'PUT'])
+def manage_worker_runtime(claw_id):
+    """Manage the secret-free Claw Worker runtime compatibility contract.
+
+    This endpoint is needed for already-running Workers that predate structured
+    runtime reporting.  Only operators can change config ownership; a Worker
+    heartbeat can refresh runtime facts but cannot claim that authority.
+    """
+    from app.models import AuditLog, ClawSidecarConfig
+    from app.services.worker_runtime import (
+        normalize_config_owner,
+        runtime_summary,
+        validate_worker_runtime,
+    )
+
+    claw = OpenClawInstance.query.get_or_404(claw_id)
+    user = _get_user()
+    if not _is_global_actor(user):
+        return jsonify({'error': '仅超级管理员可配置 Worker 运行时'}), 403
+
+    cfg = ClawSidecarConfig.query.get(claw_id)
+    if request.method == 'GET':
+        result = runtime_summary(
+            cfg.runtime_config_json if cfg else None,
+            cfg.config_owner if cfg else 'hub',
+        )
+        result.update({
+            'claw_id': claw_id,
+            'agent_type': cfg.agent_type if cfg else '',
+            'config_version': cfg.config_version if cfg else None,
+            'runtime_reported_at': (
+                str(cfg.runtime_reported_at)
+                if cfg and cfg.runtime_reported_at else None),
+        })
+        return jsonify(result)
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) != {'config_owner', 'runtime'}:
+        return jsonify({
+            'error': '请求体必须且只能包含 config_owner、runtime 字段',
+        }), 400
+    try:
+        owner = normalize_config_owner(data.get('config_owner'))
+        runtime = validate_worker_runtime(data.get('runtime'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    if runtime['kind'] != 'claw_worker':
+        return jsonify({'error': '该接口仅登记 kind=claw_worker'}), 400
+
+    if cfg is None:
+        cfg = ClawSidecarConfig(
+            claw_id=claw_id,
+            agent_type=runtime['provider'],
+            llm_provider=claw.llm_provider or 'venus',
+            llm_model=claw.llm_model or 'venus',
+            wecom_enabled=bool(claw.wecom_bot_id and claw.wecom_bot_secret),
+            enabled=True,
+            config_version=1,
+            config_owner=owner,
+        )
+        db.session.add(cfg)
+
+    before = {
+        'config_owner': cfg.config_owner or 'hub',
+        'runtime': cfg.runtime_config_json,
+        'agent_type': cfg.agent_type or '',
+    }
+    after = {
+        'config_owner': owner,
+        'runtime': runtime,
+        'agent_type': runtime['provider'],
+    }
+    changed = before != after
+    if changed:
+        actor_name = _actor_display_name(user)
+        cfg.config_owner = owner
+        cfg.runtime_config_json = runtime
+        cfg.agent_type = runtime['provider']
+        cfg.config_version = int(cfg.config_version or 0) + 1
+        cfg.updated_by = actor_name
+        db.session.add(AuditLog(
+            action='update',
+            resource_type='claw_worker_runtime',
+            resource_id=claw_id,
+            resource_name=claw.name,
+            operator=actor_name,
+            ip_address=request.remote_addr,
+            detail=json.dumps(
+                {'before': before, 'after': after},
+                ensure_ascii=False, sort_keys=True),
+        ))
+    db.session.commit()
+
+    result = runtime_summary(cfg.runtime_config_json, cfg.config_owner)
+    result.update({
+        'claw_id': claw_id,
+        'agent_type': cfg.agent_type,
+        'config_version': cfg.config_version,
+        'changed': changed,
+        'runtime_reported_at': (
+            str(cfg.runtime_reported_at) if cfg.runtime_reported_at else None),
+    })
+    return jsonify(result)
+
+
+@api_bp.route('/openclaws/<int:claw_id>/system-context-policy',
+              methods=['GET', 'PUT'])
+def manage_system_context_policy(claw_id):
+    """Manage the per-Worker trusted policy used by Codex sidecars.
+
+    This is an operator control-plane endpoint. The stored value is never
+    returned by ``sidecar-config`` directly; that endpoint validates it again
+    and intersects its Flow IDs with the live Workflow execute ACL.
+    """
+
+    from app.models import AuditLog, ClawSidecarConfig
+    from app.services.agent_system_context import validate_system_context_policy
+
+    claw = OpenClawInstance.query.get_or_404(claw_id)
+    user = _get_user()
+    if not _is_global_actor(user):
+        return jsonify({'error': '仅超级管理员可配置 Worker 系统策略'}), 403
+
+    cfg = ClawSidecarConfig.query.get(claw_id)
+    if request.method == 'GET':
+        return jsonify({
+            'claw_id': claw_id,
+            'agent_type': cfg.agent_type if cfg else '',
+            'config_version': cfg.config_version if cfg else None,
+            'policy': cfg.system_context_policy_json if cfg else None,
+        })
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or set(data) != {'policy'}:
+        return jsonify({'error': '请求体仅允许 policy 字段'}), 400
+
+    if not ((cfg and (cfg.agent_type or '').lower() == 'codex') or
+            _has_registered_codex_agent(claw)):
+        return jsonify({'error': '仅已注册的 Codex Worker 可启用该策略'}), 400
+
+    raw_policy = data.get('policy')
+    try:
+        canonical_policy = (
+            None if raw_policy is None
+            else validate_system_context_policy(raw_policy)
+        )
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    if cfg is None:
+        cfg = ClawSidecarConfig(
+            claw_id=claw_id,
+            agent_type='codex',
+            llm_provider=claw.llm_provider or 'venus',
+            llm_model=claw.llm_model or 'venus',
+            wecom_enabled=bool(claw.wecom_bot_id and claw.wecom_bot_secret),
+            enabled=True,
+            config_version=1,
+        )
+        db.session.add(cfg)
+
+    before = cfg.system_context_policy_json
+    changed = before != canonical_policy
+    if changed:
+        actor_name = _actor_display_name(user)
+        cfg.system_context_policy_json = canonical_policy
+        cfg.config_version = int(cfg.config_version or 0) + 1
+        cfg.updated_by = actor_name
+        db.session.add(AuditLog(
+            action='update',
+            resource_type='sidecar_system_context_policy',
+            resource_id=claw_id,
+            resource_name=claw.name,
+            operator=actor_name,
+            ip_address=request.remote_addr,
+            detail=json.dumps({
+                'before': before,
+                'after': canonical_policy,
+                'config_version': cfg.config_version,
+            }, ensure_ascii=False, sort_keys=True),
+        ))
+    db.session.commit()
+
+    return jsonify({
+        'claw_id': claw_id,
+        'agent_type': cfg.agent_type,
+        'config_version': cfg.config_version,
+        'changed': changed,
+        'policy': cfg.system_context_policy_json,
+    })
 
 
 @api_bp.route('/openclaws/<int:claw_id>/regenerate-token', methods=['POST'])
@@ -1095,10 +1373,10 @@ def heartbeat(claw_id, claw=None):
     elif not claw.status or claw.status == 'offline':
         # 无上报且当前离线，默认设为工作
         claw.status = '工作'
-    claw.last_activity = datetime.now()
+    claw.last_activity = cst_now_naive()
     db.session.commit()
 
-    today = date.today()
+    today = cst_now_naive().date()
 
     # 消息统计
     pending_messages = ClawMessage.query.filter_by(
@@ -1121,34 +1399,23 @@ def heartbeat(claw_id, claw=None):
 
     for t in all_todos:
         log = today_logs.get(t.id)
-        is_done = log and log.status == 'completed'
-
-        # 判断今天是否需要执行
-        need_today = False
-        if t.schedule_type == 'once':
-            need_today = not is_done
-        elif t.schedule_type == 'daily':
-            need_today = True
-        elif t.schedule_type == 'weekly' and t.schedule_day:
-            need_today = today.isoweekday() == t.schedule_day
-        elif t.schedule_type == 'monthly' and t.schedule_day:
-            need_today = today.day == t.schedule_day
-
-        if need_today:
-            if is_done:
-                todos_done += 1
-            else:
-                todos_pending += 1
-                if t.title:
-                    pending_titles.append(t.title)
-                if t.task_category == 'init':
-                    init_pending += 1
-                if t.urgency_level == 'interrupt' and t.schedule_time:
-                    interrupt_pending.append({
-                        'id': t.id,
-                        'title': t.title,
-                        'time': t.schedule_time,
-                    })
+        state = todo_schedule_state(t, today_log=log)
+        if log and log.status in TERMINAL_TODO_STATUSES:
+            todos_done += 1
+        elif state['is_due']:
+            todos_pending += 1
+            if t.title:
+                pending_titles.append(t.title)
+            if t.task_category == 'init':
+                init_pending += 1
+            if t.urgency_level == 'interrupt' and t.schedule_time:
+                interrupt_pending.append({
+                    'id': t.id,
+                    'title': t.title,
+                    'time': t.schedule_time,
+                    'due_at': state['due_at'],
+                    'timezone': state['timezone'],
+                })
 
     # 分层记忆注入（P2）：按今日待办标题聚合命中的公共经验，心跳时提醒
     memory_inject = {'pitfall_alerts': [], 'unread_pitfall_count': 0}
@@ -1171,7 +1438,8 @@ def heartbeat(claw_id, claw=None):
             'interrupt': interrupt_pending,
         },
         'memory_inject': memory_inject,
-        'server_time': datetime.now().isoformat(),
+        'server_time': cst_iso(),
+        'timezone': TODO_TIMEZONE,
     })
 
 

@@ -70,6 +70,11 @@ Hub API: http://clawteam.woa.com:18800/api/v1
 | `current_claw_id` | 当前占用 claw 的 ID（如果是 claw 占用）               |
 | `current_purpose` | 当前使用途径/备注（acquire 时上报）                   |
 | `last_login_at`   | 最近一次领用时间                                      |
+| `lease_ttl_seconds` | 当前租期秒数，默认 1800                             |
+| `lease_expires_at` | 当前租约到期时间；到期后会自动回收                  |
+| `lease_heartbeat_at` | 最近一次 keepalive 时间                            |
+| `workflow_run_id` | 可选，关联本次使用账号的 Workflow Run                |
+| `controller_run_id` | 可选，关联 Codex 控制周期                           |
 | `notes`           | 账号自身固有备注（创建时填）                          |
 
 ---
@@ -143,7 +148,10 @@ Header:
 请求体：
 {
   "purpose": "登录 QQ 飞车手游执行登录链路冒烟",   // 必填，>=2 字
-  "force": false                                  // 仅 admin 可加 true 强制抢占
+  "force": false,                                 // 仅 admin 可加 true 强制抢占
+  "ttl_seconds": 1800,                            // 可选，60..7200
+  "workflow_run_id": 118,                         // 可选，便于追溯
+  "controller_run_id": "codex-cycle-20260812-01"  // 可选
 }
 ```
 
@@ -171,6 +179,24 @@ Header:
   → **换一个空闲账号**（先 list `?status=idle`），不要硬抢。
 - 状态 abnormal → `{"error": "账号当前为异常状态..."}`
   → 找龙虾王 recover 后再用。
+
+`acquire` 已使用数据库行锁，两个执行方并发领同一账号时只允许一个成功。
+
+### 3.1 长任务续租
+
+任务超过初始 TTL 时，当前占用者需要定期续租：
+
+```
+POST /api/v1/test-accounts/{ID}/keepalive
+
+请求体（可选）：
+{ "ttl_seconds": 1800 }
+```
+
+- 仅当前占用者或管理员可续租。
+- 成功后 `lease_expires_at` 更新为当前时间加 TTL，并记录 `renew` 流水。
+- 已过期租约不能被 keepalive 复活，返回 `TEST_ACCOUNT_LEASE_EXPIRED`；必须重新 acquire。
+- 新的 list/get/acquire 会自动回收过期账号，并记录 `expire` 流水。
 
 ### 4. 释放（用完必须做）
 
@@ -254,7 +280,7 @@ GET /api/v1/test-accounts/{ID}/usage-history?limit=10
 }
 ```
 
-可选 `?action=acquire|release|mark_abnormal|recover|create|delete` 过滤。
+可选 `?action=acquire|renew|expire|release|mark_abnormal|recover|create|delete` 过滤。
 
 ### 8. 创建账号（仅 admin）
 
@@ -384,6 +410,6 @@ finally:
 ## 设计约束
 
 1. 账号密码以**明文**存于 Hub MySQL（仅供内网测试用），**不要**把密码外发到任何外网服务、群消息或截图上。
-2. 一次任务领用 → 一次释放，是**强约束**。如果业务流程长（>30 分钟），考虑加心跳续约（暂未实现，后续如需要再加 `/keepalive`）。
+2. 一次任务领用 → 按需 keepalive → 一次释放，是**强约束**。默认 TTL 为 30 分钟，长任务必须在到期前调用 `/keepalive`。
 3. 不允许把 `acquire` 接口写进**自动化脚本的 setUpClass 一次性领用、整轮跑完才释放**——会饿死其他 claw。需要长期占用请走 admin 申请专属号 + `notes` 标记。
 4. 若任务 crash，下次恢复时**先看 `usage-history`**，如果发现自己上一次 acquire 没配对的 release，先补一次 release 再继续。

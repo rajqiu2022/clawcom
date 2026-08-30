@@ -5,6 +5,12 @@
 
 {% block top_actions %}
 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <label class="wf-project-filter" for="wf-project-filter">
+        <span>PROJECT SCOPE</span>
+        <select id="wf-project-filter" class="form-select" onchange="changeWorkflowProject(this.value)">
+            <option value="">全部项目</option>
+        </select>
+    </label>
     <button class="btn btn-primary" onclick="startDefaultRun()">启动 RacingGO QA Run</button>
     <button class="btn btn-ghost" onclick="loadAll()">刷新</button>
 </div>
@@ -14,6 +20,10 @@
 <style>
 .wf-layout { display:grid;grid-template-columns:320px 1fr;gap:16px;align-items:start; }
 .wf-panel { background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:14px; }
+.wf-project-filter { display:flex;align-items:center;gap:8px;min-width:230px;padding:4px 5px 4px 10px;border:1px solid var(--border);border-radius:999px;background:color-mix(in srgb,var(--bg-card) 92%,var(--accent-dim)); }
+.wf-project-filter > span { color:var(--text-muted);font-family:monospace;font-size:.64rem;font-weight:800;letter-spacing:.08em;white-space:nowrap; }
+.wf-project-filter .form-select { min-width:132px;height:30px;padding:3px 28px 3px 9px;border:0;border-left:1px solid var(--border);border-radius:0 999px 999px 0;background:transparent;font-size:.8rem;box-shadow:none; }
+.wf-project-filter .form-select option { background:var(--bg-card);color:var(--text-primary); }
 .wf-title { font-weight:700;margin-bottom:10px; }
 .wf-item { border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px;cursor:pointer;background:var(--bg-secondary); }
 .wf-item:hover { border-color:var(--accent); }
@@ -78,6 +88,14 @@
 }
 .wf-flow-node:hover { transform:translateY(-3px);border-color:var(--accent);box-shadow:0 16px 34px rgba(59,130,246,.15); }
 .wf-flow-node.active { border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim),0 16px 34px rgba(59,130,246,.15); }
+.wf-flow-node.contract-invalid { border-color:#f59e0b;box-shadow:inset 4px 0 0 #f59e0b,0 10px 24px rgba(245,158,11,.12); }
+.wf-contract-badge { display:inline-flex;align-items:center;border:1px solid #f59e0b88;background:#f59e0b1f;color:#d97706;border-radius:999px;padding:2px 8px;font-size:.72rem;font-weight:900;letter-spacing:.02em; }
+.wf-alert { padding:10px 12px;border:1px solid #f59e0b66;border-left:4px solid #f59e0b;background:#f59e0b14;border-radius:10px;margin-bottom:12px;line-height:1.55; }
+.wf-conclusions { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-bottom:12px; }
+.wf-conclusion { border:1px solid var(--border);border-radius:10px;padding:9px 10px;background:var(--bg-secondary);min-width:0; }
+.wf-conclusion b { display:block;color:var(--text-muted);font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px; }
+.wf-conclusion span { display:block;font-weight:800;font-size:.82rem;overflow-wrap:anywhere; }
+@media (max-width: 760px) { .wf-conclusions { grid-template-columns:1fr; } }
 .wf-flow-node-title { font-weight:800;line-height:1.35;margin:8px 0 6px; }
 .wf-flow-node-sub { color:var(--text-muted);font-family:monospace;font-size:.72rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
 .wf-analysis-badge { display:inline-flex;align-items:center;gap:4px;color:#0f766e;background:#14b8a622;border:1px solid #14b8a666;border-radius:999px;padding:2px 7px;font-size:.7rem;font-weight:800; }
@@ -247,6 +265,8 @@ let currentRunData = null;
 let currentRunStepId = null;
 let currentRunStepArtifacts = {};
 let currentWorkflowReportUrl = '';
+let workflowProjects = [];
+let selectedWorkflowProjectId = '';
 const workflowListPaging = {
     definitions: {page: 1, per_page: 10, total: 0, pages: 1},
     runs: {page: 1, per_page: 10, total: 0, pages: 1},
@@ -302,6 +322,9 @@ function stepDisplayState(step) {
     })[(step && step.status) || 'pending'] || 'todo';
 }
 function stepDisplayStateBadge(step) {
+    if (step && step.result_code === 'CONTRACT_INVALID') {
+        return '<span class="wf-contract-badge" title="必填结果字段缺失">CONTRACT_INVALID</span>';
+    }
     const state = stepDisplayState(step);
     const cls = {
         todo: 'pending',
@@ -416,6 +439,59 @@ function pagedPath(path, state, extra) {
     params.set('page', state.page || 1);
     params.set('per_page', state.per_page || 10);
     return `${path}?${params.toString()}`;
+}
+function workflowProjectQuery(extra) {
+    const params = Object.assign({}, extra || {});
+    if (selectedWorkflowProjectId) params.project_id = selectedWorkflowProjectId;
+    return params;
+}
+function workflowProjectName(row) {
+    if (!row) return '未归属';
+    if (row.project_name) return row.project_name;
+    if (row.definition && row.definition.project_name) return row.definition.project_name;
+    const projectId = Number(row.project_id || (row.definition && row.definition.project_id) || 0);
+    const project = workflowProjects.find(item => Number(item.id) === projectId);
+    return project ? project.name : (projectId ? `项目 #${projectId}` : '未归属');
+}
+function syncWorkflowProjectUrl(removeRunId) {
+    const url = new URL(location.href);
+    if (selectedWorkflowProjectId) url.searchParams.set('project_id', selectedWorkflowProjectId);
+    else url.searchParams.delete('project_id');
+    if (removeRunId) url.searchParams.delete('run_id');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+}
+async function loadWorkflowProjects() {
+    workflowProjects = await api('/projects');
+    const select = document.getElementById('wf-project-filter');
+    const params = new URLSearchParams(location.search);
+    const explicitProjectId = params.get('project_id') || '';
+    const linkedRunId = params.get('run_id') || '';
+    const rememberedProjectId = linkedRunId ? '' : (localStorage.getItem('workflow.project_id') || '');
+    const wanted = explicitProjectId || rememberedProjectId;
+    const validIds = new Set(workflowProjects.map(project => String(project.id)));
+    selectedWorkflowProjectId = validIds.has(String(wanted)) ? String(wanted) : '';
+    select.innerHTML = '<option value="">全部项目</option>' + workflowProjects.map(project =>
+        `<option value="${esc(project.id)}">${esc(project.name)}</option>`
+    ).join('');
+    select.value = selectedWorkflowProjectId;
+    syncWorkflowProjectUrl(false);
+}
+async function changeWorkflowProject(value) {
+    selectedWorkflowProjectId = String(value || '');
+    localStorage.setItem('workflow.project_id', selectedWorkflowProjectId);
+    ['definitions','favorites','runs'].forEach(kind => { workflowListPaging[kind].page = 1; });
+    currentDefinitionId = null;
+    currentDefinitionData = null;
+    currentRunId = null;
+    currentRunData = null;
+    currentRunStepId = null;
+    document.getElementById('run-detail').innerHTML = '<div class="wf-empty">选择模板或 Workflow Run 查看详情</div>';
+    syncWorkflowProjectUrl(true);
+    try {
+        await Promise.all([loadDefinitions(), loadFavoriteDefinitions(), loadRuns()]);
+    } catch (e) {
+        await customAlert('项目筛选失败：' + e.message, 'error');
+    }
 }
 function normalizePagedResponse(data, fallbackState) {
     if (Array.isArray(data)) {
@@ -659,7 +735,7 @@ function renderDefinitionList(rows, emptyText) {
 }
 async function loadDefinitions() {
     const state = workflowListPaging.definitions;
-    const data = await api(pagedPath('/workflow-definitions', state));
+    const data = await api(pagedPath('/workflow-definitions', state, workflowProjectQuery()));
     const page = normalizePagedResponse(data, state);
     definitions = page.items;
     Object.assign(state, page.pagination);
@@ -668,7 +744,7 @@ async function loadDefinitions() {
 }
 async function loadFavoriteDefinitions() {
     const state = workflowListPaging.favorites;
-    const data = await api(pagedPath('/workflow-definitions', state, {favorite: '1'}));
+    const data = await api(pagedPath('/workflow-definitions', state, workflowProjectQuery({favorite: '1'})));
     const page = normalizePagedResponse(data, state);
     favoriteDefinitions = page.items;
     Object.assign(state, page.pagination);
@@ -697,13 +773,14 @@ async function openDefinition(id) {
         </div>
         <div class="wf-meta" style="margin-bottom:12px">
             模板ID：${esc(d.id)} · 版本：v${esc(d.version)} · 状态：${esc(d.status)} · 创建：${esc(creatorLabel(d))} · 节点数：${steps.length}
-            · ${esc(visibilityLabel(d))} · 项目：${esc(d.project_name || '-')} · ${d.can_execute ? '可启动' : '无启动权限'} · ${d.can_manage ? '可授权' : '不可授权'}
+            · ${esc(visibilityLabel(d))} · 项目：${esc(d.project_name || '-')} · ${d.can_execute ? '可启动' : '无启动权限'} · ${d.can_edit ? '可编辑' : '只读'} · ${d.can_manage ? '可授权' : '不可授权'}
             ${d.description ? ' · ' + esc(d.description) : ''}
         </div>
         <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
             <button class="btn btn-ghost btn-sm" onclick="toggleDefinitionFavorite(${d.id}, ${d.is_favorite ? 'true' : 'false'})">${d.is_favorite ? '★ 已收藏' : '☆ 收藏模板'}</button>
             ${d.can_execute ? `<button class="btn btn-primary btn-sm" onclick="startRunFromDefinition(${d.id})">基于此模板启动 Run</button>` : ''}
             ${d.can_manage ? `<button class="btn btn-ghost btn-sm" onclick="addDefinitionExecutor(${d.id})">添加执行者</button>` : ''}
+            ${d.can_manage ? `<button class="btn btn-ghost btn-sm" onclick="manageDefinitionEditors(${d.id})">管理编辑者</button>` : ''}
             ${d.can_change_visibility ? `<button class="btn btn-ghost btn-sm" onclick="toggleDefinitionVisibility(${d.id}, '${esc(d.visibility_scope === 'private' ? 'project' : 'private')}')">${d.visibility_scope === 'private' ? '设为项目共享' : '设为个人可见'}</button>` : ''}
             ${d.can_delete ? `<button class="btn btn-danger btn-sm" onclick="deleteDefinition(${d.id})">删除模板</button>` : ''}
         </div>
@@ -799,7 +876,7 @@ function renderDefinitionInspector(step) {
                 <div class="wf-meta">${analysis.create_report ? '生成分析报告' : '仅输出结构化问题'} · ${esc(analysis.report_format || 'html')} · ${analysis.require_independent_review ? '要求独立评审' : '无需独立评审'}</div>
                 <div class="wf-meta">迭代变量：<span class="wf-code">${esc(analysis.iteration_id_var || 'iteration_id')}</span></div>
             </div>` : '<div class="wf-meta">未启用。普通节点继续按现有 Runner 协议执行。</div>'}
-            ${currentDefinitionData?.can_manage ? `<button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="configureAnalysisNode('${esc(step.id)}')">${analysis ? '修改代码分析配置' : '配置为代码分析节点'}</button>` : ''}
+            ${currentDefinitionData?.can_edit ? `<button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="configureAnalysisNode('${esc(step.id)}')">${analysis ? '修改代码分析配置' : '配置为代码分析节点'}</button>` : ''}
         </div>` : ''}
         <div class="wf-inspector-section">
             <div class="wf-inspector-section-title">分支规则</div>
@@ -809,7 +886,7 @@ function renderDefinitionInspector(step) {
 }
 
 async function configureAnalysisNode(stepId) {
-    if (!currentDefinitionData?.can_manage) return;
+    if (!currentDefinitionData?.can_edit) return;
     const steps = currentDefinitionData.definition?.steps || [];
     const step = steps.find(item => item.id === stepId);
     if (!step) return;
@@ -880,7 +957,7 @@ async function configureAnalysisNode(stepId) {
 async function loadRuns(selectId) {
     const state = workflowListPaging.runs;
     if (selectId) state.page = 1;
-    const data = await api(pagedPath('/workflow-runs', state));
+    const data = await api(pagedPath('/workflow-runs', state, workflowProjectQuery()));
     const page = normalizePagedResponse(data, state);
     runs = page.items;
     Object.assign(state, page.pagination);
@@ -894,7 +971,7 @@ async function loadRuns(selectId) {
                     ${r.can_delete ? `<button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteRun(${r.id})">删除</button>` : ''}
                 </span>
             </div>
-            <div class="wf-meta">${esc(r.workflow_name)} · 当前：${esc(r.current_step_id || '-')}</div>
+            <div class="wf-meta">${esc(r.workflow_name)} · 项目：${esc(workflowProjectName(r))} · 当前：${esc(r.current_step_id || '-')}</div>
         </div>
     `).join('') : '<div class="wf-empty">暂无运行记录</div>';
     el.innerHTML += renderPagination('runs');
@@ -902,10 +979,12 @@ async function loadRuns(selectId) {
 }
 async function loadAll() {
     try {
-        await loadDefinitions();
-        await loadFavoriteDefinitions();
-        await loadRuns();
-        if (currentRunId) await openRun(currentRunId);
+        const linkedRunId = Number(
+            new URLSearchParams(location.search).get('run_id') || 0) || null;
+        await loadWorkflowProjects();
+        await Promise.all([loadDefinitions(), loadFavoriteDefinitions()]);
+        await loadRuns(linkedRunId);
+        if (currentRunId && !linkedRunId) await openRun(currentRunId);
     } catch (e) {
         await customAlert('加载失败：' + e.message, 'error');
     }
@@ -913,6 +992,10 @@ async function loadAll() {
 async function startDefaultRun() {
     try {
         const defaultDef = definitions.find(d => d.workflow_key === 'racinggo_qa_auto_test');
+        if (selectedWorkflowProjectId && !defaultDef) {
+            await customAlert('当前项目没有 RacingGO QA Workflow 模板，请切换项目或从模板列表启动。', 'warning');
+            return;
+        }
         const startPayload = await openWorkflowStartDialog(defaultDef ? defaultDef.id : {
             name: 'RacingGO QA Run',
             workflow_key: 'racinggo_qa_auto_test',
@@ -1009,6 +1092,65 @@ async function addDefinitionExecutor(definitionId) {
         await customAlert('添加执行者失败：' + e.message, 'error');
     }
 }
+async function manageDefinitionEditors(definitionId) {
+    try {
+        const d = await api(`/workflow-definitions/${definitionId}/start-options`);
+        const opts = d.start_options || {agents: [], owners: []};
+        const acl = d.editor_acl || {};
+        const currentClaws = new Set((acl.claw_ids || []).map(x => Number(x)));
+        const currentUsers = new Set((acl.user_ids || []).map(x => Number(x)));
+        const result = await new Promise(resolve => {
+            const html = `<div class="modal" style="max-width:760px">
+                <div class="modal-icon info">${_SVG.edit}</div>
+                <div class="modal-title">管理 Workflow 编辑者</div>
+                <div class="modal-desc" style="text-align:left;white-space:normal">
+                    <div><b>${esc(d.name || '')}</b></div>
+                    <div class="wf-start-hint">Editor 可修改模板内容和节点，但不能管理权限、可见性或删除模板。</div>
+                </div>
+                <div class="wf-start-grid">
+                    <div class="wf-start-field">
+                        <label>Agent 编辑者（可多选）</label>
+                        ${renderCheckboxDropdown('_wf_editor_agents', '请选择 Agent 编辑者', opts.agents || [], 'agent', currentClaws)}
+                    </div>
+                    <div class="wf-start-field">
+                        <label>Owner / 用户编辑者（可多选）</label>
+                        ${renderCheckboxDropdown('_wf_editor_users', '请选择 owner / 用户', opts.owners || [], 'owner', currentUsers)}
+                    </div>
+                </div>
+                <div class="wf-start-hint" style="margin-top:10px">保存会替换当前编辑者名单；全部取消可清空 Editor ACL，不影响执行者授权。</div>
+                <div class="modal-actions">
+                    <button class="btn btn-ghost" id="_wf_editor_cancel">取消</button>
+                    <button class="btn btn-primary" id="_wf_editor_save">保存编辑者</button>
+                </div>
+            </div>`;
+            const overlay = _buildOverlay(html);
+            bindCheckboxDropdown(overlay, '_wf_editor_agents');
+            bindCheckboxDropdown(overlay, '_wf_editor_users');
+            overlay.querySelector('#_wf_editor_cancel').onclick = () => _closeOverlay(overlay, () => resolve(null));
+            overlay.querySelector('#_wf_editor_save').onclick = () => {
+                const payload = {
+                    claw_ids: checkedNumbers(overlay, '_wf_editor_agents'),
+                    user_ids: checkedNumbers(overlay, '_wf_editor_users'),
+                };
+                _closeOverlay(overlay, () => resolve(payload));
+            };
+            overlay.addEventListener('click', event => {
+                if (event.target === overlay) _closeOverlay(overlay, () => resolve(null));
+            });
+        });
+        if (!result) return;
+        await api(`/workflow-definitions/${definitionId}/editors`, {
+            method: 'PUT',
+            body: JSON.stringify(result),
+        });
+        showToast('Workflow 编辑者已更新', 'success');
+        await openDefinition(definitionId);
+        await loadDefinitions();
+        await loadFavoriteDefinitions();
+    } catch (e) {
+        await customAlert('更新编辑者失败：' + e.message, 'error');
+    }
+}
 async function toggleDefinitionFavorite(definitionId, isFavorite) {
     try {
         await api(`/workflow-definitions/${definitionId}/favorite`, {
@@ -1102,10 +1244,14 @@ function openWorkflowReportStandalone() {
     if (currentWorkflowReportUrl) window.open(currentWorkflowReportUrl, '_blank', 'noopener');
 }
 async function openRun(id) {
+    const run = await api('/workflow-runs/' + id);
+    if (selectedWorkflowProjectId && Number(run.project_id) !== Number(selectedWorkflowProjectId)) {
+        await customAlert('该 Workflow Run 不属于当前筛选项目。', 'warning');
+        return;
+    }
     currentRunId = id;
     currentDefinitionId = null;
     showSidebarTab('runs');
-    const run = await api('/workflow-runs/' + id);
     currentRunData = run;
     document.querySelectorAll('#run-list .wf-item').forEach(x => {
         x.classList.toggle('active', Number(x.dataset.runId) === id);
@@ -1123,17 +1269,30 @@ async function openRun(id) {
     const startVars = run.context && run.context.start_vars && Object.keys(run.context.start_vars).length
         ? `<div class="wf-inspector-section" style="margin-bottom:12px"><div class="wf-inspector-section-title">启动参数变量</div><pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(run.context.start_vars, null, 2))}</pre></div>`
         : '';
+    const contractInvalidCount = steps.filter(s => s.result_code === 'CONTRACT_INVALID').length;
+    const evidenceIncomplete = run.evidence_manifest_status === 'EVIDENCE_INGEST_INCOMPLETE';
+    const runAlert = (contractInvalidCount || evidenceIncomplete)
+        ? `<div class="wf-alert"><strong>执行完成，但结果不满足 Hub 完整性要求</strong><br>${contractInvalidCount ? `${contractInvalidCount} 个节点存在 CONTRACT_INVALID。` : ''}${evidenceIncomplete ? ' Evidence Manifest 未完整入库，不能按“无问题”处理。' : ''}</div>`
+        : '';
+    const conclusions = `<div class="wf-conclusions">
+        <div class="wf-conclusion"><b>Workflow</b><span>${esc(run.workflow_status || run.status || '-')}</span></div>
+        <div class="wf-conclusion"><b>Business</b><span>${esc(run.business_conclusion || '待结论')}</span></div>
+        <div class="wf-conclusion"><b>Automation</b><span>${esc(run.automation_conclusion || '待结论')}</span></div>
+    </div>`;
     document.getElementById('run-detail').innerHTML = `
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
             <h2 style="margin:0;flex:1">#${run.id} ${esc(run.run_name || run.workflow_name)}</h2>
             ${statusBadge(run.status)}
             <button class="btn btn-ghost btn-sm" onclick="openRun(${run.id})">刷新</button>
+            ${['blocked','failed'].includes(run.status) ? `<button class="btn btn-primary btn-sm" onclick="restartRun(${run.id})">完整重启</button>` : ''}
             <button class="btn btn-danger btn-sm" onclick="cancelRun(${run.id})">终止</button>
             ${run.can_delete ? `<button class="btn btn-danger btn-sm" onclick="deleteRun(${run.id})">删除</button>` : ''}
         </div>
         <div class="wf-meta" style="margin-bottom:12px">
-            模板：${esc(run.workflow_name)} · 触发：${esc(run.triggered_by || '-')} · 创建：${esc(run.created_at || '')}
+            模板：${esc(run.workflow_name)} · 项目：${esc(workflowProjectName(run))} · 触发：${esc(run.triggered_by || '-')} · 创建：${esc(run.created_at || '')}
         </div>
+        ${conclusions}
+        ${runAlert}
         ${startVars}
         ${(run.blocker && run.blocker.message) ? `<div style="padding:10px;border-left:3px solid #ef4444;background:#ef444422;border-radius:8px;margin-bottom:12px">${esc(run.blocker.message)}</div>` : ''}
         ${renderApprovals(run)}
@@ -1157,7 +1316,8 @@ function renderRunFlow(steps) {
 function renderRunFlowNode(step, idx, total) {
     const active = step.step_id === currentRunStepId;
     const meta = nodeTypeMeta(step);
-    return `<div class="wf-flow-node ${active ? 'active' : ''}" data-run-step-id="${esc(step.step_id)}" onclick="selectRunStep('${esc(step.step_id)}')">
+    const contractInvalid = step.result_code === 'CONTRACT_INVALID';
+    return `<div class="wf-flow-node ${active ? 'active' : ''} ${contractInvalid ? 'contract-invalid' : ''}" data-run-step-id="${esc(step.step_id)}" onclick="selectRunStep('${esc(step.step_id)}')">
         ${renderWorkflowReportDot(step.step_id)}
         ${idx > 0 ? '<span class="wf-flow-port in"></span>' : ''}
         ${idx < total - 1 ? '<span class="wf-flow-port out"></span>' : ''}
@@ -1216,6 +1376,10 @@ function renderRunStepInspector(step) {
         <b>上报者</b><span>${esc(step.progress_by || '-')}</span>
     </div>${progressDetail}`;
     const refs = (step.config && step.config.references) || [];
+    const contract = step.contract_result || {};
+    const contractPanel = contract.code === 'CONTRACT_INVALID'
+        ? `<div class="wf-alert" style="margin-top:10px;margin-bottom:0"><strong>CONTRACT_INVALID</strong><br>缺失字段：${esc(JSON.stringify(contract.missing || {}))}<br>处理策略：${esc(contract.policy || 'blocked')}</div>`
+        : '';
     return `<div>
         <div class="wf-inspector-title">
             ${nodeTypeBadge(step)}
@@ -1228,6 +1392,7 @@ function renderRunStepInspector(step) {
             ${renderStepStateActions(step)}
             ${['blocked','failed'].includes(step.status) ? `<button class="btn btn-ghost btn-sm" onclick="retryStep(${currentRunData.id}, '${esc(step.step_id)}')">重试</button>` : ''}
         </div>
+        ${contractPanel}
         <div class="wf-inspector-section">
             <div class="wf-inspector-section-title">执行信息</div>
             <div class="wf-mini-grid">
@@ -1374,6 +1539,35 @@ async function retryStep(runId, stepId) {
         await loadRuns();
     } catch (e) {
         await customAlert('重试失败：' + e.message, 'error');
+    }
+}
+async function restartRun(runId) {
+    if (!await customConfirm({
+        title: '完整重启 Workflow Run',
+        msg: '确认从第一个节点完整重启当前 Run？\n\nRun ID 保持不变；旧结果和证据会归档，旧审批失效，所有节点重新派发。',
+        type: 'warning',
+        okText: '完整重启'
+    })) return;
+    const reason = await customPrompt({
+        title: '填写重启原因',
+        msg: '简要说明已完成的修复（可空）：',
+        placeholder: '例如：验证收据已按 Adapter 1.1.30 合同补齐',
+        defaultVal: '失败修复完成，原 Run 从头重启'
+    });
+    if (reason === null) return;
+    try {
+        await api(`/workflow-runs/${runId}/restart`, {
+            method:'POST',
+            headers:{
+                'Content-Type':'application/json',
+                'Idempotency-Key':`workflow-run-${runId}-restart-${Date.now()}`
+            },
+            body:JSON.stringify({reason})
+        });
+        await openRun(runId);
+        await loadRuns();
+    } catch (e) {
+        await customAlert('完整重启失败：' + e.message, 'error');
     }
 }
 async function cancelRun(runId) {

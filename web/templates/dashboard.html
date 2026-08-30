@@ -382,7 +382,7 @@ function renderUpcomingTodos() {
                     ${(todo.template_created_at || todo.created_at) ? `· 创建于 ${fmtTime(todo.template_created_at || todo.created_at)}` : ''}
                 </div>
             </div>
-            <span class="tag tag-yellow" style="font-size:0.7rem;white-space:nowrap">待完成</span>
+            <span class="tag ${todo.today_status === 'scheduled' ? 'tag-blue' : 'tag-yellow'}" style="font-size:0.7rem;white-space:nowrap">${todo.today_status === 'scheduled' ? `计划 ${todo.schedule_time || ''}`.trim() : '待完成'}</span>
         </div>
     `).join('');
 }

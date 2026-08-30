@@ -5,7 +5,24 @@
 Hub 统一部署器支持 Linux systemd `hermes` 与 `codex` 两条独立路径。Pi 已退役；
 `agent_type=pi` 会直接失败，不能作为默认值或 fallback。
 
-Codex 部署只托管 `openclaw-sidecar-v2-claw-<id>.service`。Sidecar 通过 Python
+新建 Claw 的 `codex` 路径现统一称为 **Claw Worker（Codex SDK）**，部署源改为 Worker
+仓库提交的不可变 Linux release，不再由 Hub 从文档重建安装步骤，也不再从
+`/static/skills/hub-sse-sidecar-v2/scripts` 拼装 Worker：
+
+```text
+Worker dist/worker-releases/index.json
+→ Hub 刷新并校验 index/release/platform/package/artifact SHA
+→ 超级管理员显式批准候选版本
+→ 新建 Claw 固定 worker_release_record_id
+→ Hub 上传已批准 tar.gz
+→ 执行包内 scripts/install-linux.sh --no-start
+→ Hub 注入实例 Token/企微/TimiAI 凭据并启动服务
+```
+
+未签名候选版本必须显式提交 `confirm_unsigned=true` 才能批准；刷新版本不会自动升级任何
+已部署实例。部署记录保存 release ID、源码 commit 和 artifact SHA，便于审计与回滚。
+
+Claw Worker 部署托管 `claw-worker-codex-<id>.service`。Worker 通过 Python
 Codex SDK 处理 `message`、`todo`、`workflow`、企微消息和 Workflow Cycle 复盘。
 Codex 是主执行者：默认可读写 `codex_workspace` 与部署请求中的 `work_dirs`，可以通过
 `hub_api` 查询/操作 Hub，并可通过 `wecom_reply` 回复已绑定的企微 Owner。Worker 负责
@@ -84,7 +101,21 @@ python -m pip install \
 升级 SDK 时先修改批准配置、重新构建并验证完整目录，再评审 config、manifest 和
 测试结果；禁止把 `<approved-version>` 或 `latest` 带入正式部署。
 
-## 3. 默认认证：ChatGPT/Codex 订阅账号
+## 3. 模型认证：Codex 订阅或 TimiAI
+
+Hub「新建 OpenClaw → 同时部署 Agent → Claw Worker（Codex SDK）」首期支持两种认证：
+
+- `chatgpt_subscription`（默认）：复用实例服务用户自己的 Codex CLI 登录状态；
+- `timiai`：使用 Codex 自定义 `model_providers.timiai`，协议固定为 `responses`，API Key
+  从 Hub 密钥箱按项目读取。
+
+TimiAI Key 不写入页面、`agent_deployments`、Sidecar 环境或 Codex SDK 子进程环境。Hub 将
+Key 写入实例私有 `0600` 凭据文件，并在 `$CODEX_HOME/config.toml` 配置命令式认证助手；
+Codex permission profile 将整个实例目录列为 protected root。该实现对齐
+[Codex advanced configuration](https://developers.openai.com/codex/config-advanced/) 的
+custom model provider / command-backed auth 合同。
+
+### 默认：ChatGPT/Codex 订阅账号
 
 Linux SDK 复用服务用户的 Codex CLI 登录状态。每个 Agent 以独立的 `oclaw_<id>`
 运行，并使用：
@@ -128,11 +159,33 @@ Enterprise Codex Access Token 仅在企业管理员已开放且当前 CLI 明确
 只保存 `codex_auth_mode` 运维标识，不接收 token。正式建议顺序为：个人验证使用订阅
 账号；共享 Worker 优先 Enterprise Access Token；没有企业条件时再使用项目级 API Key。
 
+### TimiAI 接口
+
+创建页选择 TimiAI 后还需选择 TimiAI 项目与模型。部署器会强制：
+
+```toml
+model_provider = "timiai"
+model = "deepseek-v4-pro-r1"
+
+[model_providers.timiai]
+base_url = "http://api.timiai.woa.com/ai_api_manage/llmproxy"
+wire_api = "responses"
+
+[model_providers.timiai.auth]
+command = "/opt/codex-runtime/venv/bin/python"
+args = ["<instance>/scripts/codex_timiai_auth.py"]
+```
+
+认证助手只读取同一实例目录内的 `credentials/timiai-api-key`，并校验它是当前服务用户
+拥有的普通文件且权限不宽于 `0600`。切回订阅认证时，部署器会清理该实例旧的 TimiAI
+凭据与助手，避免认证模式漂移。
+
 ## 4. Hub 部署请求
 
 ```json
 {
   "agent_type": "codex",
+  "worker_release_record_id": 7,
   "deploy_method": "systemd",
   "host": "linux-worker.example",
   "ssh_user": "root",
@@ -147,12 +200,28 @@ Enterprise Codex Access Token 仅在企业管理员已开放且当前 CLI 明确
   "codex_requirements": "/opt/codex-runtime/requirements-codex.lock",
   "codex_wheelhouse": "/opt/codex-runtime/wheelhouse",
   "codex_requirements_sha256": "<manifest 中的 64 位 SHA-256>",
-  "codex_auth_mode": "chatgpt_subscription",
+  "codex_auth_mode": "chatgpt_subscription | timiai",
   "codex_model": "<可选的批准模型>",
   "wecom_node_bin": "/usr/bin/node",
   "wecom_sdk_root": "/opt/wecom-runtime/node_modules/@wecom/aibot-node-sdk"
 }
 ```
+
+`worker_release_record_id` 必须指向 `linux-x86_64 + approved` 的 Hub release 记录；新建页只
+展示已批准版本，默认选中当前 default。版本来源配置：
+
+- `WORKER_RELEASE_REPOSITORY_PATH`：Hub 可直接读取的只读 Worker Git checkout；
+- 或 `WORKER_RELEASE_REPOSITORY_URL` + `WORKER_RELEASE_SOURCE_REF`：Hub 管理自己的 checkout
+  并在“刷新版本”时执行 fetch；
+- `WORKER_RELEASE_STORE_ROOT`：Hub 私有发布包存储目录。
+
+URL 不能携带用户名/密码；私有仓库认证由 Hub 主机的只读 Git/SSH 运行身份提供，不进入
+API 参数、数据库或日志。
+
+创建页不要求操作者填写 runtime SHA。Hub 从环境变量
+`DEPLOY_CODEX_REQUIREMENTS_SHA256` 或 `system_config.deploy_codex_requirements_sha256`
+读取统一部署环境的固定值；runtime 根目录可由 `DEPLOY_CODEX_RUNTIME_DIR` 或
+`system_config.deploy_codex_runtime_dir` 配置，默认 `/opt/codex-runtime`。
 
 目标机还需要 Python 3.11、venv、systemd、已存在的 workspace。Hub 会从锁定的
 `openai-codex-cli-bin` wheel 建立 runtime 内部 CLI 入口，然后依次完成运行包 SHA
@@ -223,8 +292,8 @@ bot ID/secret 只写入服务用户可读的 `<data>/wecom-credentials.json`（`
 
 ```bash
 python3 ops/codex_runtime_release.py verify --runtime /opt/codex-runtime
-systemctl status openclaw-sidecar-v2-claw-<id>.service
-journalctl -u openclaw-sidecar-v2-claw-<id>.service -n 100 --no-pager
+systemctl status claw-worker-codex-<id>.service
+journalctl -u claw-worker-codex-<id>.service -n 100 --no-pager
 sudo -u oclaw_<id> env HOME=<data>/home CODEX_HOME=<data>/home/.codex \
   /opt/codex-runtime/venv/bin/codex login status
 ```

@@ -1072,10 +1072,11 @@ function _isTodoDueToday(t) {
 
 async function loadTodos() {
     try {
-        const todos = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos?enabled_only=false`).then(r=>r.json());
+        const todos = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos?enabled_only=false&include_not_due=true`).then(r=>r.json());
         window._detailAllTodos = todos;
         const list = $('#todo-list');
-        const pending = todos.filter(t => _isTodoDueToday(t) && (!t.today_status || t.today_status === 'pending'));
+        const pending = todos.filter(t => t.is_due && (!t.today_status || t.today_status === 'pending'));
+        const scheduled = todos.filter(t => t.enabled && t.today_status === 'scheduled' && t.scheduled_for_today);
         let submitted = todos.filter(t => t.today_status === 'submitted');
         const approved = todos.filter(t => _isTodoDueToday(t) && (t.today_status === 'approved' || t.today_status === 'completed'));
         const dailyTodos = todos
@@ -1098,7 +1099,7 @@ async function loadTodos() {
         }
         window._detailSubmittedTodos = submitted;
 
-        $('#todo-stats').textContent = `待完成 ${pending.length} / 每日任务 ${dailyTodos.length} / 已提交 ${submitted.length} / 已审核 ${approved.length}`;
+        $('#todo-stats').textContent = `待执行 ${pending.length} / 计划中 ${scheduled.length} / 每日任务 ${dailyTodos.length} / 已提交 ${submitted.length} / 已审核 ${approved.length}`;
 
         // 更新今日待办badge
         const todayBadge = document.getElementById('detail-todos-badge');
@@ -1393,9 +1394,13 @@ async function toggleTodo(todoId, isDone) {
     if (isDone) return;
     if (!await customConfirm('确认提交此待办？提交后需管理员审核通过才算完成。')) return;
     try {
-        await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${todoId}/complete`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"status":"submitted"}'});
+        const resp = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${todoId}/complete`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{"status":"submitted"}'});
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            throw new Error(data.error || data.code || `HTTP ${resp.status}`);
+        }
         loadTodos();
-    } catch(e) { showToast('操作失败','error'); }
+    } catch(e) { showToast(`操作失败：${e.message}`,'error'); }
 }
 
 async function showCreateTodo() {
@@ -1437,7 +1442,7 @@ function onTodoTypeChange() {
 
 async function editTodo(id) {
     try {
-        const todos = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos?enabled_only=false`).then(r=>r.json());
+        const todos = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos?enabled_only=false&include_not_due=true`).then(r=>r.json());
         const t = todos.find(x=>x.id===id);
         if (!t) return;
         editingTodoId = id;

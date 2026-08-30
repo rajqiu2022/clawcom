@@ -6,6 +6,7 @@ import json
 import subprocess
 import tempfile
 import time
+import tomllib
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,9 +47,13 @@ for name, attrs in (
         sys.modules[name] = module
 
 
-from app.api import agent_deployments  # noqa: E402
+from app.api import agent_deployments, openclaws  # noqa: E402
 from app.services.agent_deployer import (  # noqa: E402
     DeployRequest,
+    StepResult,
+    _deploy_claw_worker_release,
+    _render_codex_config,
+    _render_codex_timiai_auth_helper,
     _render_codex_wecom_credentials,
     _render_codex_sidecar_unit,
     _render_sidecar_unit,
@@ -92,6 +97,7 @@ class CodexLinuxDeployerTest(unittest.TestCase):
     def test_codex_parse_defaults_to_subscription_auth_without_hermes_key(self):
         payload = {
             'agent_type': 'codex',
+            'legacy_codex_deploy': True,
             'codex_workspace': '/srv/projects/example',
             'codex_requirements_sha256': 'a' * 64,
         }
@@ -112,6 +118,240 @@ class CodexLinuxDeployerTest(unittest.TestCase):
                          '/opt/codex-runtime/venv/bin/codex')
         self.assertIn('/srv/projects/example', req.work_dirs)
         self.assertEqual(req.container_name(), build_codex_unit_name(17))
+
+    def test_codex_timiai_auth_uses_vault_key_and_responses_provider(self):
+        payload = {
+            'agent_type': 'codex',
+            'legacy_codex_deploy': True,
+            'codex_workspace': '/srv/projects/example',
+            'codex_requirements_sha256': 'a' * 64,
+            'codex_auth_mode': 'timiai',
+            'llm_provider': 'timiai',
+            'llm_model': 'deepseek-v4-pro-r1',
+            'timiai_project': 'gbt',
+        }
+        with patch.object(agent_deployments, '_deployment_defaults',
+                          return_value=self._defaults()), patch.object(
+                              agent_deployments, '_configured_venus_api_key',
+                              return_value=''), patch.object(
+                                  agent_deployments, '_configured_timiai_api_key',
+                                  return_value='timiai-from-vault'):
+            req = agent_deployments._parse_deploy_options(
+                payload, self._claw(), 'hub-token', 'https://hub.example', 'admin')
+
+        self.assertEqual('timiai', req.codex_auth_mode)
+        self.assertEqual('timiai', req.llm_provider)
+        self.assertEqual('deepseek-v4-pro-r1', req.codex_model)
+        self.assertEqual('timiai-from-vault', req.timiai_api_key)
+
+        config = _render_codex_config(req)
+        helper = _render_codex_timiai_auth_helper(req)
+        self.assertIn('model_provider = "timiai"', config)
+        self.assertIn('model = "deepseek-v4-pro-r1"', config)
+        self.assertIn('wire_api = "responses"', config)
+        self.assertIn('[model_providers.timiai.auth]', config)
+        self.assertNotIn('timiai-from-vault', config)
+        self.assertNotIn('timiai-from-vault', helper)
+        self.assertNotIn('TIMIAI_API_KEY', _render_sidecar_env(req))
+        parsed = tomllib.loads(config)
+        self.assertEqual('timiai', parsed['model_provider'])
+        self.assertEqual('responses', parsed['model_providers']['timiai']['wire_api'])
+        compile(helper, 'codex_timiai_auth.py', 'exec')
+
+    def test_codex_timiai_auth_requires_project_vault_key(self):
+        payload = {
+            'agent_type': 'codex',
+            'legacy_codex_deploy': True,
+            'codex_workspace': '/srv/projects/example',
+            'codex_requirements_sha256': 'a' * 64,
+            'codex_auth_mode': 'timiai',
+            'llm_provider': 'timiai',
+            'llm_model': 'deepseek-v4-pro-r1',
+            'timiai_project': 'gbt',
+        }
+        with patch.object(agent_deployments, '_deployment_defaults',
+                          return_value=self._defaults()), patch.object(
+                              agent_deployments, '_configured_venus_api_key',
+                              return_value=''), patch.object(
+                                  agent_deployments, '_configured_timiai_api_key',
+                                  return_value=''):
+            with self.assertRaisesRegex(ValueError, 'TimiAI API Key'):
+                agent_deployments._parse_deploy_options(
+                    payload, self._claw(), 'hub-token', 'https://hub.example', 'admin')
+
+    def test_codex_runtime_sha_can_come_from_hub_deployment_defaults(self):
+        payload = {
+            'agent_type': 'codex',
+            'legacy_codex_deploy': True,
+            'codex_workspace': '/srv/projects/example',
+        }
+        defaults = dict(self._defaults(), codex_requirements_sha256='c' * 64)
+        with patch.object(agent_deployments, '_deployment_defaults',
+                          return_value=defaults), patch.object(
+                              agent_deployments, '_configured_venus_api_key',
+                              return_value=''), patch.object(
+                                  agent_deployments, '_configured_timiai_api_key',
+                                  return_value=''):
+            req = agent_deployments._parse_deploy_options(
+                payload, self._claw(), 'hub-token', 'https://hub.example', 'admin')
+        self.assertEqual('c' * 64, req.codex_requirements_sha256)
+
+    def test_codex_release_selection_binds_approved_worker_artifact(self):
+        payload = {
+            'agent_type': 'codex',
+            'codex_workspace': '/srv/projects/example',
+            'codex_requirements_sha256': 'a' * 64,
+            'worker_release_record_id': 7,
+        }
+        release = SimpleNamespace(
+            id=7,
+            release_id='worker-' + 'd' * 40,
+            source_commit='d' * 40,
+            release_manifest_sha256='e' * 64,
+            platform_manifest_sha256='f' * 64,
+            package_manifest_sha256='1' * 64,
+            artifact_path='/hub/releases/worker.tar.gz',
+            artifact_filename='worker.tar.gz',
+            artifact_sha256='2' * 64,
+            artifact_size=1234,
+        )
+        with patch.object(agent_deployments, '_deployment_defaults',
+                          return_value=self._defaults()), patch.object(
+                              agent_deployments, '_configured_venus_api_key',
+                              return_value=''), patch.object(
+                                  agent_deployments, '_configured_timiai_api_key',
+                                  return_value=''), patch(
+                                      'app.services.worker_releases.approved_release',
+                                      return_value=release):
+            req = agent_deployments._parse_deploy_options(
+                payload, self._claw(), 'hub-token', 'https://hub.example', 'admin')
+        self.assertEqual(release.release_id, req.worker_release_id)
+        self.assertEqual(release.source_commit, req.worker_source_commit)
+        self.assertEqual('/opt/claw-worker/claw-17', req.codex_install_root())
+        self.assertEqual('/var/lib/claw-worker/claw-17', req.codex_instance_dir())
+        self.assertEqual('clawcodex17', req.systemd_service_user())
+
+    def test_release_deployer_invokes_bundled_linux_installer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            artifact = Path(temp) / 'worker.tar.gz'
+            artifact.write_bytes(b'approved-worker-artifact')
+            import hashlib
+            artifact_sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            req = DeployRequest(
+                openclaw_id=17,
+                claw_name='Codex Worker',
+                claw_token='hub-token',
+                hub_url='https://hub.example',
+                host='linux.example',
+                ssh_user='root',
+                agent_type='codex',
+                codex_runtime_dir='/opt/codex-runtime',
+                codex_workspace='/srv/projects/example',
+                codex_requirements_sha256='a' * 64,
+                codex_auth_mode='timiai',
+                codex_model='deepseek-v4-pro-r1',
+                llm_provider='timiai',
+                llm_model='deepseek-v4-pro-r1',
+                timiai_api_key='vault-key',
+                worker_release_record_id=7,
+                worker_release_id='worker-' + 'd' * 40,
+                worker_source_commit='d' * 40,
+                worker_release_manifest_sha256='e' * 64,
+                worker_package_manifest_sha256='f' * 64,
+                worker_artifact_path=str(artifact),
+                worker_artifact_filename=artifact.name,
+                worker_artifact_sha256=artifact_sha,
+                worker_artifact_size=artifact.stat().st_size,
+                worker_install_root='/opt/claw-worker/claw-17',
+                worker_instance_dir='/var/lib/claw-worker/claw-17',
+            )
+
+            class FakeSsh:
+                def __init__(self):
+                    self.commands = []
+
+                def run(self, command, **kwargs):
+                    self.commands.append(command)
+                    return StepResult(kwargs.get('name', 'run'), 0, 'active', '')
+
+                def put_file(self, *_args, **kwargs):
+                    return StepResult(kwargs.get('name', 'put_file'), 0, '', '')
+
+                def put_text(self, *_args, **kwargs):
+                    return StepResult(kwargs.get('name', 'put_text'), 0, '', '')
+
+            ssh = FakeSsh()
+            terminal = []
+            _deploy_claw_worker_release(
+                ssh, req, [], lambda status, error=None: terminal.append((status, error)))
+            rendered = '\n'.join(ssh.commands)
+            self.assertEqual([('success', None)], terminal)
+            self.assertIn('scripts/install-linux.sh', rendered)
+            self.assertIn('--no-start', rendered)
+            self.assertNotIn('/static/skills/hub-sse-sidecar-v2', rendered)
+
+    def test_openclaw_model_fields_accept_timiai_worker_selection(self):
+        payload = {
+            'deploy': {
+                'agent_type': 'codex',
+                'codex_auth_mode': 'timiai',
+                'llm_provider': 'timiai',
+                'llm_model': 'deepseek-v4-pro',
+                'timiai_project': 'qqspeed_pc',
+            },
+        }
+        self.assertEqual(
+            ('timiai', 'deepseek-v4-pro'),
+            openclaws._parse_llm_fields(payload),
+        )
+        self.assertEqual(
+            'qqspeed_pc', openclaws._parse_timiai_project(payload))
+
+        payload['deploy']['llm_model'] = 'deepseek-v4-pro-r1'
+        with self.assertRaisesRegex(ValueError, '不支持模型'):
+            openclaws._parse_llm_fields(payload)
+
+        existing = SimpleNamespace(
+            llm_provider='timiai', llm_model='deepseek-v4-pro',
+            timiai_project='contra')
+        self.assertEqual(
+            ('timiai', 'deepseek-v4-pro'),
+            openclaws._parse_llm_fields(
+                {'llm_provider': 'timiai'}, existing))
+        self.assertEqual(
+            'contra', openclaws._parse_timiai_project({}, existing))
+
+    def test_managed_agent_restart_uses_stable_internal_hub_url(self):
+        source = (_WEB / 'app' / 'api' / 'agent_deployments.py').read_text(
+            encoding='utf-8')
+        start = source.index('def _restart_systemd_agent')
+        end = source.index('\ndef _path_in_agent_root', start)
+        block = source[start:end]
+        self.assertIn("'http://clawteam.woa.com:18800'", block)
+        self.assertNotIn('request.host_url', block)
+        self.assertIn('reset Hermes conversation mappings', block)
+        self.assertIn("'sessions_reset': sessions_reset", block)
+
+        page = (_WEB / 'templates' / 'openclaws.html').read_text(
+            encoding='utf-8')
+        self.assertIn('resetSessions: modelChanged', page)
+        self.assertIn('reset_sessions: opts.resetSessions === true', page)
+
+    def test_codex_deploy_rejects_missing_approved_worker_release(self):
+        payload = {
+            'agent_type': 'codex',
+            'codex_workspace': '/srv/projects/example',
+            'codex_requirements_sha256': 'a' * 64,
+        }
+        with patch.object(agent_deployments, '_deployment_defaults',
+                          return_value=self._defaults()), patch.object(
+                              agent_deployments, '_configured_venus_api_key',
+                              return_value=''), patch.object(
+                                  agent_deployments, '_configured_timiai_api_key',
+                                  return_value=''):
+            with self.assertRaisesRegex(ValueError, 'worker_release_record_id'):
+                agent_deployments._parse_deploy_options(
+                    payload, self._claw(), 'hub-token', 'https://hub.example', 'admin')
 
     def test_codex_deployer_uses_bundled_cli_and_cp311_runtime(self):
         source = (Path(__file__).resolve().parents[1] / 'web' / 'app' /

@@ -1,6 +1,6 @@
 ---
 name: case-review
-description: "用例评审 Skill。负责发起用例评审课题、提交评审轮次、评审打分、评审意见修改、整改用例、关闭评审、提交评审总结。当用户要求发起用例评审、对用例进行评审打分、处理评审意见、填写评审总结时触发。"
+description: "用例评审 Skill。负责发起评审、读取概要和用例、提交与维护评审记录、评分、整改、关闭和总结；支持 Hub 内 Agent 长期凭据，以及外部研发 AI 通过一次性邀请链接兑换临时密钥参与评审。当用户要求发起用例评审、评审用例、处理评审意见，或提供 Developer AI 协作链接/临时任务包时触发。"
 metadata: { "openclaw": { "category": "testing", "emoji": "📋" } }
 ---
 
@@ -11,6 +11,13 @@ metadata: { "openclaw": { "category": "testing", "emoji": "📋" } }
 ---
 
 ## Hub API 基础信息
+
+先判断鉴权模式：
+
+- 收到 `/developer-ai/collaborate#invite=...`、`hub_ci_...` 邀请码、`hub_cs_...` 临时密钥或 `case-review-bootstrap.v1` 任务包时，必须读取 [references/external-developer-ai.md](references/external-developer-ai.md)，按临时协作协议执行。
+- 用户要求生成、复制、查询、延期或撤销“对外评审链接/Developer AI 邀请”时，也必须读取该 reference，并使用其中的协作会话 API；不得手工伪造邀请码或临时密钥。
+- 其他已注册 Hub Agent 使用下面的长期凭据和传统评审流程。
+- 外部 Developer AI 不得索取、猜测或复用 `HUB_API_TOKEN`；临时密钥只允许访问任务包指定的评审对象和接口。
 
 ```
 HUB_BASE = 环境变量 HUB_API_URL 或 https://clawteam.woa.com:18800

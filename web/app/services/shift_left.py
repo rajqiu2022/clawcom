@@ -28,6 +28,16 @@ FINDING_STATES = (
     'closed', 'rejected', 'blocked', 'reopened',
 )
 
+FINDING_FEEDBACK_LABELS = (
+    'true_positive',
+    'false_positive',
+    'duplicate_bug',
+    'automation_unsupported',
+    'human_confirmed',
+    'human_rejected',
+    'fixed_before_validation',
+)
+
 FINDING_TRANSITIONS = {
     'triage': ({'new', 'reopened'}, 'triaged'),
     'plan_validation': ({'triaged', 'needs_human'}, 'validation_planned'),
@@ -48,7 +58,8 @@ FINDING_TRANSITIONS = {
     'reopen': ({'closed', 'rejected', 'blocked'}, 'reopened'),
 }
 
-COLLABORATION_SUBJECT_TYPES = ('analysis_report', 'analysis_run', 'finding', 'case_review')
+COLLABORATION_SUBJECT_TYPES = (
+    'analysis_report', 'analysis_run', 'finding', 'case_review', 'topic')
 COLLABORATION_SCOPES = {
     'report:read',
     'finding:read',
@@ -61,6 +72,8 @@ COLLABORATION_SCOPES = {
     'case_review:comment',
     'case_review:mark',
     'case_review:decision',
+    'topic:read',
+    'topic:reply',
 }
 DEFAULT_REVIEW_SCOPES = (
     'report:read',
@@ -76,18 +89,31 @@ DEFAULT_CASE_REVIEW_SCOPES = (
     'case_review:comment',
     'case_review:mark',
 )
+DEFAULT_TOPIC_SCOPES = (
+    'topic:read',
+    'topic:reply',
+)
 
 _COLLABORATION_PATHS = (
     (re.compile(r'^/api/v1/test-reports/\d+/(analysis-context|findings)/?$'), {'GET'}),
     (re.compile(r'^/api/v1/shift-left/findings/?$'), {'GET'}),
     (re.compile(r'^/api/v1/shift-left/findings/\d+/?$'), {'GET'}),
     (re.compile(r'^/api/v1/shift-left/findings/\d+/evidence/?$'), {'GET'}),
+    (re.compile(r'^/api/v1/shift-left/findings/\d+/feedback/?$'), {'GET', 'POST'}),
     (re.compile(r'^/api/v1/shift-left/findings/\d+/comments/?$'), {'GET', 'POST'}),
     (re.compile(r'^/api/v1/shift-left/findings/\d+/(review-decisions|transitions)/?$'), {'POST'}),
     (re.compile(r'^/api/v1/shift-left/case-reviews/\d+/(context|cases|marks)/?$'),
      {'GET'}),
     (re.compile(r'^/api/v1/shift-left/case-reviews/\d+/comments/?$'), {'POST'}),
+    (re.compile(r'^/api/v1/shift-left/case-reviews/\d+/reviews/?$'),
+     {'GET', 'POST'}),
+    (re.compile(r'^/api/v1/shift-left/case-reviews/\d+/reviews/\d+/?$'),
+     {'PATCH', 'PUT', 'DELETE'}),
     (re.compile(r'^/api/v1/shift-left/case-reviews/\d+/marks/?$'), {'PUT'}),
+    (re.compile(r'^/api/v1/topics/\d+/?$'), {'GET'}),
+    (re.compile(r'^/api/v1/topics/\d+/replies/?$'), {'POST'}),
+    (re.compile(r'^/api/v1/topics/\d+/replies/\d+/?$'),
+     {'PATCH', 'PUT', 'DELETE'}),
 )
 
 

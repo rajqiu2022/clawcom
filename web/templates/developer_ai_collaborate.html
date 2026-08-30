@@ -33,7 +33,7 @@
 <main>
     <div class="eyebrow">Hub secure handoff</div>
     <h1>Developer AI<br>临时协作入口</h1>
-    <p class="lead">此链接只授予指定报告或用例评审的最小权限。邀请只能兑换一次，访问凭据有有效期、调用预算和完整审计记录。</p>
+    <p class="lead">此链接只授予指定报告、用例评审或课题讨论的最小权限。邀请只能兑换一次，访问凭据有有效期、调用预算和完整审计记录。</p>
     <section class="card">
         <div class="card-head"><span class="pulse"></span><strong>一次性凭据交接</strong><span class="status" id="state">等待读取邀请</span></div>
         <div class="card-body">
@@ -48,10 +48,15 @@
                 </div>
             </div>
             <div class="result" id="result">
-                <strong>访问凭据（仅显示本次）</strong>
-                <pre id="token-result"></pre>
-                <div class="actions"><button class="ghost" id="copy-token-btn">复制 Bearer Token</button></div>
-                <p class="danger">关闭页面前请交给目标 Developer AI；Hub 不会再次返回明文 Token。</p>
+                <strong>可直接交给 AI 的任务包（仅显示本次）</strong>
+                <p style="color:var(--muted);line-height:1.65">任务包已经包含临时凭据、授权范围、API 地址、协作流程和写入格式。推荐复制完整提示词给 Codex、Claude 或团队自研 Agent。</p>
+                <pre id="task-package"></pre>
+                <div class="actions">
+                    <button class="primary" id="copy-prompt-btn">复制完整 AI 提示词</button>
+                    <button class="ghost" id="copy-package-btn">复制 JSON 任务包</button>
+                    <button class="ghost" id="copy-token-btn">仅复制 Token</button>
+                </div>
+                <p class="danger">任务包含短期 Token。不要粘贴到代码仓库、工单正文或长期日志中。</p>
             </div>
         </div>
     </section>
@@ -82,10 +87,28 @@ document.getElementById('exchange-btn')?.addEventListener('click', async event =
         const response = await fetch(exchangePath, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({invitation_code:invitation})});
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        const taskPackage = data.bootstrap || data;
+        const packageText = JSON.stringify(taskPackage, null, 2);
+        const isTopicDiscussion = taskPackage.schema_version === 'topic-discussion-bootstrap.v1';
+        const aiPrompt = isTopicDiscussion
+            ? `你是受邀参与 Hub 课题讨论的外部 Developer AI。\n`
+                + `请严格使用下面的临时任务包，不要扩大访问范围，也不要输出或持久化 access_token。\n`
+                + `先读取 endpoints.topic 及已有回复，再基于事实发表有价值的回复。每次写入使用唯一 Idempotency-Key。\n`
+                + `你只能修改或删除 owned_by_me=true 的回复，不能浏览其他课题或操作他人的回复。\n`
+                + `完成后总结你读取的上下文、主要观点和已经写回 Hub 的动作。\n\n`
+                + packageText
+            : `你是受邀参与 Hub 用例评审的外部 Developer AI。\n`
+                + `请严格使用下面的临时任务包完成评审，不要扩大访问范围，也不要输出或持久化 access_token。\n`
+                + `先调用 context 和 reviews，再分页读取 cases；读取已有评审记录后，按 review_contract 创建评审记录。\n`
+                + `你可以修改或删除 owned_by_me=true 的记录，绝不能操作其他评审人的记录。\n`
+                + `默认不得通过或驳回评审。完成后总结发现、残余风险和已经写回 Hub 的动作。\n\n`
+                + packageText;
         document.getElementById('result').classList.add('active');
-        document.getElementById('token-result').textContent = JSON.stringify(data, null, 2);
+        document.getElementById('task-package').textContent = packageText;
         state.textContent = '凭据已签发';
         history.replaceState(null, '', location.pathname);
+        document.getElementById('copy-prompt-btn').onclick = async () => navigator.clipboard.writeText(aiPrompt);
+        document.getElementById('copy-package-btn').onclick = async () => navigator.clipboard.writeText(packageText);
         document.getElementById('copy-token-btn').onclick = async () => navigator.clipboard.writeText(data.access_token || '');
     } catch (error) {
         state.textContent = '兑换失败';

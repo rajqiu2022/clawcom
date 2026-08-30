@@ -3,7 +3,7 @@
 支持发帖、回复、管理、频率限制、通知
 """
 from datetime import datetime, date, timedelta
-from flask import request, jsonify, session as flask_session
+from flask import current_app, g, request, jsonify, session as flask_session
 from sqlalchemy import func
 from sqlalchemy.sql.expression import text
 from app import db
@@ -72,6 +72,19 @@ def _get_sys_config(key, default=''):
 
 def _get_caller_info():
     """识别调用者：Web session 或 OpenClaw Token"""
+    collaboration = getattr(g, '_collaboration_session', None)
+    if collaboration:
+        return {
+            'username': collaboration.agent_identity,
+            'user_id': None,
+            'claw_id': None,
+            'role': 'external_collaboration',
+            'is_admin': False,
+            'project_ids': ([collaboration.project_id]
+                            if collaboration.project_id else []),
+            'collaboration': collaboration,
+            'collaboration_session_id': collaboration.id,
+        }
     uid = flask_session.get('user_id')
     if uid:
         user = User.query.get(uid)
@@ -128,8 +141,24 @@ def _is_topic_granted(caller, topic):
     return int(topic.id) in granted_topic_ids(caller)
 
 
+def _collaboration_topic_allowed(caller, topic, scope):
+    collaboration = (caller or {}).get('collaboration')
+    return bool(
+        collaboration
+        and collaboration.subject_type == 'topic'
+        and int(collaboration.subject_id) == int(topic.id)
+        and collaboration.has_scope(scope))
+
+
 def _ensure_topic_viewable(caller, topic):
     """统一的查看鉴权，返回 error response 或 None。"""
+    if (caller or {}).get('collaboration'):
+        if _collaboration_topic_allowed(caller, topic, 'topic:read'):
+            return None
+        return jsonify({
+            'error': '该课题不在临时协作范围内或缺少 topic:read',
+            'code': 'COLLABORATION_SUBJECT_DENIED',
+        }), 403
     if can_view_topic(
             caller, topic,
             topic_project_id=_topic_project_id(topic),
@@ -143,6 +172,13 @@ def _ensure_topic_viewable(caller, topic):
 
 def _ensure_topic_commentable(caller, topic):
     """统一的参与鉴权，返回 error response 或 None。"""
+    if (caller or {}).get('collaboration'):
+        if _collaboration_topic_allowed(caller, topic, 'topic:reply'):
+            return None
+        return jsonify({
+            'error': '该课题不在临时协作范围内或缺少 topic:reply',
+            'code': 'COLLABORATION_SCOPE_DENIED',
+        }), 403
     if can_comment_topic(
             caller, topic,
             topic_project_id=_topic_project_id(topic),
@@ -436,7 +472,26 @@ def get_topic(topic_id):
         return err
 
     data = topic.to_dict(with_replies=True)
-    if topic.visibility == 'assigned':
+    enabled = current_app.config.get('SHIFT_LEFT_ENABLED', False)
+    if isinstance(enabled, str):
+        enabled = enabled.lower() in ('1', 'true', 'yes', 'on')
+    data['external_collaboration_enabled'] = bool(enabled)
+    data['can_manage_external_collaboration'] = bool(
+        caller and not caller.get('collaboration')
+        and (caller.get('is_admin') or _is_topic_author(caller, topic)))
+    collaboration = (caller or {}).get('collaboration')
+    if collaboration:
+        data['external_collaboration'] = True
+        data['collaboration_scopes'] = collaboration.scopes_json or []
+        owned_ids = {
+            row.id for row in TopicReply.query.filter_by(
+                topic_id=topic.id,
+                collaboration_session_id=collaboration.id,
+            ).all()
+        }
+        for reply in data.get('replies') or []:
+            reply['owned_by_me'] = reply['id'] in owned_ids
+    if topic.visibility == 'assigned' and not collaboration:
         data['grants'] = [g.to_dict() for g in
                           TopicGrant.query.filter_by(topic_id=topic.id).all()]
     return jsonify(data)
@@ -947,8 +1002,18 @@ def reply_topic(topic_id):
     if not data or not data.get('content'):
         return jsonify({'error': '回复内容不能为空'}), 400
 
+    collaboration = caller.get('collaboration')
+    idempotency_row = None
+    if collaboration:
+        from app.api.shift_left import _actor as _collaboration_actor
+        from app.api.shift_left import _idempotency_begin
+        idempotency_row, replay = _idempotency_begin(
+            _collaboration_actor())
+        if replay:
+            return replay
+
     # 回复间隔限制（非管理员）
-    if not caller['is_admin']:
+    if not caller['is_admin'] and not collaboration:
         interval = int(_get_sys_config('topic_reply_interval_minutes', '10'))
         cutoff = datetime.now() - timedelta(minutes=interval)
         recent = TopicReply.query.filter(
@@ -975,6 +1040,7 @@ def reply_topic(topic_id):
         author_claw_id=caller.get('claw_id'),
         author_user_id=caller.get('user_id'),
         author_name=caller['username'],
+        collaboration_session_id=(collaboration.id if collaboration else None),
         reply_to_id=data.get('reply_to_id'),
     )
     db.session.add(reply)
@@ -983,7 +1049,17 @@ def reply_topic(topic_id):
 
     notified = _notify_topic_participants(topic, '回复', '%s 发表了回复' % caller['username'],
                                exclude_claw_id=caller.get('claw_id'))
-    db.session.commit()
+    db.session.flush()
+    payload = reply.to_dict()
+    if collaboration:
+        payload['owned_by_me'] = True
+        from app.api.shift_left import _commit_payload
+        response = _commit_payload(idempotency_row, payload, 201)
+        if response[1] >= 400:
+            return response
+    else:
+        db.session.commit()
+        response = (jsonify(payload), 201)
     from app.api.agent_client import notify_claw
     for cid in notified:
         notify_claw(cid)
@@ -992,7 +1068,69 @@ def reply_topic(topic_id):
                operator=caller['username'],
                detail='回复课题「%s」' % topic.title)
 
-    return jsonify(reply.to_dict()), 201
+    return response
+
+
+@api_bp.route('/topics/<int:topic_id>/replies/<int:reply_id>',
+              methods=['PATCH', 'PUT'])
+def update_reply(topic_id, reply_id):
+    """修改自己的回复；外部临时身份只能修改本会话创建的回复。"""
+    topic = Topic.query.get_or_404(topic_id)
+    if topic.status != 'open':
+        return jsonify({'error': '课题已关闭，无法修改回复'}), 400
+    reply = TopicReply.query.filter_by(
+        id=reply_id, topic_id=topic_id, status='active').first_or_404()
+    caller = _get_caller_info()
+    if not caller:
+        return jsonify({'error': '未登录'}), 401
+    err = _ensure_topic_commentable(caller, topic)
+    if err:
+        return err
+
+    collaboration = caller.get('collaboration')
+    idempotency_row = None
+    if collaboration:
+        if reply.collaboration_session_id != collaboration.id:
+            return jsonify({
+                'error': '只能修改当前临时协作会话创建的回复',
+                'code': 'TOPIC_REPLY_NOT_OWNER',
+            }), 403
+        from app.api.shift_left import _actor as _collaboration_actor
+        from app.api.shift_left import _idempotency_begin
+        idempotency_row, replay = _idempotency_begin(
+            _collaboration_actor())
+        if replay:
+            return replay
+    elif not caller['is_admin']:
+        is_own = (
+            (caller.get('claw_id')
+             and caller['claw_id'] == reply.author_claw_id)
+            or (caller.get('user_id')
+                and caller['user_id'] == reply.author_user_id))
+        if not is_own:
+            return jsonify({'error': '只能修改自己的回复'}), 403
+
+    data = request.get_json(silent=True) or {}
+    content = str(data.get('content') or '').strip()
+    if not content:
+        return jsonify({'error': '回复内容不能为空'}), 400
+    reply.content = content
+    reply.updated_at = datetime.now()
+    payload = reply.to_dict()
+    payload['owned_by_me'] = True
+    if collaboration:
+        from app.api.shift_left import _commit_payload
+        response = _commit_payload(idempotency_row, payload, 200)
+        if response[1] >= 400:
+            return response
+    else:
+        db.session.commit()
+        response = (jsonify(payload), 200)
+
+    log_action('update', 'topic_reply', reply.id, topic.title,
+               operator=caller['username'],
+               detail='修改课题「%s」中的本人回复' % topic.title)
+    return response
 
 
 @api_bp.route('/topics/<int:topic_id>/replies/<int:reply_id>', methods=['DELETE'])
@@ -1003,7 +1141,29 @@ def delete_reply(topic_id, reply_id):
     if not caller:
         return jsonify({'error': '未登录'}), 401
 
-    if not caller['is_admin']:
+    collaboration = caller.get('collaboration')
+    idempotency_row = None
+    if collaboration:
+        if reply.topic.status != 'open':
+            return jsonify({
+                'error': '课题已关闭，无法删除回复',
+                'code': 'TOPIC_CLOSED',
+            }), 400
+        err = _ensure_topic_commentable(caller, reply.topic)
+        if err:
+            return err
+        if reply.collaboration_session_id != collaboration.id:
+            return jsonify({
+                'error': '只能删除当前临时协作会话创建的回复',
+                'code': 'TOPIC_REPLY_NOT_OWNER',
+            }), 403
+        from app.api.shift_left import _actor as _collaboration_actor
+        from app.api.shift_left import _idempotency_begin
+        idempotency_row, replay = _idempotency_begin(
+            _collaboration_actor())
+        if replay:
+            return replay
+    elif not caller['is_admin']:
         is_own = (caller.get('claw_id') and caller['claw_id'] == reply.author_claw_id) or \
                  (caller.get('user_id') and caller['user_id'] == reply.author_user_id)
         if not is_own:
@@ -1013,9 +1173,13 @@ def delete_reply(topic_id, reply_id):
     topic = Topic.query.get(topic_id)
     if topic:
         topic.reply_count = max(0, (topic.reply_count or 1) - 1)
+    payload = {'message': '回复已删除', 'deleted': True,
+               'reply_id': reply.id}
+    if collaboration:
+        from app.api.shift_left import _commit_payload
+        return _commit_payload(idempotency_row, payload, 200)
     db.session.commit()
-
-    return jsonify({'message': '回复已删除'})
+    return jsonify(payload)
 
 
 # ============== 用例评审轮次 API ==============

@@ -7,6 +7,7 @@ from app.models import (OpenClawInstance, DailyReport, KnowledgeEntry,
                         ClawTodo, ClawTodoLog)
 from app.api import api_bp
 from app.api.agent_client import _cleanup_stale_connections
+from app.services.todo_schedule import cst_now_naive, todo_schedule_state
 
 
 def _infer_task_category(task_text):
@@ -69,7 +70,7 @@ def dashboard_stats():
     # 清理超时的 SSE 连接
     _cleanup_stale_connections()
 
-    today = date.today()
+    today = cst_now_naive().date()
 
     visible_claws = _get_visible_claws()
     visible_ids = {c.id for c in visible_claws}
@@ -208,11 +209,10 @@ def dashboard_stats():
     # 计算每个 claw 的待办数
     claw_todo_counts = {}
     for todo in all_enabled_todos:
-        st = (todo.schedule_time or '').strip()
-        if todo.urgency_level == 'interrupt' and st in ('15:00', '15:30', '21:00'):
-            continue
         today_log = today_logs_map.get(todo.id)
-        if not today_log or today_log.status == 'pending':
+        state = todo_schedule_state(todo, today_log=today_log)
+        if ((state['is_due'] or state['scheduled_for_today'])
+                and (not today_log or today_log.status == 'pending')):
             cid = todo.openclaw_id
             claw_todo_counts[cid] = claw_todo_counts.get(cid, 0) + 1
 
@@ -301,16 +301,13 @@ def dashboard_stats():
                         all_latest_logs_map[log.todo_id] = log
 
         for todo in todos_q:
-            st = (todo.schedule_time or '').strip()
-            if todo.urgency_level == 'interrupt' and st in ('15:00', '15:30', '21:00'):
-                continue
-
             today_log = all_today_logs_map.get(todo.id)
             if not today_log:
                 latest_log = all_latest_logs_map.get(todo.id)
                 if latest_log and latest_log.status == 'submitted':
                     today_log = latest_log
 
+            state = todo_schedule_state(todo, today_log=today_log)
             todo_base = {
                 'id': todo.id,
                 'title': todo.title,
@@ -322,12 +319,16 @@ def dashboard_stats():
                 'urgency_level': todo.urgency_level or 'flexible',
                 'priority': todo.priority or 'P1',
                 'task_category': todo.task_category or 'routine',
-                'today_status': today_log.status if today_log else 'pending',
+                'today_status': state['today_status'],
                 'today_completed_at': str(today_log.completed_at) if today_log and today_log.completed_at else None,
                 'result_summary': today_log.result_summary if today_log else None,
                 'created_at': str(todo.created_at) if todo.created_at else None,
+                'is_due': state['is_due'],
+                'due_at': state['due_at'],
+                'timezone': state['timezone'],
             }
-            if (not today_log or today_log.status == 'pending') and todo.enabled:
+            if (not today_log or today_log.status == 'pending') and todo.enabled and (
+                    state['is_due'] or state['scheduled_for_today']):
                 upcoming_todos.append(todo_base)
             elif today_log and today_log.status == 'submitted':
                 submitted_todos.append(todo_base)

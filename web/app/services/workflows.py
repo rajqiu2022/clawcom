@@ -4,6 +4,8 @@ The service intentionally avoids Flask/SQLAlchemy dependencies so the workflow
 state rules can be tested without booting the Hub app.
 """
 
+import copy
+
 VALID_STEP_TYPES = {
     'worker_task',
     'agent_task',
@@ -35,7 +37,25 @@ STEP_STATUSES = {
     'waiting_approval',
 }
 
+# ``warn`` is a legacy gate policy used by the long-running Flow #12.  It is
+# deliberately not a WorkflowStep status: a failed warning gate records the
+# diagnostic but lets the step keep the status reported by its executor.
+GATE_ON_FAIL_POLICIES = STEP_STATUSES | {'warn'}
+
 TERMINAL_STEP_STATUSES = {'passed', 'skipped'}
+TERMINAL_RESULT_STEP_STATUSES = TERMINAL_STEP_STATUSES | {'blocked', 'failed'}
+WORKER_RESULT_STATUSES = {'passed', 'failed', 'blocked', 'skipped'}
+WORKFLOW_OUTCOME_VALUES = {
+    'business': {'PASSED', 'FAILED', 'INCONCLUSIVE', 'NOT_EXECUTED'},
+    'automation': {'SUCCEEDED', 'PARTIAL', 'BLOCKED', 'FAILED'},
+    'evidence': {'COMPLETE', 'ANALYSIS_INCOMPLETE'},
+    'report': {'PUBLISHED', 'DRAFT', 'FAILED', 'NOT_APPLICABLE'},
+    'notification': {'SENT', 'FAILED', 'NOT_REQUIRED'},
+    'review': {'COMPLETED', 'FAILED', 'INCOMPLETE', 'NOT_ASSIGNED'},
+}
+DEFAULT_STEP_LEASE_SECONDS = 180
+MIN_STEP_LEASE_SECONDS = 30
+MAX_STEP_LEASE_SECONDS = 900
 DISPLAY_STEP_STATES = {
     'todo': {'pending'},
     'running': {'running', 'retrying', 'waiting_approval'},
@@ -52,6 +72,58 @@ VALID_REFERENCE_TYPES = {
     'url',
 }
 WORKFLOW_PAGE_SIZES = {10, 20, 50}
+
+# Flow #25 opts into this contract explicitly.  Existing Workflow Definitions
+# do not inherit it, so legacy Sidecars and Job Services keep their current
+# behavior until a Definition is deliberately migrated.
+RACINGGO_FLOW25_WORKER_CONTRACT_VERSION = 'deepflow.racinggo.flow25_worker@1'
+RACINGGO_FLOW25_CONTROLLED_RUNNER = 'deepflow.racinggo.flow25_worker_v1'
+RACINGGO_FLOW25_WORKER_OPERATIONS = {
+    'merge_latest_dev2': 'merge_latest_dev2',
+    'runtime_bootstrap': 'runtime_bootstrap',
+    'editor_health': 'editor_health',
+    'playmode_bootstrap': 'playmode_bootstrap',
+    'bridge_ping': 'bridge_ping',
+    'bridge_snapshot': 'bridge_snapshot',
+    'bridge_contract': 'bridge_contract',
+    'login_lobby': 'login_lobby',
+    'library20_execute': 'library20_execute',
+}
+RACINGGO_MERGE_OUTPUTS = (
+    'source_head',
+    'target_head',
+    'backup_branch',
+    'merge_commit',
+    'workspace_clean',
+    'operation_receipt',
+)
+RACINGGO_RUNTIME_OUTPUTS = (
+    'runtime_generation',
+    'unity_pid',
+    'unity_process_started_at',
+    'mcp_pid',
+    'mcp_url',
+    'mcp_port',
+    'mobile_bridge_port',
+    'ui_bridge_port',
+    'project_root',
+    'unity_project_root',
+    'source_head',
+    'target_head',
+    'readiness_consecutive_successes',
+)
+_ARBITRARY_COMMAND_INPUT_KEYS = {
+    'args',
+    'cmd',
+    'command',
+    'exec_cmd',
+    'executable',
+    'executable_path',
+    'powershell',
+    'script',
+    'script_path',
+    'shell',
+}
 
 
 def workflow_step_display_state(status):
@@ -141,6 +213,15 @@ def normalize_executor_acl(value):
     }
 
 
+def normalize_editor_acl(value):
+    """Normalize the multi-actor Workflow Definition editor ACL."""
+    value = value if isinstance(value, dict) else {}
+    return {
+        'claw_ids': _as_int_list(value.get('claw_ids')),
+        'user_ids': _as_int_list(value.get('user_ids')),
+    }
+
+
 def _same_actor(owner_type, owner_id, actor_type, actor_id):
     try:
         return str(owner_type or '') == str(actor_type or '') and int(owner_id) == int(actor_id)
@@ -173,6 +254,23 @@ def can_manage_workflow(owner_type, owner_id, executor_acl, actor_type, actor_id
     if is_admin:
         return True
     return _same_actor(owner_type, owner_id, actor_type, actor_id)
+
+
+def can_edit_workflow(owner_type, owner_id, editor_acl,
+                      actor_type, actor_id, is_admin=False):
+    """Return whether actor can edit Definition content, not its permissions."""
+    if is_admin or _same_actor(owner_type, owner_id, actor_type, actor_id):
+        return True
+    acl = normalize_editor_acl(editor_acl)
+    try:
+        actor_id = int(actor_id)
+    except (TypeError, ValueError):
+        return False
+    if actor_type == 'claw':
+        return actor_id in acl['claw_ids']
+    if actor_type == 'user':
+        return actor_id in acl['user_ids']
+    return False
 
 
 def can_view_workflow(visibility_scope, owner_type, owner_id, project_id,
@@ -212,6 +310,180 @@ def can_claim_step(claimed_by, claimed_at, worker_id, now, lease_seconds):
         return (now - claimed_at).total_seconds() > int(lease_seconds or 0)
     except Exception:
         return True
+
+
+def normalize_step_lease_seconds(value):
+    """Normalize server-side workflow worker lease seconds."""
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        seconds = DEFAULT_STEP_LEASE_SECONDS
+    if seconds < MIN_STEP_LEASE_SECONDS:
+        return MIN_STEP_LEASE_SECONDS
+    if seconds > MAX_STEP_LEASE_SECONDS:
+        return MAX_STEP_LEASE_SECONDS
+    return seconds
+
+
+def _same_claim_owner(claimed_claw_id, claimed_by, claw_id, worker_id):
+    try:
+        same_claw = int(claimed_claw_id) == int(claw_id)
+    except (TypeError, ValueError):
+        return False
+    return same_claw and str(claimed_by or '').strip() == str(worker_id or '').strip()
+
+
+def can_claim_step_lease(claimed_claw_id, claimed_by, claim_expires_at,
+                         claw_id, worker_id, now):
+    """Return whether a worker can create or renew a strong step claim."""
+    worker_id = str(worker_id or '').strip()
+    if not worker_id:
+        return {'allowed': False, 'reason': 'missing_worker_id'}
+    has_claim = bool(claimed_claw_id or str(claimed_by or '').strip() or claim_expires_at)
+    if not has_claim:
+        return {'allowed': True, 'reason': 'unclaimed'}
+    if _same_claim_owner(claimed_claw_id, claimed_by, claw_id, worker_id):
+        return {'allowed': True, 'reason': 'same_owner'}
+    if not claim_expires_at or claim_expires_at <= now:
+        return {'allowed': True, 'reason': 'expired'}
+    return {'allowed': False, 'reason': 'claim_conflict'}
+
+
+def active_step_claim_state(step_type, claimed_claw_id, claimed_by,
+                            claim_expires_at, claw_id, worker_id, now):
+    """Validate the active claim required for worker_task write operations."""
+    if str(step_type or 'worker_task') != 'worker_task':
+        return {'active': True, 'reason': 'not_worker_task'}
+    if not (claimed_claw_id or str(claimed_by or '').strip() or claim_expires_at):
+        return {'active': False, 'reason': 'claim_required'}
+    if not _same_claim_owner(claimed_claw_id, claimed_by, claw_id, worker_id):
+        return {'active': False, 'reason': 'claim_owner_mismatch'}
+    if not claim_expires_at or claim_expires_at <= now:
+        return {'active': False, 'reason': 'claim_expired'}
+    return {'active': True, 'reason': 'active'}
+
+
+def validate_worker_result_status(status):
+    """Return a terminal worker result status or fail closed."""
+    status = str(status or '').strip()
+    if status not in WORKER_RESULT_STATUSES:
+        raise ValueError('status 必须是 passed/failed/blocked/skipped')
+    return status
+
+
+def validate_workflow_finalizer_result(step_config, result):
+    """Require an explicit completion receipt only for opted-in finalizers."""
+    config = step_config if isinstance(step_config, dict) else {}
+    if config.get('finalizer') is not True and config.get('is_finalizer') is not True:
+        return {'valid': True, 'missing': []}
+    result = result if isinstance(result, dict) else {}
+    outputs = result.get('outputs') if isinstance(result.get('outputs'), dict) else {}
+    missing = []
+    if outputs.get('finalizer_complete') is not True:
+        missing.append('outputs.finalizer_complete')
+    receipt = outputs.get('finalizer_receipt')
+    if not isinstance(receipt, dict) or not receipt:
+        missing.append('outputs.finalizer_receipt')
+    return {
+        'valid': not missing,
+        'missing': missing,
+        'code': '' if not missing else 'FINALIZER_RECEIPT_REQUIRED',
+    }
+
+
+def _canonical_outcome(domain, value):
+    rendered = str(value or '').strip().upper()
+    aliases = {
+        'business': {
+            'COMPLETED': 'PASSED',
+            'CONFIRMED_BUSINESS_FAILURE': 'FAILED',
+            'COMPLETED_WITH_BUGS': 'FAILED',
+        },
+        'automation': {
+            'COMPLETED': 'SUCCEEDED',
+            'COMPLETED_WITH_AUTOMATION_ERROR': 'PARTIAL',
+            'AUTOMATION_ENV_BLOCKED': 'BLOCKED',
+        },
+        'evidence': {
+            'EVIDENCE_INGEST_INCOMPLETE': 'ANALYSIS_INCOMPLETE',
+        },
+    }
+    rendered = aliases.get(domain, {}).get(rendered, rendered)
+    return rendered if rendered in WORKFLOW_OUTCOME_VALUES[domain] else ''
+
+
+def merge_workflow_run_outcomes(current, result, step_config=None):
+    """Merge one result into the six independent Run outcome dimensions."""
+    merged = {
+        key: _canonical_outcome(key, (current or {}).get(key))
+        for key in WORKFLOW_OUTCOME_VALUES
+    }
+    result = result if isinstance(result, dict) else {}
+    outputs = result.get('outputs') if isinstance(result.get('outputs'), dict) else {}
+    metrics = result.get('metrics') if isinstance(result.get('metrics'), dict) else {}
+
+    def first(*names):
+        for name in names:
+            for source in (result, outputs, metrics):
+                if source.get(name) not in (None, ''):
+                    return source.get(name)
+        return None
+
+    candidates = {
+        'business': first('business_outcome', 'business_conclusion'),
+        'automation': first('automation_outcome', 'automation_conclusion'),
+        'evidence': first('evidence_outcome', 'evidence_ingest_status'),
+        'report': first('report_outcome', 'report_status'),
+        'notification': first('notification_outcome'),
+        'review': first('review_outcome'),
+    }
+    if candidates['business'] in (None, ''):
+        if first('business_failure_confirmed') is True:
+            candidates['business'] = 'FAILED'
+        elif first('business_passed') is True:
+            candidates['business'] = 'PASSED'
+        elif first('business_inconclusive') is True:
+            candidates['business'] = 'INCONCLUSIVE'
+    if candidates['report'] in (None, ''):
+        if first('hub_report_id') not in (None, ''):
+            candidates['report'] = 'PUBLISHED'
+        elif first('report_published') is False:
+            candidates['report'] = 'FAILED'
+    if candidates['notification'] in (None, ''):
+        if first('wecom_sent') is True:
+            candidates['notification'] = 'SENT'
+        elif first('notification_skipped') is True:
+            candidates['notification'] = 'NOT_REQUIRED'
+        elif first('notification_required') is True and first('wecom_sent') is False:
+            candidates['notification'] = 'FAILED'
+    config = step_config if isinstance(step_config, dict) else {}
+    if config.get('assignment_role') == 'reviewer' and candidates['review'] in (
+            None, ''):
+        status = str(result.get('status') or '').lower()
+        candidates['review'] = (
+            'COMPLETED' if status in ('passed', 'skipped') else 'FAILED')
+    for domain, value in candidates.items():
+        canonical = _canonical_outcome(domain, value)
+        if canonical:
+            merged[domain] = canonical
+    return merged
+
+
+def composite_workflow_terminal_status(outcomes, has_blocked=False,
+                                       has_failed=False):
+    """Map composite outcomes to a technical Run terminal status."""
+    outcomes = outcomes if isinstance(outcomes, dict) else {}
+    business = _canonical_outcome('business', outcomes.get('business'))
+    automation = _canonical_outcome('automation', outcomes.get('automation'))
+    if business in {'PASSED', 'FAILED', 'INCONCLUSIVE'}:
+        return 'succeeded'
+    if business == 'NOT_EXECUTED':
+        return 'failed' if automation == 'FAILED' or has_failed else 'blocked'
+    if has_failed:
+        return 'failed'
+    if has_blocked:
+        return 'blocked'
+    return 'succeeded'
 
 
 def resolve_workflow_step_claw_ids(
@@ -478,6 +750,92 @@ def normalize_analysis_config(value):
     }
 
 
+def _gate_operands(expression, path):
+    """Return the two operands of the small, supported gate expression DSL."""
+    text = str(expression or '').strip()
+    for operator in ('>=', '<=', '==', '!=', '>', '<'):
+        if operator not in text:
+            continue
+        left, right = (part.strip() for part in text.split(operator, 1))
+        if not left or not right:
+            break
+        return left, right
+    raise ValueError(
+        f'{path}: expected a comparison using ==, !=, >, >=, < or <=')
+
+
+def _metric_schema_paths(schema, prefix='metrics'):
+    """Collect metric paths from JSON Schema, a simple mapping, or a list."""
+    paths = set()
+    if isinstance(schema, list):
+        for item in schema:
+            value = str(item or '').strip()
+            if value:
+                paths.add(value if value.startswith('metrics.')
+                          else f'{prefix}.{value}')
+        return paths
+    if not isinstance(schema, dict):
+        return paths
+
+    properties = schema.get('properties')
+    if not isinstance(properties, dict):
+        ignored = {
+            '$schema', 'type', 'title', 'description', 'required',
+            'additionalProperties', 'examples', 'default',
+        }
+        properties = {
+            key: value for key, value in schema.items() if key not in ignored
+        }
+    for key, value in properties.items():
+        key = str(key or '').strip()
+        if not key:
+            continue
+        path = f'{prefix}.{key}'
+        nested = _metric_schema_paths(value, path)
+        if nested:
+            paths.update(nested)
+        else:
+            paths.add(path)
+    return paths
+
+
+def normalize_step_gates(value, step_index, metrics_schema=None):
+    """Validate gate syntax and declared metric references with exact paths."""
+    if value in (None, ''):
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f'steps[{step_index}].gates: expected an array')
+    declared_metrics = (
+        _metric_schema_paths(metrics_schema)
+        if metrics_schema is not None else None
+    )
+    normalized = []
+    for gate_index, gate in enumerate(value):
+        gate_path = f'steps[{step_index}].gates[{gate_index}]'
+        if not isinstance(gate, dict):
+            raise ValueError(f'{gate_path}: expected an object')
+        expression = str(gate.get('expression') or '').strip()
+        left, right = _gate_operands(expression, f'{gate_path}.expression')
+        on_fail = str(gate.get('on_fail') or 'blocked').strip()
+        if on_fail not in GATE_ON_FAIL_POLICIES:
+            raise ValueError(
+                f'{gate_path}.on_fail: unsupported gate policy {on_fail!r}')
+        if declared_metrics is not None:
+            operands = (left, right)
+            for operand in operands:
+                if not operand.startswith('metrics.'):
+                    continue
+                if operand not in declared_metrics:
+                    raise ValueError(
+                        f'{gate_path}.expression: metric path {operand!r} '
+                        'is not declared in metrics_schema')
+        item = dict(gate)
+        item['expression'] = expression
+        item['on_fail'] = on_fail
+        normalized.append(item)
+    return normalized
+
+
 def normalize_step(step, idx):
     """Normalize a single workflow step definition."""
     if not isinstance(step, dict):
@@ -487,6 +845,9 @@ def normalize_step(step, idx):
     if step_type not in VALID_STEP_TYPES:
         step_type = 'worker_task'
     approval_required = bool(step.get('approval_required') or step_type == 'approval')
+    metrics_schema = step.get('metrics_schema')
+    if metrics_schema is not None and not isinstance(metrics_schema, (dict, list)):
+        raise ValueError(f'steps[{idx}].metrics_schema: expected an object or array')
     normalized = {
         'id': step_id,
         'name': str(step.get('name') or step.get('title') or step_id),
@@ -494,9 +855,8 @@ def normalize_step(step, idx):
         'runner': str(step.get('runner') or ''),
         'depends_on': _as_list(step.get('depends_on')),
         'approval_required': approval_required,
-        'gates': [g for g in (step.get('gates') or []) if isinstance(g, dict)],
+        'gates': normalize_step_gates(step.get('gates'), idx, metrics_schema),
         'target_agent': str(step.get('target_agent') or ''),
-        'target_post': str(step.get('target_post') or '').strip(),
         'target_claw_id': step.get('target_claw_id'),
         'prompt': str(step.get('prompt') or ''),
         'references': normalize_step_references(step.get('references')),
@@ -509,6 +869,32 @@ def normalize_step(step, idx):
         ],
         'retry_max': int(step.get('retry_max') or 0),
     }
+    if metrics_schema is not None:
+        normalized['metrics_schema'] = copy.deepcopy(metrics_schema)
+    for key in ('required_metrics', 'required_evidence'):
+        if key in step:
+            normalized[key] = _as_list(step.get(key))
+    if 'allow_empty_contract_fields' in step:
+        allow_empty = step.get('allow_empty_contract_fields')
+        if not isinstance(allow_empty, dict):
+            raise ValueError(
+                f'steps[{idx}].allow_empty_contract_fields: expected an object')
+        normalized['allow_empty_contract_fields'] = {
+            section: _as_list(allow_empty.get(section))
+            for section in ('metrics', 'evidence', 'outputs')
+            if section in allow_empty
+        }
+    if 'contract_on_fail' in step:
+        contract_on_fail = str(step.get('contract_on_fail') or 'blocked').strip()
+        if contract_on_fail not in ('blocked', 'failed', 'warn'):
+            raise ValueError(
+                f'steps[{idx}].contract_on_fail: expected blocked/failed/warn')
+        normalized['contract_on_fail'] = contract_on_fail
+    # Preserve legacy JSON shape on targeted Definition updates. Flow #12
+    # predates target_post; adding an empty field to every step made a harmless
+    # PATCH rewrite the full stored definition and changed its content hash.
+    if 'target_post' in step or step.get('target_post'):
+        normalized['target_post'] = str(step.get('target_post') or '').strip()
     if isinstance(step.get('analysis'), dict):
         normalized['analysis'] = normalize_analysis_config(step.get('analysis'))
     for key in ('auto_block_on_heartbeat_loss', 'heartbeat_auto_block', 'auto_block_on_no_response'):
@@ -519,7 +905,292 @@ def normalize_step(step, idx):
             normalized[key] = str(step.get(key)).strip()
     if 'notify_agent_on_start' in step:
         normalized['notify_agent_on_start'] = bool(step.get('notify_agent_on_start'))
+    if 'require_fencing_token' in step:
+        normalized['require_fencing_token'] = bool(step.get('require_fencing_token'))
+    # These are orchestration policies, not executor-only hints. Preserve the
+    # canonical top-level shape while continuing to read the legacy values
+    # already shipped under ``inputs`` by Flow #12/#25.
+    if 'advance_on_any_result' in step:
+        normalized['advance_on_any_result'] = (
+            step.get('advance_on_any_result') is True)
+    if 'run_even_if_upstream_blocked' in step:
+        normalized['run_even_if_upstream_blocked'] = (
+            step.get('run_even_if_upstream_blocked') is True)
+    if 'assignment_role' in step:
+        assignment_role = str(step.get('assignment_role') or '').strip()
+        if assignment_role not in ('executor', 'reviewer'):
+            raise ValueError(
+                f'steps[{idx}].assignment_role: expected executor/reviewer')
+        normalized['assignment_role'] = assignment_role
+    if 'finalizer' in step or 'is_finalizer' in step:
+        normalized['finalizer'] = bool(
+            step.get('finalizer') is True or step.get('is_finalizer') is True)
+    if 'advance_policy' in step:
+        advance_policy = str(step.get('advance_policy') or '').strip()
+        if advance_policy:
+            normalized['advance_policy'] = advance_policy
     return normalized
+
+
+def _validate_controlled_worker_contract(context, steps):
+    policy = (
+        context.get('executor_operation_policy')
+        if isinstance(context, dict)
+        and isinstance(context.get('executor_operation_policy'), dict)
+        else {})
+    version = str(policy.get('worker_contract_version') or '').strip()
+    if not version:
+        return
+    if version != RACINGGO_FLOW25_WORKER_CONTRACT_VERSION:
+        raise ValueError(
+            'context.executor_operation_policy.worker_contract_version: '
+            f'unsupported controlled worker contract {version!r}')
+    if policy.get('mode') != 'workflow_run_executor':
+        raise ValueError(
+            'controlled worker contract requires mode=workflow_run_executor')
+    if policy.get('require_worker_binding') is not True:
+        raise ValueError(
+            'controlled worker contract requires require_worker_binding=true')
+
+    allowed_operations = set(RACINGGO_FLOW25_WORKER_OPERATIONS.values())
+    for idx, step in enumerate(steps):
+        if step.get('type') != 'worker_task':
+            continue
+        if step.get('runner') != RACINGGO_FLOW25_CONTROLLED_RUNNER:
+            raise ValueError(
+                f'steps[{idx}].runner: controlled runner must be '
+                f'{RACINGGO_FLOW25_CONTROLLED_RUNNER!r}')
+        inputs = step.get('inputs') if isinstance(step.get('inputs'), dict) else {}
+        operation = str(inputs.get('operation') or '').strip()
+        expected_operation = RACINGGO_FLOW25_WORKER_OPERATIONS.get(
+            str(step.get('id') or '').strip())
+        if operation not in allowed_operations or expected_operation is None:
+            raise ValueError(
+                f'steps[{idx}].inputs.operation: unsupported operation '
+                f'{operation!r}')
+        if operation != expected_operation:
+            raise ValueError(
+                f'steps[{idx}].inputs.operation: operation {operation!r} does '
+                f'not match step {step.get("id")!r}')
+        command_keys = sorted(_ARBITRARY_COMMAND_INPUT_KEYS.intersection(inputs))
+        if command_keys:
+            raise ValueError(
+                f'steps[{idx}].inputs: arbitrary command fields are forbidden: '
+                + ', '.join(command_keys))
+        if operation == 'merge_latest_dev2':
+            unexpected = sorted(
+                set(inputs) - {'operation', 'protected_target_id'})
+            if unexpected:
+                raise ValueError(
+                    f'steps[{idx}].inputs: merge_latest_dev2 does not '
+                    'accept Hub-controlled operation inputs: '
+                    + ', '.join(unexpected))
+        step['require_fencing_token'] = True
+
+
+def _replace_flow25_runtime_references(value):
+    replacements = {
+        '{context.mcp_url}': '{steps.runtime_bootstrap.outputs.mcp_url}',
+        '{start_vars.mcp_url}': '{steps.runtime_bootstrap.outputs.mcp_url}',
+        '{context.mobile_bridge_port}': (
+            '{steps.runtime_bootstrap.outputs.mobile_bridge_port}'),
+        '{start_vars.mobile_bridge_port}': (
+            '{steps.runtime_bootstrap.outputs.mobile_bridge_port}'),
+        '{context.ui_bridge_port}': (
+            '{steps.runtime_bootstrap.outputs.ui_bridge_port}'),
+        '{start_vars.ui_bridge_port}': (
+            '{steps.runtime_bootstrap.outputs.ui_bridge_port}'),
+        '{context.unity_project}': (
+            '{steps.runtime_bootstrap.outputs.unity_project_root}'),
+        '{context.racinggo_root}': (
+            '{steps.runtime_bootstrap.outputs.project_root}'),
+    }
+    if isinstance(value, dict):
+        return {
+            key: _replace_flow25_runtime_references(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_replace_flow25_runtime_references(item) for item in value]
+    if isinstance(value, str):
+        result = value
+        for old, new in replacements.items():
+            result = result.replace(old, new)
+        return result
+    return value
+
+
+def build_racinggo_flow25_controlled_worker_candidate(definition):
+    """Return a non-deployed Flow #25 candidate using one controlled runner.
+
+    The helper intentionally operates on an exported Definition.  It does not
+    persist or activate anything, which lets Hub and Worker teams review the
+    exact migration before a canary.
+    """
+    candidate = copy.deepcopy(definition if isinstance(definition, dict) else {})
+    steps = candidate.get('steps') if isinstance(candidate.get('steps'), list) else []
+    by_id = {
+        str(step.get('id') or ''): step
+        for step in steps if isinstance(step, dict)
+    }
+    required_existing = set(RACINGGO_FLOW25_WORKER_OPERATIONS) - {'runtime_bootstrap'}
+    missing = sorted(required_existing - set(by_id))
+    for step_id in ('merge_latest_dev2', 'precheck'):
+        if step_id not in by_id:
+            missing.append(step_id)
+    if missing:
+        raise ValueError(
+            'Flow #25 candidate is missing required steps: '
+            + ', '.join(sorted(set(missing))))
+
+    if 'runtime_bootstrap' not in by_id:
+        merge_index = next(
+            idx for idx, step in enumerate(steps)
+            if isinstance(step, dict) and step.get('id') == 'merge_latest_dev2')
+        bootstrap = {
+            'id': 'runtime_bootstrap',
+            'name': 'Dev2 Runtime Bootstrap',
+            'type': 'worker_task',
+            'runner': RACINGGO_FLOW25_CONTROLLED_RUNNER,
+            'depends_on': ['merge_latest_dev2'],
+            'inputs': {
+                'operation': 'runtime_bootstrap',
+                'protected_target_id': 'racinggo-dev2',
+                'required_readiness_successes': 5,
+                'runtime_output_missing_code': 'RUNTIME_OUTPUT_MISSING',
+            },
+            'outputs': list(RACINGGO_RUNTIME_OUTPUTS),
+            'required_metrics': [
+                'unity_started',
+                'mcp_started',
+                'project_root_matches',
+                'readiness_consecutive_successes',
+            ],
+            'required_evidence': [
+                'process_ownership',
+                'project_root_check',
+                'readiness_samples',
+            ],
+            'contract_on_fail': 'blocked',
+            'require_fencing_token': True,
+        }
+        steps.insert(merge_index + 1, bootstrap)
+        by_id['runtime_bootstrap'] = bootstrap
+
+    by_id['precheck']['depends_on'] = ['runtime_bootstrap']
+    command_keys = _ARBITRARY_COMMAND_INPUT_KEYS
+    for step_id, operation in RACINGGO_FLOW25_WORKER_OPERATIONS.items():
+        step = by_id[step_id]
+        step['type'] = 'worker_task'
+        step['runner'] = RACINGGO_FLOW25_CONTROLLED_RUNNER
+        inputs = (
+            {}
+            if step_id == 'merge_latest_dev2'
+            else dict(step.get('inputs'))
+            if isinstance(step.get('inputs'), dict)
+            else {})
+        for key in command_keys:
+            inputs.pop(key, None)
+        inputs.update({
+            'operation': operation,
+            'protected_target_id': 'racinggo-dev2',
+        })
+        if step_id == 'merge_latest_dev2':
+            step['prompt'] = (
+                '由受控 DeepFlow Runner 执行 merge_latest_dev2；Hub 不下发 '
+                'Git 命令、路径或文件白名单。')
+            step['gates'] = []
+            step['outputs'] = list(RACINGGO_MERGE_OUTPUTS)
+            step['required_metrics'] = [
+                'restored_file_count',
+                'changed_file_count',
+                'workspace_clean',
+            ]
+            step['required_evidence'] = ['operation_receipt']
+            step['allow_empty_contract_fields'] = {
+                'outputs': ['backup_branch'],
+            }
+            step['contract_on_fail'] = 'blocked'
+        elif step_id != 'runtime_bootstrap':
+            inputs.update({
+                'runtime_output_missing_code': 'RUNTIME_OUTPUT_MISSING',
+                'required_runtime_outputs': list(RACINGGO_RUNTIME_OUTPUTS),
+                'runtime_generation': (
+                    '{steps.runtime_bootstrap.outputs.runtime_generation}'),
+                'unity_pid': '{steps.runtime_bootstrap.outputs.unity_pid}',
+                'mcp_url': '{steps.runtime_bootstrap.outputs.mcp_url}',
+                'mobile_bridge_port': (
+                    '{steps.runtime_bootstrap.outputs.mobile_bridge_port}'),
+                'ui_bridge_port': (
+                    '{steps.runtime_bootstrap.outputs.ui_bridge_port}'),
+                'project_root': (
+                    '{steps.runtime_bootstrap.outputs.project_root}'),
+                'unity_project_root': (
+                    '{steps.runtime_bootstrap.outputs.unity_project_root}'),
+            })
+        step['inputs'] = inputs
+        step['require_fencing_token'] = True
+
+    # Keep the DeepFlow operation input contract narrow (mode only), while
+    # making the merge receipt lineage explicit in the Hub Definition and in
+    # the task payload available to the Worker.
+    by_id['runtime_bootstrap']['input_vars'] = {
+        key: f'{{steps.merge_latest_dev2.outputs.{key}}}'
+        for key in RACINGGO_MERGE_OUTPUTS
+    }
+
+    candidate['steps'] = _replace_flow25_runtime_references(steps)
+    bootstrap_position = next(
+        idx for idx, step in enumerate(candidate['steps'])
+        if isinstance(step, dict) and step.get('id') == 'runtime_bootstrap')
+    dynamic_runtime_inputs = {
+        'runtime_generation': (
+            '{steps.runtime_bootstrap.outputs.runtime_generation}'),
+        'unity_pid': '{steps.runtime_bootstrap.outputs.unity_pid}',
+        'mcp_url': '{steps.runtime_bootstrap.outputs.mcp_url}',
+        'mobile_bridge_port': (
+            '{steps.runtime_bootstrap.outputs.mobile_bridge_port}'),
+        'ui_bridge_port': (
+            '{steps.runtime_bootstrap.outputs.ui_bridge_port}'),
+        'project_root': '{steps.runtime_bootstrap.outputs.project_root}',
+        'racinggo_root': '{steps.runtime_bootstrap.outputs.project_root}',
+        'unity_project': (
+            '{steps.runtime_bootstrap.outputs.unity_project_root}'),
+        'unity_project_root': (
+            '{steps.runtime_bootstrap.outputs.unity_project_root}'),
+    }
+    for step in candidate['steps'][bootstrap_position + 1:]:
+        if not isinstance(step, dict):
+            continue
+        inputs = dict(step.get('inputs')) if isinstance(step.get('inputs'), dict) else {}
+        # Preserve the historical field names where consumers still expect
+        # them, but source every value from the bootstrap receipt.
+        for key, value in dynamic_runtime_inputs.items():
+            if key in inputs or step.get('type') in ('worker_task', 'agent_task'):
+                inputs[key] = value
+        inputs['runtime_output_missing_code'] = 'RUNTIME_OUTPUT_MISSING'
+        step['inputs'] = inputs
+    context = copy.deepcopy(candidate.get('context')) if isinstance(
+        candidate.get('context'), dict) else {}
+    for key in ('mcp_url', 'mobile_bridge_port', 'ui_bridge_port'):
+        context.pop(key, None)
+    policy = dict(context.get('executor_operation_policy')) if isinstance(
+        context.get('executor_operation_policy'), dict) else {}
+    policy.update({
+        'mode': 'workflow_run_executor',
+        'require_worker_binding': True,
+        'worker_contract_version': RACINGGO_FLOW25_WORKER_CONTRACT_VERSION,
+        'controlled_runner': RACINGGO_FLOW25_CONTROLLED_RUNNER,
+        'protected_target_id': 'racinggo-dev2',
+    })
+    context['executor_operation_policy'] = policy
+    candidate['context'] = context
+
+    if '8091' in str(candidate):
+        raise ValueError('Flow #25 candidate still contains forbidden port fallback 8091')
+    # Validate without replacing the richer exported Definition shape.
+    normalize_workflow_definition(candidate)
+    return candidate
 
 
 def normalize_workflow_definition(data):
@@ -542,14 +1213,34 @@ def normalize_workflow_definition(data):
     if unknown_deps:
         raise ValueError('depends_on 引用了不存在的步骤：%s' % ', '.join(unknown_deps))
     key = _slug(data.get('key') or data.get('id') or data.get('name'))
-    return {
+    context = copy.deepcopy(data.get('context')) if isinstance(
+        data.get('context'), dict) else {}
+    _validate_controlled_worker_contract(context, steps)
+    normalized = {
         'key': key,
         'name': str(data.get('name') or key),
         'description': str(data.get('description') or ''),
         'version': int(data.get('version') or 1),
         'steps': steps,
-        'context': data.get('context') if isinstance(data.get('context'), dict) else {},
+        'context': context,
     }
+    outcome_status_mode = str(
+        data.get('outcome_status_mode') or 'legacy').strip().lower()
+    if outcome_status_mode not in ('legacy', 'composite'):
+        raise ValueError(
+            'outcome_status_mode: expected legacy or composite')
+    if 'outcome_status_mode' in data or outcome_status_mode == 'composite':
+        normalized['outcome_status_mode'] = outcome_status_mode
+    if 'composite_outcomes' in data:
+        if not isinstance(data.get('composite_outcomes'), bool):
+            raise ValueError('composite_outcomes: expected a boolean')
+        normalized['composite_outcomes'] = data.get('composite_outcomes')
+    if 'start_vars_schema' in data:
+        if not isinstance(data.get('start_vars_schema'), dict):
+            raise ValueError('start_vars_schema: expected an object')
+        normalized['start_vars_schema'] = copy.deepcopy(
+            data.get('start_vars_schema'))
+    return normalized
 
 
 def merge_workflow_definition_update(existing_definition, patch):
@@ -566,12 +1257,21 @@ def merge_workflow_definition_update(existing_definition, patch):
     if original_key:
         merged['key'] = original_key
     for source in (nested, patch):
-        for field in ('name', 'description', 'version', 'steps', 'context'):
+        for field in (
+                'name', 'description', 'version', 'steps', 'context',
+                'start_vars_schema', 'outcome_status_mode',
+                'composite_outcomes'):
             if field in source:
                 merged[field] = source[field]
     if original_key:
         merged['key'] = original_key
-    return normalize_workflow_definition(merged)
+    normalized = normalize_workflow_definition(merged)
+    # In-place updates promise an immutable key. Preserve the exact persisted
+    # spelling as well as its identity; legacy keys may contain hyphens that
+    # the create-time slugger would otherwise rewrite to underscores.
+    if original_key:
+        normalized['key'] = str(original_key)
+    return normalized
 
 
 def normalize_start_vars(value):
@@ -612,9 +1312,153 @@ def resolve_start_var_claw_ids(start_vars, var_path, strict=False):
     return sorted(set(result))
 
 
+def _positive_assignment_claw_id(value, field, required=False):
+    if value in (None, ''):
+        if required:
+            raise ValueError('%s is required' % field)
+        return None
+    if isinstance(value, bool):
+        raise ValueError('%s must be a positive Claw ID' % field)
+    try:
+        claw_id = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('%s must be a positive Claw ID' % field) from exc
+    if claw_id <= 0:
+        raise ValueError('%s must be a positive Claw ID' % field)
+    return claw_id
+
+
+def resolve_workflow_run_assignment(
+        definition, start_vars=None, worker_claw_id=None,
+        selected_executor_claw_ids=None):
+    """Resolve one immutable executor/reviewer assignment at Run creation.
+
+    Definitions opt in by declaring ``worker_claw_id`` or
+    ``reviewer_claw_id`` in ``start_vars_schema``, or by marking a step with
+    ``assignment_role``. Legacy definitions retain their existing routing.
+    """
+    definition = definition if isinstance(definition, dict) else {}
+    variables = normalize_start_vars(start_vars)
+    schema = (
+        definition.get('start_vars_schema')
+        if isinstance(definition.get('start_vars_schema'), dict) else {})
+    steps = [
+        step for step in (definition.get('steps') or [])
+        if isinstance(step, dict)]
+    explicit_roles = {
+        str(step.get('assignment_role') or '').strip()
+        for step in steps
+        if step.get('assignment_role')
+    }
+    role_bound = bool(
+        {'worker_claw_id', 'executor_claw_id', 'reviewer_claw_id'}
+        & set(schema)
+    ) or bool(explicit_roles & {'executor', 'reviewer'})
+    if not role_bound:
+        return None
+
+    worker = _positive_assignment_claw_id(
+        worker_claw_id, 'worker_claw_id',
+        required=bool(
+            (schema.get('worker_claw_id') or {}).get('required')))
+    declared_worker = _positive_assignment_claw_id(
+        variables.get('worker_claw_id'), 'start_vars.worker_claw_id')
+    if worker and declared_worker and worker != declared_worker:
+        raise ValueError('worker_claw_id does not match start_vars.worker_claw_id')
+    worker = worker or declared_worker
+
+    declared_executor = _positive_assignment_claw_id(
+        variables.get('executor_claw_id'), 'start_vars.executor_claw_id')
+    executor = declared_executor or worker
+    if worker and executor and executor != worker:
+        raise ValueError('executor_claw_id must equal worker_claw_id')
+    if executor is None:
+        raise ValueError('executor_claw_id is required')
+
+    selected = []
+    for raw in selected_executor_claw_ids or []:
+        selected.append(_positive_assignment_claw_id(
+            raw, 'executor_claw_ids', required=True))
+    selected = sorted(set(selected))
+    if selected and selected != [executor]:
+        raise ValueError('executor_claw_ids must contain only executor_claw_id')
+
+    reviewer_spec = schema.get('reviewer_claw_id') or {}
+    reviewer_required = bool(reviewer_spec.get('required')) or (
+        'reviewer' in explicit_roles)
+    reviewer = _positive_assignment_claw_id(
+        variables.get('reviewer_claw_id'), 'start_vars.reviewer_claw_id',
+        required=reviewer_required)
+    if reviewer is not None and reviewer == executor:
+        raise ValueError('reviewer_claw_id must differ from executor_claw_id')
+
+    step_roles = {}
+    for step in steps:
+        if step.get('type') not in ('agent_task', 'worker_task'):
+            continue
+        step_id = str(step.get('id') or '')
+        role = str(step.get('assignment_role') or '').strip()
+        # Compatibility for Definition #12 v21. New definitions must declare
+        # assignment_role explicitly; this exact legacy id is not generalized.
+        if not role and step_id == 'peer_review_finalize':
+            role = 'reviewer'
+        if role not in ('executor', 'reviewer'):
+            role = 'executor'
+        if role == 'reviewer' and reviewer is None:
+            raise ValueError('reviewer_claw_id is required for reviewer step')
+        step_roles[step_id] = role
+
+    variables['worker_claw_id'] = worker or executor
+    variables['executor_claw_id'] = executor
+    variables['executor_claw_ids'] = [executor]
+    if reviewer is not None:
+        variables['reviewer_claw_id'] = reviewer
+    return {
+        'schema': 'hub.workflow.assignment@1',
+        'executor_claw_id': executor,
+        'reviewer_claw_id': reviewer,
+        'worker_claw_id': worker or executor,
+        'start_vars': variables,
+        'step_roles': step_roles,
+        'source': {
+            'executor': 'worker_binding',
+            'reviewer': 'start_vars.reviewer_claw_id' if reviewer else '',
+        },
+    }
+
+
+def materialize_workflow_run_assignment(
+        definition, assignment, claw_names=None):
+    """Copy a definition and freeze every execution step to its role owner."""
+    value = copy.deepcopy(definition if isinstance(definition, dict) else {})
+    if not isinstance(assignment, dict):
+        return value
+    names = claw_names if isinstance(claw_names, dict) else {}
+    executor = int(assignment['executor_claw_id'])
+    reviewer = assignment.get('reviewer_claw_id')
+    roles = assignment.get('step_roles') or {}
+    for step in value.get('steps') or []:
+        if not isinstance(step, dict) or step.get('type') not in (
+                'agent_task', 'worker_task'):
+            continue
+        role = roles.get(str(step.get('id') or ''), 'executor')
+        target = int(reviewer) if role == 'reviewer' else executor
+        step['assignment_role'] = role
+        step['target_claw_id'] = target
+        step['executor_claw_ids'] = [target]
+        step['target_agent'] = names.get(target) or str(target)
+        step['target_post'] = ''
+    value['assignment_contract'] = {
+        'schema': assignment.get('schema'),
+        'executor_claw_id': executor,
+        'reviewer_claw_id': reviewer,
+    }
+    return value
+
+
 def build_workflow_start_context(start_vars=None, context=None, start_mode='immediate',
                                  schedule_cron='', executor_claw_ids=None,
-                                 executor_user_ids=None):
+                                 executor_user_ids=None, worker_claw_id=None):
     """Build the run-level context shared by every workflow step."""
     base = dict(context) if isinstance(context, dict) else {}
     merged_start_vars = normalize_start_vars(base.get('start_vars'))
@@ -629,6 +1473,15 @@ def build_workflow_start_context(start_vars=None, context=None, start_mode='imme
         'executor_user_ids': _as_int_list(executor_user_ids),
         'variables': merged_start_vars,
     })
+    bound_workers = _as_int_list([worker_claw_id])
+    if bound_workers:
+        workflow_start['worker_claw_id'] = bound_workers[0]
+        workflow_start['worker_binding_mode'] = 'single_flow_worker'
+    else:
+        # Binding is accepted only through the dedicated start parameter. Do
+        # not trust a caller-supplied nested context to select another Worker.
+        workflow_start.pop('worker_claw_id', None)
+        workflow_start.pop('worker_binding_mode', None)
     base['workflow_start'] = workflow_start
     return base
 
@@ -661,9 +1514,41 @@ def build_workflow_agent_task_payload(run, step, outputs=None):
         'progress_api': '/api/v1/workflow-runs/%s/steps/%s/progress' % (run_id, step_id),
         'result_api': '/api/v1/workflow-runs/%s/steps/%s/result' % (run_id, step_id),
     }
+    workflow_start = (
+        context.get('workflow_start')
+        if isinstance(context.get('workflow_start'), dict) else {})
+    worker_ids = _as_int_list([workflow_start.get('worker_claw_id')])
+    if worker_ids:
+        acting_ids = _as_int_list([
+            step.get('target_claw_id'), config.get('target_claw_id')])
+        payload['execution_route'] = {
+            'mode': 'single_flow_worker',
+            'worker_claw_id': worker_ids[0],
+            'acting_claw_id': acting_ids[0] if acting_ids else None,
+            'acting_agent': str(
+                step.get('target_agent') or config.get('target_agent') or ''),
+            'acting_post': str(
+                step.get('target_post') or config.get('target_post') or ''),
+        }
+    snapshot = run.get('testcase_library_snapshot')
+    if not isinstance(snapshot, dict):
+        snapshot = context.get('testcase_library_snapshot')
+    if isinstance(snapshot, dict):
+        payload['testcase_library_snapshot'] = snapshot
     # 透传统一任务上下文包（由 step.to_dict(with_context=True) 注入）
     if isinstance(step.get('task_context'), dict):
         payload['task_context'] = step['task_context']
+    if (step.get('step_type') or step.get('type') or config.get('type')) == 'notification':
+        authorization = config.get('notification_authorization')
+        payload['notification'] = {
+            'authorized': bool(
+                isinstance(authorization, dict) and authorization.get('allowed')),
+            'target': '大群2',
+            'credential_mode': 'hub_brokered',
+            'send_api': '/api/v1/wecom/send',
+            'template_version': str(
+                config.get('template_version') or 'workflow-wecom-v1'),
+        }
     analysis = config.get('analysis') if isinstance(config.get('analysis'), dict) else {}
     if analysis.get('enabled'):
         payload['analysis'] = dict(analysis)
@@ -698,15 +1583,69 @@ def initial_step_status(step):
 
 
 def ready_step_ids(definition, step_states):
-    """Return pending step ids whose dependencies are all terminal success states."""
+    """Return pending steps whose dependency-result policies are satisfied.
+
+    Normal edges remain fail-closed and only accept ``passed``/``skipped``.
+    A ``blocked``/``failed`` result may satisfy an edge only when either the
+    upstream explicitly advances on any result or the downstream explicitly
+    opts into running after an upstream blocker.
+    """
+    steps = definition.get('steps') or []
+    step_by_id = {
+        step.get('id'): step for step in steps if isinstance(step, dict)
+    }
     ready = []
-    for step in definition.get('steps') or []:
+    for step in steps:
         if step_states.get(step['id'], 'pending') != 'pending':
             continue
         deps = step.get('depends_on') or []
-        if all(step_states.get(dep) in TERMINAL_STEP_STATUSES for dep in deps):
+        if all(_workflow_dependency_satisfied(
+                step_by_id.get(dep) or {}, step, step_states.get(dep))
+               for dep in deps):
             ready.append(step['id'])
     return ready
+
+
+def _workflow_policy_inputs(step):
+    inputs = step.get('inputs') if isinstance(step, dict) else None
+    return inputs if isinstance(inputs, dict) else {}
+
+
+def step_advances_on_any_result(step):
+    """Return whether a step's terminal failure may release its dependants."""
+    if not isinstance(step, dict):
+        return False
+    if step.get('advance_on_any_result') is True:
+        return True
+    if str(step.get('advance_policy') or '').strip() == 'advance_on_any_result':
+        return True
+    inputs = _workflow_policy_inputs(step)
+    return (
+        inputs.get('advance_on_any_result') is True
+        or str(inputs.get('advance_policy') or '').strip()
+        == 'advance_on_any_result'
+    )
+
+
+def step_runs_if_upstream_blocked(step):
+    """Return whether a step explicitly accepts blocked/failed dependencies."""
+    if not isinstance(step, dict):
+        return False
+    if step.get('run_even_if_upstream_blocked') is True:
+        return True
+    return _workflow_policy_inputs(step).get(
+        'run_even_if_upstream_blocked') is True
+
+
+def _workflow_dependency_satisfied(upstream, downstream, upstream_status):
+    if upstream_status in TERMINAL_STEP_STATUSES:
+        return True
+    if upstream_status not in TERMINAL_RESULT_STEP_STATUSES:
+        return False
+    return (
+        step_advances_on_any_result(upstream)
+        or step_runs_if_upstream_blocked(downstream)
+    )
 
 
 def _dig(payload, path):
@@ -795,10 +1734,243 @@ def evaluate_step_gates(step, result):
                 'message': gate.get('message') or '',
                 'error': gate.get('error') or '',
             })
+    result_status = result.get('status') or 'passed'
     if not failed:
-        return {'passed': True, 'status': result.get('status') or 'passed', 'failed_gates': []}
-    status = failed[0].get('on_fail') if failed[0].get('on_fail') in STEP_STATUSES else 'blocked'
-    return {'passed': False, 'status': status, 'failed_gates': failed}
+        return {
+            'passed': True,
+            'status': result_status,
+            'failed_gates': [],
+            'warning_only': False,
+        }
+    blocking = [
+        gate for gate in failed if gate.get('on_fail') != 'warn'
+    ]
+    if not blocking:
+        return {
+            'passed': True,
+            'status': result_status,
+            'failed_gates': failed,
+            'warning_only': True,
+        }
+    status = (
+        blocking[0].get('on_fail')
+        if blocking[0].get('on_fail') in STEP_STATUSES
+        else 'blocked'
+    )
+    return {
+        'passed': False,
+        'status': status,
+        'failed_gates': failed,
+        'warning_only': False,
+    }
+
+
+def _contract_path_exists(payload, path):
+    """Return true when a declared path exists, preserving valid false/zero values."""
+    current = payload if isinstance(payload, dict) else {}
+    parts = [part for part in str(path or '').strip().split('.') if part]
+    if not parts:
+        return False
+    for part in parts:
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    return True
+
+
+def _contract_field_present(payload, path):
+    if not _contract_path_exists(payload, path):
+        return False
+    value = _dig(payload, path)
+    return value not in (None, '', [], {})
+
+
+def _contract_fields(value):
+    fields = []
+    for raw in value or []:
+        if isinstance(raw, dict):
+            raw = raw.get('name') or raw.get('path') or raw.get('key')
+        name = str(raw or '').strip()
+        if name and name not in fields:
+            fields.append(name)
+    return fields
+
+
+def step_contract_failure_policy(step):
+    """Resolve contract failure behavior without weakening explicit blockers."""
+    step = step if isinstance(step, dict) else {}
+    explicit = str(step.get('contract_on_fail') or '').strip()
+    if explicit in ('blocked', 'failed', 'warn'):
+        return explicit
+    gates = step.get('gates') if isinstance(step.get('gates'), list) else []
+    if gates and all(str(gate.get('on_fail') or 'blocked') == 'warn'
+                     for gate in gates if isinstance(gate, dict)):
+        return 'warn'
+    return 'blocked'
+
+
+def collect_declared_step_outputs(step, result):
+    """Persist every declared output, accepting legacy top-level writebacks."""
+    step = step if isinstance(step, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    outputs = dict(result.get('outputs') or {}) if isinstance(
+        result.get('outputs'), dict) else {}
+    declared = _contract_fields(step.get('outputs'))
+    control_fields = (
+        'business_failure_confirmed', 'notification_required',
+        'report_required', 'business_conclusion', 'automation_conclusion',
+        'automation_failure_confirmed', 'automation_error_count',
+    )
+    for name in list(dict.fromkeys(declared + list(control_fields))):
+        if _contract_path_exists(outputs, name):
+            continue
+        if _contract_path_exists(result, name):
+            value = _dig(result, name)
+            target = outputs
+            parts = name.split('.')
+            for part in parts[:-1]:
+                target = target.setdefault(part, {})
+            target[parts[-1]] = value
+    return outputs
+
+
+def validate_step_result_contract(step, result):
+    """Validate declared metrics, evidence and outputs on every result writeback."""
+    step = step if isinstance(step, dict) else {}
+    result = result if isinstance(result, dict) else {}
+    sections = {
+        'metrics': _contract_fields(step.get('required_metrics')),
+        'evidence': _contract_fields(step.get('required_evidence')),
+        'outputs': _contract_fields(step.get('outputs')),
+    }
+    allow_empty = (
+        step.get('allow_empty_contract_fields')
+        if isinstance(step.get('allow_empty_contract_fields'), dict)
+        else {})
+    missing = {}
+    for section, fields in sections.items():
+        payload = result.get(section) if isinstance(result.get(section), dict) else {}
+        empty_is_valid = set(_contract_fields(allow_empty.get(section)))
+        absent = [
+            field for field in fields
+            if not (
+                _contract_path_exists(payload, field)
+                if field in empty_is_valid
+                else _contract_field_present(payload, field)
+            )
+        ]
+        if absent:
+            missing[section] = absent
+    valid = not missing
+    return {
+        'valid': valid,
+        'code': 'CONTRACT_VALID' if valid else 'CONTRACT_INVALID',
+        'policy': step_contract_failure_policy(step),
+        'declared': sections,
+        'missing': missing,
+    }
+
+
+def _find_output_value(outputs, key):
+    """Find the last non-empty key in deterministic step/output insertion order."""
+    found = None
+    def visit(value):
+        nonlocal found
+        if not isinstance(value, dict):
+            return
+        if key in value and value.get(key) not in (None, ''):
+            found = value.get(key)
+        for nested in value.values():
+            if isinstance(nested, dict):
+                visit(nested)
+    visit(outputs if isinstance(outputs, dict) else {})
+    return found
+
+
+def evaluate_notification_authorization(outputs, report_readback=False):
+    """Platform hard gate for brokered Workflow group notifications."""
+    outputs = outputs if isinstance(outputs, dict) else {}
+    checks = {
+        'business_failure_confirmed': _find_output_value(
+            outputs, 'business_failure_confirmed') is True,
+        'notification_required': _find_output_value(
+            outputs, 'notification_required') is True,
+        'report_required': _find_output_value(outputs, 'report_required') is True,
+        'hub_report_id': _find_output_value(outputs, 'hub_report_id') not in (None, ''),
+        'share_url': bool(str(_find_output_value(outputs, 'share_url') or '').strip()),
+        'report_readback': bool(report_readback),
+    }
+    allowed = all(checks.values())
+    return {
+        'allowed': allowed,
+        'checks': checks,
+        'notification_skipped': not allowed,
+        'wecom_sent': False,
+        'skip_reason': '' if allowed else 'business_pass_or_automation_only',
+    }
+
+
+def validate_notification_result_contract(result, authorization, sent_audit=False):
+    """Reject notification claims that were not authorized and audited by Hub."""
+    result = result if isinstance(result, dict) else {}
+    authorization = authorization if isinstance(authorization, dict) else {}
+    metrics = result.get('metrics') if isinstance(result.get('metrics'), dict) else {}
+    outputs = result.get('outputs') if isinstance(result.get('outputs'), dict) else {}
+    claim_keys = {
+        'notification_skipped', 'wecom_sent', 'skip_reason', 'wecom_log_id',
+    }
+    has_claim = any(
+        _contract_path_exists(section, key)
+        for section in (metrics, outputs)
+        for key in claim_keys
+    )
+    if not has_claim:
+        return {
+            'valid': True,
+            'code': 'NOTIFICATION_NOT_CLAIMED',
+            'checked': False,
+            'violations': [],
+        }
+
+    claimed_sent = any(
+        _find_output_value(section, 'wecom_sent') is True
+        for section in (metrics, outputs)
+    )
+    claimed_skipped = next((
+        _find_output_value(section, 'notification_skipped')
+        for section in (outputs, metrics)
+        if _find_output_value(section, 'notification_skipped') is not None
+    ), None)
+    skip_reason = next((
+        str(_find_output_value(section, 'skip_reason') or '').strip()
+        for section in (outputs, metrics)
+        if _find_output_value(section, 'skip_reason') is not None
+    ), '')
+    allowed = authorization.get('allowed') is True
+    violations = []
+    if claimed_sent and not allowed:
+        violations.append('notification_not_authorized')
+    if claimed_sent and not sent_audit:
+        violations.append('wecom_send_audit_missing')
+    if allowed and not claimed_sent:
+        violations.append('authorized_notification_not_sent')
+    if not allowed and claimed_skipped is not True:
+        violations.append('notification_skipped_must_be_true')
+    if not allowed and skip_reason != 'business_pass_or_automation_only':
+        violations.append('skip_reason_invalid')
+
+    return {
+        'valid': not violations,
+        'code': ('NOTIFICATION_CONTRACT_VALID' if not violations
+                 else 'NOTIFICATION_CONTRACT_INVALID'),
+        'checked': True,
+        'authorized': allowed,
+        'sent_audit': bool(sent_audit),
+        'claimed_sent': claimed_sent,
+        'claimed_skipped': claimed_skipped,
+        'skip_reason': skip_reason,
+        'violations': violations,
+    }
 
 
 def evaluate_step_branches(step, result):

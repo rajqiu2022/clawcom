@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -52,11 +53,27 @@ from app.models import (  # noqa: E402
     TestReport as _ReportModel,
     User,
     Topic,
+    TopicReply,
     hash_token,
 )
 
 
 class ShiftLeftApiTest(unittest.TestCase):
+    def test_topics_api_imports_collaboration_request_context(self):
+        source = (_WEB / 'app' / 'api' / 'topics.py').read_text(
+            encoding='utf-8')
+        self.assertIn(
+            'from flask import current_app, g, request, jsonify, session as flask_session',
+            source)
+
+    def test_topic_payload_exposes_runtime_collaboration_gate_and_server_permission(self):
+        response = self.client.get(
+            f'/api/v1/topics/{self.discussion_topic.id}')
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertTrue(response.get_json()['external_collaboration_enabled'])
+        self.assertTrue(
+            response.get_json()['can_manage_external_collaboration'])
+
     def setUp(self):
         self.app = Flask(__name__)
         self.app.config.update(
@@ -147,7 +164,24 @@ class ShiftLeftApiTest(unittest.TestCase):
             author_user_id=self.admin.id, author_name=self.admin.username,
             project_name=self.project.name, review_library_id=self.case_library.id,
             review_case_ids=[self.outside_case.id], review_status='reviewing')
-        db.session.add_all([self.review_topic, self.other_review_topic])
+        self.discussion_topic = Topic(
+            title='登录恢复方案讨论', content='请讨论登录恢复边界',
+            board='test_methods', author_user_id=self.admin.id,
+            author_name=self.admin.username, project_name=self.project.name,
+            status='open', visibility='assigned')
+        self.other_discussion_topic = Topic(
+            title='支付方案讨论', content='其他课题', board='test_methods',
+            author_user_id=self.admin.id, author_name=self.admin.username,
+            project_name=self.project.name, status='open')
+        self.projectless_topic = Topic(
+            title='跨项目方法讨论', content='不绑定项目的课题',
+            board='test_methods', author_user_id=self.admin.id,
+            author_name=self.admin.username, status='open')
+        db.session.add_all([
+            self.review_topic, self.other_review_topic,
+            self.discussion_topic, self.other_discussion_topic,
+            self.projectless_topic,
+        ])
         db.session.flush()
         self.review_round = CaseReviewRound(
             topic_id=self.review_topic.id, round_number=1,
@@ -343,6 +377,22 @@ class ShiftLeftApiTest(unittest.TestCase):
         self.assertEqual(decision.status_code, 201,
                          decision.get_data(as_text=True))
 
+        feedback_current = self.client.get(
+            f"/api/v1/shift-left/findings/{finding['id']}", headers=auth)
+        feedback = self.client.post(
+            f"/api/v1/shift-left/findings/{finding['id']}/feedback",
+            json={
+                'label': 'true_positive',
+                'from_revision': feedback_current.get_json()['revision'],
+                'note': 'Developer AI 根据双端常量和报告证据确认命中',
+                'evidence_refs': ['hub-artifact://analysis/constants-diff'],
+            },
+            headers=dict(auth, **{'Idempotency-Key': 'dev-ai-feedback-1'}),
+        )
+        self.assertEqual(feedback.status_code, 201,
+                         feedback.get_data(as_text=True))
+        self.assertEqual(feedback.get_json()['source_type'], 'developer_ai')
+
         wrong_revision = self.client.post(
             f"/api/v1/shift-left/findings/{finding['id']}/transitions",
             json={'action': 'acknowledge', 'from_revision': 1,
@@ -400,6 +450,14 @@ class ShiftLeftApiTest(unittest.TestCase):
         self.assertEqual(
             created.get_json()['scopes'],
             ['case_review:read', 'case_review:comment', 'case_review:mark'])
+        listed = self.client.get(
+            '/api/v1/collaboration-sessions'
+            f'?subject_type=case_review&subject_id={self.review_topic.id}')
+        self.assertEqual(listed.status_code, 200, listed.get_data(as_text=True))
+        self.assertEqual(listed.get_json()['total'], 1)
+        self.assertEqual(
+            listed.get_json()['items'][0]['agent_identity'],
+            'developer-ai:racinggo-case-review')
         invitation = created.get_json()['invitation_code']
 
         with self.client.session_transaction() as sess:
@@ -408,7 +466,20 @@ class ShiftLeftApiTest(unittest.TestCase):
             '/api/v1/collaboration-sessions/exchange',
             json={'invitation_code': invitation},
         )
-        token = exchange.get_json()['access_token']
+        self.assertEqual(exchange.status_code, 200, exchange.get_data(as_text=True))
+        exchange_payload = exchange.get_json()
+        token = exchange_payload['access_token']
+        bootstrap = exchange_payload['bootstrap']
+        self.assertEqual(bootstrap['schema_version'], 'case-review-bootstrap.v1')
+        self.assertEqual(bootstrap['authorization']['access_token'], token)
+        self.assertIn(
+            f'/case-reviews/{self.review_topic.id}/context',
+            bootstrap['endpoints']['context'])
+        self.assertIn(
+            f'/case-reviews/{self.review_topic.id}/reviews',
+            bootstrap['endpoints']['reviews'])
+        self.assertIn('review_contract', bootstrap)
+        self.assertNotIn('case_review:decision', bootstrap['scopes'])
         auth = {'Authorization': f'Bearer {token}'}
 
         context = self.client.get(
@@ -416,6 +487,9 @@ class ShiftLeftApiTest(unittest.TestCase):
             headers=auth)
         self.assertEqual(context.status_code, 200, context.get_data(as_text=True))
         self.assertEqual(context.get_json()['open_round_id'], self.review_round.id)
+        self.assertEqual(
+            context.get_json()['review_summary']['submitted_review_count'], 0)
+        self.assertIn('reviews', context.get_json()['links'])
         cases = self.client.get(
             f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/cases',
             headers=auth)
@@ -434,15 +508,37 @@ class ShiftLeftApiTest(unittest.TestCase):
             auth, **{'Idempotency-Key': 'case-review-comment-1'})
         comment_body = {'content': '登录步骤缺少失败态覆盖', 'score': 7}
         comment = self.client.post(
-            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/comments',
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/reviews',
             json=comment_body, headers=comment_headers)
         replay = self.client.post(
-            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/comments',
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/reviews',
             json=comment_body, headers=comment_headers)
         self.assertEqual(comment.status_code, 201, comment.get_data(as_text=True))
         self.assertEqual(comment.get_json(), replay.get_json())
         self.assertEqual(CaseReviewComment.query.filter_by(
             round_id=self.review_round.id).count(), 1)
+        review_id = comment.get_json()['id']
+        self.assertTrue(comment.get_json()['owned_by_me'])
+
+        records = self.client.get(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/reviews',
+            headers=auth)
+        self.assertEqual(records.status_code, 200,
+                         records.get_data(as_text=True))
+        self.assertEqual(records.get_json()['total'], 1)
+        self.assertTrue(records.get_json()['items'][0]['owned_by_me'])
+
+        updated = self.client.patch(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}'
+            f'/reviews/{review_id}',
+            json={'content': '补充失败态覆盖和可观测证据', 'score': 9},
+            headers=dict(auth, **{
+                'Idempotency-Key': 'case-review-record-update-1'}))
+        self.assertEqual(updated.status_code, 200,
+                         updated.get_data(as_text=True))
+        self.assertEqual(updated.get_json()['score'], 9)
+        self.assertTrue(updated.get_json()['is_edited'])
+        self.assertTrue(updated.get_json()['can_modify'])
 
         decision_denied = self.client.post(
             f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/comments',
@@ -467,6 +563,378 @@ class ShiftLeftApiTest(unittest.TestCase):
         self.assertEqual(marked.get_json(), mark_replay.get_json())
         self.assertEqual(CaseReviewNodeMark.query.filter_by(
             topic_id=self.review_topic.id).count(), 1)
+
+        deleted = self.client.delete(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}'
+            f'/reviews/{review_id}',
+            headers=dict(auth, **{
+                'Idempotency-Key': 'case-review-record-delete-1'}))
+        self.assertEqual(deleted.status_code, 200,
+                         deleted.get_data(as_text=True))
+        self.assertTrue(deleted.get_json()['deleted'])
+        records_after_delete = self.client.get(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/reviews',
+            headers=auth)
+        self.assertEqual(records_after_delete.get_json()['total'], 0)
+        context_after_delete = self.client.get(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/context',
+            headers=auth)
+        self.assertEqual(
+            context_after_delete.get_json()['review_summary']
+            ['submitted_review_count'], 0)
+        self.assertEqual(
+            context_after_delete.get_json()['rounds'][0]['comments'], [])
+
+    def test_topic_collaboration_is_single_subject_idempotent_and_owned(self):
+        created = self.client.post(
+            '/api/v1/collaboration-sessions',
+            json={
+                'subject_type': 'topic',
+                'subject_id': self.discussion_topic.id,
+                'agent_identity': 'developer-ai:racinggo:topic-alice',
+                'invitation_ttl_minutes': 4320,
+                'token_ttl_minutes': 4320,
+            },
+            headers={'Idempotency-Key': 'topic-collaboration-create-1'},
+        )
+        self.assertEqual(created.status_code, 201, created.get_data(as_text=True))
+        self.assertEqual(created.get_json()['project_id'], self.project.id)
+        self.assertEqual(created.get_json()['scopes'],
+                         ['topic:read', 'topic:reply'])
+        session_id = created.get_json()['id']
+        invitation = created.get_json()['invitation_code']
+
+        pending_deadline = datetime.now() + timedelta(hours=60)
+        extended = self.client.patch(
+            f'/api/v1/collaboration-sessions/{session_id}/deadline',
+            json={'expires_at': pending_deadline.isoformat(timespec='seconds')},
+            headers={'Idempotency-Key': 'topic-collaboration-deadline-1'},
+        )
+        self.assertEqual(extended.status_code, 200,
+                         extended.get_data(as_text=True))
+        self.assertFalse(extended.get_json()['link_rotated'])
+
+        with self.client.session_transaction() as sess:
+            sess.clear()
+        exchanged = self.client.post(
+            '/api/v1/collaboration-sessions/exchange',
+            json={'invitation_code': invitation})
+        self.assertEqual(exchanged.status_code, 200,
+                         exchanged.get_data(as_text=True))
+        package = exchanged.get_json()['bootstrap']
+        self.assertEqual(package['schema_version'],
+                         'topic-discussion-bootstrap.v1')
+        self.assertIn(f'/topics/{self.discussion_topic.id}',
+                      package['endpoints']['topic'])
+        token = exchanged.get_json()['access_token']
+        auth = {'Authorization': f'Bearer {token}'}
+
+        topic = self.client.get(
+            f'/api/v1/topics/{self.discussion_topic.id}', headers=auth)
+        self.assertEqual(topic.status_code, 200, topic.get_data(as_text=True))
+        self.assertTrue(topic.get_json()['external_collaboration'])
+        other = self.client.get(
+            f'/api/v1/topics/{self.other_discussion_topic.id}', headers=auth)
+        self.assertEqual(other.status_code, 403, other.get_data(as_text=True))
+        listing = self.client.get('/api/v1/topics', headers=auth)
+        self.assertEqual(listing.status_code, 403, listing.get_data(as_text=True))
+        self.assertEqual(listing.get_json()['code'], 'COLLABORATION_PATH_DENIED')
+
+        missing_key = self.client.post(
+            f'/api/v1/topics/{self.discussion_topic.id}/replies',
+            json={'content': '先补充登录态恢复的失败路径'}, headers=auth)
+        self.assertEqual(missing_key.status_code, 400,
+                         missing_key.get_data(as_text=True))
+        reply_headers = dict(auth, **{
+            'Idempotency-Key': 'topic-collaboration-reply-1'})
+        reply_body = {'content': '需要覆盖 Token 过期后的静默恢复与重新登录。'}
+        replied = self.client.post(
+            f'/api/v1/topics/{self.discussion_topic.id}/replies',
+            json=reply_body, headers=reply_headers)
+        replay = self.client.post(
+            f'/api/v1/topics/{self.discussion_topic.id}/replies',
+            json=reply_body, headers=reply_headers)
+        self.assertEqual(replied.status_code, 201, replied.get_data(as_text=True))
+        self.assertEqual(replied.get_json(), replay.get_json())
+        self.assertTrue(replied.get_json()['owned_by_me'])
+        self.assertTrue(replied.get_json()['external_collaboration'])
+        self.assertEqual(TopicReply.query.filter_by(
+            topic_id=self.discussion_topic.id).count(), 1)
+        reply_id = replied.get_json()['id']
+
+        changed = self.client.patch(
+            f'/api/v1/topics/{self.discussion_topic.id}/replies/{reply_id}',
+            json={'content': '补充：覆盖 Token 过期、顶号和断网恢复。'},
+            headers=dict(auth, **{
+                'Idempotency-Key': 'topic-collaboration-reply-update-1'}))
+        self.assertEqual(changed.status_code, 200,
+                         changed.get_data(as_text=True))
+        self.assertTrue(changed.get_json()['owned_by_me'])
+
+        readback = self.client.get(
+            f'/api/v1/topics/{self.discussion_topic.id}', headers=auth)
+        self.assertTrue(readback.get_json()['replies'][0]['owned_by_me'])
+        self.assertIn('顶号', readback.get_json()['replies'][0]['content'])
+
+        with self.client.session_transaction() as sess:
+            sess['user_id'] = self.admin.id
+        second = self.client.post(
+            '/api/v1/collaboration-sessions',
+            json={
+                'subject_type': 'topic',
+                'subject_id': self.discussion_topic.id,
+                'agent_identity': 'developer-ai:racinggo:topic-bob',
+            },
+            headers={'Idempotency-Key': 'topic-collaboration-create-2'})
+        with self.client.session_transaction() as sess:
+            sess.clear()
+        second_exchange = self.client.post(
+            '/api/v1/collaboration-sessions/exchange',
+            json={'invitation_code': second.get_json()['invitation_code']})
+        second_auth = {
+            'Authorization': 'Bearer ' + second_exchange.get_json()['access_token'],
+            'Idempotency-Key': 'topic-cross-session-update-1',
+        }
+        denied_update = self.client.patch(
+            f'/api/v1/topics/{self.discussion_topic.id}/replies/{reply_id}',
+            json={'content': 'Bob overwrite attempt'}, headers=second_auth)
+        self.assertEqual(denied_update.status_code, 403,
+                         denied_update.get_data(as_text=True))
+        self.assertEqual(denied_update.get_json()['code'],
+                         'TOPIC_REPLY_NOT_OWNER')
+
+        deleted = self.client.delete(
+            f'/api/v1/topics/{self.discussion_topic.id}/replies/{reply_id}',
+            headers=dict(auth, **{
+                'Idempotency-Key': 'topic-collaboration-reply-delete-1'}))
+        self.assertEqual(deleted.status_code, 200,
+                         deleted.get_data(as_text=True))
+        self.assertTrue(deleted.get_json()['deleted'])
+
+    def test_projectless_topic_can_issue_scoped_external_invite(self):
+        created = self.client.post(
+            '/api/v1/collaboration-sessions',
+            json={
+                'subject_type': 'topic',
+                'subject_id': self.projectless_topic.id,
+                'agent_identity': 'developer-ai:shared-method:codex',
+            },
+            headers={'Idempotency-Key': 'projectless-topic-invite-1'},
+        )
+        self.assertEqual(created.status_code, 201, created.get_data(as_text=True))
+        self.assertIsNone(created.get_json()['project_id'])
+
+        review_as_topic = self.client.post(
+            '/api/v1/collaboration-sessions',
+            json={
+                'subject_type': 'topic',
+                'subject_id': self.review_topic.id,
+                'agent_identity': 'developer-ai:wrong-contract:codex',
+            },
+            headers={'Idempotency-Key': 'review-as-topic-denied-1'},
+        )
+        self.assertEqual(review_as_topic.status_code, 400,
+                         review_as_topic.get_data(as_text=True))
+        self.assertEqual(review_as_topic.get_json()['code'],
+                         'TOPIC_SUBJECT_TYPE_MISMATCH')
+
+    def test_case_review_records_cannot_be_changed_by_another_session(self):
+        tokens = []
+        for index, identity in enumerate((
+                'developer-ai:racinggo:alice-codex',
+                'developer-ai:racinggo:bob-claude')):
+            created = self.client.post(
+                '/api/v1/collaboration-sessions',
+                json={
+                    'subject_type': 'case_review',
+                    'subject_id': self.review_topic.id,
+                    'agent_identity': identity,
+                },
+                headers={'Idempotency-Key':
+                         'case-review-owner-session-%d' % index})
+            invitation = created.get_json()['invitation_code']
+            with self.client.session_transaction() as sess:
+                sess.clear()
+            exchanged = self.client.post(
+                '/api/v1/collaboration-sessions/exchange',
+                json={'invitation_code': invitation})
+            tokens.append(exchanged.get_json()['access_token'])
+            if index == 0:
+                with self.client.session_transaction() as sess:
+                    sess['user_id'] = self.admin.id
+
+        first_auth = {
+            'Authorization': 'Bearer ' + tokens[0],
+            'Idempotency-Key': 'case-review-owner-create',
+        }
+        created_record = self.client.post(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/reviews',
+            json={'content': 'Alice review', 'score': 8},
+            headers=first_auth)
+        self.assertEqual(created_record.status_code, 201,
+                         created_record.get_data(as_text=True))
+        review_id = created_record.get_json()['id']
+
+        second_auth = {'Authorization': 'Bearer ' + tokens[1]}
+        visible = self.client.get(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/reviews',
+            headers=second_auth)
+        self.assertFalse(visible.get_json()['items'][0]['owned_by_me'])
+        denied_update = self.client.patch(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}'
+            f'/reviews/{review_id}',
+            json={'content': 'Bob overwrite attempt'},
+            headers=dict(second_auth, **{
+                'Idempotency-Key': 'case-review-cross-update'}))
+        self.assertEqual(denied_update.status_code, 403)
+        self.assertEqual(denied_update.get_json()['code'],
+                         'CASE_REVIEW_RECORD_NOT_OWNER')
+        denied_delete = self.client.delete(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}'
+            f'/reviews/{review_id}',
+            headers=dict(second_auth, **{
+                'Idempotency-Key': 'case-review-cross-delete'}))
+        self.assertEqual(denied_delete.status_code, 403)
+        self.assertEqual(denied_delete.get_json()['code'],
+                         'CASE_REVIEW_RECORD_NOT_OWNER')
+
+    def test_case_review_collaboration_identity_is_specific_and_not_reused(self):
+        generic = self.client.post(
+            '/api/v1/collaboration-sessions',
+            json={
+                'subject_type': 'case_review',
+                'subject_id': self.review_topic.id,
+                'agent_identity': 'developer-ai:case-review',
+            },
+            headers={'Idempotency-Key': 'case-review-generic-identity'},
+        )
+        self.assertEqual(generic.status_code, 400)
+        self.assertEqual(generic.get_json()['code'],
+                         'AGENT_IDENTITY_TOO_GENERIC')
+
+        body = {
+            'subject_type': 'case_review',
+            'subject_id': self.review_topic.id,
+            'agent_identity': 'developer-ai:racinggo:alice-codex',
+        }
+        created = self.client.post(
+            '/api/v1/collaboration-sessions', json=body,
+            headers={'Idempotency-Key': 'case-review-unique-identity'})
+        self.assertEqual(created.status_code, 201,
+                         created.get_data(as_text=True))
+        replay = self.client.post(
+            '/api/v1/collaboration-sessions', json=body,
+            headers={'Idempotency-Key': 'case-review-unique-identity'})
+        self.assertEqual(replay.status_code, 200,
+                         replay.get_data(as_text=True))
+        duplicate = self.client.post(
+            '/api/v1/collaboration-sessions', json=body,
+            headers={'Idempotency-Key': 'case-review-duplicate-identity'})
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(duplicate.get_json()['code'],
+                         'COLLABORATION_IDENTITY_ACTIVE')
+
+    def test_case_review_link_supports_72_hours_and_same_link_deadline_update(self):
+        created = self.client.post(
+            '/api/v1/collaboration-sessions',
+            json={
+                'subject_type': 'case_review',
+                'subject_id': self.review_topic.id,
+                'agent_identity': 'developer-ai:racinggo:deadline-test',
+                'invitation_ttl_minutes': 4320,
+                'token_ttl_minutes': 4320,
+            },
+            headers={'Idempotency-Key': 'case-review-72h-create'},
+        )
+        self.assertEqual(created.status_code, 201, created.get_data(as_text=True))
+        payload = created.get_json()
+        session_id = payload['id']
+        invitation = payload['invitation_code']
+        row = db.session.get(CollaborationSession, session_id)
+        self.assertGreater(row.invitation_expires_at,
+                           datetime.now() + timedelta(hours=71, minutes=59))
+        self.assertEqual(row.token_ttl_seconds, 72 * 60 * 60)
+
+        pending_deadline = datetime.now() + timedelta(hours=60)
+        updated = self.client.patch(
+            f'/api/v1/collaboration-sessions/{session_id}/deadline',
+            json={'expires_at': pending_deadline.isoformat(timespec='seconds')},
+            headers={'Idempotency-Key': 'case-review-pending-deadline'},
+        )
+        self.assertEqual(updated.status_code, 200, updated.get_data(as_text=True))
+        self.assertEqual(updated.get_json()['deadline_field'],
+                         'invitation_expires_at')
+        self.assertFalse(updated.get_json()['link_rotated'])
+
+        with self.client.session_transaction() as sess:
+            sess.clear()
+        exchanged = self.client.post(
+            '/api/v1/collaboration-sessions/exchange',
+            json={'invitation_code': invitation})
+        self.assertEqual(exchanged.status_code, 200,
+                         exchanged.get_data(as_text=True))
+        access_token = exchanged.get_json()['access_token']
+
+        with self.client.session_transaction() as sess:
+            sess['user_id'] = self.admin.id
+        row = db.session.get(CollaborationSession, session_id)
+        row.token_expires_at = datetime.now() - timedelta(minutes=1)
+        db.session.commit()
+        active_deadline = datetime.now() + timedelta(hours=48)
+        extended = self.client.patch(
+            f'/api/v1/collaboration-sessions/{session_id}/deadline',
+            json={'expires_at': active_deadline.isoformat(timespec='seconds')},
+            headers={'Idempotency-Key': 'case-review-active-deadline'},
+        )
+        self.assertEqual(extended.status_code, 200,
+                         extended.get_data(as_text=True))
+        self.assertEqual(extended.get_json()['deadline_field'], 'token_expires_at')
+        self.assertFalse(extended.get_json()['link_rotated'])
+
+        with self.client.session_transaction() as sess:
+            sess.clear()
+        context = self.client.get(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/context',
+            headers={'Authorization': f'Bearer {access_token}'})
+        self.assertEqual(context.status_code, 200, context.get_data(as_text=True))
+
+    def test_case_review_deadline_cannot_exceed_72_hours(self):
+        created = self.client.post(
+            '/api/v1/collaboration-sessions',
+            json={
+                'subject_type': 'case_review',
+                'subject_id': self.review_topic.id,
+                'agent_identity': 'developer-ai:racinggo:deadline-cap',
+            },
+            headers={'Idempotency-Key': 'case-review-deadline-cap-create'},
+        )
+        too_late = datetime.now() + timedelta(hours=73)
+        response = self.client.patch(
+            f"/api/v1/collaboration-sessions/{created.get_json()['id']}/deadline",
+            json={'expires_at': too_late.isoformat(timespec='seconds')},
+            headers={'Idempotency-Key': 'case-review-deadline-cap-update'},
+        )
+        self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+        self.assertEqual(response.get_json()['code'],
+                         'INVALID_COLLABORATION_DEADLINE')
+
+    def test_collaboration_create_rejects_ttl_over_72_hours_without_clamping(self):
+        response = self.client.post(
+            '/api/v1/collaboration-sessions',
+            json={
+                'subject_type': 'topic',
+                'subject_id': self.discussion_topic.id,
+                'agent_identity': 'developer-ai:racinggo:ttl-overflow',
+                'invitation_ttl_minutes': 4321,
+                'token_ttl_minutes': 4320,
+            },
+            headers={'Idempotency-Key': 'topic-ttl-overflow'},
+        )
+        self.assertEqual(response.status_code, 400, response.get_data(as_text=True))
+        self.assertEqual(
+            response.get_json()['code'], 'COLLABORATION_TTL_OUT_OF_RANGE')
+        self.assertEqual(0, CollaborationSession.query.filter_by(
+            agent_identity='developer-ai:racinggo:ttl-overflow').count())
 
     def test_agent_cannot_confirm_its_own_finding_or_verify_its_own_fix(self):
         with self.client.session_transaction() as sess:

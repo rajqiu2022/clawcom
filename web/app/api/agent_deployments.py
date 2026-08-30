@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shlex
+import time
 
 from flask import current_app, jsonify, request
 
@@ -149,6 +150,8 @@ def _deployment_defaults() -> dict:
         'deploy_default_host',
         'deploy_default_ssh_port',
         'deploy_default_ssh_user',
+        'deploy_codex_runtime_dir',
+        'deploy_codex_requirements_sha256',
     ))
     return {
         'host': (os.getenv('DEPLOY_DEFAULT_HOST') or rows.get('deploy_default_host') or '').strip(),
@@ -166,6 +169,16 @@ def _deployment_defaults() -> dict:
             'deploy_default_ssh_key_passphrase',
             'deploy_ssh_key_passphrase',
         )) or None,
+        'codex_runtime_dir': (
+            os.getenv('DEPLOY_CODEX_RUNTIME_DIR')
+            or rows.get('deploy_codex_runtime_dir')
+            or DEFAULT_CODEX_RUNTIME_DIR
+        ).strip().rstrip('/'),
+        'codex_requirements_sha256': (
+            os.getenv('DEPLOY_CODEX_REQUIREMENTS_SHA256')
+            or rows.get('deploy_codex_requirements_sha256')
+            or ''
+        ).strip().lower(),
     }
 
 
@@ -183,7 +196,9 @@ def _deployment_host_port(dep: AgentDeployment, defaults: dict) -> tuple[str, in
     return raw_host, port
 
 
-def _restart_systemd_agent(claw: OpenClawInstance, actor_name: str) -> dict:
+def _restart_systemd_agent(
+        claw: OpenClawInstance, actor_name: str,
+        reset_sessions: bool = False) -> dict:
     """Restart the latest successful Hub-managed systemd provider."""
     dep = (AgentDeployment.query
            .filter_by(openclaw_id=claw.id, deploy_method='systemd', status='success')
@@ -250,7 +265,11 @@ def _restart_systemd_agent(claw: OpenClawInstance, actor_name: str) -> dict:
             },
             claw=claw,
             claw_token=claw.get_token_plain() or '',
-            hub_url=request.host_url.rstrip('/'),
+            # Agent/sidecar 走稳定的内网 HTTP 入口；不能使用浏览器请求的
+            # host_url，否则从 NGN HTTPS 页面点击重启会把弱证书地址写回
+            # sidecar.env，导致目标机 SSL 校验失败并持续重启。
+            hub_url=(os.environ.get('HUB_PUBLIC_URL')
+                     or 'http://clawteam.woa.com:18800').rstrip('/'),
             actor_name=actor_name,
         )
         data = deploy_req.systemd_data_dir()
@@ -330,6 +349,26 @@ def _restart_systemd_agent(claw: OpenClawInstance, actor_name: str) -> dict:
         if not sync.ok:
             raise RuntimeError(f'同步配置权限失败：{(sync.stderr or sync.stdout)[-800:]}')
 
+        sessions_reset = False
+        if reset_sessions:
+            sessions_path = f'{data}/sessions/sessions.json'
+            backup_path = (
+                f'{sessions_path}.bak-model-switch-{int(time.time())}')
+            reset = ssh.run(
+                f"if [ -f {shlex.quote(sessions_path)} ]; then "
+                f"cp -a {shlex.quote(sessions_path)} "
+                f"{shlex.quote(backup_path)}; fi && "
+                f"printf '{{}}\\n' > {shlex.quote(sessions_path)} && "
+                f"chown {shlex.quote(service_user)}:{AGENT_SERVICE_GROUP} "
+                f"{shlex.quote(sessions_path)} && "
+                f"chmod 0600 {shlex.quote(sessions_path)}",
+                timeout=20, name='reset Hermes conversation mappings')
+            if not reset.ok:
+                raise RuntimeError(
+                    '模型切换后的会话重置失败：'
+                    f'{(reset.stderr or reset.stdout)[-800:]}')
+            sessions_reset = True
+
         reload_sr = ssh.run('systemctl daemon-reload', timeout=30, name='systemctl daemon-reload')
         if not reload_sr.ok:
             raise RuntimeError(f'daemon-reload 失败：{(reload_sr.stderr or reload_sr.stdout)[-800:]}')
@@ -364,6 +403,7 @@ def _restart_systemd_agent(claw: OpenClawInstance, actor_name: str) -> dict:
         'host': f'{host}:{ssh_port}' if ssh_port != 22 else host,
         'status': 'active',
         'config_synced': True,
+        'sessions_reset': sessions_reset,
         'llm_provider': normalize_hermes_provider(claw.llm_provider or DEFAULT_HERMES_LLM_PROVIDER),
         'llm_model': normalize_hermes_model(
             claw.llm_model or DEFAULT_HERMES_LLM_MODEL,
@@ -422,13 +462,27 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
     ssh_password = defaults['ssh_password'] or None
     ssh_private_key = defaults['ssh_private_key'] or None
     ssh_key_passphrase = defaults['ssh_key_passphrase'] or None
-    venus_api_key = _configured_venus_api_key() or None
+    codex_auth_mode = (data.get('codex_auth_mode') or 'chatgpt_subscription').strip().lower()
+    requested_provider = data.get('llm_provider') or getattr(claw, 'llm_provider', None)
+    if agent_type == 'codex' and codex_auth_mode == 'timiai':
+        requested_provider = 'timiai'
     llm_provider = normalize_hermes_provider(
-        data.get('llm_provider') or getattr(claw, 'llm_provider', None)
-        or DEFAULT_HERMES_LLM_PROVIDER)
+        requested_provider or DEFAULT_HERMES_LLM_PROVIDER)
     timiai_project = normalize_timiai_project(
         data.get('timiai_project') or getattr(claw, 'timiai_project', None))
-    timiai_api_key = _configured_timiai_api_key(timiai_project) or None
+    needs_venus_key = agent_type == 'hermes' and llm_provider == 'venus'
+    needs_timiai_key = (
+        (agent_type == 'hermes' and llm_provider == 'timiai')
+        or (agent_type == 'codex' and codex_auth_mode == 'timiai')
+    )
+    venus_api_key = (
+        _configured_venus_api_key() or None
+        if needs_venus_key else None
+    )
+    timiai_api_key = (
+        _configured_timiai_api_key(timiai_project) or None
+        if needs_timiai_key else None
+    )
     default_model = (DEFAULT_HERMES_LLM_MODEL if llm_provider == 'venus'
                      else DEFAULT_TIMIAI_LLM_MODEL)
     llm_model = normalize_hermes_model(
@@ -448,6 +502,10 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
         raise ValueError(
             'TimiAI API Key 未配置：请在 Hub 密钥箱配置项目 %s 对应的密钥' %
             timiai_project_label(timiai_project))
+    if agent_type == 'codex' and codex_auth_mode == 'timiai' and not timiai_api_key:
+        raise ValueError(
+            'TimiAI API Key 未配置：请在 Hub 密钥箱配置项目 %s 对应的密钥' %
+            timiai_project_label(timiai_project))
 
     hermes_home = (data.get('hermes_home') or '').strip().rstrip('/') or None
     hermes_install_dir = (data.get('hermes_install_dir') or '').strip().rstrip('/') or None
@@ -463,7 +521,10 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
         data.get('work_dirs', getattr(claw, 'work_dirs', None) or []))
 
     safe = claw.safe_name or ''
-    codex_runtime_dir = (data.get('codex_runtime_dir') or DEFAULT_CODEX_RUNTIME_DIR).strip().rstrip('/')
+    codex_runtime_dir = (
+        data.get('codex_runtime_dir') or defaults.get('codex_runtime_dir')
+        or DEFAULT_CODEX_RUNTIME_DIR
+    ).strip().rstrip('/')
     codex_data_dir = (data.get('codex_data_dir') or
                       f"{_build_remote_base_dir_compat(claw, safe_name=safe)}/data").strip().rstrip('/')
     codex_python = (data.get('codex_python') or '').strip() or None
@@ -471,12 +532,34 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
                  f'{codex_runtime_dir}/venv/bin/codex').strip()
     codex_workspace = (data.get('codex_workspace') or '').strip().rstrip('/') or None
     codex_model = (data.get('codex_model') or '').strip()
+    if agent_type == 'codex' and codex_auth_mode == 'timiai' and not codex_model:
+        codex_model = llm_model
     codex_requirements = (data.get('codex_requirements') or
                           f'{codex_runtime_dir}/requirements-codex.lock').strip()
     codex_wheelhouse = (data.get('codex_wheelhouse') or
                         f'{codex_runtime_dir}/wheelhouse').strip().rstrip('/')
-    codex_requirements_sha256 = (data.get('codex_requirements_sha256') or '').strip().lower()
-    codex_auth_mode = (data.get('codex_auth_mode') or 'chatgpt_subscription').strip().lower()
+    codex_requirements_sha256 = (
+        data.get('codex_requirements_sha256')
+        or defaults.get('codex_requirements_sha256')
+        or ''
+    ).strip().lower()
+    worker_release_record_id = data.get('worker_release_record_id')
+    worker_release = None
+    worker_release_fields = {
+        'worker_release_record_id': None,
+        'worker_release_id': '',
+        'worker_source_commit': '',
+        'worker_release_manifest_sha256': '',
+        'worker_platform_manifest_sha256': '',
+        'worker_package_manifest_sha256': '',
+        'worker_artifact_path': '',
+        'worker_artifact_filename': '',
+        'worker_artifact_sha256': '',
+        'worker_artifact_size': 0,
+        'worker_install_root': '',
+        'worker_instance_dir': '',
+        'worker_runtime_mode': 'legacy_split',
+    }
     wecom_node_bin = (data.get('wecom_node_bin') or '/usr/bin/node').strip()
     wecom_sdk_root = (data.get('wecom_sdk_root') or
                       '/opt/wecom-runtime/node_modules/@wecom/aibot-node-sdk').strip().rstrip('/')
@@ -509,9 +592,9 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
         if not _SHA256_RE.fullmatch(codex_requirements_sha256):
             raise ValueError('codex_requirements_sha256 必填，且必须是 64 位十六进制 SHA-256')
         if codex_auth_mode not in (
-                'chatgpt_subscription', 'api_key', 'enterprise_access_token'):
+                'chatgpt_subscription', 'timiai', 'api_key', 'enterprise_access_token'):
             raise ValueError(
-                'codex_auth_mode 仅支持 chatgpt_subscription、api_key、enterprise_access_token')
+                'codex_auth_mode 仅支持 chatgpt_subscription、timiai、api_key、enterprise_access_token')
         if bool(wecom_bot_id) != bool(wecom_bot_secret):
             raise ValueError('启用企微通信时必须同时配置 wecom_bot_id 与 wecom_bot_secret')
         if wecom_bot_id and not owner_wecom_userid:
@@ -522,6 +605,31 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
                     (wecom_sdk_root, 'wecom_sdk_root')):
                 if not path.startswith('/') or any(ch.isspace() for ch in path) or '%' in path:
                     raise ValueError(f'{label} 必须是不含空格或 % 的 Linux 绝对路径')
+        if worker_release_record_id not in (None, ''):
+            try:
+                from app.services.worker_releases import approved_release
+                worker_release = approved_release(int(worker_release_record_id))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(str(exc)) from exc
+            worker_release_fields.update({
+                'worker_release_record_id': worker_release.id,
+                'worker_release_id': worker_release.release_id,
+                'worker_source_commit': worker_release.source_commit,
+                'worker_release_manifest_sha256': worker_release.release_manifest_sha256,
+                'worker_platform_manifest_sha256': worker_release.platform_manifest_sha256,
+                'worker_package_manifest_sha256': worker_release.package_manifest_sha256,
+                'worker_artifact_path': worker_release.artifact_path,
+                'worker_artifact_filename': worker_release.artifact_filename,
+                'worker_artifact_sha256': worker_release.artifact_sha256,
+                'worker_artifact_size': worker_release.artifact_size,
+                'worker_install_root': f'/opt/claw-worker/claw-{int(claw.id)}',
+                'worker_instance_dir': f'/var/lib/claw-worker/claw-{int(claw.id)}',
+                'worker_runtime_mode': 'legacy_split',
+            })
+            codex_python = f'/opt/claw-worker/claw-{int(claw.id)}/venv/bin/python'
+            codex_cli = f'/opt/claw-worker/claw-{int(claw.id)}/venv/bin/codex'
+        elif data.get('legacy_codex_deploy') is not True:
+            raise ValueError('Claw Worker 部署必须绑定已批准的 worker_release_record_id')
     elif deploy_method == 'systemd':
         if not hermes_home and not hermes_install_dir:
             hermes_install_dir = _default_hermes_install_dir()
@@ -533,7 +641,6 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
             ).order_by(AgentDeployment.id.desc()).first()
             if existing_dep and existing_dep.remote_base_dir:
                 # 从 remote_base_dir 提取 data 目录（格式：/opt/openclaw-agents/claw-{id}-xxx/data (venv:...)）
-                import re
                 m = re.match(r'^(/\S+?/data)', existing_dep.remote_base_dir)
                 if m:
                     hermes_data_dir = m.group(1)
@@ -630,6 +737,7 @@ def _parse_deploy_options(data: dict, claw: OpenClawInstance,
         codex_wheelhouse=codex_wheelhouse,
         codex_requirements_sha256=codex_requirements_sha256,
         codex_auth_mode=codex_auth_mode,
+        **worker_release_fields,
         wecom_node_bin=wecom_node_bin,
         wecom_sdk_root=wecom_sdk_root,
         venus_api_key=venus_api_key,
@@ -659,8 +767,9 @@ def create_deployment_record(claw: OpenClawInstance, req: DeployRequest) -> Agen
     ``image`` 留空，``remote_base_dir`` 记数据目录及安装目录摘要。
     """
     if req.deploy_method == 'systemd':
-        data = req.systemd_data_dir()
-        inst = req.systemd_install_dir()
+        data = req.remote_base_dir()
+        inst = (req.codex_install_root() if req.worker_release_id
+                else req.systemd_install_dir())
         remote_base = f"{data} (venv:{inst})"
         if len(remote_base) > 500:
             remote_base = remote_base[:497] + '...'
@@ -682,6 +791,10 @@ def create_deployment_record(claw: OpenClawInstance, req: DeployRequest) -> Agen
         remote_base_dir=remote_base,
         container_name=container,
         image=image,
+        worker_release_record_id=req.worker_release_record_id,
+        worker_release_id=req.worker_release_id,
+        worker_source_commit=req.worker_source_commit,
+        worker_artifact_sha256=req.worker_artifact_sha256,
         status='pending',
         triggered_by=req.triggered_by,
     )
@@ -753,8 +866,12 @@ def restart_openclaw_agent(claw_id: int):
     if not has_managed:
         return jsonify({'error': '仅通过 Hub 注册部署成功的 Agent 可重启'}), 403
 
+    data = request.get_json(silent=True) or {}
+    reset_sessions = data.get('reset_sessions') is True
     try:
-        result = _restart_systemd_agent(claw, _actor_display_name(user))
+        result = _restart_systemd_agent(
+            claw, _actor_display_name(user),
+            reset_sessions=reset_sessions)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:

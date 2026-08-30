@@ -11,6 +11,9 @@
         <div class="view-tabs">
             <button class="tab-btn active" data-view="command">📋 任务下发</button>
             <button class="tab-btn" data-view="chat">💬 聊天</button>
+            {% if chat_room_enabled %}
+            <button class="tab-btn" data-view="rooms">⌁ 主题聊天室 <span class="room-tab-badge" id="roomTabBadge" style="display:none">0</span></button>
+            {% endif %}
             <button class="tab-btn" data-view="records">📋 消息记录</button>
             <button class="tab-btn" data-view="monitor">📊 状态监控</button>
         </div>
@@ -195,6 +198,78 @@
                 </div>
             </div>
         </div>
+
+        {% if chat_room_enabled %}
+        <!-- 主题聊天室：独立于现有点对点聊天 -->
+        <div class="view-content" id="view-rooms" style="display:none">
+            <div class="rooms-console">
+                <aside class="rooms-rail">
+                    <div class="rooms-rail-head">
+                        <div>
+                            <span class="rooms-kicker">COLLAB CHANNELS</span>
+                            <h3>主题聊天室</h3>
+                        </div>
+                        <button class="room-icon-btn" onclick="openRoomCreateModal()" title="创建聊天室">＋</button>
+                    </div>
+                    <div class="room-search-wrap">
+                        <span>⌕</span>
+                        <input id="roomSearch" placeholder="搜索主题" oninput="renderRoomList()">
+                    </div>
+                    <div class="room-list" id="roomList">
+                        <div class="room-empty">正在同步频道…</div>
+                    </div>
+                </aside>
+
+                <section class="room-stage">
+                    <div class="room-stage-empty" id="roomStageEmpty">
+                        <div class="room-orbit">⌁</div>
+                        <h3>选择一个协作主题</h3>
+                        <p>对话记录、成员与 Agent 触发状态会集中保留在这里。</p>
+                    </div>
+                    <div class="room-stage-active" id="roomStageActive" style="display:none">
+                        <header class="room-stage-head">
+                            <div>
+                                <div class="room-headline"><span class="room-live-dot"></span><h3 id="activeRoomTitle">-</h3></div>
+                                <p id="activeRoomDescription">-</p>
+                            </div>
+                            <div class="room-head-actions">
+                                <span class="room-policy-pill" id="activeRoomPolicy">@提及时唤醒 Agent</span>
+                                <button class="btn btn-sm btn-ghost" onclick="loadActiveRoom()">刷新</button>
+                            </div>
+                        </header>
+                        <div class="room-message-stream" id="roomMessageStream" tabindex="0" aria-label="聊天消息"></div>
+                        <div class="room-compose">
+                            <div class="room-mention-strip" id="roomMentionStrip">
+                                <button class="mention-chip mention-all" onclick="toggleRoomMentionAll()">@ 所有人</button>
+                            </div>
+                            <textarea id="roomComposer" rows="3" placeholder="输入消息；只有明确 @Agent 或 @所有人才会触发 Agent…"></textarea>
+                            <div class="room-compose-foot">
+                                <span>Enter 发送 · Shift+Enter 换行</span>
+                                <button class="btn btn-primary" id="roomSendButton" onclick="sendRoomMessage()">发送消息</button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <aside class="room-context">
+                    <div class="room-context-head">
+                        <span class="rooms-kicker">PARTICIPANTS</span>
+                        <button class="room-icon-btn small" onclick="openRoomMemberModal()" title="邀请 Hub 成员">＋</button>
+                    </div>
+                    <div class="room-member-list" id="roomMemberList">
+                        <div class="room-empty">选择聊天室后显示成员</div>
+                    </div>
+                    <div class="room-external-card" id="roomExternalCard" style="display:none">
+                        <span class="rooms-kicker">EXTERNAL ACCESS</span>
+                        <h4>邀请外部协作者</h4>
+                        <p>生成 Agent 可直接访问的 HTTP 18800 临时链接；凭据到期后可续期。</p>
+                        <button class="btn btn-sm btn-ghost" onclick="createExternalRoomInvite()">生成 Agent 邀请链接</button>
+                        <div class="room-invite-result" id="roomInviteResult" style="display:none"></div>
+                    </div>
+                </aside>
+            </div>
+        </div>
+        {% endif %}
     </div>
 
     <!-- 右侧：实时动态 -->
@@ -273,6 +348,27 @@
         </div>
     </div>
 </div>
+
+{% if chat_room_enabled %}
+<div class="modal-overlay" id="room-create-modal">
+    <div class="modal room-modal">
+        <span class="rooms-kicker">NEW COLLAB CHANNEL</span>
+        <h2 class="modal-title">创建主题聊天室</h2>
+        <div class="form-group"><label class="form-label">主题 *</label><input class="form-input" id="newRoomTitle" maxlength="160" placeholder="例如：Flow #25 冷机验收"></div>
+        <div class="form-group"><label class="form-label">项目 *</label><select class="form-select" id="newRoomProject"></select></div>
+        <div class="form-group"><label class="form-label">说明</label><textarea class="form-textarea" id="newRoomDescription" rows="3" placeholder="写清讨论范围与预期结论"></textarea></div>
+        <div class="modal-actions"><button class="btn btn-ghost" onclick="closeRoomCreateModal()">取消</button><button class="btn btn-primary" onclick="createRoom()">创建</button></div>
+    </div>
+</div>
+<div class="modal-overlay" id="room-member-modal">
+    <div class="modal room-modal">
+        <span class="rooms-kicker">HUB DIRECTORY</span>
+        <h2 class="modal-title">邀请成员与 Agent</h2>
+        <div class="room-candidate-list" id="roomCandidateList"><div class="room-empty">正在加载…</div></div>
+        <div class="modal-actions"><button class="btn btn-ghost" onclick="closeRoomMemberModal()">完成</button></div>
+    </div>
+</div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -1177,6 +1273,109 @@
 .chat-date-divider::before { left: 5%; }
 .chat-date-divider::after { right: 5%; }
 
+/* ===== 主题聊天室 / 协作战情室 ===== */
+.rooms-mode .command-center { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.rooms-mode .cc-sidebar, .rooms-mode .cc-inbox { display: none !important; }
+.rooms-mode .cc-main { min-width: 0; }
+.rooms-mode .header-right { visibility: hidden; }
+.rooms-console {
+    height: calc(100dvh - 180px); min-height: 0; display: grid;
+    grid-template-columns: 260px minmax(420px, 1fr) 270px;
+    overflow: hidden; border: 1px solid var(--border); border-radius: 14px;
+    background: #0d1117; box-shadow: 0 20px 50px rgba(0,0,0,.22);
+}
+.rooms-rail, .room-context { background: #10151c; min-width:0; min-height:0; overflow:hidden; display:flex; flex-direction:column; }
+.rooms-rail { border-right: 1px solid rgba(148,163,184,.14); }
+.room-context { border-left: 1px solid rgba(148,163,184,.14); padding:18px; gap:18px; overflow-y:auto; }
+.rooms-rail-head, .room-context-head, .room-stage-head {
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+}
+.rooms-rail-head { padding: 20px 18px 14px; }
+.rooms-rail-head h3 { margin:3px 0 0; font-size:1rem; letter-spacing:.01em; }
+.rooms-kicker { color:#55d6be; font-size:.62rem; font-weight:800; letter-spacing:.15em; }
+.room-icon-btn {
+    width:34px; height:34px; border-radius:10px; border:1px solid rgba(85,214,190,.35);
+    background:rgba(85,214,190,.08); color:#72e3ce; font-size:1.3rem; cursor:pointer;
+}
+.room-icon-btn:hover { background:rgba(85,214,190,.16); transform:translateY(-1px); }
+.room-icon-btn.small { width:28px;height:28px;font-size:1rem; }
+.room-search-wrap { margin:0 14px 12px; padding:9px 11px; display:flex; gap:8px; align-items:center; border:1px solid rgba(148,163,184,.16); border-radius:10px; background:#0b1016; }
+.room-search-wrap input { width:100%; border:0; outline:0; color:var(--text-primary); background:transparent; font-size:.8rem; }
+.room-list { min-height:0; overflow:auto; padding:0 9px 14px; display:flex; flex-direction:column; gap:4px; }
+.room-list-item { padding:12px; border:1px solid transparent; border-radius:11px; cursor:pointer; transition:.18s ease; }
+.room-list-item:hover { background:rgba(148,163,184,.06); }
+.room-list-item.active { background:linear-gradient(100deg,rgba(85,214,190,.14),rgba(85,214,190,.03)); border-color:rgba(85,214,190,.3); }
+.room-list-top { display:flex; align-items:center; gap:8px; }
+.room-list-mark { color:#55d6be; font-weight:900; }
+.room-list-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.84rem; font-weight:700; }
+.room-unread { min-width:19px; height:19px; border-radius:10px; display:grid; place-items:center; padding:0 5px; background:#f97316; color:#fff; font-size:.65rem; font-weight:800; }
+.room-list-preview { margin:6px 0 0 20px; color:var(--text-muted); font-size:.7rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.room-stage { min-width:0; min-height:0; overflow:hidden; display:flex; flex-direction:column; background:radial-gradient(circle at 50% -20%,rgba(85,214,190,.08),transparent 40%),#0d1117; }
+.room-stage-empty { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; color:var(--text-secondary); text-align:center; }
+.room-stage-empty h3 { margin:14px 0 5px; color:var(--text-primary); }
+.room-stage-empty p { font-size:.82rem; max-width:360px; }
+.room-orbit { width:64px;height:64px;border:1px solid rgba(85,214,190,.35);border-radius:50%;display:grid;place-items:center;color:#55d6be;font-size:1.7rem;box-shadow:0 0 0 10px rgba(85,214,190,.03),0 0 40px rgba(85,214,190,.08); }
+.room-stage-active { min-height:0; height:100%; display:flex; flex-direction:column; }
+.room-stage-head { padding:15px 20px; border-bottom:1px solid rgba(148,163,184,.14); background:rgba(13,17,23,.88); }
+.room-headline { display:flex;align-items:center;gap:8px; }
+.room-headline h3 { margin:0; font-size:1rem; }
+.room-live-dot { width:7px;height:7px;border-radius:50%;background:#55d6be;box-shadow:0 0 10px #55d6be; }
+.room-stage-head p { margin:4px 0 0 15px; color:var(--text-muted); font-size:.72rem; }
+.room-head-actions { display:flex;align-items:center;gap:8px; }
+.room-policy-pill { border:1px solid rgba(85,214,190,.22);background:rgba(85,214,190,.07);color:#87dacc;border-radius:20px;padding:5px 9px;font-size:.65rem; }
+.room-message-stream { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain; scrollbar-gutter:stable; scrollbar-width:thin; scrollbar-color:rgba(85,214,190,.48) transparent; padding:18px 22px; display:flex;flex-direction:column;gap:14px; }
+.room-message-stream::-webkit-scrollbar { width:10px; }
+.room-message-stream::-webkit-scrollbar-track { background:transparent; }
+.room-message-stream::-webkit-scrollbar-thumb { background:rgba(85,214,190,.36);border:3px solid transparent;border-radius:10px;background-clip:padding-box; }
+.room-message-stream:focus-visible { outline:2px solid rgba(85,214,190,.55);outline-offset:-3px; }
+.room-message { display:grid;grid-template-columns:32px minmax(0,1fr);gap:10px;max-width:82%; }
+.room-message.mine { margin-left:auto; grid-template-columns:minmax(0,1fr) 32px; }
+.room-msg-avatar { width:32px;height:32px;border-radius:10px;display:grid;place-items:center;background:#18212b;color:#78d9c7;border:1px solid rgba(148,163,184,.15);font-size:.73rem;font-weight:800; }
+.room-message.mine .room-msg-avatar { grid-column:2; }
+.room-msg-body { min-width:0; }
+.room-message.mine .room-msg-body { grid-column:1;grid-row:1;text-align:right; }
+.room-msg-meta { display:flex;align-items:center;gap:7px;margin-bottom:4px;color:var(--text-muted);font-size:.65rem; }
+.room-message.mine .room-msg-meta { justify-content:flex-end; }
+.room-msg-name { color:var(--text-secondary);font-weight:700; }
+.room-msg-bubble { display:inline-block;text-align:left;padding:9px 12px;border:1px solid rgba(148,163,184,.15);border-radius:4px 12px 12px 12px;background:#151b23;color:var(--text-primary);font-size:.84rem;line-height:1.55;white-space:pre-wrap;word-break:break-word; }
+.room-message.mine .room-msg-bubble { border-radius:12px 4px 12px 12px;background:linear-gradient(135deg,#167967,#126557);border-color:rgba(85,214,190,.3);color:#f4fffd; }
+.room-msg-mention { color:#7ce3d0;font-weight:700; }
+.room-compose { padding:12px 16px 14px;border-top:1px solid rgba(148,163,184,.14);background:#10151c; }
+.room-mention-strip { display:flex;gap:6px;overflow:auto;padding-bottom:7px; }
+.mention-chip { border:1px solid rgba(148,163,184,.2);border-radius:20px;padding:4px 9px;background:#151b23;color:var(--text-secondary);font-size:.68rem;cursor:pointer;white-space:nowrap; }
+.mention-chip:hover,.mention-chip.selected { color:#9ef1e2;border-color:rgba(85,214,190,.48);background:rgba(85,214,190,.1); }
+.mention-chip.agent::before { content:'AI';font-size:.52rem;margin-right:5px;color:#55d6be;font-weight:900; }
+.room-compose textarea { width:100%;resize:none;box-sizing:border-box;background:#0b1016;border:1px solid rgba(148,163,184,.18);border-radius:10px;color:var(--text-primary);padding:10px 12px;outline:0;font:inherit;font-size:.84rem; }
+.room-compose textarea:focus { border-color:rgba(85,214,190,.5);box-shadow:0 0 0 3px rgba(85,214,190,.06); }
+.room-compose-foot { display:flex;align-items:center;justify-content:space-between;margin-top:8px;color:var(--text-muted);font-size:.66rem; }
+.room-context-head { border-bottom:1px solid rgba(148,163,184,.12);padding-bottom:12px; }
+.room-member-list { display:flex;flex-direction:column;gap:7px;overflow:auto;max-height:50%; }
+.room-member { display:flex;align-items:center;gap:9px;padding:7px;border-radius:9px; }
+.room-member:hover { background:rgba(148,163,184,.05); }
+.room-member-avatar { width:29px;height:29px;border-radius:9px;display:grid;place-items:center;background:#18212b;color:#78d9c7;font-size:.66rem;font-weight:800; }
+.room-member-copy { min-width:0;flex:1; }
+.room-member-name { white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:.78rem;font-weight:650; }
+.room-member-role { color:var(--text-muted);font-size:.62rem; }
+.room-member-type { font-size:.58rem;color:#55d6be;border:1px solid rgba(85,214,190,.22);padding:2px 5px;border-radius:5px; }
+.room-external-card { margin-top:auto;border:1px solid rgba(85,214,190,.18);background:linear-gradient(145deg,rgba(85,214,190,.08),rgba(85,214,190,.015));border-radius:12px;padding:14px; }
+.room-external-card h4 { margin:7px 0 5px;font-size:.83rem; }
+.room-external-card p { color:var(--text-muted);font-size:.68rem;line-height:1.55;margin:0 0 10px; }
+.room-invite-result { margin-top:9px;padding:8px;border-radius:8px;background:#0b1016;color:#8cebd9;font-size:.65rem;word-break:break-all;cursor:pointer; }
+.room-empty { color:var(--text-muted);font-size:.75rem;text-align:center;padding:24px 8px; }
+.room-tab-badge { display:inline-grid;place-items:center;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#f97316;color:#fff;font-size:.58rem;margin-left:3px; }
+.room-modal { border-top:2px solid #55d6be; }
+.room-candidate-list { max-height:430px;overflow:auto;display:flex;flex-direction:column;gap:7px;margin:14px 0; }
+.room-candidate { display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg-primary); }
+.room-candidate-copy { min-width:0;flex:1; }.room-candidate-copy strong{display:block;font-size:.82rem}.room-candidate-copy span{color:var(--text-muted);font-size:.67rem}
+
+@media (max-width: 1100px) {
+    .rooms-console { grid-template-columns:220px minmax(360px,1fr) 220px; }
+}
+@media (max-width: 800px) {
+    .rooms-console { grid-template-columns:190px minmax(350px,1fr); overflow:auto; }
+    .room-context { display:none; }
+}
+
 /* 聊天模式：隐藏勾选相关 UI */
 .chat-mode .claw-checkbox,
 .chat-mode .claw-list-hint,
@@ -1246,6 +1445,7 @@
 <script>
 const HUB_API = '/api/v1/agent-hub/web';
 const API_BASE = '/api/v1';
+const CHAT_ROOM_ENABLED = {{ 'true' if chat_room_enabled else 'false' }};
 
 // 在线状态判断：兼容中文状态（工作/学习/摸鱼）和英文状态（online）
 const ONLINE_STATUSES = ['online', '工作', '学习', '摸鱼'];
@@ -1272,12 +1472,14 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 
         if (view === 'records') loadMessageRecords();
         if (view === 'monitor') loadMonitorView();
+        if (view === 'rooms') loadChatRooms();
 
         // 聊天模式隐藏右侧；记录模式隐藏左侧 OpenClaw 选择栏
         const inbox = document.querySelector('.cc-inbox');
-        if (inbox) inbox.style.display = (view === 'chat') ? 'none' : '';
+        if (inbox) inbox.style.display = (view === 'chat' || view === 'rooms') ? 'none' : '';
         document.body.classList.toggle('chat-mode', view === 'chat');
         document.body.classList.toggle('records-mode', view === 'records');
+        document.body.classList.toggle('rooms-mode', view === 'rooms');
 
         // 离开聊天 tab 时停止自动刷新
         if (view !== 'chat' && chatRefreshTimer) {
@@ -1981,6 +2183,7 @@ function openChat(clawId, clawName, clawStatus) {
     if (inbox) inbox.style.display = 'none';
     document.body.classList.add('chat-mode');
     document.body.classList.remove('records-mode');
+    document.body.classList.remove('rooms-mode');
 
     // 高亮当前聊天对象
     document.querySelectorAll('.agent-item').forEach(el => el.classList.remove('chat-active'));
@@ -2139,6 +2342,327 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
+// ===== 主题聊天室 =====
+let chatRooms = [];
+let activeRoom = null;
+let activeRoomMembers = [];
+let selectedRoomMentions = new Set();
+let roomRefreshTimer = null;
+
+async function roomFetch(url, options = {}) {
+    const res = await fetch(url, options);
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok) throw new Error(data.error || data.code || `HTTP ${res.status}`);
+    return data;
+}
+
+async function loadChatRooms(preserveActive = true) {
+    if (!CHAT_ROOM_ENABLED) return;
+    try {
+        const data = await roomFetch(`${API_BASE}/chat-rooms`);
+        chatRooms = data.items || [];
+        renderRoomList();
+        const unread = chatRooms.reduce((sum, item) => sum + (item.unread_count || 0), 0);
+        const badge = document.getElementById('roomTabBadge');
+        if (badge) {
+            badge.textContent = unread > 99 ? '99+' : unread;
+            badge.style.display = unread ? 'inline-grid' : 'none';
+        }
+        if (preserveActive && activeRoom) {
+            activeRoom = chatRooms.find(item => item.id === activeRoom.id) || activeRoom;
+        }
+    } catch (e) {
+        const list = document.getElementById('roomList');
+        if (list) list.innerHTML = `<div class="room-empty">同步失败：${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderRoomList() {
+    const list = document.getElementById('roomList');
+    if (!list) return;
+    const query = (document.getElementById('roomSearch')?.value || '').trim().toLowerCase();
+    const visible = chatRooms.filter(room => `${room.title} ${room.description}`.toLowerCase().includes(query));
+    if (!visible.length) {
+        list.innerHTML = '<div class="room-empty">暂无主题聊天室<br>点击右上角 ＋ 创建</div>';
+        return;
+    }
+    list.innerHTML = visible.map(room => {
+        const latest = room.last_message;
+        const preview = latest ? `${latest.sender?.display_name || ''}：${latest.content || ''}` : (room.description || '等待第一条消息');
+        return `<div class="room-list-item ${activeRoom?.id === room.id ? 'active' : ''}" onclick="selectChatRoom(${room.id})">
+            <div class="room-list-top"><span class="room-list-mark">#</span><span class="room-list-title">${escapeHtml(room.title)}</span>${room.unread_count ? `<span class="room-unread">${room.unread_count}</span>` : ''}</div>
+            <div class="room-list-preview">${escapeHtml(preview)}</div>
+        </div>`;
+    }).join('');
+}
+
+async function selectChatRoom(roomId) {
+    activeRoom = chatRooms.find(room => room.id === roomId) || {id: roomId};
+    selectedRoomMentions.clear();
+    // 邀请链接严格属于单个聊天室；切换房间时不能保留、展示或复制旧链接。
+    const inviteResult = document.getElementById('roomInviteResult');
+    if (inviteResult) {
+        inviteResult.textContent = '';
+        inviteResult.dataset.url = '';
+        inviteResult.style.display = 'none';
+        inviteResult.onclick = null;
+    }
+    renderRoomList();
+    document.getElementById('roomStageEmpty').style.display = 'none';
+    document.getElementById('roomStageActive').style.display = 'flex';
+    document.getElementById('roomExternalCard').style.display = 'block';
+    await loadActiveRoom(true);
+    if (roomRefreshTimer) clearInterval(roomRefreshTimer);
+    roomRefreshTimer = setInterval(() => {
+        if (currentView === 'rooms') loadActiveRoom(false);
+    }, 6000);
+}
+
+async function loadActiveRoom(scrollToBottom = false) {
+    if (!activeRoom?.id) return;
+    try {
+        const [room, memberData, messageData] = await Promise.all([
+            roomFetch(`${API_BASE}/chat-rooms/${activeRoom.id}`),
+            roomFetch(`${API_BASE}/chat-rooms/${activeRoom.id}/members`),
+            roomFetch(`${API_BASE}/chat-rooms/${activeRoom.id}/messages?limit=120`),
+        ]);
+        activeRoom = room;
+        activeRoomMembers = memberData.items || [];
+        document.getElementById('activeRoomTitle').textContent = room.title;
+        document.getElementById('activeRoomDescription').textContent = room.description || `${room.member_count} 位成员正在协作`;
+        document.getElementById('activeRoomPolicy').textContent = room.agent_policy === 'all_messages' ? '所有消息唤醒 Agent' : '@提及时唤醒 Agent';
+        renderRoomMembers();
+        renderRoomMentionStrip();
+        renderRoomMessages(messageData.items || [], scrollToBottom);
+        const last = (messageData.items || []).at(-1);
+        if (last) {
+            await roomFetch(`${API_BASE}/chat-rooms/${activeRoom.id}/read`, {
+                method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_id:last.id})
+            });
+        }
+        loadChatRooms(true);
+    } catch (e) {
+        showToast(`聊天室加载失败：${e.message}`, 'error');
+    }
+}
+
+function renderRoomMembers() {
+    const box = document.getElementById('roomMemberList');
+    if (!box) return;
+    box.innerHTML = activeRoomMembers.map(member => {
+        const type = member.member_type === 'agent' ? 'AGENT' : (member.member_type === 'guest' ? 'GUEST' : 'USER');
+        const glyph = member.member_type === 'agent' ? 'AI' : (member.display_name || '?').slice(0, 1).toUpperCase();
+        const role = member.role === 'owner' ? '房主' : (member.role === 'admin' ? '管理员' : '成员');
+        return `<div class="room-member"><div class="room-member-avatar">${escapeHtml(glyph)}</div><div class="room-member-copy"><div class="room-member-name">${escapeHtml(member.display_name)}</div><div class="room-member-role">${role}</div></div><span class="room-member-type">${type}</span></div>`;
+    }).join('') || '<div class="room-empty">暂无成员</div>';
+}
+
+function renderRoomMentionStrip() {
+    const strip = document.getElementById('roomMentionStrip');
+    if (!strip) return;
+    const allSelected = selectedRoomMentions.has('all');
+    const myId = activeRoom?.my_member?.id;
+    strip.innerHTML = `<button class="mention-chip mention-all ${allSelected ? 'selected' : ''}" onclick="toggleRoomMentionAll()">@ 所有人</button>` +
+        activeRoomMembers.filter(member => member.id !== myId).map(member =>
+            `<button class="mention-chip ${member.member_type === 'agent' ? 'agent' : ''} ${selectedRoomMentions.has(member.id) ? 'selected' : ''}" onclick="toggleRoomMention(${member.id})">@ ${escapeHtml(member.display_name)}</button>`
+        ).join('');
+}
+
+function roomMentionLabel(value) {
+    if (value === 'all') return '所有人';
+    return activeRoomMembers.find(member => member.id === Number(value))?.display_name || '';
+}
+
+function insertRoomMentionToken(label) {
+    const input = document.getElementById('roomComposer');
+    if (!input || !label) return;
+    const token = `@${label}`;
+    if (input.value.includes(token)) { input.focus(); return; }
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    const leading = start > 0 && !/\s/.test(input.value.slice(start - 1, start)) ? ' ' : '';
+    input.setRangeText(`${leading}${token} `, start, end, 'end');
+    input.focus();
+}
+
+function removeRoomMentionToken(label) {
+    const input = document.getElementById('roomComposer');
+    if (!input || !label) return;
+    const token = `@${label}`;
+    const index = input.value.indexOf(token);
+    if (index < 0) return;
+    let end = index + token.length;
+    if (input.value.charAt(end) === ' ') end += 1;
+    input.value = `${input.value.slice(0, index)}${input.value.slice(end)}`.replace(/ {2,}/g, ' ');
+}
+
+function toggleRoomMentionAll() {
+    if (selectedRoomMentions.has('all')) {
+        selectedRoomMentions.delete('all');
+        removeRoomMentionToken('所有人');
+    } else {
+        [...selectedRoomMentions].forEach(value => removeRoomMentionToken(roomMentionLabel(value)));
+        selectedRoomMentions.clear();
+        selectedRoomMentions.add('all');
+        insertRoomMentionToken('所有人');
+    }
+    renderRoomMentionStrip();
+}
+
+function toggleRoomMention(memberId) {
+    const label = roomMentionLabel(memberId);
+    if (!label) return;
+    if (selectedRoomMentions.has('all')) {
+        selectedRoomMentions.delete('all');
+        removeRoomMentionToken('所有人');
+    }
+    if (selectedRoomMentions.has(memberId)) {
+        selectedRoomMentions.delete(memberId);
+        removeRoomMentionToken(label);
+    } else {
+        selectedRoomMentions.add(memberId);
+        insertRoomMentionToken(label);
+    }
+    renderRoomMentionStrip();
+}
+
+function renderRoomMessages(messages, forceBottom = false) {
+    const stream = document.getElementById('roomMessageStream');
+    if (!stream) return;
+    const nearBottom = stream.scrollHeight - stream.scrollTop <= stream.clientHeight + 70;
+    const myId = activeRoom?.my_member?.id;
+    if (!messages.length) {
+        stream.innerHTML = '<div class="room-empty">频道已建立。发送第一条消息，开始形成可追溯的协作记录。</div>';
+        return;
+    }
+    stream.innerHTML = messages.map(message => {
+        const sender = message.sender || {};
+        const mine = message.sender_member_id === myId;
+        const glyph = sender.member_type === 'agent' ? 'AI' : (sender.display_name || '?').slice(0,1).toUpperCase();
+        const time = (message.created_at || '').slice(5, 16);
+        const content = String(message.content || '');
+        const mentionLabels = (message.mentions || []).map(item => item.type === 'all' ? '@所有人' : `@${activeRoomMembers.find(m => m.id === item.member_id)?.display_name || '成员'}`);
+        // 兼容历史消息：旧消息正文里没有 @ 文本时才由结构化 mentions 补显，避免新消息重复。
+        const missingMentionText = mentionLabels.filter(label => !content.includes(label)).join(' ');
+        const body = `${missingMentionText ? `<span class="room-msg-mention">${escapeHtml(missingMentionText)}</span>\n` : ''}${escapeHtml(content)}`;
+        return `<div class="room-message ${mine ? 'mine' : ''}"><div class="room-msg-avatar">${escapeHtml(glyph)}</div><div class="room-msg-body"><div class="room-msg-meta"><span class="room-msg-name">${escapeHtml(sender.display_name || '未知成员')}</span><span>${escapeHtml(time)}</span></div><div class="room-msg-bubble">${body}</div></div></div>`;
+    }).join('');
+    if (forceBottom || nearBottom) stream.scrollTop = stream.scrollHeight;
+}
+
+async function sendRoomMessage() {
+    if (!activeRoom?.id) return;
+    const input = document.getElementById('roomComposer');
+    const content = input.value.trim();
+    if (!content) return;
+    const mentions = [...selectedRoomMentions].map(value => value === 'all' ? {type:'all'} : {type:'member', member_id:value});
+    const key = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+    const button = document.getElementById('roomSendButton');
+    button.disabled = true;
+    try {
+        await roomFetch(`${API_BASE}/chat-rooms/${activeRoom.id}/messages`, {
+            method:'POST', headers:{'Content-Type':'application/json','Idempotency-Key':key},
+            body:JSON.stringify({content, mentions})
+        });
+        input.value = '';
+        selectedRoomMentions.clear();
+        await loadActiveRoom(true);
+    } catch (e) { showToast(`发送失败：${e.message}`, 'error'); }
+    finally { button.disabled = false; }
+}
+
+async function openRoomCreateModal() {
+    const modal = document.getElementById('room-create-modal');
+    modal.classList.add('active');
+    try {
+        const data = await roomFetch(`${API_BASE}/projects`);
+        const projects = data.projects || data.items || (Array.isArray(data) ? data : []);
+        document.getElementById('newRoomProject').innerHTML = projects.map(project => `<option value="${project.id}">${escapeHtml(project.name)}</option>`).join('');
+    } catch (e) { showToast(`项目加载失败：${e.message}`, 'error'); }
+}
+function closeRoomCreateModal() { document.getElementById('room-create-modal')?.classList.remove('active'); }
+
+async function createRoom() {
+    const title = document.getElementById('newRoomTitle').value.trim();
+    const projectId = Number(document.getElementById('newRoomProject').value);
+    if (!title || !projectId) return showToast('请填写主题并选择项目', 'error');
+    try {
+        const room = await roomFetch(`${API_BASE}/chat-rooms`, {
+            method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+                title, project_id:projectId, description:document.getElementById('newRoomDescription').value.trim(), agent_policy:'mention_only'
+            })
+        });
+        closeRoomCreateModal();
+        document.getElementById('newRoomTitle').value = '';
+        document.getElementById('newRoomDescription').value = '';
+        await loadChatRooms(false);
+        await selectChatRoom(room.id);
+        showToast('聊天室已创建', 'success');
+    } catch (e) { showToast(`创建失败：${e.message}`, 'error'); }
+}
+
+async function openRoomMemberModal() {
+    if (!activeRoom?.id) return showToast('请先选择聊天室', 'error');
+    document.getElementById('room-member-modal').classList.add('active');
+    const box = document.getElementById('roomCandidateList');
+    box.innerHTML = '<div class="room-empty">正在加载 Hub 通讯录…</div>';
+    try {
+        const data = await roomFetch(`${API_BASE}/chat-rooms/candidates?project_id=${activeRoom.project_id}`);
+        const existingUsers = new Set(activeRoomMembers.filter(m => m.user_id).map(m => m.user_id));
+        const existingAgents = new Set(activeRoomMembers.filter(m => m.claw_id).map(m => m.claw_id));
+        const users = (data.users || []).filter(item => !existingUsers.has(item.id)).map(item => ({...item,type:'user',meta:`用户 · ${item.username}`}));
+        const agents = (data.agents || []).filter(item => !existingAgents.has(item.id)).map(item => ({...item,type:'agent',meta:`Agent · ${item.status || 'offline'}`}));
+        const candidates = [...agents, ...users];
+        box.innerHTML = candidates.map(item => `<div class="room-candidate"><div class="room-member-avatar">${item.type === 'agent' ? 'AI' : escapeHtml(item.name.slice(0,1))}</div><div class="room-candidate-copy"><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.meta)}</span></div><button class="btn btn-sm btn-ghost" onclick="inviteRoomCandidate('${item.type}',${item.id},this)">邀请</button></div>`).join('') || '<div class="room-empty">所有可用成员都已在聊天室中</div>';
+    } catch (e) { box.innerHTML = `<div class="room-empty">加载失败：${escapeHtml(e.message)}</div>`; }
+}
+function closeRoomMemberModal() { document.getElementById('room-member-modal')?.classList.remove('active'); }
+async function inviteRoomCandidate(type, id, button) {
+    button.disabled = true;
+    try {
+        await roomFetch(`${API_BASE}/chat-rooms/${activeRoom.id}/members`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type,id})});
+        button.textContent = '已邀请'; await loadActiveRoom(false);
+    } catch (e) { button.disabled=false; showToast(`邀请失败：${e.message}`,'error'); }
+}
+
+async function createExternalRoomInvite() {
+    if (!activeRoom?.id) return;
+    const requestedRoomId = activeRoom.id;
+    const requestedRoomTitle = activeRoom.title || `聊天室 #${requestedRoomId}`;
+    try {
+        const invite = await roomFetch(`${API_BASE}/chat-rooms/${requestedRoomId}/invites`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({label:'Agent 外部协作'})});
+        if (Number(invite.room_id) !== Number(requestedRoomId)) throw new Error('邀请链接房间校验失败');
+        if (Number(activeRoom?.id) !== Number(requestedRoomId)) {
+            showToast(`${requestedRoomTitle} 的链接已生成；请切回该聊天室后重新生成并复制`, 'error');
+            return;
+        }
+        const result = document.getElementById('roomInviteResult');
+        result.textContent = invite.join_url;
+        result.dataset.url = invite.join_url;
+        result.dataset.roomId = String(requestedRoomId);
+        result.title = '点击复制 Agent 邀请链接'; result.style.display='block';
+        result.onclick = async () => {
+            if (Number(activeRoom?.id) !== requestedRoomId || Number(result.dataset.roomId) !== requestedRoomId) {
+                showToast('该链接不属于当前聊天室，请重新生成', 'error');
+                return;
+            }
+            await navigator.clipboard.writeText(invite.join_url);
+            showToast(`${requestedRoomTitle} 的 Agent 邀请链接已复制`,'success');
+        };
+        await navigator.clipboard.writeText(invite.join_url);
+        showToast(`已生成并复制 ${requestedRoomTitle} 的 HTTP 18800 Agent 邀请链接`,'success');
+    } catch (e) { showToast(`生成失败：${e.message}`,'error'); }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const composer = document.getElementById('roomComposer');
+    if (composer) composer.addEventListener('keydown', event => {
+        if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendRoomMessage(); }
+    });
+    if (CHAT_ROOM_ENABLED) loadChatRooms(false);
+});
+
 // 初始化
 loadStats();
 loadClaws();
@@ -2152,7 +2676,6 @@ setInterval(() => {
     loadMessages();
 }, 15000);
 </script>
-{% endblock %}
 {% endblock %}
 
 

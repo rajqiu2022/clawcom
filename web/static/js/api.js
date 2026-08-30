@@ -39,7 +39,8 @@ const API = {
     },
 
     // Skills
-    listSkills() { return this.get('/skills'); },
+    listSkills() { return this.get('/skills?summary=true'); },
+    getSkill(id) { return this.get(`/skills/${id}`); },
     createSkill(data) { return this.post('/skills', data); },
     updateSkill(id, data) { return this.put(`/skills/${id}`, data); },
     installSkill(clawId, skillId) {

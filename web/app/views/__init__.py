@@ -234,7 +234,8 @@ def check_login():
     #    /r/<token> 或 /test-reports/share/<token> 都放行
     if (request.path.startswith('/r/')
             or request.path.startswith('/test-reports/share/')
-            or request.path == '/developer-ai/collaborate'):
+            or request.path == '/developer-ai/collaborate'
+            or request.path == '/chat/join'):
         return None
 
     # 知识库匿名分享页：只读正文，并支持通过公开 API 下载 Markdown。
@@ -411,7 +412,18 @@ def tapd():
 
 @views_bp.route('/hub')
 def hub():
-    return render_template('hub.html')
+    return render_template(
+        'hub.html',
+        chat_room_enabled=bool(current_app.config.get('CHAT_ROOM_ENABLED', False)),
+    )
+
+
+@views_bp.route('/chat/join')
+def chat_room_join():
+    """外部临时成员入口；邀请码只从 URL fragment 由浏览器兑换。"""
+    if not current_app.config.get('CHAT_ROOM_ENABLED', False):
+        return render_template('chat_room_join.html', chat_room_enabled=False), 404
+    return render_template('chat_room_join.html', chat_room_enabled=True)
 
 
 @views_bp.route('/agent-templates')
@@ -543,6 +555,24 @@ def pixel_office():
 def testplans():
     """测试计划排期"""
     return render_template('testplans.html')
+
+
+@views_bp.route('/automation-closed-loop')
+def automation_closed_loop():
+    """项目级自动化闭环只读驾驶舱（P0-J）。"""
+    return render_template('automation_closed_loop.html')
+
+
+@views_bp.route('/agent-eval')
+def agent_eval_page():
+    """Agent岗位评测、双评校准与运行回读。"""
+    value = current_app.config.get('AGENT_TEAM_CONTRACTS_ENABLED', False)
+    enabled = (
+        value.lower() in ('1', 'true', 'yes', 'on')
+        if isinstance(value, str) else bool(value))
+    return render_template(
+        'agent_eval.html',
+        agent_team_contracts_enabled=enabled)
 
 
 @views_bp.route('/engineering')

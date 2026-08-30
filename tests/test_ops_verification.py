@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +50,40 @@ class OpsVerificationTest(unittest.TestCase):
 
     def test_reread_unknown_type_none(self):
         self.assertIsNone(ov.reread_resource('bogus', 1, ['status']))
+
+    def test_requirement_review_verdict_is_supported_resource_type(self):
+        self.assertEqual(
+            ov.RESOURCE_MODEL_NAMES['requirement_review_verdict'],
+            'RequirementReviewVerdict',
+        )
+
+    def test_requirement_review_verdict_uses_canonical_payload(self):
+        row = SimpleNamespace(
+            id=9,
+            requirement_item_id=101,
+            iteration_id=5,
+            review_key='run-7',
+            verdict='risk',
+            risk_level='high',
+            testability='unclear',
+            issues_json=[{'field': 'scope', 'message': '不清晰'}],
+            summary='需要补充边界',
+            reviewer_name='Worker A',
+            reviewer_claw_id=3,
+            created_at=None,
+            updated_at=None,
+        )
+
+        actual = ov.resource_to_actual(
+            'requirement_review_verdict',
+            row,
+            ['id', 'issues', 'summary', 'issues_json'],
+        )
+
+        self.assertEqual(actual['id'], 9)
+        self.assertEqual(actual['issues'][0]['field'], 'scope')
+        self.assertEqual(actual['summary'], '需要补充边界')
+        self.assertNotIn('issues_json', actual)
 
 
 if __name__ == '__main__':

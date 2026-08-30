@@ -24,6 +24,9 @@ instance/
 .env
 .env.local
 .env.*.local
+_dahe_env
+_dahe_config.yaml
+chat-sessions-*.json
 
 # Logs
 *.log

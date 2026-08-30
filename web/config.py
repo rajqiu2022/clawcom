@@ -12,6 +12,20 @@ class Config:
     SHIFT_LEFT_ENABLED = os.getenv('SHIFT_LEFT_ENABLED', '0') in (
         '1', 'true', 'True', 'yes', 'on')
 
+    # 多 Agent 交付合同（Artifact/Stage/Handoff/Eval）按项目灰度前默认关闭。
+    AGENT_TEAM_CONTRACTS_ENABLED = os.getenv(
+        'AGENT_TEAM_CONTRACTS_ENABLED', '0') in (
+            '1', 'true', 'True', 'yes', 'on')
+
+    # 主题聊天室是纯增量能力，默认关闭，避免部署后改变现有点对点聊天行为。
+    CHAT_ROOM_ENABLED = os.getenv('CHAT_ROOM_ENABLED', '0') in (
+        '1', 'true', 'True', 'yes', 'on')
+    CHAT_ROOM_GUEST_TOKEN_MINUTES = int(os.getenv(
+        'CHAT_ROOM_GUEST_TOKEN_MINUTES', '2880'))
+    CHAT_ROOM_GUEST_TOKEN_MAX_MINUTES = int(os.getenv(
+        'CHAT_ROOM_GUEST_TOKEN_MAX_MINUTES', '10080'))
+    CHAT_ROOM_AGENT_MAX_DEPTH = int(os.getenv('CHAT_ROOM_AGENT_MAX_DEPTH', '5'))
+
     # Session（OA/WOA 单点登录后保持登录态）
     # SameSite=Lax 兼容 passport.woa.com 302 跳回我们的 callback。
     PERMANENT_SESSION_LIFETIME = timedelta(days=int(os.getenv('SESSION_DAYS', '30')))

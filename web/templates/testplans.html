@@ -468,13 +468,14 @@
 .tp-multi-trigger.active .tp-multi-arrow { transform: rotate(180deg); }
 
 .tp-multi-panel {
-    position: absolute; top: calc(100% + 6px); left: 0; right: 0;
+    position: absolute; top: auto; bottom: calc(100% + 6px); left: 0; right: 0;
     background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
     box-shadow: var(--shadow-lg, 0 12px 32px rgba(0,0,0,0.35));
     z-index: 10001;
     max-height: 320px; display: flex; flex-direction: column;
     overflow: hidden;
 }
+.tp-multi-panel[hidden] { display: none !important; }
 .tp-multi-toolbar {
     display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--border);
     background: var(--bg-card);
@@ -531,6 +532,17 @@
 .tp-multi-option .opt-name { flex: 1; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tp-multi-option .opt-meta { color: var(--text-muted); font-size: 0.74rem; flex-shrink: 0; }
 .tp-multi-empty { padding: 16px; color: var(--text-muted); font-size: 0.82rem; text-align: center; }
+
+.tp-iteration-modal-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 10002;
+    margin: 18px -24px -24px;
+    padding: 14px 24px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-card);
+    box-shadow: 0 -10px 24px rgba(0, 0, 0, .12);
+}
 
 /* 用例状态选择 */
 .tp-case-status-select {
@@ -692,9 +704,11 @@ async function loadProjects() {
         projects.forEach(p => {
             sel.innerHTML += `<option value="${p.id}">${p.name}</option>`;
         });
-        initProjectIdFilter(sel, projects, () => {
-            if (!isBootstrappingTestplans) loadIterations();
-        });
+        if (typeof initProjectIdFilter === 'function') {
+            initProjectIdFilter(sel, projects, () => {
+                if (!isBootstrappingTestplans) loadIterations();
+            });
+        }
     } catch(e) { console.error('加载项目失败', e); }
 }
 
@@ -2595,7 +2609,7 @@ function openIterationModal(iterId) {
     overlay.className = 'modal-overlay active';
     overlay.style.zIndex = '9999';
     overlay.innerHTML = `
-    <div class="modal" style="max-width:560px;max-height:90vh;overflow-y:auto">
+    <div class="modal tp-iteration-modal" style="max-width:560px;max-height:90vh;overflow-y:auto">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
             <h3 style="margin:0;font-size:1.05rem">${isEdit ? '编辑测试迭代' : '新建测试迭代'}</h3>
             <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
@@ -2670,7 +2684,7 @@ function openIterationModal(iterId) {
                 </div>
             </div>
         </div>
-        <div style="display:flex;gap:12px;justify-content:center;margin-top:18px">
+        <div class="tp-iteration-modal-actions" style="display:flex;gap:12px;justify-content:center">
             <button class="btn btn-ghost" onclick="this.closest('.modal-overlay').remove()">关闭</button>
             <button class="btn btn-primary" onclick="saveIteration(${iterId || 0})">${isEdit ? '保存' : '创建'}</button>
         </div>

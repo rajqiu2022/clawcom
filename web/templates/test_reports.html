@@ -757,8 +757,8 @@ async function createDeveloperAiLink(subjectType, subjectId, projectId) {
             <p style="color:var(--text-secondary);line-height:1.6">链接中的邀请码只能兑换一次。默认开放报告读取、问题备注和开发侧状态更新，不开放提权或跨对象访问。</p>
             <div class="form-group"><label>Developer AI 身份标识</label><input id="_dev_ai_identity" class="form-input" value="developer-ai:project-client" placeholder="例如 developer-ai:racinggo-client"></div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-                <div class="form-group"><label>邀请有效期（分钟）</label><input id="_dev_ai_invite_ttl" class="form-input" type="number" min="5" max="1440" value="30"></div>
-                <div class="form-group"><label>Token 有效期（分钟）</label><input id="_dev_ai_token_ttl" class="form-input" type="number" min="5" max="1440" value="120"></div>
+                <div class="form-group"><label>邀请有效期（分钟，最长72小时）</label><input id="_dev_ai_invite_ttl" class="form-input" type="number" min="5" max="4320" value="30"></div>
+                <div class="form-group"><label>Token 有效期（分钟，最长72小时）</label><input id="_dev_ai_token_ttl" class="form-input" type="number" min="5" max="4320" value="120"></div>
             </div>
             <div class="modal-actions"><button class="btn btn-ghost" id="_dev_ai_cancel">取消</button><button class="btn btn-primary" id="_dev_ai_create">生成一次性链接</button></div>
         </div>`;

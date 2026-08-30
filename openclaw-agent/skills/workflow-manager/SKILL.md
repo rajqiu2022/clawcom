@@ -1,3 +1,9 @@
+---
+name: workflow-manager
+description: "使用 Hub Workflow 与 Workflow Mission 创建、调度和跟踪流程。固定步骤使用 Definition/Run，后续 Flow 需按结果决定时由主 Agent 通过 Mission 自主 dispatch Child Run；也用于节点进度、结果、重试、审批、恢复和证据归档。"
+metadata: { "openclaw": { "category": "hub_system", "emoji": "🔀" } }
+---
+
 # Workflow 自动化编排 (workflow-manager)
 
 ## 简介
@@ -6,11 +12,13 @@
 
 Workflow 的定位不是完整 n8n，也不是让 Hub 云端执行 Unity/ADB/Shell；它是 Hub 内的轻量流程编排器：
 
-- Hub 负责：把长流程拆为节点、保存节点说明和参考内容、推进节点状态、通知目标 Agent/owner、归档证据、页面展示。
+- 固定单 Flow：Hub 按 Definition 推进节点、保存状态和参考内容、通知执行者、归档证据并展示。
+- 多 Flow / 开放式目标：由主 Agent 创建或领取 Workflow Mission，自主选择下一条 Flow；Hub 只提供项目范围、身份、幂等、预算和审计控制面。
 - Agent / worker 负责：执行单个节点任务，自行监控执行情况，并明确回写节点状态。
 - 大模型相关节点走 `agent_task`：Hub 通知指定 Agent，由 Agent 使用自身 Skill、Rules、工具、知识库、测试报告、课题讨论、测试用例等上下文执行。
 - 外部写操作（推群、触发蓝盾、push 分支等）必须走审批或预授权，不能私自跳过。
 - Hub 的 subprocess timeout / AgentTask timeout 只是执行通道信号，不等于业务阻断；是否阻断应由 Agent/worker 或 owner 明确上报。
+- 普通项目内 Flow 选择、结果读取和下一步决策不新增逐步骤人工 Gate，也不要求 Mission 额外定义一套 metrics/evidence 合同。
 
 ---
 
@@ -103,6 +111,29 @@ Workflow 模板，定义一组步骤、依赖关系、runner、门禁和审批�
 
 Step 产生的证据，如 JSON、HTML、截图、日志、Hub 报告、蓝盾构建链接、APK 链接等。Worker 应尽量把证据写入 `evidence` 字段，由 Hub 自动归档。
 
+### Workflow Mission
+
+Workflow Mission 用于“目标明确，但下一条 Flow 需要根据实际结果再决定”的任务。主 Agent 负责认知和决策，Hub 不解析业务语义，也不会替主 Agent 自动选择下一条 Flow。
+
+优先按下面规则选择模式：
+
+| 场景 | 推荐模式 |
+|---|---|
+| 步骤和依赖已确定，A 完成后固定执行 B/C | 一个 Workflow Definition 内串行/并行节点 |
+| 需要根据 Child Run 结果决定继续、换 Flow、重试或结束 | Workflow Mission |
+| 只是让其他人看到进度 | 聊天或通知；不要把聊天消息当调度事实 |
+
+Mission 的关键原则：
+
+- Mission 创建时一次性快照项目内允许执行的 active Flow；普通 dispatch 不再逐 Flow 申请授权。
+- 主 Agent 必须先查询 Mission 的 `definitions_api`，再调用 `dispatch_api`，不能凭记忆猜 Definition ID。
+- Child Run 结束后，主 Agent 读取 Run 的结构化结果、outputs、references 和 evidence，自主决定下一步。
+- Hub 只校验主 Agent身份、项目范围、Mission 状态、幂等键和 Child Run 预算；不要为了普通内部调度自行追加审批、凭据或复杂合同。
+- 通知、凭据发放、代码 push、构包和其他破坏性/外部动作继续使用已有平台门禁；Mission 不绕过这些边界。
+- dispatch 不能覆盖执行者。逻辑执行者来自 Definition，物理投递 Worker 固定为 Mission 主 Agent。
+
+需要创建或操作 Mission 时，继续阅读 [references/workflow-missions.md](references/workflow-missions.md)。
+
 ---
 
 ## 节点类型
@@ -123,6 +154,48 @@ Step 产生的证据，如 JSON、HTML、截图、日志、Hub 报告、蓝盾�
 ---
 
 ## 常用流程
+
+### 0. 主 Agent 自主调度多个 Flow
+
+当目标需要跨多个 Flow 且后续路径依赖运行结果时，不要把全部判断硬编码进 Hub，也不要通过聊天消息串联。使用 Workflow Mission：
+
+```text
+创建 Mission（一次授权）
+  -> 主 Agent 查询可用 Flow
+  -> 主 Agent dispatch Child Run
+  -> 等待并回读 Child Run 结果
+  -> 主 Agent 决定继续 / 换 Flow / 重试 / 完成 Mission
+```
+
+最小 dispatch：
+
+```http
+POST /api/v1/workflow-missions/{MISSION_ID}/dispatch
+
+{
+  "workflow_definition_id": 37,
+  "decision_key": "case-design-stage-1",
+  "reason": "代码分析已完成，进入用例设计"
+}
+```
+
+相同 `decision_key` 和相同请求重放会返回同一个 Child Run；同一个 key 不能复用于不同决策。返回后使用 `readback_url` 查询 Run，等其进入终态再做下一次决策。
+
+通过 Codex Worker 的 `hub_api` 调用 Mission dispatch 时，提供稳定 `operation_id` 即可，普通 Mission dispatch 不需要附加逐步骤 `verify.expected`：
+
+```json
+{
+  "method": "POST",
+  "path": "/api/v1/workflow-missions/91/dispatch",
+  "operation_id": "mission-91-case-design-stage-1",
+  "body": {
+    "workflow_definition_id": 37,
+    "decision_key": "case-design-stage-1"
+  }
+}
+```
+
+详细创建、查询、dispatch、结束和错误处理合同见 [references/workflow-missions.md](references/workflow-missions.md)。
 
 ### 1. 查看 Workflow 模板
 
@@ -455,6 +528,40 @@ POST /api/v1/workflow-runs/{RUN_ID}/steps/{STEP_ID}/retry
 - 临时网络失败。
 - 截图/报告已人工修复。
 - Unity/ADB 卡住后已恢复环境。
+
+### 6.5 失败修复后完整重启同一个 Run
+
+当 Run 已是 `blocked/failed`，修复完成后仍要执行**同一个 Flow**，优先原地完整重启，不要创建新的 Run：
+
+```http
+POST /api/v1/workflow-runs/{RUN_ID}/restart
+Idempotency-Key: workflow-run-{RUN_ID}-restart-{稳定业务序号}
+
+{
+  "reason": "Adapter 1.1.30 验证收据已补齐并登记"
+}
+```
+
+完整重启的语义：
+
+- Run ID、Mission dispatch 记录和 Child Run 预算保持不变；
+- 所有旧 AgentTask 失效，worker claim/fencing 在重新认领后换代；
+- 所有节点从第一步重新派发，旧 outputs/metrics/evidence 不参与新一轮判断；
+- 旧 Artifact 保留但标记为 restart archive，Evidence Manifest 回到 incomplete；
+- 旧审批失效，涉及外部动作的审批节点必须重新审批；
+- `context.restart_count/restart_history` 保存重启次数、原因和上轮结果摘要；
+- 相同幂等键重放返回同一次重启结果，不会再次重启。
+
+选择规则：
+
+| 情况 | 操作 |
+|---|---|
+| 仅当前节点临时失败 | `/steps/{STEP_ID}/retry` |
+| 要从某个中间节点重新执行 | `/resume` + `from_step_id` |
+| 修复后要把同一 Flow 从头再跑 | `/restart`，复用原 Run ID |
+| 目标变化，需要不同 Workflow Definition | Mission `/dispatch` 新 Child Run |
+
+`cancelled` Run 不允许重启；确实取消后重新开展，才创建新 Run。
 
 ### 7. 从指定步骤恢复
 
@@ -1099,6 +1206,11 @@ Worker 必须避免重复执行危险动作：
 ## 触发词
 
 - "启动 RacingGO QA Workflow"
+- "创建 Workflow Mission"
+- "让主 Agent 自主选择下一条 Flow"
+- "跨多个 Flow 完成目标"
+- "查询 Mission 可用 Flow"
+- "dispatch Child Run"
 - "创建 workflow run"
 - "查看 workflow 状态"
 - "重试 workflow 步骤"

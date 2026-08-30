@@ -14,6 +14,7 @@ RESOURCE_MODEL_NAMES = {
     'test_report': 'TestReport',
     'workflow_step': 'WorkflowRunStep',
     'agent_task': 'AgentTask',
+    'requirement_review_verdict': 'RequirementReviewVerdict',
 }
 
 
@@ -45,6 +46,43 @@ def compare_expected_actual(expected: dict[str, Any],
     return {'verified': not mismatches, 'mismatches': mismatches}
 
 
+def resource_to_actual(resource_type: str, row: Any,
+                       keys: list[str]) -> dict[str, Any]:
+    """Build the canonical actual payload for one DB row and requested keys."""
+    if resource_type == 'requirement_review_verdict':
+        payload = row.to_dict() if hasattr(row, 'to_dict') else {
+            'id': getattr(row, 'id', None),
+            'requirement_item_id': getattr(row, 'requirement_item_id', None),
+            'iteration_id': getattr(row, 'iteration_id', None),
+            'review_key': getattr(row, 'review_key', None) or 'default',
+            'verdict': getattr(row, 'verdict', None) or 'pass',
+            'risk_level': getattr(row, 'risk_level', None) or 'low',
+            'testability': getattr(row, 'testability', None) or 'testable',
+            'issues': getattr(row, 'issues_json', None) or [],
+            'summary': getattr(row, 'summary', None) or '',
+            'reviewer_name': getattr(row, 'reviewer_name', None) or '',
+            'reviewer_claw_id': getattr(row, 'reviewer_claw_id', None),
+            'created_at': str(getattr(row, 'created_at', '')) if getattr(row, 'created_at', None) else None,
+            'updated_at': str(getattr(row, 'updated_at', '')) if getattr(row, 'updated_at', None) else None,
+        }
+        return {
+            key: payload[key]
+            for key in keys or []
+            if key in payload
+        }
+
+    actual: dict[str, Any] = {}
+    for key in keys or []:
+        value = getattr(row, key, None)
+        try:
+            import json
+            json.dumps(value)
+            actual[key] = value
+        except Exception:
+            actual[key] = _normalize(value)
+    return actual
+
+
 def reread_resource(resource_type: str, resource_id: int,
                     keys: list[str]) -> dict[str, Any] | None:
     """从数据库重读资源指定字段。不存在返回 None，异常返回 None。
@@ -64,13 +102,4 @@ def reread_resource(resource_type: str, resource_id: int,
         return None
     if row is None:
         return None
-    actual: dict[str, Any] = {}
-    for key in keys or []:
-        value = getattr(row, key, None)
-        try:
-            import json
-            json.dumps(value)
-            actual[key] = value
-        except Exception:
-            actual[key] = _normalize(value)
-    return actual
+    return resource_to_actual(resource_type, row, keys)

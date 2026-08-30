@@ -70,7 +70,7 @@
 
 <!-- 新建弹窗 -->
 <div class="modal-overlay" id="create-modal">
-    <div class="modal" style="max-width:640px">
+    <div class="modal" style="max-width:720px">
         <h2 class="modal-title">注册新 OpenClaw</h2>
         <form id="create-form">
             <div class="form-group">
@@ -135,20 +135,32 @@
             </div>
             <input type="hidden" name="connection_mode" value="polling">
 
-            <!-- 代建 Hermes Agent（仅 super_admin 可见）-->
+            <!-- Hub 代建 Agent（仅 super_admin 可见）-->
             <div id="create-agent-block" style="display:none">
             <div class="form-group" style="border-top:1px dashed var(--border);padding-top:14px;margin-top:14px">
                 <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer">
                     <input type="checkbox" id="create-agent-toggle" onchange="onCreateAgentToggle()" style="width:16px;height:16px">
-                    <span>同时部署 Hermes Agent（Hub 自动安装）</span>
+                    <span>同时部署 Agent（Hub 自动安装）</span>
                 </label>
                 <div style="font-size:0.78rem;color:var(--text-muted);margin-top:6px;padding-left:24px;line-height:1.6">
-                    勾选后 Hub 会先建 OpenClaw、生成 Token，再自动部署一个 per-claw Hermes（目录 / unit 名按 claw id 隔离，不会和别的 claw 互相覆盖）。<br>
-                    Venus / TimiAI API Key 使用 Hub 服务端预置密钥，页面不展示也不提交。该操作仅 <strong>超级管理员</strong> 可执行。
+                    Hub 会先创建 OpenClaw 和 Token，再在统一 Linux 环境中部署独立 systemd 服务。<br>
+                    可选 Hermes Agent 或 Claw Worker；所有 API Key 均从 Hub 密钥箱读取，页面不展示也不提交。该操作仅 <strong>超级管理员</strong> 可执行。
                 </div>
             </div>
             <div id="create-agent-fields" style="display:none;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:12px">
                 <input type="hidden" name="deploy_method" value="systemd">
+                <div class="form-group" style="margin-bottom:12px">
+                    <label class="form-label">部署类型 *</label>
+                    <select class="form-input" name="agent_type" id="create-agent-type" onchange="onCreateAgentTypeChange()">
+                        <option value="hermes" selected>Hermes Agent</option>
+                        <option value="codex">Claw Worker（Codex SDK）</option>
+                    </select>
+                    <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
+                        Claw Worker 首期固定使用 <code>Codex SDK</code> 执行分支，不启用 Hermes/Pi fallback。
+                    </div>
+                </div>
+
+                <div id="create-hermes-fields">
                 <div class="form-group" style="margin-bottom:10px">
                     <label class="form-label">大模型平台 *</label>
                     <select class="form-input" name="llm_provider" id="create-llm-provider" onchange="onCreateLlmProviderChange()">
@@ -174,28 +186,90 @@
                         Venus 走 <code>chat_completions</code>；TimiAI 走 <code>codex_responses</code>。选择会写入 Hermes <code>config.yaml</code>，卡片上也可后续修改。
                     </div>
                 </div>
+                </div>
+
+                <div id="create-codex-fields" style="display:none">
+                    <div class="form-group" style="margin-bottom:12px;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-primary)">
+                        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px">
+                            <label class="form-label" style="margin:0">Worker 发布版本 *</label>
+                            <button type="button" class="btn btn-sm" onclick="refreshWorkerReleaseCatalog()">刷新版本</button>
+                        </div>
+                        <select class="form-input" name="worker_release_record_id" id="create-worker-release"></select>
+                        <div id="create-worker-release-meta" style="font-size:0.72rem;color:var(--text-muted);margin-top:6px;line-height:1.55"></div>
+                        <button type="button" class="btn btn-sm btn-primary" id="approve-worker-release-btn"
+                                onclick="approveLatestWorkerRelease()" style="display:none;margin-top:8px">
+                            批准候选并设为默认
+                        </button>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="form-label">工程工作目录 *</label>
+                        <input class="form-input" name="codex_workspace" id="create-codex-workspace"
+                               placeholder="目标 Linux 主机绝对路径，如 /srv/projects/RacingGoUnity_dev2">
+                        <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
+                            该目录会成为 Codex SDK 的默认 workspace，并纳入 Worker 固定读写白名单。
+                        </div>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label class="form-label">模型认证 *</label>
+                        <select class="form-input" name="codex_auth_mode" id="create-codex-auth-mode" onchange="onCreateCodexAuthModeChange()">
+                            <option value="chatgpt_subscription" selected>Codex 订阅认证</option>
+                            <option value="timiai">TimiAI 接口</option>
+                        </select>
+                    </div>
+                    <div id="create-codex-subscription-fields">
+                        <div class="form-group" style="margin-bottom:10px">
+                            <label class="form-label">Codex 模型</label>
+                            <input class="form-input" name="codex_model" id="create-codex-model"
+                                   placeholder="可选；留空使用订阅账号默认模型">
+                        </div>
+                        <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:10px;line-height:1.55">
+                            部署会为该 Claw 创建独立 <code>CODEX_HOME</code>。若目标服务用户尚未授权，部署会安全停止并返回设备授权命令；Hub 不读取或复制 <code>auth.json</code>。
+                        </div>
+                    </div>
+                    <div id="create-codex-timiai-fields" style="display:none;border-left:2px solid var(--accent);padding-left:12px;margin-bottom:10px">
+                        <div class="form-group" style="margin-bottom:10px">
+                            <label class="form-label">TimiAI 项目 *</label>
+                            <select class="form-input" name="codex_timiai_project" id="create-codex-timiai-project" onchange="onCreateCodexTimiaiProjectChange()">
+                                <option value="gbt" selected>GBT</option>
+                                <option value="qqspeed_pc">QQ飞车端游</option>
+                                <option value="contra">魂斗罗</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="margin-bottom:10px">
+                            <label class="form-label">TimiAI 模型 *</label>
+                            <select class="form-input" name="codex_timiai_model" id="create-codex-timiai-model"></select>
+                        </div>
+                        <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:10px;line-height:1.55">
+                            使用 Codex 官方自定义 provider 的 <code>responses</code> 协议。项目 Key 从 Hub 密钥箱写入 Worker 私有凭据文件，不进入页面、数据库、Prompt 或 SDK 子进程环境。
+                        </div>
+                    </div>
+                </div>
+
                 <div class="form-group" style="margin-bottom:10px">
                     <label class="form-label">企微 Bot ID / Key</label>
                     <input class="form-input" name="wecom_bot_id" id="create-wecom-bot-id"
-                           placeholder="可选：填写后随 Hermes Agent 一次性部署">
+                           placeholder="可选：填写后随 Agent 一次性部署">
                 </div>
                 <div class="form-group" style="margin-bottom:10px">
                     <label class="form-label">企微 Secret</label>
                     <input class="form-input" name="wecom_bot_secret" id="create-wecom-secret" type="password"
                            placeholder="可选：与 Bot ID / Key 同时填写">
                     <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;line-height:1.5">
-                        两项都填写时会加密保存到 OpenClaw，并在本次 Hermes Agent 部署中写入
-                        <code>config.yaml</code> / <code>.env</code>；Secret 不会在页面回显。
+                        两项都填写时会加密保存到 OpenClaw，并在本次 Agent 部署中写入受保护配置；Secret 不会在页面回显。
                     </div>
                 </div>
                 <input type="hidden" name="hermes_layout" value="split">
                 <input type="hidden" name="deploy_hermes_start_mode" value="gateway">
-                <div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:10px;line-height:1.55">
+                <div id="create-hermes-layout-hint" style="font-size:0.72rem;color:var(--text-muted);margin-bottom:10px;line-height:1.55">
                     安装目录和数据目录使用 Hub 服务端默认值：运行时安装目录由服务端配置，私有数据目录自动生成在
                     <code>/opt/openclaw-agents/&lt;claw&gt;/data</code>；
                     <code>/opt/agent_share</code> 是所有 Agent 的共享写目录。<br>
                     systemd 服务名为 <code>hermes-gateway-claw-&lt;id&gt;.service</code>，
                     启动命令为 <code>python -m hermes_cli.main gateway run --replace</code>。
+                </div>
+                <div id="create-codex-layout-hint" style="display:none;font-size:0.72rem;color:var(--text-muted);margin-bottom:10px;line-height:1.55">
+                    Claw Worker 使用 Hub 统一的锁版本离线 Codex runtime；requirements SHA-256 从服务端配置读取。<br>
+                    systemd 服务名为 <code>claw-worker-codex-&lt;id&gt;.service</code>，每个实例使用独立 Linux 用户和私有 <code>CODEX_HOME</code>。
                 </div>
             </div>
             </div><!-- /create-agent-block -->
@@ -337,10 +411,10 @@
         </div>
         <div id="reg-install-summary" style="font-size:0.85rem;color:var(--text-muted);margin-bottom:14px"></div>
 
-        <!-- Hermes Agent 部署状态（仅在勾选了"代建 Agent"时出现） -->
+        <!-- Agent 部署状态（仅在勾选了"代建 Agent"时出现） -->
         <div id="reg-deploy-section" style="display:none;margin-bottom:14px;border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--bg-secondary)">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-                <strong style="font-size:0.92rem">🛠️ Hermes Agent 部署</strong>
+                <strong style="font-size:0.92rem">🛠️ Agent 部署</strong>
                 <span id="reg-deploy-status-pill" style="font-size:0.78rem;padding:2px 10px;border-radius:999px;background:rgba(234,179,8,0.15);color:#eab308">⏳ 部署中...</span>
             </div>
             <div id="reg-deploy-meta" style="font-size:0.78rem;color:var(--text-muted);line-height:1.7"></div>
@@ -379,10 +453,10 @@
     </div>
 </div>
 
-<!-- Hermes Agent 部署进度弹窗 -->
+<!-- Agent 部署进度弹窗 -->
 <div class="modal-overlay" id="deploy-progress-modal">
     <div class="modal" style="max-width:620px">
-        <h2 class="modal-title">Hermes Agent 部署进度</h2>
+        <h2 class="modal-title">Agent 部署进度</h2>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
             <strong style="font-size:0.92rem">部署状态</strong>
             <span id="progress-deploy-status-pill" style="font-size:0.78rem;padding:2px 10px;border-radius:999px;background:rgba(234,179,8,0.15);color:#eab308">读取中...</span>
@@ -915,6 +989,8 @@ let allProjects = [];
 let filteredClaws = [];
 let canViewTokens = false;  // 是否有权限查看 Token
 let isSuperAdmin = false;   // 是否超级管理员（控制"代建 Hermes Agent"开关可见性）
+let workerReleases = [];
+let latestWorkerCandidate = null;
 
 const HERMES_LLM_PROVIDERS = [
     { value: 'venus', label: 'Venus' },
@@ -931,7 +1007,8 @@ const HERMES_LLM_MODELS_BY_PROVIDER = {
         { value: 'hunyuan-v3', label: 'Hunyuan V3' },
     ],
     timiai: [
-        { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+        { value: 'deepseek-v4-pro-r1', label: 'DeepSeek V4 Pro (R1)' },
+        { value: 'deepseek-v4-flash-r1', label: 'DeepSeek V4 Flash (R1)' },
         { value: 'glm-5.2', label: 'GLM 5.2' },
         { value: 'glm-5v-turbo', label: 'GLM 5V Turbo' },
         { value: 'claude-sonnet-4.6', label: 'Claude Sonnet 4.6' },
@@ -1029,6 +1106,98 @@ function onCreateTimiaiProjectChange() {
     renderLlmModelSelect(document.getElementById('create-llm-model'), provider, null, project);
 }
 
+function onCreateAgentTypeChange() {
+    const agentType = document.getElementById('create-agent-type').value || 'hermes';
+    const isCodex = agentType === 'codex';
+    document.getElementById('create-hermes-fields').style.display = isCodex ? 'none' : '';
+    document.getElementById('create-codex-fields').style.display = isCodex ? '' : 'none';
+    document.getElementById('create-hermes-layout-hint').style.display = isCodex ? 'none' : '';
+    document.getElementById('create-codex-layout-hint').style.display = isCodex ? '' : 'none';
+    const workspace = document.getElementById('create-codex-workspace');
+    if (workspace) workspace.required = isCodex;
+    if (isCodex) {
+        onCreateCodexAuthModeChange();
+        loadWorkerReleases();
+    }
+    else onCreateLlmProviderChange();
+}
+
+async function loadWorkerReleases() {
+    if (!isSuperAdmin) return;
+    const select = document.getElementById('create-worker-release');
+    const meta = document.getElementById('create-worker-release-meta');
+    const approve = document.getElementById('approve-worker-release-btn');
+    if (!select || !meta || !approve) return;
+    try {
+        const result = await API.request('GET', '/worker-releases');
+        workerReleases = result.items || [];
+        const approved = workerReleases.filter(item => item.approval_status === 'approved');
+        latestWorkerCandidate = workerReleases.find(item => item.approval_status === 'candidate') || null;
+        select.innerHTML = approved.length
+            ? approved.map(item => `<option value="${item.id}"${item.is_default ? ' selected' : ''}>${item.source_commit.slice(0, 12)} · ${item.release_id}</option>`).join('')
+            : '<option value="">暂无已批准版本</option>';
+        if (result.default) {
+            meta.textContent = `默认 ${result.default.source_commit.slice(0, 12)} · artifact ${result.default.artifact_sha256.slice(0, 12)}…`;
+        } else if (latestWorkerCandidate) {
+            meta.textContent = `发现候选 ${latestWorkerCandidate.source_commit.slice(0, 12)}，批准后才能部署。`;
+        } else {
+            meta.textContent = '尚未导入 Worker release；请先刷新版本。';
+        }
+        approve.style.display = latestWorkerCandidate ? '' : 'none';
+    } catch (err) {
+        select.innerHTML = '<option value="">版本读取失败</option>';
+        meta.textContent = err.message;
+        approve.style.display = 'none';
+    }
+}
+
+async function refreshWorkerReleaseCatalog() {
+    try {
+        showToast('正在校验 Worker release catalog...', 'info');
+        const result = await API.request('POST', '/worker-releases/refresh', {});
+        showToast(result.message || 'Worker 候选版本已刷新', 'success');
+        await loadWorkerReleases();
+    } catch (err) {
+        showToast('刷新 Worker 版本失败: ' + err.message, 'error');
+    }
+}
+
+async function approveLatestWorkerRelease() {
+    if (!latestWorkerCandidate) return;
+    const confirmed = await customConfirm({
+        title: '批准 Worker 候选版本',
+        msg: `候选 ${latestWorkerCandidate.source_commit.slice(0, 12)} 当前为未签名制品。确认 SHA 校验结果并设为新建 Claw 默认版本？`,
+        type: 'warning',
+        okText: '确认批准',
+    });
+    if (!confirmed) return;
+    try {
+        await API.request('POST', `/worker-releases/${latestWorkerCandidate.id}/approve`, {
+            confirm_unsigned: true,
+        });
+        showToast('Worker 版本已批准并设为默认', 'success');
+        await loadWorkerReleases();
+    } catch (err) {
+        showToast('批准 Worker 版本失败: ' + err.message, 'error');
+    }
+}
+
+function onCreateCodexAuthModeChange() {
+    const mode = document.getElementById('create-codex-auth-mode').value || 'chatgpt_subscription';
+    const isTimiai = mode === 'timiai';
+    document.getElementById('create-codex-subscription-fields').style.display = isTimiai ? 'none' : '';
+    document.getElementById('create-codex-timiai-fields').style.display = isTimiai ? '' : 'none';
+    if (isTimiai) onCreateCodexTimiaiProjectChange();
+}
+
+function onCreateCodexTimiaiProjectChange() {
+    const project = document.getElementById('create-codex-timiai-project').value || 'gbt';
+    renderLlmModelSelect(
+        document.getElementById('create-codex-timiai-model'),
+        'timiai', null, project
+    );
+}
+
 function onSettingsLlmProviderChange() {
     const provider = document.getElementById('settings-llm-provider-select').value || 'venus';
     const projectGroup = document.getElementById('settings-timiai-project-group');
@@ -1057,7 +1226,7 @@ const ROLE_LABELS = {
 
 function llmModelLabel(value, provider) {
     const prov = provider || inferLlmProvider(value);
-    const key = value || (prov === 'timiai' ? 'deepseek-v4-pro' : 'venus');
+    const key = value || (prov === 'timiai' ? 'deepseek-v4-pro-r1' : 'venus');
     const pool = prov === 'timiai' ? allTimiaiModels() : hermesModelsForProvider(prov);
     const hit = pool.find(m => m.value === key);
     return hit ? hit.label : key;
@@ -1254,6 +1423,16 @@ function renderClawCard(c) {
     const onlineCount = filteredClaws.filter(cl => ['工作','学习','摸鱼','online'].includes(cl.status)).length;
     const modelLabel = llmDisplayLabel(c);
     const hasHermesAgent = !!c.has_hermes_agent;
+    const hasCodexAgent = !!c.has_codex_agent;
+    const hasWorkerRuntime = !!c.has_worker_runtime;
+    const runtime = c.worker_runtime || {};
+    const runtimeProvider = c.runtime_provider || '';
+    const runtimeOwner = c.runtime_config_owner || 'hub';
+    const runtimeProviderLabel = runtimeProvider === 'codex' ? 'Codex SDK' : 'Hermes';
+    const runtimeAuthLabel = runtimeProvider === 'codex'
+        ? (runtime.auth_mode === 'timiai_bridge' ? 'TimiAI 接口' : '订阅认证')
+        : (runtime.llm_model || (runtime.llm_provider === 'timiai' ? 'TimiAI' : ''));
+    const deployedAgentName = c.agent_type === 'codex' ? 'Claw Worker' : 'Hermes Agent';
     const hasWecom = !!(c.wecom_bot_id || c.has_wecom_bot_secret);
     const isDeployingAgent = ['pending', 'in_progress'].includes(c.agent_deployment_status || '');
     const deployFailed = (c.agent_deployment_status || '') === 'failed';
@@ -1263,12 +1442,12 @@ function renderClawCard(c) {
     const deployPanel = isAgentDeployLocked ? `
         <div class="deploy-panel ${deployFailed ? 'failed' : ''}">
             <div>
-                <div class="deploy-panel-title">${deployFailed ? 'Hermes Agent 部署失败' : 'Hermes Agent 部署中'}</div>
-                <div class="deploy-panel-desc">${deployFailed ? '当前仅可查看进度或重新部署。' : '部署完成前暂不可进入详情或修改设置。'}</div>
+                <div class="deploy-panel-title">${deployFailed ? `${deployedAgentName} 部署失败` : `${deployedAgentName} 部署中`}</div>
+                <div class="deploy-panel-desc">${deployFailed ? '请先查看部署日志，再按完整配置重试。' : '部署完成前暂不可进入详情或修改设置。'}</div>
             </div>
             <div class="deploy-panel-actions">
                 <button class="btn btn-sm" onclick="event.stopPropagation(); viewDeploymentProgress(${c.id})">查看进度</button>
-                ${deployFailed && isSuperAdmin ? `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); redeployHermesAgent(${c.id})">重新部署</button>` : ''}
+                ${deployFailed && isSuperAdmin && c.agent_type !== 'codex' ? `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); redeployHermesAgent(${c.id})">重新部署</button>` : ''}
             </div>
         </div>` : '';
 
@@ -1299,8 +1478,14 @@ function renderClawCard(c) {
             ${c.registration_awaiting_review ? `<span class="claw-meta-tag" title="龙虾王注册验收待审核" onclick="event.stopPropagation(); location.href='/openclaws/${c.id}?tab=todos&subtab=registration'" style="color:var(--red);cursor:pointer;font-weight:600;border:1px solid rgba(239,68,68,.45)">🦞 注册待审</span>` : ''}
         </div>
         <div class="claw-meta-row" style="margin-top:4px">
-            ${hasHermesAgent ? `<span class="claw-meta-tag" title="Hermes 大模型">🧠 ${modelLabel}</span>` : ''}
-            ${hasHermesAgent ? `<span class="claw-meta-tag" title="Hub 代建 Hermes Agent">Hermes</span>` : ''}
+            ${hasWorkerRuntime ? `<span class="claw-meta-tag" title="统一 Claw Worker 运行时">Claw Worker</span>` : ''}
+            ${hasWorkerRuntime ? `<span class="claw-meta-tag" title="Worker Provider">${runtimeProviderLabel}</span>` : ''}
+            ${hasWorkerRuntime && runtimeAuthLabel ? `<span class="claw-meta-tag" title="Worker 模型/认证">🧠 ${runtimeAuthLabel}</span>` : ''}
+            ${hasWorkerRuntime && runtimeOwner === 'worker' ? `<span class="claw-meta-tag" title="模型和认证由 Worker 本机维护">本机配置</span>` : ''}
+            ${!hasWorkerRuntime && hasHermesAgent ? `<span class="claw-meta-tag" title="Hermes 大模型">🧠 ${modelLabel}</span>` : ''}
+            ${!hasWorkerRuntime && hasHermesAgent ? `<span class="claw-meta-tag" title="Hub 代建 Hermes Agent">Hermes</span>` : ''}
+            ${!hasWorkerRuntime && hasCodexAgent ? `<span class="claw-meta-tag" title="Hub 代建 Claw Worker">Claw Worker</span>` : ''}
+            ${!hasWorkerRuntime && hasCodexAgent ? `<span class="claw-meta-tag" title="执行引擎">Codex SDK</span>` : ''}
             ${hasWecom ? `<span class="claw-meta-tag" title="已绑定企微机器人">企微</span>` : ''}
             ${c.can_own && hasHermesAgent && !isAgentDeployLocked ? `<button class="btn btn-sm" onclick="event.stopPropagation(); openClawSettingsModal(${c.id})"
                     style="padding:3px 8px;font-size:0.72rem;">设置</button>` : ''}
@@ -1358,7 +1543,7 @@ function openClawSettingsModal(clawId) {
     renderLlmModelSelect(
         document.getElementById('settings-llm-model-select'),
         provider,
-        c.llm_model || (provider === 'timiai' ? 'deepseek-v4-pro' : 'venus'),
+        c.llm_model || (provider === 'timiai' ? 'deepseek-v4-pro-r1' : 'venus'),
         settingsProject
     );
 
@@ -1390,12 +1575,16 @@ async function confirmClawSettings() {
     }
     const provider = document.getElementById('settings-llm-provider-select').value || 'venus';
     const value = document.getElementById('settings-llm-model-select').value
-        || (provider === 'timiai' ? 'deepseek-v4-pro' : 'venus');
+        || (provider === 'timiai' ? 'deepseek-v4-pro-r1' : 'venus');
     const payload = {
         llm_provider: provider,
         llm_model: value,
         timiai_project: document.getElementById('settings-timiai-project-select').value || 'gbt',
     };
+    const modelChanged = (
+        provider !== (c.llm_provider || inferLlmProvider(c.llm_model))
+        || value !== c.llm_model
+        || payload.timiai_project !== (c.timiai_project || 'gbt'));
     if (c.has_hermes_agent) {
         payload.wecom_bot_id = document.getElementById('settings-wecom-bot-id').value.trim();
         const secret = document.getElementById('settings-wecom-secret').value.trim();
@@ -1412,8 +1601,12 @@ async function confirmClawSettings() {
         applyFilters();
         closeClawSettingsModal();
         try {
-            await restartHermesAgentService(restartClawId, { confirm: false, quiet: true });
-            showToast('OpenClaw 设置已保存，Hermes Agent 已重启', 'success');
+            await restartHermesAgentService(restartClawId, {
+                confirm: false, quiet: true, resetSessions: modelChanged,
+            });
+            showToast(modelChanged
+                ? '模型设置已生效，旧会话已归档，新消息将创建新会话'
+                : 'OpenClaw 设置已保存，Hermes Agent 已重启', 'success');
         } catch (restartErr) {
             showToast('设置已保存，但 Hermes Agent 重启失败: ' + restartErr.message, 'error');
         }
@@ -1446,7 +1639,9 @@ async function restartHermesAgentService(clawId, options = {}) {
         });
         if (!confirmed) return null;
     }
-    const result = await API.post(`/openclaws/${clawId}/agent/restart`, {});
+    const result = await API.post(`/openclaws/${clawId}/agent/restart`, {
+        reset_sessions: opts.resetSessions === true,
+    });
     if (!opts.quiet) {
         showToast(result.message || 'Hermes Agent 已重启', 'success');
     }
@@ -1603,7 +1798,9 @@ function openCreateModal() {
     document.getElementById('avatar-preview').textContent = '🐱';
     initAvatarPicker();
     loadModuleCategoryOptions();
-    onCreateLlmProviderChange();
+    document.getElementById('create-agent-toggle').checked = false;
+    document.getElementById('create-agent-fields').style.display = 'none';
+    onCreateAgentTypeChange();
     document.getElementById('create-modal').classList.add('active');
 }
 
@@ -1944,7 +2141,7 @@ function onCreateAgentToggle() {
     document.getElementById('create-agent-fields').style.display = on ? '' : 'none';
     if (on) {
         try { onHermesLayoutChange(); } catch (e) { /* */ }
-        onCreateLlmProviderChange();
+        onCreateAgentTypeChange();
     }
 }
 
@@ -1988,6 +2185,11 @@ function _deploymentMetaHtml(dep) {
         lines.push(`${cLabel}：<code>${_escapeDeployHtml(dep.container_name)}</code>`);
     }
     if (dep.image) lines.push(`镜像：<code>${_escapeDeployHtml(dep.image)}</code>`);
+    if (dep.worker_release_id) {
+        lines.push(`Worker release：<code>${_escapeDeployHtml(dep.worker_release_id)}</code>`);
+        lines.push(`源码 commit：<code>${_escapeDeployHtml(dep.worker_source_commit || '')}</code>`);
+        lines.push(`Artifact SHA：<code>${_escapeDeployHtml(dep.worker_artifact_sha256 || '')}</code>`);
+    }
     if (dep.error_message) lines.push(`<span style="color:#ef4444">错误：${_escapeDeployHtml(dep.error_message)}</span>`);
     return lines.join('<br>') || '暂无部署详情';
 }
@@ -2059,7 +2261,7 @@ async function redeployHermesAgent(clawId) {
                     return {
                         deploy_method: 'systemd',
                         llm_provider: provider,
-                        llm_model: claw.llm_model || (provider === 'timiai' ? 'deepseek-v4-pro' : 'venus'),
+                        llm_model: claw.llm_model || (provider === 'timiai' ? 'deepseek-v4-pro-r1' : 'venus'),
                         timiai_project: claw.timiai_project || 'gbt',
                         hermes_start_mode: 'gateway',
                     };
@@ -2117,9 +2319,10 @@ function _startDeployListPolling(clawId) {
                 if (dep && ['success', 'failed', 'cancelled'].includes(dep.status)) {
                     clearInterval(_deployListPollTimer);
                     _deployListPollTimer = null;
+                    const providerName = dep.agent_type === 'codex' ? 'Claw Worker' : 'Hermes Agent';
                     showToast(dep.status === 'success'
-                        ? 'Hermes Agent 部署完成，已通知龙虾王发送企微'
-                        : 'Hermes Agent 部署结束，请查看卡片状态', dep.status === 'success' ? 'success' : 'error');
+                        ? `${providerName} 部署完成，已通知龙虾王发送企微`
+                        : `${providerName} 部署结束，请查看卡片状态`, dep.status === 'success' ? 'success' : 'error');
                     return;
                 }
             }
@@ -2153,20 +2356,66 @@ document.getElementById('create-form').addEventListener('submit', async e => {
         }
         data.wecom_bot_id = wecomBotId;
         data.wecom_bot_secret = wecomSecret;
-        const llmProvider = data.llm_provider || 'venus';
+        const agentType = data.agent_type || 'hermes';
         deployOpts = {
             deploy_method: 'systemd',
-            llm_provider: llmProvider,
-            llm_model: data.llm_model || (llmProvider === 'timiai' ? 'deepseek-v4-pro' : 'venus'),
-            timiai_project: data.timiai_project || 'gbt',
-            hermes_start_mode: 'gateway',
+            agent_type: agentType,
         };
+        if (agentType === 'codex') {
+            const workerReleaseId = Number(data.worker_release_record_id || 0);
+            if (!workerReleaseId) {
+                showToast('请先刷新并批准一个 Worker 发布版本', 'error');
+                return;
+            }
+            const workspace = (data.codex_workspace || '').trim();
+            if (!workspace.startsWith('/')) {
+                showToast('Claw Worker 工程工作目录必须是目标 Linux 主机上的绝对路径', 'error');
+                return;
+            }
+            const authMode = data.codex_auth_mode || 'chatgpt_subscription';
+            const timiaiProject = data.codex_timiai_project || 'gbt';
+            const timiaiModel = data.codex_timiai_model || 'deepseek-v4-pro-r1';
+            const codexModel = authMode === 'timiai'
+                ? timiaiModel
+                : (data.codex_model || '').trim();
+            Object.assign(deployOpts, {
+                worker_release_record_id: workerReleaseId,
+                codex_workspace: workspace,
+                codex_auth_mode: authMode,
+                codex_model: codexModel,
+            });
+            if (authMode === 'timiai') {
+                Object.assign(deployOpts, {
+                    llm_provider: 'timiai',
+                    llm_model: timiaiModel,
+                    timiai_project: timiaiProject,
+                });
+                data.llm_provider = 'timiai';
+                data.llm_model = timiaiModel;
+                data.timiai_project = timiaiProject;
+            }
+        } else {
+            const llmProvider = data.llm_provider || 'venus';
+            Object.assign(deployOpts, {
+                llm_provider: llmProvider,
+                llm_model: data.llm_model || (llmProvider === 'timiai' ? 'deepseek-v4-pro-r1' : 'venus'),
+                timiai_project: data.timiai_project || 'gbt',
+                hermes_start_mode: 'gateway',
+            });
+        }
         data.create_agent = true;
         data.deploy = deployOpts;
         data.hub_url = window.HUB_PUBLIC_URL || 'https://clawteam.woa.com:18800';
     }
     // 清掉前端单独收集的 deploy_* / hermes_layout，避免后端误收未知字段
     delete data.hermes_layout;
+    delete data.agent_type;
+    delete data.codex_workspace;
+    delete data.codex_auth_mode;
+    delete data.codex_model;
+    delete data.codex_timiai_project;
+    delete data.codex_timiai_model;
+    delete data.worker_release_record_id;
     Object.keys(data).forEach(k => { if (k.startsWith('deploy_')) delete data[k]; });
 
     try {
@@ -2181,10 +2430,11 @@ document.getElementById('create-form').addEventListener('submit', async e => {
         if (result.agent_deployment) {
             const depStatus = result.agent_deployment.status;
             if (['pending', 'in_progress'].includes(depStatus)) {
-                showToast('OpenClaw 已创建，后台部署 Hermes Agent 中；部署完成后会通知龙虾王发送企微', 'success');
+                const providerName = result.agent_deployment.agent_type === 'codex' ? 'Claw Worker' : 'Hermes Agent';
+                showToast(`OpenClaw 已创建，后台部署 ${providerName} 中；部署完成后会通知龙虾王发送企微`, 'success');
                 _startDeployListPolling(clawId);
             } else {
-                showToast(result.agent_deployment.error_message || 'OpenClaw 已创建，但 Hermes Agent 部署任务未启动', 'error');
+                showToast(result.agent_deployment.error_message || 'OpenClaw 已创建，但 Agent 部署任务未启动', 'error');
             }
             return;
         }

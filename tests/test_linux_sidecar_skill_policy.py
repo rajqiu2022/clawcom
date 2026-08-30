@@ -53,9 +53,43 @@ class LinuxSidecarSkillPolicyTest(unittest.TestCase):
         finally:
             sidecar._config = old_config
 
-        self.assertIn('建议 Skills（可用时优先加载）：case-review', rendered)
+        self.assertIn(
+            '建议 Skills（可用时优先加载；缺失本身不阻断）：case-review',
+            rendered,
+        )
         self.assertIn('阻断型 Skills（缺失则停止）：security-gate', rendered)
         self.assertNotIn('必装/必读 Skills', rendered)
+
+    def test_wecom_context_contains_identity_capability_and_profile(self):
+        old_config = sidecar._config
+        old_claw_id = sidecar.CLAW_ID
+        try:
+            sidecar.CLAW_ID = '12'
+            sidecar._config = {
+                'agent_type': 'codex',
+                'claw_name': '小马-高级测试经理',
+                'hub_capability_digest': 'Hub capability index',
+                'active_agent_profile': {
+                    'post_name': '高级测试经理',
+                    'profile': {
+                        'name': '高级测试经理',
+                        'version': 2,
+                        'system_prompt': '负责测试分析、用例设计和质量报告。',
+                    },
+                },
+            }
+            rendered = '\n'.join(sidecar.wecom_context_lines())
+        finally:
+            sidecar._config = old_config
+            sidecar.CLAW_ID = old_claw_id
+
+        self.assertIn('Claw #12 / 小马-高级测试经理', rendered)
+        self.assertIn('当前 Provider：codex', rendered)
+        self.assertIn('Hub capability index', rendered)
+        self.assertIn('岗位说明书', rendered)
+        self.assertIn('负责测试分析、用例设计和质量报告。', rendered)
+        self.assertIn('Sidecar', rendered)
+        self.assertNotIn('CLAW_TOKEN=', rendered)
 
 
 if __name__ == '__main__':

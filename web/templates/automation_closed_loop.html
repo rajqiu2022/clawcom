@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% block title %}自动化闭环 - ClawTeam{% endblock %}
+{% block page_title %}自动化闭环{% endblock %}
+{% block nav_automation_closed_loop %}active{% endblock %}
+
+{% block top_actions %}
+<div class="acl-toolbar">
+    <label class="acl-control"><span>项目</span><select id="acl-project" class="form-select" onchange="reloadOverview()"><option value="">选择项目</option></select></label>
+    <label class="acl-control compact"><span>用例库</span><input id="acl-library" class="form-input" type="number" min="1" value="33"></label>
+    <label class="acl-control compact"><span>Flow</span><input id="acl-flow" class="form-input" type="number" min="1" value="12"></label>
+    <button class="btn btn-primary" type="button" onclick="reloadOverview()">刷新态势</button>
+</div>
+{% endblock %}
+
+{% block head %}
+<style>
+:root {
+    --acl-ink: var(--text-primary);
+    --acl-muted: var(--text-muted);
+    --acl-line: var(--border);
+    --acl-panel: var(--bg-card);
+    --acl-deck: var(--bg-secondary);
+    --acl-orange: #c95d22;
+    --acl-green: #2b8a62;
+    --acl-blue: #2878a8;
+    --acl-red: #b9473f;
+    --acl-yellow: #b48522;
+}
+.content-area { padding-top:16px; }
+.acl-toolbar { display:flex; align-items:flex-end; gap:8px; flex-wrap:wrap; }
+.acl-control { display:flex; flex-direction:column; gap:3px; min-width:170px; }
+.acl-control.compact { min-width:82px; width:82px; }
+.acl-control span { font:600 10px/1.2 "JetBrains Mono", monospace; letter-spacing:.08em; color:var(--acl-muted); text-transform:uppercase; }
+.acl-control .form-select,.acl-control .form-input { height:34px; font-size:12px; }
+.acl-shell { max-width:1700px; margin:0 auto; color:var(--acl-ink); }
+.acl-flightline {
+    position:relative; overflow:hidden; border:1px solid var(--acl-line); border-radius:12px;
+    background:
+        linear-gradient(100deg, color-mix(in srgb, var(--acl-orange) 13%, transparent), transparent 42%),
+        repeating-linear-gradient(90deg, transparent 0, transparent 39px, color-mix(in srgb, var(--acl-line) 35%, transparent) 40px),
+        var(--acl-panel);
+    padding:18px 20px; display:flex; justify-content:space-between; gap:20px; align-items:flex-end;
+}
+.acl-flightline::after { content:""; position:absolute; right:24px; top:-48px; width:220px; height:220px; border:1px solid color-mix(in srgb, var(--acl-orange) 28%, transparent); border-radius:50%; box-shadow:0 0 0 22px color-mix(in srgb, var(--acl-orange) 5%, transparent),0 0 0 52px color-mix(in srgb, var(--acl-orange) 3%, transparent); pointer-events:none; }
+.acl-kicker { font:600 10px/1 "JetBrains Mono", monospace; color:var(--acl-orange); letter-spacing:.18em; text-transform:uppercase; margin-bottom:7px; }
+.acl-flightline h2 { font-family:"EB Garamond",serif; font-size:26px; line-height:1.05; margin:0 0 5px; }
+.acl-flightline p { margin:0; color:var(--acl-muted); font-size:12px; max-width:720px; }
+.acl-live { position:relative; z-index:1; text-align:right; font:500 10px/1.6 "JetBrains Mono", monospace; color:var(--acl-muted); }
+.acl-live b { display:inline-flex; align-items:center; gap:6px; color:var(--acl-green); font-weight:600; }
+.acl-live b::before { content:""; width:7px; height:7px; border-radius:50%; background:var(--acl-green); box-shadow:0 0 0 4px color-mix(in srgb, var(--acl-green) 14%, transparent); }
+.acl-metrics { display:grid; grid-template-columns:repeat(6,minmax(120px,1fr)); gap:8px; margin:10px 0; }
+.acl-metric { border:1px solid var(--acl-line); border-radius:9px; background:var(--acl-panel); padding:12px 13px; min-width:0; }
+.acl-metric .code { font:500 9px/1 "JetBrains Mono", monospace; color:var(--acl-muted); letter-spacing:.1em; }
+.acl-metric .value { margin-top:8px; font:600 24px/1 "JetBrains Mono", monospace; }
+.acl-metric .label { margin-top:7px; font-size:11px; color:var(--acl-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.acl-metric.alert .value { color:var(--acl-red); }
+.acl-metric.good .value { color:var(--acl-green); }
+.acl-grid { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(350px,.65fr); gap:10px; }
+.acl-panel { border:1px solid var(--acl-line); border-radius:10px; background:var(--acl-panel); min-width:0; overflow:hidden; }
+.acl-panel.wide { grid-column:1/-1; }
+.acl-panel-head { min-height:48px; padding:10px 13px; border-bottom:1px solid var(--acl-line); display:flex; align-items:center; justify-content:space-between; gap:12px; background:linear-gradient(180deg,color-mix(in srgb,var(--acl-deck) 65%,transparent),transparent); }
+.acl-panel-title { display:flex; align-items:center; gap:9px; min-width:0; }
+.acl-index { font:600 9px/22px "JetBrains Mono",monospace; width:24px; height:24px; border:1px solid var(--acl-line); border-radius:5px; text-align:center; color:var(--acl-orange); }
+.acl-panel-title h3 { margin:0; font-size:13px; }
+.acl-panel-title small { display:block; margin-top:2px; color:var(--acl-muted); font-size:10px; font-weight:400; }
+.acl-panel-body { padding:11px 13px; }
+.acl-pipeline { display:grid; grid-template-columns:repeat(12,minmax(72px,1fr)); gap:5px; }
+.acl-stage { position:relative; background:var(--acl-deck); border:1px solid var(--acl-line); border-radius:6px; padding:8px; min-height:62px; }
+.acl-stage::after { content:""; position:absolute; right:-6px; top:50%; width:6px; border-top:1px solid var(--acl-line); }
+.acl-stage:last-child::after { display:none; }
+.acl-stage .n { font:600 18px/1 "JetBrains Mono",monospace; }
+.acl-stage .s { margin-top:7px; font:500 8px/1.25 "JetBrains Mono",monospace; color:var(--acl-muted); overflow-wrap:anywhere; }
+.acl-stage.hot { border-color:color-mix(in srgb,var(--acl-orange) 50%,var(--acl-line)); }
+.acl-agebar { display:flex; gap:5px; flex-wrap:wrap; margin-top:9px; }
+.acl-age { padding:4px 6px; border:1px solid var(--acl-line); border-radius:4px; font:500 9px/1 "JetBrains Mono",monospace; color:var(--acl-muted); }
+.acl-age b { color:var(--acl-ink); }
+.acl-columns { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+.acl-queue { border:1px solid var(--acl-line); border-radius:7px; background:var(--acl-deck); overflow:hidden; }
+.acl-queue-title { padding:8px 9px; border-bottom:1px solid var(--acl-line); display:flex; justify-content:space-between; font-size:11px; font-weight:600; }
+.acl-list { max-height:260px; overflow:auto; }
+.acl-row { padding:9px; border-bottom:1px solid color-mix(in srgb,var(--acl-line) 75%,transparent); }
+.acl-row:last-child { border-bottom:0; }
+.acl-row-top { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
+.acl-row-title { font-size:11px; font-weight:600; overflow-wrap:anywhere; }
+.acl-row-meta { margin-top:5px; display:flex; gap:7px; flex-wrap:wrap; font:500 9px/1.4 "JetBrains Mono",monospace; color:var(--acl-muted); }
+.acl-link { border:0; padding:0; background:transparent; color:var(--acl-orange); font-size:10px; cursor:pointer; white-space:nowrap; text-decoration:none; }
+.acl-link:hover { text-decoration:underline; }
+.acl-empty { padding:22px 10px; text-align:center; color:var(--acl-muted); font-size:11px; }
+.acl-table-wrap { overflow:auto; }
+.acl-table { width:100%; border-collapse:collapse; font-size:11px; }
+.acl-table th { padding:7px 8px; text-align:left; color:var(--acl-muted); font:500 9px/1.2 "JetBrains Mono",monospace; letter-spacing:.05em; border-bottom:1px solid var(--acl-line); white-space:nowrap; }
+.acl-table td { padding:8px; border-bottom:1px solid color-mix(in srgb,var(--acl-line) 70%,transparent); vertical-align:top; }
+.acl-table tr:last-child td { border-bottom:0; }
+.acl-table .mono { font:500 9px/1.45 "JetBrains Mono",monospace; color:var(--acl-muted); }
+.acl-pill { display:inline-flex; align-items:center; padding:2px 6px; border-radius:999px; border:1px solid var(--acl-line); font:500 9px/1.3 "JetBrains Mono",monospace; white-space:nowrap; }
+.acl-pill.ok { color:var(--acl-green); border-color:color-mix(in srgb,var(--acl-green) 45%,var(--acl-line)); background:color-mix(in srgb,var(--acl-green) 8%,transparent); }
+.acl-pill.warn { color:var(--acl-yellow); border-color:color-mix(in srgb,var(--acl-yellow) 45%,var(--acl-line)); }
+.acl-pill.bad { color:var(--acl-red); border-color:color-mix(in srgb,var(--acl-red) 45%,var(--acl-line)); }
+.acl-summary { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-bottom:9px; }
+.acl-summary > div { padding:8px; background:var(--acl-deck); border-radius:6px; border:1px solid var(--acl-line); }
+.acl-summary b { display:block; font:600 17px/1 "JetBrains Mono",monospace; }
+.acl-summary span { display:block; margin-top:5px; color:var(--acl-muted); font-size:9px; }
+.acl-modal { position:fixed; inset:0; z-index:1000; display:none; align-items:center; justify-content:center; padding:24px; background:rgba(5,8,10,.68); backdrop-filter:blur(5px); }
+.acl-modal.open { display:flex; }
+.acl-modal-card { width:min(900px,95vw); max-height:84vh; overflow:hidden; border:1px solid var(--acl-line); border-radius:12px; background:var(--acl-panel); box-shadow:0 24px 70px rgba(0,0,0,.35); }
+.acl-modal-head { padding:13px 15px; border-bottom:1px solid var(--acl-line); display:flex; justify-content:space-between; align-items:center; }
+.acl-modal-body { padding:14px; max-height:calc(84vh - 55px); overflow:auto; }
+.acl-trace-node { display:flex; gap:10px; align-items:flex-start; padding:8px 9px; border-left:2px solid var(--acl-orange); background:var(--acl-deck); margin-bottom:5px; border-radius:0 6px 6px 0; }
+.acl-trace-node .depth { font:600 9px/1.6 "JetBrains Mono",monospace; color:var(--acl-orange); }
+.acl-error { border:1px solid color-mix(in srgb,var(--acl-red) 50%,var(--acl-line)); background:color-mix(in srgb,var(--acl-red) 9%,var(--acl-panel)); color:var(--acl-red); border-radius:8px; padding:12px; margin:10px 0; font-size:12px; }
+.acl-skeleton { height:11px; margin:8px 0; border-radius:3px; background:linear-gradient(90deg,var(--acl-deck),color-mix(in srgb,var(--acl-line) 45%,var(--acl-deck)),var(--acl-deck)); background-size:220% 100%; animation:acl-scan 1.3s linear infinite; }
+@keyframes acl-scan { to { background-position:-220% 0; } }
+@media (max-width:1250px) { .acl-metrics{grid-template-columns:repeat(3,1fr)} .acl-pipeline{grid-template-columns:repeat(6,1fr)} }
+@media (max-width:900px) { .acl-grid{grid-template-columns:1fr} .acl-panel.wide{grid-column:auto} .acl-columns{grid-template-columns:1fr} .acl-metrics{grid-template-columns:repeat(2,1fr)} .acl-flightline{align-items:flex-start;flex-direction:column}.acl-live{text-align:left}.acl-pipeline{grid-template-columns:repeat(3,1fr)} }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="acl-shell">
+    <section class="acl-flightline">
+        <div><div class="acl-kicker">Loop control / project telemetry</div><h2 id="acl-project-name">等待选择项目</h2><p>候选发现、能力补齐、资格验证、正式发布、运行证据与规则学习的统一只读态势面。</p></div>
+        <div class="acl-live"><b>READ ONLY</b><div id="acl-generated">尚未同步</div></div>
+    </section>
+    <div id="acl-error"></div>
+    <section class="acl-metrics" id="acl-metrics"></section>
+    <div class="acl-grid">
+        <section class="acl-panel wide"><header class="acl-panel-head"><div class="acl-panel-title"><span class="acl-index">01</span><div><h3>候选流水线</h3><small>状态数量与最长滞留时间</small></div></div><span class="acl-pill" id="acl-stale-pill">—</span></header><div class="acl-panel-body"><div class="acl-pipeline" id="acl-pipeline"></div><div class="acl-agebar" id="acl-aging"></div></div></section>
+        <section class="acl-panel wide"><header class="acl-panel-head"><div class="acl-panel-title"><span class="acl-index">02</span><div><h3>行动队列</h3><small>Capability、资格验证与发布异常</small></div></div></header><div class="acl-panel-body"><div class="acl-columns" id="acl-queues"></div></div></section>
+        <section class="acl-panel"><header class="acl-panel-head"><div class="acl-panel-title"><span class="acl-index">03</span><div><h3>用例库与 Flow 快照</h3><small id="acl-library-sub">Library #33 · Flow12</small></div></div><a class="acl-link" id="acl-library-link" href="/testcases/33">打开用例库 →</a></header><div class="acl-panel-body" id="acl-library-flow"></div></section>
+        <section class="acl-panel"><header class="acl-panel-head"><div class="acl-panel-title"><span class="acl-index">04</span><div><h3>Capability Gap</h3><small>等待候选与关联开发需求</small></div></div></header><div class="acl-panel-body" id="acl-gaps"></div></section>
+        <section class="acl-panel"><header class="acl-panel-head"><div class="acl-panel-title"><span class="acl-index">05</span><div><h3>运行证据与结论</h3><small>Evidence Manifest 完整度</small></div></div></header><div class="acl-panel-body" id="acl-evidence"></div></section>
+        <section class="acl-panel"><header class="acl-panel-head"><div class="acl-panel-title"><span class="acl-index">06</span><div><h3>Finding 与规则学习</h3><small>人工反馈与 replay gate</small></div></div></header><div class="acl-panel-body" id="acl-learning"></div></section>
+        <section class="acl-panel wide"><header class="acl-panel-head"><div class="acl-panel-title"><span class="acl-index">07</span><div><h3>共享资源占用</h3><small>按项目 Run 与租约元数据归属过滤</small></div></div><span class="acl-pill" id="acl-conflicts">0 冲突事件</span></header><div class="acl-panel-body" id="acl-leases"></div></section>
+    </div>
+</div>
+<div class="acl-modal" id="acl-trace-modal" onclick="if(event.target===this)closeTrace()"><div class="acl-modal-card"><header class="acl-modal-head"><strong>候选闭环链路</strong><button class="btn btn-ghost btn-sm" type="button" onclick="closeTrace()">关闭</button></header><div class="acl-modal-body" id="acl-trace-body"></div></div></div>
+<script>
+const ACL_STATES=['DISCOVERED','DESIGNED','WAITING_CAPABILITY','READY_FOR_CANARY','QUALIFIED','PENDING_PUBLISH','ACTIVE','CASE_DESIGN_ERROR','PRODUCT_BUG_CANDIDATE','ENV_BLOCKED','QUARANTINED','RETIRED'];
+const ACL_LABELS={DISCOVERED:'已发现',DESIGNED:'已设计',WAITING_CAPABILITY:'等能力',READY_FOR_CANARY:'待验证',QUALIFIED:'已合格',PENDING_PUBLISH:'待发布',ACTIVE:'已入库',CASE_DESIGN_ERROR:'设计错误',PRODUCT_BUG_CANDIDATE:'产品疑似Bug',ENV_BLOCKED:'环境阻塞',QUARANTINED:'隔离',RETIRED:'已退役'};
+let aclData=null;
+function aclEsc(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+function aclNum(v){return Number(v||0).toLocaleString('zh-CN');}
+function aclPill(v){const s=String(v||'—');const c=/complete|success|active|passed|qualified|no_risk/i.test(s)?'ok':/fail|error|blocked|quarantined|incomplete|critical|high/i.test(s)?'bad':'warn';return `<span class="acl-pill ${c}">${aclEsc(s)}</span>`;}
+function aclEmpty(text='当前无数据'){return `<div class="acl-empty">${aclEsc(text)}</div>`;}
+function aclRows(items,render){return items&&items.length?items.map(render).join(''):aclEmpty();}
+function aclTableRows(items,render,cols){return items&&items.length?items.map(render).join(''):`<tr><td colspan="${cols}" class="acl-empty">当前无数据</td></tr>`;}
+function candidateRow(x){return `<div class="acl-row"><div class="acl-row-top"><div class="acl-row-title">#${x.id} ${aclEsc(x.title)}</div><button class="acl-link" onclick="openTrace('${aclEsc(x.trace_api)}')">链路</button></div><div class="acl-row-meta"><span>${aclEsc(ACL_LABELS[x.state]||x.state)}</span><span>${aclNum(x.age_hours)}h</span><span>${aclEsc(x.module_key||'未分模块')}</span></div></div>`;}
+function setLoading(){document.getElementById('acl-metrics').innerHTML=Array.from({length:6},()=>'<div class="acl-metric"><div class="acl-skeleton"></div><div class="acl-skeleton"></div></div>').join('');['acl-pipeline','acl-queues','acl-library-flow','acl-gaps','acl-evidence','acl-learning','acl-leases'].forEach(id=>document.getElementById(id).innerHTML='<div class="acl-skeleton"></div><div class="acl-skeleton"></div><div class="acl-skeleton"></div>');}
+async function loadProjects(){const projects=await API.listProjects();const sel=document.getElementById('acl-project');sel.innerHTML='<option value="">选择项目</option>'+projects.map(p=>`<option value="${p.id}">${aclEsc(p.name)}</option>`).join('');const q=new URLSearchParams(location.search);const wanted=q.get('project_id')||localStorage.getItem('acl.project_id');if(wanted&&projects.some(p=>String(p.id)===String(wanted)))sel.value=wanted;else if(projects.length)sel.value=projects[0].id;const lib=q.get('library_id');const flow=q.get('workflow_definition_id');if(lib)document.getElementById('acl-library').value=lib;if(flow)document.getElementById('acl-flow').value=flow;}
+async function reloadOverview(){const projectId=document.getElementById('acl-project').value;if(!projectId)return;const libraryId=document.getElementById('acl-library').value||33;const flowId=document.getElementById('acl-flow').value||12;localStorage.setItem('acl.project_id',projectId);setLoading();document.getElementById('acl-error').innerHTML='';try{aclData=await API.get(`/automation-closed-loop/overview?project_id=${encodeURIComponent(projectId)}&library_id=${encodeURIComponent(libraryId)}&workflow_definition_id=${encodeURIComponent(flowId)}`);renderOverview(aclData);history.replaceState(null,'',`?project_id=${projectId}&library_id=${libraryId}&workflow_definition_id=${flowId}`);}catch(e){document.getElementById('acl-error').innerHTML=`<div class="acl-error">态势读取失败：${aclEsc(e.message)}</div>`;}}
+function renderOverview(d){document.getElementById('acl-project-name').textContent=d.project.name+' · 自动化闭环';document.getElementById('acl-generated').textContent='同步于 '+d.generated_at;const c=d.candidates,g=d.capability_gaps,l=d.resource_leases,e=d.evidence,r=d.analysis_rules;const rate=e.completeness_rate==null?'—':Math.round(e.completeness_rate*100)+'%';const metrics=[['CAND',c.total,'候选总数',''],['STALE',c.stale_count,`超过 ${c.stale_hours}h`,'alert'],['CAP-GAP',g.waiting_candidate_count,'等待能力候选',g.waiting_candidate_count?'alert':''],['LEASE',l.active_count,'当前资源租约',''],['EVID',rate,'证据完整率',e.completeness_rate===1?'good':''],['REPLAY',`${r.replay_counts.passed}/${r.replay_counts.total}`,'回放门禁通过','good']];document.getElementById('acl-metrics').innerHTML=metrics.map(x=>`<div class="acl-metric ${x[3]}"><div class="code">${x[0]}</div><div class="value">${aclEsc(x[1])}</div><div class="label">${aclEsc(x[2])}</div></div>`).join('');renderPipeline(c);renderQueues(c);renderLibraryFlow(d);renderGaps(g);renderEvidence(e);renderLearning(d.findings,r);renderLeases(l);}
+function renderPipeline(c){document.getElementById('acl-pipeline').innerHTML=ACL_STATES.map(s=>`<div class="acl-stage ${(c.state_counts[s]||0)?'hot':''}"><div class="n">${aclNum(c.state_counts[s])}</div><div class="s">${aclEsc(ACL_LABELS[s])}</div></div>`).join('');document.getElementById('acl-aging').innerHTML=c.state_aging.map(x=>`<span class="acl-age">${aclEsc(ACL_LABELS[x.state]||x.state)} <b>${aclNum(x.oldest_age_hours)}h</b></span>`).join('')||aclEmpty();const pill=document.getElementById('acl-stale-pill');pill.textContent=`${c.stale_count} 个滞留`;pill.className='acl-pill '+(c.stale_count?'bad':'ok');}
+function renderQueues(c){const defs=[['等待 Capability',c.queues.waiting_capability],['待资格验证',c.queues.pending_qualification],['待发布 / 失败',[...c.queues.pending_publish,...c.queues.publish_failures]]];document.getElementById('acl-queues').innerHTML=defs.map(([title,items])=>`<div class="acl-queue"><div class="acl-queue-title"><span>${title}</span><span>${items.length}</span></div><div class="acl-list">${aclRows(items,candidateRow)}</div></div>`).join('');}
+function renderLibraryFlow(d){const lib=d.testcase_library,w=d.workflow_runs;document.getElementById('acl-library-sub').textContent=`Library #${lib.library_id} · Flow${w.definition_id}`;document.getElementById('acl-library-link').href=`/testcases/${lib.library_id}`;const current=lib.current;let html=current?`<div class="acl-summary"><div><b>r${aclNum(current.revision)}</b><span>当前 revision</span></div><div><b>${aclNum(current.case_count)}</b><span>正式用例</span></div><div><b>${lib.rollback_count}</b><span>最近回滚</span></div></div>`:aclEmpty(`未找到用例库 #${lib.library_id}`);html+=`<div class="acl-table-wrap"><table class="acl-table"><thead><tr><th>RUN</th><th>RESULT</th><th>REVISION</th><th>CASES</th></tr></thead><tbody>${aclTableRows(w.items,x=>`<tr><td><a class="acl-link" href="${aclEsc(x.run_url)}">#${x.id}</a><div class="mono">${aclEsc(x.run_name||x.workflow_key)}</div></td><td>${aclPill(x.status)}</td><td>${x.library_snapshot?'r'+aclNum(x.library_snapshot.revision):'—'}</td><td>${x.library_snapshot?aclNum(x.library_snapshot.case_count):'—'}</td></tr>`,4)}</tbody></table></div>`;document.getElementById('acl-library-flow').innerHTML=html;}
+function renderGaps(g){document.getElementById('acl-gaps').innerHTML=`<div class="acl-summary"><div><b>${g.total}</b><span>能力缺口</span></div><div><b>${g.waiting_candidate_count}</b><span>等待候选</span></div><div><b>${g.requeue_pending_count}</b><span>待回队</span></div></div><div class="acl-list">${aclRows(g.items,x=>{const req=x.development_requirement||{};return `<div class="acl-row"><div class="acl-row-top"><div class="acl-row-title">#${x.id} ${aclEsc(x.title)}</div>${aclPill(x.status)}</div><div class="acl-row-meta"><span>${x.waiting_candidate_count} 候选</span><span>${aclEsc(x.owner||'未指派')}</span></div>${req.ref?`<div style="margin-top:6px"><a class="acl-link" href="${aclEsc(req.url||'#')}" target="_blank" rel="noopener">${aclEsc(req.ref)} · ${aclEsc(req.status||'未同步')}</a></div>`:''}</div>`;})}</div>`;}
+function renderEvidence(e){document.getElementById('acl-evidence').innerHTML=`<div class="acl-summary"><div><b>${e.complete_count}</b><span>完整</span></div><div><b>${e.total-e.complete_count}</b><span>不完整</span></div><div><b>${Object.keys(e.classification_counts).length}</b><span>结论类型</span></div></div><div class="acl-table-wrap"><table class="acl-table"><thead><tr><th>RUN</th><th>EVIDENCE</th><th>CLASSIFICATION</th></tr></thead><tbody>${aclTableRows(e.items,x=>`<tr><td><a class="acl-link" href="${aclEsc(x.run_url)}">#${x.workflow_run_id}</a></td><td>${aclPill(x.completeness_status)}</td><td>${aclPill(x.classification||'待分析')}</td></tr>`,3)}</tbody></table></div>`;}
+function renderLearning(f,r){const feedback=Object.entries(f.feedback_counts).map(([k,v])=>`${k} ${v}`).join(' · ')||'暂无人工反馈';document.getElementById('acl-learning').innerHTML=`<div class="acl-summary"><div><b>${f.total}</b><span>活跃 Finding</span></div><div><b>${r.total}</b><span>分析规则</span></div><div><b>${r.replay_counts.failed}</b><span>门禁未通过</span></div></div><div class="acl-row"><div class="acl-row-title">反馈标签</div><div class="acl-row-meta">${aclEsc(feedback)}</div></div><div class="acl-table-wrap"><table class="acl-table"><thead><tr><th>FINDING</th><th>SEVERITY</th><th>STATUS</th></tr></thead><tbody>${aclTableRows(f.items,x=>`<tr><td><a class="acl-link" href="${aclEsc(x.detail_url)}">#${x.id} ${aclEsc(x.title)}</a></td><td>${aclPill(x.severity)}</td><td>${aclPill(x.status)}</td></tr>`,3)}</tbody></table></div>`;}
+function renderLeases(l){document.getElementById('acl-conflicts').textContent=`${l.conflict_count} 冲突事件`;document.getElementById('acl-conflicts').title=l.conflict_tracking;document.getElementById('acl-leases').innerHTML=`<div class="acl-table-wrap"><table class="acl-table"><thead><tr><th>RESOURCE</th><th>OWNER</th><th>PRIORITY</th><th>EXPIRES</th><th>HOLDER</th></tr></thead><tbody>${aclTableRows(l.items,x=>`<tr><td><span class="mono">${aclEsc(x.resource_key)}</span><br>${aclPill(x.resource_type)}</td><td>${aclEsc(x.owner_type)} / ${aclEsc(x.owner_id)}</td><td>${aclNum(x.priority)}</td><td class="mono">${aclEsc(x.expires_at)}</td><td>${aclEsc(x.holder_actor_name||'—')}</td></tr>`,5)}</tbody></table></div>${l.expired_pending_cleanup_count?`<div class="acl-error" style="margin-bottom:0">${l.expired_pending_cleanup_count} 条已过期 active 记录等待租约清理器回收</div>`:''}`;}
+async function openTrace(api){const modal=document.getElementById('acl-trace-modal');const body=document.getElementById('acl-trace-body');modal.classList.add('open');body.innerHTML='<div class="acl-skeleton"></div><div class="acl-skeleton"></div>';try{const data=await API.get(api.replace('/api/v1',''));body.innerHTML=`<div class="acl-summary"><div><b>${data.node_count}</b><span>对象</span></div><div><b>${data.edge_count}</b><span>关系</span></div><div><b>${data.truncated?'YES':'NO'}</b><span>是否截断</span></div></div>${data.nodes.map(n=>`<div class="acl-trace-node"><span class="depth">D${n.depth}</span><div><strong>${aclEsc(n.entity_type)}</strong><div class="acl-row-meta">${aclEsc(n.entity_id)}</div></div></div>`).join('')}${data.edges.length?`<h4 style="margin:16px 0 8px">关系明细</h4><div class="acl-table-wrap"><table class="acl-table"><tbody>${data.edges.map(e=>`<tr><td>${aclEsc(e.from_type)} #${aclEsc(e.from_id)}</td><td>${aclPill(e.relation_type)}</td><td>${aclEsc(e.to_type)} #${aclEsc(e.to_id)}</td></tr>`).join('')}</tbody></table></div>`:''}`;}catch(e){body.innerHTML=`<div class="acl-error">链路读取失败：${aclEsc(e.message)}</div>`;}}
+function closeTrace(){document.getElementById('acl-trace-modal').classList.remove('open');}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeTrace();});
+document.addEventListener('DOMContentLoaded',async()=>{try{await loadProjects();await reloadOverview();}catch(e){document.getElementById('acl-error').innerHTML=`<div class="acl-error">初始化失败：${aclEsc(e.message)}</div>`;}});
+</script>
+{% endblock %}

@@ -15,10 +15,17 @@ API设计：
 
 import os
 from datetime import datetime, date, timedelta
-from flask import request, jsonify, Response, stream_with_context, Blueprint
+from flask import request, jsonify, Response, stream_with_context, Blueprint, current_app
 from app import db
 from app.models import (AgentPostAssignment, AgentTask, OpenClawInstance,
-                        ClawMessage, ClawTodo, ClawTodoLog, _now)
+                        ClawMessage, ClawTodo, ClawTodoLog,
+                        WorkflowDefinition, _now)
+from app.services.todo_schedule import (
+    TODO_TIMEZONE,
+    cst_iso,
+    cst_now_naive,
+    todo_schedule_state,
+)
 from functools import wraps
 import json
 import time
@@ -308,6 +315,22 @@ def require_claw_token(f):
     return _unified(f)
 
 
+def _runnable_todo_payload(todo, today_log=None):
+    state = todo_schedule_state(todo, today_log=today_log)
+    if not state['is_due']:
+        return None
+    return {
+        'id': todo.id,
+        'title': todo.title,
+        'description': todo.description or '',
+        'urgency': todo.urgency_level or 'flexible',
+        'schedule_time': todo.schedule_time,
+        'schedule_type': todo.schedule_type,
+        'task_category': todo.task_category or 'routine',
+        **state,
+    }
+
+
 @agent_bp.route('/<int:claw_id>/events', methods=['GET'])
 @require_claw_token
 def claw_sse_events(claw_id, claw=None):
@@ -319,6 +342,8 @@ def claw_sse_events(claw_id, claw=None):
     - event: heartbeat\ndata: {server_time}\n\n
     - event: task\ndata: {task_id, task_type, command, target_path, payload}\n\n
     - event: message\ndata: {msg_id, content, msg_type, ...}\n\n
+    - event: room_invited\ndata: {room, member}\n\n
+    - event: room_message\ndata: {delivery_id, room, message}\n\n
     - event: todos_pending\ndata: {count, todos: [{id, title, urgency, ...}]}\n\n
     - event: ping\ndata: \n\n
     """
@@ -350,15 +375,19 @@ def claw_sse_events(claw_id, claw=None):
     finally:
         _raw_conn.close()
 
-    # 刷新 claw 对象以获取最新状态
-    db.session.expire(claw)
+    # _cleanup_stale_connections / _audit_sidecar_health may remove the scoped
+    # session, so the decorator-provided object can already be detached here.
+    # Re-query in the current session instead of expiring a detached instance.
+    claw = db.session.get(OpenClawInstance, claw_id)
+    if claw is None:
+        return jsonify({'error': 'OpenClaw 不存在'}), 404
     claw_name = claw.name
     logger.info(f"SSE连接建立，OpenClaw {claw_id} ({claw_name}) 状态: {claw.status}")
     _release_orm_session()
 
     def generate():
         # 发送连接成功事件
-        yield f"event: connected\ndata: {json.dumps({'claw_id': claw_id, 'name': claw_name, 'server_time': datetime.now().isoformat()})}\n\n"
+        yield f"event: connected\ndata: {json.dumps({'claw_id': claw_id, 'name': claw_name, 'server_time': cst_iso(), 'timezone': TODO_TIMEZONE})}\n\n"
 
         # === 连接建立时推送未读消息和当前待办（解决断线期间消息丢失问题）===
         try:
@@ -386,38 +415,26 @@ def claw_sse_events(claw_id, claw=None):
                 )
 
             # 推送当前待办列表
-            today = date.today()
+            today = cst_now_naive().date()
             all_todos = ClawTodo.query.filter_by(openclaw_id=claw_id, enabled=True).all()
             today_logs = {l.todo_id: l for l in ClawTodoLog.query.filter_by(
                 openclaw_id=claw_id, log_date=today).all()}
             pending_todos = []
             for t in all_todos:
                 log = today_logs.get(t.id)
-                # submitted 表示 agent 已经执行并回写结果，等待人工审核。
-                # 对 SSE 推送而言它不能再算 pending，否则会反复触发 agent 重做。
-                is_done = log and log.status in ('submitted', 'completed', 'approved')
-                need_today = False
-                if t.schedule_type == 'once':
-                    need_today = not is_done
-                elif t.schedule_type == 'daily':
-                    need_today = True
-                elif t.schedule_type == 'weekly' and t.schedule_day:
-                    need_today = today.isoweekday() == t.schedule_day
-                elif t.schedule_type == 'monthly' and t.schedule_day:
-                    need_today = today.day == t.schedule_day
-                if need_today and not is_done:
-                    pending_todos.append({
-                        'id': t.id,
-                        'title': t.title,
-                        'urgency': t.urgency_level or 'flexible',
-                        'schedule_time': t.schedule_time,
-                        'schedule_type': t.schedule_type,
-                        'today_status': log.status if log else None,
-                    })
+                item = _runnable_todo_payload(t, log)
+                if item:
+                    pending_todos.append(item)
+            room_events = []
+            if current_app.config.get('CHAT_ROOM_ENABLED', False):
+                from app.services.chat_rooms import pending_agent_events
+                room_events = pending_agent_events(claw_id, limit=50)
             _release_orm_session()
             for payload in unread_payloads:
                 yield f"event: message\ndata: {json.dumps(payload)}\n\n"
             yield f"event: todos_pending\ndata: {json.dumps({'count': len(pending_todos), 'todos': pending_todos})}\n\n"
+            for event_name, payload in room_events:
+                yield f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
             logger.info(f"SSE连接建立，推送 {len(pending_todos)} 个待办给 OpenClaw {claw_id}")
         except Exception as e:
             logger.error(f"SSE连接建立时推送初始数据失败: {e}")
@@ -578,10 +595,20 @@ def claw_sse_events(claw_id, claw=None):
                         task_events.append(f"event: task\ndata: {json.dumps(task.to_dict())}\n\n")
                     events_to_yield.extend(task_events)
 
+                    # 聊天室事件使用独立事件名。普通聊天室消息不会创建 notify_agent
+                    # 投递，因此不会无意唤醒 Agent；仅 @提及/@所有人（或房间显式
+                    # all_messages 策略）会出现在这里。
+                    if current_app.config.get('CHAT_ROOM_ENABLED', False):
+                        from app.services.chat_rooms import pending_agent_events
+                        for event_name, payload in pending_agent_events(claw_id, limit=20):
+                            events_to_yield.append(
+                                f"event: {event_name}\ndata: "
+                                f"{json.dumps(payload, ensure_ascii=False)}\n\n")
+
                     # 检查待办任务变化（每 30 秒，或收到待办变更通知时立即推送）
                     has_todo_change = _consume_todo_change(claw_id)
                     if has_todo_change or now - last_todo_check > 30:
-                        today = date.today()
+                        today = cst_now_naive().date()
                         all_todos = ClawTodo.query.filter_by(
                             openclaw_id=claw_id, enabled=True).all()
                         today_logs = {l.todo_id: l for l in ClawTodoLog.query.filter_by(
@@ -590,30 +617,9 @@ def claw_sse_events(claw_id, claw=None):
                         pending_todos = []
                         for t in all_todos:
                             log = today_logs.get(t.id)
-                            # submitted 表示 agent 已经执行并回写结果，等待人工审核。
-                            # 对 SSE 推送而言它不能再算 pending，否则会反复触发 agent 重做。
-                            is_done = log and log.status in ('submitted', 'completed', 'approved')
-
-                            # 判断今天是否需要执行
-                            need_today = False
-                            if t.schedule_type == 'once':
-                                need_today = not is_done
-                            elif t.schedule_type == 'daily':
-                                need_today = True
-                            elif t.schedule_type == 'weekly' and t.schedule_day:
-                                need_today = today.isoweekday() == t.schedule_day
-                            elif t.schedule_type == 'monthly' and t.schedule_day:
-                                need_today = today.day == t.schedule_day
-
-                            if need_today and not is_done:
-                                pending_todos.append({
-                                    'id': t.id,
-                                    'title': t.title,
-                                    'urgency': t.urgency_level or 'flexible',
-                                    'schedule_time': t.schedule_time,
-                                    'schedule_type': t.schedule_type,
-                                    'today_status': log.status if log else None,
-                                })
+                            item = _runnable_todo_payload(t, log)
+                            if item:
+                                pending_todos.append(item)
 
                         current_count = len(pending_todos)
                         current_signature = tuple(t.get('id') for t in pending_todos)
@@ -1039,7 +1045,11 @@ def claw_sidecar_config(claw_id, claw=None):
 
     Query 参数（可选）:
         sidecar_version=2.0.0  - sidecar 自身版本
-        agent_type=openclaw    - 自动探测到的 agent 类型（首次启动用于初始化配置）
+        agent_type=openclaw    - 旧版 sidecar 自动探测到的 provider
+        runtime_kind=claw_worker - 新版 Worker 运行时类型
+        runtime_provider=codex - 新版 Worker provider（hermes/codex）
+        runtime_mode=legacy_split - Worker 进程拓扑
+        runtime_platform=linux - Worker 平台（linux/windows）
         openclaw_bin=/path/...  - 自动探测到的 bin 路径
 
     返回:
@@ -1051,8 +1061,14 @@ def claw_sidecar_config(claw_id, claw=None):
         }
     """
     from app.models import ClawSidecarConfig
+    from app.services.worker_runtime import (
+        runtime_from_query,
+        runtime_summary,
+    )
 
     cfg = ClawSidecarConfig.query.get(claw_id)
+    cfg_was_new = cfg is None
+    runtime_report_warning = ''
     if cfg is None:
         # 首次启动：用 sidecar 上报的 agent_type / bin 初始化（保守默认）
         cfg = ClawSidecarConfig(
@@ -1067,6 +1083,7 @@ def claw_sidecar_config(claw_id, claw=None):
             wecom_enabled=bool(claw.wecom_bot_id and claw.wecom_bot_secret),
             enabled=True,
             config_version=1,
+            config_owner='hub',
             sidecar_version=request.args.get('sidecar_version', '') or '',
             last_heartbeat_at=datetime.now(),
             updated_by=f'sidecar_first_start',
@@ -1078,11 +1095,35 @@ def claw_sidecar_config(claw_id, claw=None):
         if sver and cfg.sidecar_version != sver:
             cfg.sidecar_version = sver
         reported_type = (request.args.get('agent_type') or '').strip().lower()
-        if reported_type in ('openclaw', 'hermes', 'codex', 'custom') \
+        stored_kind = (
+            (cfg.runtime_config_json or {}).get('kind')
+            if isinstance(cfg.runtime_config_json, dict) else '')
+        if stored_kind != 'claw_worker' \
+                and reported_type in ('openclaw', 'hermes', 'codex', 'custom') \
                 and cfg.agent_type != reported_type:
             cfg.agent_type = reported_type
             cfg.config_version = int(cfg.config_version or 0) + 1
             cfg.updated_by = 'sidecar_provider_activation'
+
+    # New Workers can report their secret-free runtime identity.  Old Workers
+    # remain compatible and can be backfilled through the operator endpoint.
+    # config_owner is deliberately never accepted from the Worker query.
+    try:
+        reported_runtime = runtime_from_query(
+            request.args, cfg.runtime_config_json)
+        if reported_runtime:
+            changed = reported_runtime != (cfg.runtime_config_json or {})
+            cfg.runtime_config_json = reported_runtime
+            cfg.runtime_reported_at = datetime.now()
+            if reported_runtime.get('kind') == 'claw_worker':
+                cfg.agent_type = reported_runtime['provider']
+            if changed and not cfg_was_new:
+                cfg.config_version = int(cfg.config_version or 0) + 1
+                cfg.updated_by = 'worker_runtime_report'
+    except ValueError as exc:
+        runtime_report_warning = 'WORKER_RUNTIME_REPORT_INVALID'
+        logger.warning('ignore invalid worker runtime report for claw %s: %s',
+                       claw_id, exc)
 
     db.session.commit()
 
@@ -1090,33 +1131,57 @@ def claw_sidecar_config(claw_id, claw=None):
     owner_wecom_userid = (claw.owner_wecom_userid or claw.owner or '').strip()
 
     payload = cfg.to_dict()
-    payload['llm_provider'] = claw.llm_provider or payload.get('llm_provider') or 'venus'
-    payload['llm_model'] = claw.llm_model or payload.get('llm_model') or 'venus'
+    runtime_info = runtime_summary(
+        cfg.runtime_config_json, cfg.config_owner or 'hub')
+    payload.update(runtime_info)
+    if runtime_info['has_worker_runtime']:
+        worker_runtime = runtime_info['worker_runtime'] or {}
+        payload['llm_provider'] = worker_runtime.get('llm_provider') or ''
+        payload['llm_model'] = worker_runtime.get('llm_model') or ''
+        payload['timiai_project'] = worker_runtime.get('timiai_project') or ''
+    else:
+        payload['llm_provider'] = (
+            claw.llm_provider or payload.get('llm_provider') or 'venus')
+        payload['llm_model'] = (
+            claw.llm_model or payload.get('llm_model') or 'venus')
     runtime_agent_type = (request.args.get('runtime_agent_type') or '').strip().lower()
     effective_runtime_agent_type = (
-        runtime_agent_type
-        if runtime_agent_type in ('openclaw', 'hermes', 'codex', 'custom')
-        else (payload.get('agent_type') or 'openclaw')
+        runtime_info['runtime_provider']
+        if runtime_info['has_worker_runtime']
+        else (runtime_agent_type
+              if runtime_agent_type in ('openclaw', 'hermes', 'codex', 'custom')
+              else (payload.get('agent_type') or 'openclaw'))
     )
+    # agent_type remains the compatibility field consumed by existing Worker
+    # releases; runtime_kind identifies the host process separately.
+    payload['agent_type'] = effective_runtime_agent_type
     payload['runtime_agent_type'] = effective_runtime_agent_type
     # Codex receives only sanitized conversational context. Its separately
     # supervised WeCom bridge reads the ACL-protected local credential file.
     payload['wecom_bot_secret'] = (
-        '' if runtime_agent_type == 'codex'
+        '' if effective_runtime_agent_type == 'codex'
         else claw.get_wecom_bot_secret_plain() or ''
     )
     payload['wecom_bot_id'] = (
-        '' if runtime_agent_type == 'codex' else claw.wecom_bot_id or ''
+        '' if effective_runtime_agent_type == 'codex' else claw.wecom_bot_id or ''
     )
     payload['wecom_enabled'] = bool(claw.wecom_bot_id and claw.wecom_bot_secret)
     payload['owner_wecom_userid'] = owner_wecom_userid
-    _la = _build_llm_apply(claw)
-    if _la:
-        payload['llm_apply'] = _la
+    # A worker-owned runtime manages its own model credentials/config.  Omitting
+    # llm_apply prevents stale Hub card values from overwriting that local state.
+    if ((cfg.config_owner or 'hub') == 'hub'
+            and effective_runtime_agent_type == 'hermes'):
+        _la = _build_llm_apply(claw)
+        if _la:
+            payload['llm_apply'] = _la
     payload['claw_name'] = claw.name
     assignments = []
     rule_links = []
+    workflow_create_definition_ids = None
+    active_workflow_missions = []
     context_warnings = []
+    if runtime_report_warning:
+        context_warnings.append(runtime_report_warning)
     try:
         assignments = AgentPostAssignment.query.filter_by(
             claw_id=claw_id, status='active').all()
@@ -1131,6 +1196,39 @@ def claw_sidecar_config(claw_id, claw=None):
         logger.exception('build agent rule config failed for claw %s', claw_id)
         context_warnings.append('RULE_CONTEXT_UNAVAILABLE')
     try:
+        from app.services.agent_system_context import (
+            allowed_workflow_create_definition_ids,
+        )
+        active_definitions = WorkflowDefinition.query.filter_by(
+            status='active').all()
+        workflow_create_definition_ids = allowed_workflow_create_definition_ids(
+            claw, active_definitions)
+    except Exception:
+        logger.exception('build workflow create grants failed for claw %s', claw_id)
+        context_warnings.append('WORKFLOW_CREATE_GRANTS_UNAVAILABLE')
+    try:
+        from app.models import WorkflowMission
+        active_workflow_missions = [
+            {
+                'id': item.id,
+                'mission_key': item.mission_key,
+                'project_id': item.project_id,
+                'definitions_api': (
+                    f'/api/v1/workflow-missions/{item.id}/definitions'),
+                'dispatch_api': (
+                    f'/api/v1/workflow-missions/{item.id}/dispatch'),
+            }
+            for item in WorkflowMission.query.filter(
+                WorkflowMission.main_claw_id == claw_id,
+                WorkflowMission.status == 'active',
+                WorkflowMission.expires_at > _now(),
+            ).order_by(WorkflowMission.updated_at.desc()).limit(10).all()
+        ]
+    except Exception:
+        db.session.rollback()
+        logger.exception('build workflow Mission grants failed for claw %s', claw_id)
+        context_warnings.append('WORKFLOW_MISSION_GRANTS_UNAVAILABLE')
+    try:
         from app.services.agent_system_context import build_agent_system_context
         payload.update(build_agent_system_context(
             claw,
@@ -1138,14 +1236,26 @@ def claw_sidecar_config(claw_id, claw=None):
             assignments,
             rule_links,
             warnings=context_warnings,
+            workflow_create_definition_ids=workflow_create_definition_ids,
+            configured_policy=cfg.system_context_policy_json,
+            workflow_missions=active_workflow_missions,
         ))
     except Exception:
         logger.exception('build agent system context failed for claw %s', claw_id)
         payload['agent_profiles'] = []
         payload['active_agent_profile'] = None
         payload['rules'] = []
+        fallback_policy = {
+            'profile_required_for_execution': False,
+            'missing_profile_behavior': 'continue_with_identity_and_rules',
+        }
+        fallback_warnings = ['SYSTEM_CONTEXT_UNAVAILABLE']
+        if (effective_runtime_agent_type == 'codex' and
+                cfg.system_context_policy_json is not None):
+            fallback_policy['allowed_workflow_create_definition_ids'] = []
+            fallback_warnings.append('CODEX_ORCHESTRATOR_POLICY_INVALID')
         payload['system_context'] = {
-            'schema_version': 1,
+            'schema_version': 2,
             'identity': {
                 'claw_id': claw_id,
                 'claw_name': claw.name or '',
@@ -1153,15 +1263,12 @@ def claw_sidecar_config(claw_id, claw=None):
             },
             'profile': None,
             'rules': [],
-            'warnings': ['SYSTEM_CONTEXT_UNAVAILABLE'],
-            'policy': {
-                'profile_required_for_execution': False,
-                'missing_profile_behavior': 'continue_with_identity_and_rules',
-            },
+            'warnings': fallback_warnings,
+            'policy': fallback_policy,
         }
-        payload['system_context_version'] = 1
+        payload['system_context_version'] = 2
         payload['system_context_digest'] = ''
-        payload['context_warnings'] = ['SYSTEM_CONTEXT_UNAVAILABLE']
+        payload['context_warnings'] = fallback_warnings
     # Hub 能力索引：sidecar 每次构 prompt 前注入，等价于"回复前先查 Rule #19"。
     try:
         from app.services.hub_capability import (
@@ -1192,7 +1299,8 @@ def claw_sidecar_config(claw_id, claw=None):
             )
     except Exception:
         logger.exception('build shared memory config failed for claw %s', claw_id)
-    payload['server_time'] = datetime.now().isoformat()
+    payload['server_time'] = cst_iso()
+    payload['timezone'] = TODO_TIMEZONE
     return jsonify(payload)
 
 
@@ -1432,7 +1540,8 @@ def get_pending_tasks_poll(claw_id, claw=None):
     return jsonify({
         'has_tasks': len(deliver) > 0,
         'tasks': [t.to_dict() for t in deliver],
-        'server_time': datetime.now().isoformat(),
+        'server_time': cst_iso(),
+        'timezone': TODO_TIMEZONE,
     })
 
 

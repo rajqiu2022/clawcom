@@ -5,7 +5,7 @@
 """
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from flask import current_app, g, jsonify, request, session
 from sqlalchemy import func
@@ -26,20 +26,24 @@ from app.models import (
     ShiftLeftAnalysisRun,
     ShiftLeftFinding,
     ShiftLeftFindingEvent,
+    ShiftLeftFindingFeedback,
     TestCase,
     TestCaseLibrary,
     TestIteration,
     TestReport,
     Topic,
     WorkflowOperationIdempotency,
+    WorkflowEvidenceManifest,
     WorkflowRun,
 )
 from app.services.shift_left import (
     COLLABORATION_SUBJECT_TYPES,
     DEFAULT_CASE_REVIEW_SCOPES,
+    DEFAULT_TOPIC_SCOPES,
     EVIDENCE_LEVELS,
     FINDING_SEVERITIES,
     FINDING_STATES,
+    FINDING_FEEDBACK_LABELS,
     build_baseline_fingerprint,
     canonical_json,
     generate_access_token,
@@ -51,6 +55,12 @@ from app.services.shift_left import (
     transition_target,
     validate_transition_preconditions,
 )
+from app.services.evidence_manifests import (
+    normalize_analysis_summary,
+    normalize_classification,
+    normalize_manifest,
+)
+from app.services.entity_relations import best_effort_upsert_relations
 from app.services.case_mindmap import MARKS, normalize_mark
 
 
@@ -58,11 +68,33 @@ ANALYSIS_RESULT_STATUSES = {
     'completed', 'completed_with_findings', 'blocked', 'failed', 'cancelled',
 }
 
+COLLABORATION_MAX_TTL_MINUTES = 72 * 60
+_CST = timezone(timedelta(hours=8))
+
 
 def _error(message, status=400, code='INVALID_REQUEST', **extra):
     payload = {'error': message, 'code': code}
     payload.update(extra)
     return jsonify(payload), status
+
+
+def _parse_collaboration_deadline(raw, now=None):
+    """Parse a collaboration deadline and enforce the rolling 72-hour cap."""
+    text = str(raw or '').strip()
+    if not text:
+        raise ValueError('expires_at 必填')
+    try:
+        deadline = datetime.fromisoformat(text.replace('Z', '+00:00'))
+    except ValueError as exc:
+        raise ValueError('expires_at 格式无效') from exc
+    if deadline.tzinfo is not None:
+        deadline = deadline.astimezone(_CST).replace(tzinfo=None)
+    now = now or now_cst_naive()
+    if deadline <= now:
+        raise ValueError('截止时间必须晚于当前时间')
+    if deadline > now + timedelta(minutes=COLLABORATION_MAX_TTL_MINUTES):
+        raise ValueError('截止时间最长只能延至当前时间后 72 小时')
+    return deadline
 
 
 def _enabled():
@@ -229,7 +261,7 @@ def _add_audit(action, resource_type, resource_id, resource_name,
     ))
 
 
-def _idempotency_begin(actor):
+def _idempotency_begin(actor, create=True):
     key = str(request.headers.get('Idempotency-Key') or '').strip()
     if not key:
         return None, _error('写请求必须携带 Idempotency-Key', 400,
@@ -257,6 +289,9 @@ def _idempotency_begin(actor):
             return None, _error('相同写请求仍在处理中', 409,
                                 'IDEMPOTENCY_IN_PROGRESS')
         return None, (jsonify(row.response_body_json or {}), row.response_status)
+
+    if not create:
+        return None, None
 
     row = WorkflowOperationIdempotency(
         actor_type=actor['type'],
@@ -489,11 +524,336 @@ def update_shift_left_analysis_result(run_id):
     return _commit_payload(idem, row.to_dict(), 200)
 
 
-@api_bp.route('/shift-left/findings', methods=['GET'])
-def list_shift_left_findings():
+def _workflow_run_for_evidence(run_id, actor, write=False):
+    row = ((WorkflowRun.query.filter_by(id=run_id).with_for_update().first())
+           if write else db.session.get(WorkflowRun, run_id))
+    if not row or row.project_id is None:
+        return None, _error(
+            'Workflow Run 不存在或未关联项目', 404, 'WORKFLOW_RUN_NOT_FOUND')
+    denied = _require_project(actor, row.project_id, write=write)
+    if denied:
+        return None, denied
+    if actor['type'] == 'collaboration':
+        return None, _error(
+            '临时协作会话请通过报告上下文读取证据', 403,
+            'COLLABORATION_SCOPE_DENIED')
+    return row, None
+
+
+def _expected_manifest_revision(data, current):
+    raw = data.get('expected_version')
+    if raw is None:
+        if current is None:
+            return 0
+        raise ValueError('更新 Evidence Manifest 必须提供 expected_version')
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError('expected_version 必须是整数') from None
+    if value < 0:
+        raise ValueError('expected_version 不能小于 0')
+    return value
+
+
+def _manifest_relation(manifest):
+    return {
+        'from_type': 'workflow_run',
+        'from_id': str(manifest.workflow_run_id),
+        'relation_type': 'has_evidence',
+        'to_type': 'evidence_manifest',
+        'to_id': str(manifest.id),
+        'metadata': {
+            'completeness_status': manifest.completeness_status,
+            'manifest_revision': manifest.revision,
+        },
+    }
+
+
+@api_bp.route('/evidence-manifests', methods=['GET'])
+def list_workflow_evidence_manifests():
+    """Read-only cross-Run evidence index, available before write rollout."""
+    actor = _actor()
+    project_id = request.args.get('project_id', type=int)
+    if not project_id:
+        return _error('project_id 必填', 400, 'PROJECT_ID_REQUIRED')
+    denied = _require_project(actor, project_id)
+    if denied:
+        return denied
+    query = WorkflowEvidenceManifest.query.filter_by(project_id=project_id)
+    if request.args.get('completeness_status'):
+        query = query.filter_by(
+            completeness_status=request.args['completeness_status'])
+    if request.args.get('classification'):
+        query = query.filter_by(classification=request.args['classification'])
+    if request.args.get('workflow_run_id', type=int):
+        query = query.filter_by(
+            workflow_run_id=request.args.get('workflow_run_id', type=int))
+    page = max(request.args.get('page', 1, type=int), 1)
+    page_size = min(max(request.args.get('page_size', 50, type=int), 1), 200)
+    pagination = query.order_by(
+        WorkflowEvidenceManifest.updated_at.desc(),
+        WorkflowEvidenceManifest.id.desc(),
+    ).paginate(page=page, per_page=page_size, error_out=False)
+    return jsonify({
+        'items': [row.to_dict() for row in pagination.items],
+        'total': pagination.total,
+        'page': page,
+        'page_size': page_size,
+    })
+
+
+@api_bp.route('/workflow-runs/<int:run_id>/evidence-manifest', methods=['GET'])
+def get_workflow_evidence_manifest(run_id):
+    # Reading evidence cannot affect an existing Flow. Keep writes gated, but
+    # allow agents and the closed-loop dashboard to inspect deployed data.
+    actor = _actor()
+    _, error = _workflow_run_for_evidence(run_id, actor)
+    if error:
+        return error
+    row = WorkflowEvidenceManifest.query.filter_by(
+        workflow_run_id=run_id).first()
+    if not row:
+        return _error(
+            'Evidence Manifest 不存在', 404, 'EVIDENCE_MANIFEST_NOT_FOUND')
+    return jsonify(row.to_dict())
+
+
+@api_bp.route('/workflow-runs/<int:run_id>/evidence-manifest', methods=['PUT'])
+def upsert_workflow_evidence_manifest(run_id):
+    # Worker result ingestion is always available for existing Workflows, so
+    # the explicit equivalent follows the same compatibility contract.
+    actor = _actor()
+    workflow_run, error = _workflow_run_for_evidence(run_id, actor, write=True)
+    if error:
+        return error
+    # Replay must win over state-dependent validation. A create without
+    # expected_version is valid while no Manifest exists; its identical retry
+    # must return the saved 201 after that Manifest has been created.
+    _, replay = _idempotency_begin(actor, create=False)
+    if replay:
+        return replay
+    data = request.get_json(silent=True) or {}
+    try:
+        normalized = normalize_manifest(data)
+    except ValueError as exc:
+        return _error(str(exc), 400, 'EVIDENCE_MANIFEST_VALIDATION_FAILED')
+    row = WorkflowEvidenceManifest.query.filter_by(
+        workflow_run_id=workflow_run.id).first()
+    try:
+        expected_version = _expected_manifest_revision(data, row)
+    except ValueError as exc:
+        return _error(str(exc), 400, 'INVALID_EXPECTED_VERSION')
+    idem, replay = _idempotency_begin(actor)
+    if replay:
+        return replay
+    current_version = int(row.revision or 1) if row else 0
+    if expected_version != current_version:
+        db.session.rollback()
+        return _error(
+            'Evidence Manifest revision 冲突', 409, 'REVISION_CONFLICT',
+            current_revision=current_version)
+    if (row and row.classification == 'NO_RISK_FOUND'
+            and normalized['completeness_status'] != 'complete'):
+        db.session.rollback()
+        return _error(
+            '现有结论是 NO_RISK_FOUND；证据降级前必须先重新分析', 409,
+            'EVIDENCE_REGRESSION_REQUIRES_REANALYSIS',
+            missing_required=normalized['missing_required'])
+
+    analysis_run_id = data.get('analysis_run_id')
+    if analysis_run_id is None and row is not None:
+        analysis_run_id = row.analysis_run_id
+    if analysis_run_id is not None:
+        try:
+            analysis_run_id = int(analysis_run_id)
+        except (TypeError, ValueError):
+            db.session.rollback()
+            return _error(
+                'analysis_run_id 必须是整数', 400, 'INVALID_ANALYSIS_RUN_ID')
+        analysis_run = db.session.get(ShiftLeftAnalysisRun, analysis_run_id)
+        if (not analysis_run or analysis_run.project_id != workflow_run.project_id
+                or (analysis_run.workflow_run_id is not None
+                    and analysis_run.workflow_run_id != workflow_run.id)):
+            db.session.rollback()
+            return _error(
+                'analysis_run_id 不属于该 Workflow Run 的项目或绑定了其他 Run',
+                400, 'ANALYSIS_RUN_MISMATCH')
+
+    created = row is None
+    if created:
+        row = WorkflowEvidenceManifest(
+            project_id=workflow_run.project_id,
+            workflow_run_id=workflow_run.id,
+            revision=1,
+            created_by=actor['name'],
+        )
+        db.session.add(row)
+    else:
+        row.revision = current_version + 1
+    row.analysis_run_id = analysis_run_id
+    row.coverage_json = normalized['coverage']
+    row.artifacts_json = normalized['artifacts']
+    row.required_evidence_json = normalized['required_evidence']
+    row.completeness_status = normalized['completeness_status']
+    row.missing_required_json = normalized['missing_required']
+    row.updated_by = actor['name']
+    db.session.flush()
+    best_effort_upsert_relations(
+        workflow_run.project_id, [_manifest_relation(row)], actor['name'])
+    _add_audit(
+        'create' if created else 'update', 'workflow_evidence_manifest', row.id,
+        'Workflow Run #%s Evidence Manifest' % workflow_run.id, actor, {
+            'workflow_run_id': workflow_run.id,
+            'revision': row.revision,
+            'completeness_status': row.completeness_status,
+            'missing_required': row.missing_required_json or [],
+        })
+    return _commit_payload(idem, row.to_dict(), 201 if created else 200)
+
+
+def _normalize_finding_ids(value):
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 100:
+        raise ValueError('finding_ids must be an array with at most 100 items')
+    result = []
+    seen = set()
+    for raw in value:
+        try:
+            finding_id = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError('finding_ids must contain integers') from None
+        if finding_id <= 0:
+            raise ValueError('finding_ids must contain positive integers')
+        if finding_id not in seen:
+            seen.add(finding_id)
+            result.append(finding_id)
+    return result
+
+
+@api_bp.route('/workflow-runs/<int:run_id>/post-run-analysis', methods=['POST'])
+def save_workflow_post_run_analysis(run_id):
     disabled = _disabled_response()
     if disabled:
         return disabled
+    actor = _actor()
+    workflow_run, error = _workflow_run_for_evidence(run_id, actor, write=True)
+    if error:
+        return error
+    manifest = WorkflowEvidenceManifest.query.filter_by(
+        workflow_run_id=workflow_run.id).first()
+    if not manifest:
+        return _error(
+            '请先保存 Evidence Manifest', 409, 'EVIDENCE_MANIFEST_REQUIRED')
+    data = request.get_json(silent=True) or {}
+    try:
+        classification = normalize_classification(data.get('classification'))
+        summary = normalize_analysis_summary(data.get('summary'))
+        finding_ids = _normalize_finding_ids(data.get('finding_ids'))
+        expected_version = _expected_manifest_revision(data, manifest)
+    except ValueError as exc:
+        return _error(str(exc), 400, 'POST_RUN_ANALYSIS_VALIDATION_FAILED')
+    idem, replay = _idempotency_begin(actor)
+    if replay:
+        return replay
+    if expected_version != int(manifest.revision or 1):
+        db.session.rollback()
+        return _error(
+            'Evidence Manifest revision 冲突', 409, 'REVISION_CONFLICT',
+            current_revision=manifest.revision)
+    if (classification == 'NO_RISK_FOUND'
+            and manifest.completeness_status != 'complete'):
+        db.session.rollback()
+        return _error(
+            '证据不完整时不能保存 NO_RISK_FOUND，必须使用 ANALYSIS_INCOMPLETE',
+            409, 'EVIDENCE_INCOMPLETE_FOR_NO_RISK',
+            missing_required=manifest.missing_required_json or [])
+
+    findings = []
+    if finding_ids:
+        findings = ShiftLeftFinding.query.filter(
+            ShiftLeftFinding.id.in_(finding_ids),
+            ShiftLeftFinding.project_id == workflow_run.project_id,
+            ShiftLeftFinding.is_archived.is_(False),
+        ).all()
+        found_ids = {row.id for row in findings}
+        missing_ids = [value for value in finding_ids if value not in found_ids]
+        if missing_ids:
+            db.session.rollback()
+            return _error(
+                'Finding 不存在或不属于该项目', 400, 'FINDING_PROJECT_MISMATCH',
+                finding_ids=missing_ids)
+
+    manifest.classification = classification
+    manifest.analysis_summary_json = summary
+    manifest.finding_ids_json = finding_ids
+    manifest.analyzed_by = actor['name']
+    manifest.analyzed_at = now_cst_naive()
+    manifest.updated_by = actor['name']
+    manifest.revision = int(manifest.revision or 1) + 1
+    if manifest.analysis_run_id is not None:
+        for finding in findings:
+            snapshot = {
+                'title': finding.title,
+                'severity': finding.severity,
+                'confidence': finding.confidence,
+                'evidence_level': finding.evidence_level,
+                'status': finding.status,
+                'module': finding.module,
+                'classification': classification,
+                'evidence_manifest_id': manifest.id,
+            }
+            occurrence = ShiftLeftAnalysisFinding.query.filter_by(
+                analysis_run_id=manifest.analysis_run_id,
+                finding_id=finding.id,
+            ).first()
+            if occurrence is None:
+                db.session.add(ShiftLeftAnalysisFinding(
+                    analysis_run_id=manifest.analysis_run_id,
+                    finding_id=finding.id,
+                    snapshot_json=snapshot,
+                ))
+            else:
+                occurrence.snapshot_json = snapshot
+    db.session.flush()
+    relations = [_manifest_relation(manifest)]
+    for finding in findings:
+        relations.extend([{
+            'from_type': 'workflow_run',
+            'from_id': str(workflow_run.id),
+            'relation_type': 'produced',
+            'to_type': 'finding',
+            'to_id': str(finding.id),
+            'metadata': {
+                'classification': classification,
+                'evidence_manifest_id': manifest.id,
+            },
+        }, {
+            'from_type': 'evidence_manifest',
+            'from_id': str(manifest.id),
+            'relation_type': 'supports',
+            'to_type': 'finding',
+            'to_id': str(finding.id),
+            'metadata': {'manifest_revision': manifest.revision},
+        }])
+    best_effort_upsert_relations(
+        workflow_run.project_id, relations, actor['name'])
+    _add_audit(
+        'classify', 'workflow_evidence_manifest', manifest.id,
+        'Workflow Run #%s Post-run Analysis' % workflow_run.id, actor, {
+            'workflow_run_id': workflow_run.id,
+            'classification': classification,
+            'finding_ids': finding_ids,
+            'revision': manifest.revision,
+        })
+    return _commit_payload(idem, manifest.to_dict(), 200)
+
+
+@api_bp.route('/findings', methods=['GET'])
+@api_bp.route('/shift-left/findings', methods=['GET'])
+def list_shift_left_findings():
+    # Compatibility/read route is safe while SHIFT_LEFT_ENABLED remains off;
+    # all mutations below stay behind the feature gate.
     actor = _actor()
     if actor['type'] == 'collaboration':
         denied = _require_collaboration_scope(actor, 'finding:read')
@@ -695,7 +1055,134 @@ def get_shift_left_finding(finding_id):
         ShiftLeftFindingEvent.query.filter_by(finding_id=finding.id)
         .order_by(ShiftLeftFindingEvent.created_at.asc(),
                   ShiftLeftFindingEvent.id.asc()).all())]
+    payload['feedback'] = [row.to_dict() for row in (
+        ShiftLeftFindingFeedback.query.filter_by(finding_id=finding.id)
+        .order_by(ShiftLeftFindingFeedback.id.asc()).all())]
     return jsonify(payload)
+
+
+@api_bp.route('/shift-left/findings/<int:finding_id>/feedback', methods=['GET'])
+def list_shift_left_finding_feedback(finding_id):
+    disabled = _disabled_response()
+    if disabled:
+        return disabled
+    actor = _actor()
+    finding = db.session.get(ShiftLeftFinding, finding_id)
+    if not finding or finding.is_archived:
+        return _error('Finding 不存在', 404, 'FINDING_NOT_FOUND')
+    denied = _require_finding_access(actor, finding)
+    if denied:
+        return denied
+    rows = (ShiftLeftFindingFeedback.query.filter_by(finding_id=finding.id)
+            .order_by(ShiftLeftFindingFeedback.id.asc()).all())
+    counts = {}
+    for row in rows:
+        counts[row.label] = counts.get(row.label, 0) + 1
+    return jsonify({
+        'finding_id': finding.id,
+        'items': [row.to_dict() for row in rows],
+        'counts': counts,
+        'total': len(rows),
+    })
+
+
+@api_bp.route('/shift-left/findings/<int:finding_id>/feedback', methods=['POST'])
+def add_shift_left_finding_feedback(finding_id):
+    disabled = _disabled_response()
+    if disabled:
+        return disabled
+    actor = _actor()
+    finding = db.session.get(ShiftLeftFinding, finding_id)
+    if not finding or finding.is_archived:
+        return _error('Finding 不存在', 404, 'FINDING_NOT_FOUND')
+    denied = _require_finding_access(
+        actor, finding, write=True, scope='finding:review')
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    label = str(data.get('label') or '').strip().lower()
+    if label not in FINDING_FEEDBACK_LABELS:
+        return _error(
+            'feedback label 无效', 400, 'INVALID_FINDING_FEEDBACK_LABEL',
+            allowed_labels=list(FINDING_FEEDBACK_LABELS))
+    try:
+        from_revision = int(data.get('from_revision'))
+    except (TypeError, ValueError):
+        return _error(
+            'from_revision 必须是整数', 400, 'INVALID_REVISION')
+    if from_revision != int(finding.revision or 1):
+        return _error(
+            'Finding revision 冲突', 409, 'REVISION_CONFLICT',
+            current_revision=finding.revision,
+            current_status=finding.status)
+    note = str(data.get('note') or '').strip()
+    refs = data.get('evidence_refs') or []
+    if not isinstance(refs, list) or len(refs) > 100:
+        return _error(
+            'evidence_refs 必须是最多 100 项的数组', 400,
+            'INVALID_FEEDBACK_EVIDENCE_REFS')
+    normalized_refs = []
+    for index, value in enumerate(refs):
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return _error(
+                    'evidence_refs 不能包含空值', 400,
+                    'INVALID_FEEDBACK_EVIDENCE_REFS')
+            normalized_refs.append(value[:1000])
+        elif isinstance(value, dict):
+            normalized_refs.append(value)
+        else:
+            return _error(
+                'evidence_refs[%s] 必须是字符串或对象' % index, 400,
+                'INVALID_FEEDBACK_EVIDENCE_REFS')
+    if not note and not normalized_refs:
+        return _error(
+            'note 或 evidence_refs 至少提供一项', 400,
+            'FINDING_FEEDBACK_EVIDENCE_REQUIRED')
+    idem, replay = _idempotency_begin(actor)
+    if replay:
+        return replay
+    idempotency_key = str(request.headers.get('Idempotency-Key') or '').strip()
+    request_hash = payload_hash({
+        'finding_id': finding.id,
+        'label': label,
+        'from_revision': from_revision,
+        'note': note,
+        'evidence_refs': normalized_refs,
+    })
+    feedback = ShiftLeftFindingFeedback(
+        project_id=finding.project_id,
+        finding_id=finding.id,
+        label=label,
+        note=note,
+        evidence_refs_json=normalized_refs,
+        source_type=(
+            'human' if actor['type'] == 'user'
+            else 'developer_ai' if actor['type'] == 'collaboration'
+            else 'system'),
+        actor_type=actor['type'],
+        actor_id=actor['id'],
+        actor_key=_independence_key(actor),
+        actor_name=actor['name'],
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+    )
+    db.session.add(feedback)
+    db.session.flush()
+    _new_finding_event(
+        finding, 'feedback', {
+            'feedback_id': feedback.id,
+            'label': label,
+            'finding_revision': from_revision,
+            'note': note,
+            'evidence_refs': normalized_refs,
+        }, actor)
+    _add_audit(
+        'feedback', 'shift_left_finding', finding.id, finding.title, actor,
+        {'feedback_id': feedback.id, 'label': label,
+         'finding_revision': from_revision})
+    return _commit_payload(idem, feedback.to_dict(), 201)
 
 
 @api_bp.route('/shift-left/findings/<int:finding_id>/evidence', methods=['GET'])
@@ -958,6 +1445,12 @@ def get_analysis_report_context(report_id):
                           'COLLABORATION_SUBJECT_DENIED')
     runs = ShiftLeftAnalysisRun.query.filter_by(report_id=report.id).order_by(
         ShiftLeftAnalysisRun.id.desc()).all()
+    workflow_run_ids = {
+        row.workflow_run_id for row in runs if row.workflow_run_id is not None}
+    manifests = (WorkflowEvidenceManifest.query.filter(
+        WorkflowEvidenceManifest.workflow_run_id.in_(workflow_run_ids)
+    ).order_by(WorkflowEvidenceManifest.id.desc()).all()
+                 if workflow_run_ids else [])
     return jsonify({
         'report': {
             'id': report.id,
@@ -971,6 +1464,7 @@ def get_analysis_report_context(report_id):
             'updated_at': str(report.updated_at) if report.updated_at else None,
         },
         'analysis_runs': [row.to_dict() for row in runs],
+        'evidence_manifests': [row.to_dict() for row in manifests],
         'latest_analysis_run_id': runs[0].id if runs else None,
     })
 
@@ -1026,6 +1520,37 @@ def _case_review_project(topic):
     return Project.query.filter_by(name=project_name).first() if project_name else None
 
 
+def _topic_project(topic):
+    if not topic or topic.status == 'deleted':
+        return None
+    project_name = str(topic.project_name or '').strip()
+    return Project.query.filter_by(name=project_name).first() if project_name else None
+
+
+def _can_manage_topic_collaboration(actor, topic):
+    if not actor or actor['type'] == 'collaboration' or not topic:
+        return False
+    if actor['type'] == 'claw':
+        claw = actor['claw']
+        return bool(
+            claw.role == 'admin'
+            or (topic.author_claw_id
+                and int(topic.author_claw_id) == int(claw.id)))
+    user = actor['user']
+    return bool(
+        user.role in ('super_admin', 'admin')
+        or (topic.author_user_id
+            and int(topic.author_user_id) == int(user.id)))
+
+
+def _require_topic_collaboration_manager(actor, topic):
+    if _can_manage_topic_collaboration(actor, topic):
+        return None
+    return _error(
+        '只有课题发起人或管理员可以管理对外协作链接', 403,
+        'TOPIC_COLLABORATION_MANAGE_DENIED')
+
+
 def _collaboration_subject_project_id(subject_type, subject_id):
     if subject_type == 'analysis_report':
         row = db.session.get(TestReport, subject_id)
@@ -1039,7 +1564,19 @@ def _collaboration_subject_project_id(subject_type, subject_id):
     if subject_type == 'case_review':
         project = _case_review_project(db.session.get(Topic, subject_id))
         return project.id if project else None
+    if subject_type == 'topic':
+        project = _topic_project(db.session.get(Topic, subject_id))
+        return project.id if project else None
     return None
+
+
+def _require_collaboration_session_manager(actor, row, write=False):
+    if row.subject_type == 'topic':
+        topic = db.session.get(Topic, row.subject_id)
+        if not topic or topic.status == 'deleted':
+            return _error('课题不存在', 404, 'TOPIC_NOT_FOUND')
+        return _require_topic_collaboration_manager(actor, topic)
+    return _require_project(actor, row.project_id, write=write)
 
 
 def _case_review_scope(topic):
@@ -1113,20 +1650,35 @@ def get_case_review_context(topic_id):
                              CaseReviewRound.is_deleted.is_(None)))
               .order_by(CaseReviewRound.round_number.asc()).all())
     marks = CaseReviewNodeMark.query.filter_by(topic_id=topic.id).all()
+    active_records = (CaseReviewComment.query.join(
+        CaseReviewRound, CaseReviewComment.round_id == CaseReviewRound.id)
+        .filter(CaseReviewRound.topic_id == topic.id)
+        .filter(db.or_(CaseReviewComment.status == 'active',
+                       CaseReviewComment.status.is_(None))).count())
     topic_payload = topic.to_dict()
     topic_payload.pop('review_rounds', None)
+    open_round_id = next((row.id for row in reversed(rounds)
+                          if row.status == 'pending'), None)
     return jsonify({
+        'review_summary': {
+            'topic_id': topic.id,
+            'title': topic.title,
+            'status': topic.review_status or 'reviewing',
+            'round_count': len(rounds),
+            'open_round_id': open_round_id,
+            'submitted_review_count': active_records,
+        },
         'topic': topic_payload,
         'project': {'id': project.id, 'name': project.name},
         'library': library.to_dict(with_cases=False, with_mindmap=False),
         'scope': {'module_paths': paths, 'case_ids': sorted(case_ids)},
         'rounds': [row.to_dict(with_comments=True) for row in rounds],
-        'open_round_id': next((row.id for row in reversed(rounds)
-                               if row.status == 'pending'), None),
+        'open_round_id': open_round_id,
         'marks': [row.to_dict() for row in marks],
         'mark_legend': {key: dict(value) for key, value in MARKS.items()},
         'links': {
             'cases': '/api/v1/shift-left/case-reviews/%d/cases' % topic.id,
+            'reviews': '/api/v1/shift-left/case-reviews/%d/reviews' % topic.id,
             'comments': '/api/v1/shift-left/case-reviews/%d/comments' % topic.id,
             'marks': '/api/v1/shift-left/case-reviews/%d/marks' % topic.id,
         },
@@ -1172,6 +1724,63 @@ def list_case_review_cases(topic_id):
                     'page': page, 'page_size': page_size})
 
 
+def _case_review_record_payload(row, actor, topic):
+    payload = row.to_dict()
+    collaboration_id = (
+        actor['collaboration'].id
+        if actor and actor['type'] == 'collaboration' else None)
+    owned = bool(collaboration_id
+                 and row.collaboration_session_id == collaboration_id)
+    payload['owned_by_me'] = owned
+    payload['can_modify'] = bool(
+        owned and topic.review_status != 'closed'
+        and row.round and row.round.status == 'pending'
+        and (row.status or 'active') == 'active')
+    return payload
+
+
+@api_bp.route('/shift-left/case-reviews/<int:topic_id>/reviews',
+              methods=['GET'])
+def list_case_review_records(topic_id):
+    disabled = _disabled_response()
+    if disabled:
+        return disabled
+    actor = _actor()
+    topic, _project, denied = _case_review_or_error(topic_id, actor)
+    if denied:
+        return denied
+    try:
+        page = max(int(request.args.get('page', 1)), 1)
+        page_size = min(max(int(request.args.get('page_size', 100)), 1), 200)
+    except (TypeError, ValueError):
+        return _error('page/page_size 必须是整数', 400,
+                      'INVALID_PAGINATION')
+    query = (CaseReviewComment.query.join(
+        CaseReviewRound, CaseReviewComment.round_id == CaseReviewRound.id)
+        .filter(CaseReviewRound.topic_id == topic.id)
+        .filter(db.or_(CaseReviewComment.status == 'active',
+                       CaseReviewComment.status.is_(None))))
+    round_id = request.args.get('round_id')
+    if round_id not in (None, ''):
+        try:
+            query = query.filter(CaseReviewComment.round_id == int(round_id))
+        except (TypeError, ValueError):
+            return _error('round_id 必须是整数', 400, 'INVALID_ROUND_ID')
+    total = query.count()
+    rows = (query.order_by(CaseReviewComment.created_at.asc(),
+                           CaseReviewComment.id.asc())
+            .offset((page - 1) * page_size).limit(page_size).all())
+    return jsonify({
+        'items': [_case_review_record_payload(row, actor, topic)
+                  for row in rows],
+        'total': total,
+        'page': page,
+        'page_size': page_size,
+    })
+
+
+@api_bp.route('/shift-left/case-reviews/<int:topic_id>/reviews',
+              methods=['POST'])
 @api_bp.route('/shift-left/case-reviews/<int:topic_id>/comments', methods=['POST'])
 def create_case_review_comment(topic_id):
     disabled = _disabled_response()
@@ -1228,9 +1837,13 @@ def create_case_review_comment(topic_id):
         author_name=actor['name'][:100],
         author_claw_id=actor['id'] if actor['type'] == 'claw' else None,
         author_user_id=actor['id'] if actor['type'] == 'user' else None,
+        collaboration_session_id=(
+            actor['collaboration'].id
+            if actor['type'] == 'collaboration' else None),
         content=content,
         verdict=verdict,
         score=score,
+        status='active',
     )
     db.session.add(row)
     if verdict in ('approve', 'reject'):
@@ -1241,7 +1854,115 @@ def create_case_review_comment(topic_id):
     _add_audit('comment', 'case_review', topic.id, topic.title, actor,
                {'round_id': review_round.id, 'comment_id': row.id,
                 'verdict': verdict})
-    return _commit_payload(idem, row.to_dict(), 201)
+    return _commit_payload(
+        idem, _case_review_record_payload(row, actor, topic), 201)
+
+
+def _owned_case_review_record_or_error(topic, review_id, actor):
+    row = (CaseReviewComment.query.join(
+        CaseReviewRound, CaseReviewComment.round_id == CaseReviewRound.id)
+        .filter(CaseReviewComment.id == review_id,
+                CaseReviewRound.topic_id == topic.id)
+        .first())
+    if not row or (row.status or 'active') != 'active':
+        return None, _error('评审记录不存在', 404,
+                            'CASE_REVIEW_RECORD_NOT_FOUND')
+    if row.collaboration_session_id != actor['collaboration'].id:
+        return None, _error('只能修改或删除当前临时会话提交的评审记录', 403,
+                            'CASE_REVIEW_RECORD_NOT_OWNER')
+    if topic.review_status == 'closed' or not row.round \
+            or row.round.status != 'pending':
+        return None, _error('评审已关闭或所属轮次已结束', 409,
+                            'CASE_REVIEW_RECORD_LOCKED')
+    return row, None
+
+
+@api_bp.route(
+    '/shift-left/case-reviews/<int:topic_id>/reviews/<int:review_id>',
+    methods=['PATCH', 'PUT'])
+def update_case_review_record(topic_id, review_id):
+    disabled = _disabled_response()
+    if disabled:
+        return disabled
+    actor = _actor()
+    topic, _project, denied = _case_review_or_error(
+        topic_id, actor, scope='case_review:comment', write=True)
+    if denied:
+        return denied
+    row, denied = _owned_case_review_record_or_error(topic, review_id, actor)
+    if denied:
+        return denied
+    data = request.get_json(silent=True) or {}
+    if not any(key in data for key in ('content', 'score')):
+        return _error('至少提供 content 或 score', 400,
+                      'REVIEW_RECORD_UPDATE_REQUIRED')
+    new_content = None
+    new_score = row.score
+    if 'content' in data:
+        content = str(data.get('content') or '').strip()
+        if not content:
+            return _error('评审意见不能为空', 400, 'COMMENT_REQUIRED')
+        if len(content) > 20000:
+            return _error('评审意见不能超过 20000 字符', 400,
+                          'COMMENT_TOO_LONG')
+        new_content = content
+    if 'score' in data:
+        score = data.get('score')
+        if score is None:
+            new_score = None
+        else:
+            try:
+                score = int(score)
+            except (TypeError, ValueError):
+                return _error('score 必须是 1-10 的整数', 400,
+                              'INVALID_SCORE')
+            if not 1 <= score <= 10:
+                return _error('score 必须是 1-10 的整数', 400,
+                              'INVALID_SCORE')
+            new_score = score
+    idem, replay = _idempotency_begin(actor)
+    if replay:
+        return replay
+    if new_content is not None:
+        row.content = new_content
+    if 'score' in data:
+        row.score = new_score
+    row.is_edited = True
+    row.updated_at = now_cst_naive()
+    _add_audit('update_review_record', 'case_review', topic.id, topic.title,
+               actor, {'round_id': row.round_id, 'review_id': row.id})
+    return _commit_payload(
+        idem, _case_review_record_payload(row, actor, topic), 200)
+
+
+@api_bp.route(
+    '/shift-left/case-reviews/<int:topic_id>/reviews/<int:review_id>',
+    methods=['DELETE'])
+def delete_case_review_record(topic_id, review_id):
+    disabled = _disabled_response()
+    if disabled:
+        return disabled
+    actor = _actor()
+    topic, _project, denied = _case_review_or_error(
+        topic_id, actor, scope='case_review:comment', write=True)
+    if denied:
+        return denied
+    row, denied = _owned_case_review_record_or_error(topic, review_id, actor)
+    if denied:
+        return denied
+    idem, replay = _idempotency_begin(actor)
+    if replay:
+        return replay
+    row.status = 'deleted'
+    row.deleted_at = now_cst_naive()
+    row.updated_at = row.deleted_at
+    _add_audit('delete_review_record', 'case_review', topic.id, topic.title,
+               actor, {'round_id': row.round_id, 'review_id': row.id})
+    return _commit_payload(idem, {
+        'id': row.id,
+        'deleted': True,
+        'deleted_at': str(row.deleted_at),
+    }, 200)
 
 
 @api_bp.route('/shift-left/case-reviews/<int:topic_id>/marks', methods=['GET'])
@@ -1364,9 +2085,185 @@ def _validate_collaboration_subject(project_id, subject_type, subject_id):
         project = _case_review_project(topic)
         if not topic or not project or project.id != project_id:
             return '用例评审不存在或不属于该项目'
+    elif subject_type == 'topic':
+        topic = db.session.get(Topic, subject_id)
+        project = _topic_project(topic)
+        if not topic:
+            return '课题不存在'
+        if topic.board == 'case_review':
+            return '用例评审课题必须使用 subject_type=case_review'
+        if project and int(project.id) != int(project_id or 0):
+            return '课题不属于该项目'
+        if not project and project_id is not None:
+            return '未关联项目的课题不能临时绑定其他项目'
     else:
         return 'subject_type 无效'
     return None
+
+
+def _case_review_bootstrap(row, access_token):
+    """Return a self-contained, machine-readable handoff for any external AI."""
+    if row.subject_type != 'case_review':
+        return None
+    topic_id = int(row.subject_id)
+    api_base = request.url_root.rstrip('/')
+    context_url = '%s/api/v1/shift-left/case-reviews/%d/context' % (
+        api_base, topic_id)
+    return {
+        'schema_version': 'case-review-bootstrap.v1',
+        'api_base_url': api_base,
+        'subject': {'type': 'case_review', 'id': topic_id},
+        'agent_identity': row.agent_identity,
+        'expires_at': str(row.token_expires_at),
+        'max_calls': row.max_calls,
+        'scopes': row.scopes_json or [],
+        'authorization': {
+            'type': 'bearer',
+            'header': 'Authorization: Bearer <access_token>',
+            'access_token': access_token,
+            'storage_warning': 'Do not store this token in source code, reports, or logs.',
+        },
+        'endpoints': {
+            'context': context_url,
+            'cases': '%s/api/v1/shift-left/case-reviews/%d/cases' % (
+                api_base, topic_id),
+            'reviews': '%s/api/v1/shift-left/case-reviews/%d/reviews' % (
+                api_base, topic_id),
+            'comments': '%s/api/v1/shift-left/case-reviews/%d/comments' % (
+                api_base, topic_id),
+            'marks': '%s/api/v1/shift-left/case-reviews/%d/marks' % (
+                api_base, topic_id),
+        },
+        'workflow': [
+            'GET context first and obey its scope, open round, mark legend, and links.',
+            'GET cases page by page; review only cases returned by this endpoint.',
+            'GET reviews to read all currently submitted review records.',
+            'POST one evidence-based record to reviews with score 1-10.',
+            'PATCH or DELETE only records whose owned_by_me flag is true.',
+            'PUT node marks only when useful; every write needs a unique Idempotency-Key.',
+            'Do not approve or reject unless case_review:decision is explicitly present.',
+            'Return a concise summary of findings, residual risks, and submitted actions.',
+        ],
+        'review_contract': {
+            'dimensions': [
+                'coverage', 'executability', 'expected_results',
+                'priority', 'consistency',
+            ],
+            'create_body': {
+                'content': '<evidence-based review in Markdown>',
+                'score': '<integer 1-10>',
+                'round_id': '<open_round_id from context>',
+            },
+            'update_body': {
+                'content': '<updated review in Markdown; optional>',
+                'score': '<integer 1-10 or null; optional>',
+            },
+            'delete_rule': (
+                'DELETE endpoints.reviews/<review_id>; only owned_by_me=true '
+                'records may be changed or deleted.'),
+            'mark_body': {
+                'marks': [{
+                    'node_id': 'case:<case_id> or mod:<module_path>',
+                    'mark': '<key from context.mark_legend>',
+                    'note': '<short evidence>',
+                }],
+            },
+        },
+    }
+
+
+def _topic_bootstrap(row, access_token):
+    """Return a machine-readable handoff for one ordinary discussion topic."""
+    if row.subject_type != 'topic':
+        return None
+    topic_id = int(row.subject_id)
+    api_base = request.url_root.rstrip('/')
+    topic_url = '%s/api/v1/topics/%d' % (api_base, topic_id)
+    replies_url = topic_url + '/replies'
+    return {
+        'schema_version': 'topic-discussion-bootstrap.v1',
+        'api_base_url': api_base,
+        'subject': {'type': 'topic', 'id': topic_id},
+        'agent_identity': row.agent_identity,
+        'expires_at': str(row.token_expires_at),
+        'max_calls': row.max_calls,
+        'scopes': row.scopes_json or [],
+        'authorization': {
+            'type': 'bearer',
+            'header': 'Authorization: Bearer <access_token>',
+            'access_token': access_token,
+            'storage_warning': (
+                'Do not store this token in source code, reports, or logs.'),
+        },
+        'endpoints': {
+            'topic': topic_url,
+            'replies': replies_url,
+            'reply': replies_url,
+            'owned_reply': replies_url + '/<reply_id>',
+        },
+        'workflow': [
+            'GET endpoints.topic first and read the topic plus existing replies.',
+            'Reply only when it adds relevant evidence, analysis, or a clear question.',
+            'POST endpoints.reply with content and a unique Idempotency-Key.',
+            'PATCH or DELETE only replies whose owned_by_me flag is true.',
+            'Every PATCH or DELETE also needs a unique Idempotency-Key.',
+            'Do not browse other topics or expand beyond this invitation subject.',
+            'Return a concise summary of what you read and wrote back to Hub.',
+        ],
+        'reply_contract': {
+            'create_body': {
+                'content': '<Markdown reply>',
+                'reply_to_id': '<optional existing reply id>',
+            },
+            'update_body': {'content': '<updated Markdown reply>'},
+            'delete_rule': (
+                'DELETE endpoints.owned_reply after replacing <reply_id>; '
+                'only owned_by_me=true replies may be changed or deleted.'),
+        },
+    }
+
+
+def _collaboration_bootstrap(row, access_token):
+    return (_case_review_bootstrap(row, access_token)
+            or _topic_bootstrap(row, access_token))
+
+
+@api_bp.route('/collaboration-sessions', methods=['GET'])
+def list_collaboration_sessions():
+    disabled = _disabled_response()
+    if disabled:
+        return disabled
+    actor = _actor()
+    if not actor or actor['type'] == 'collaboration':
+        return _error('临时协作 Token 不能读取会话管理信息', 403,
+                      'COLLABORATION_SCOPE_DENIED')
+    subject_type = str(request.args.get('subject_type') or '').strip()
+    if subject_type not in COLLABORATION_SUBJECT_TYPES:
+        return _error('subject_type 无效', 400, 'INVALID_SUBJECT_TYPE')
+    try:
+        subject_id = int(request.args.get('subject_id'))
+    except (TypeError, ValueError):
+        return _error('subject_id 必须是整数', 400, 'INVALID_SUBJECT_ID')
+    if subject_type == 'topic':
+        topic = db.session.get(Topic, subject_id)
+        if not topic or topic.status == 'deleted':
+            return _error('课题不存在', 404, 'TOPIC_NOT_FOUND')
+        denied = _require_topic_collaboration_manager(actor, topic)
+    else:
+        project_id = _collaboration_subject_project_id(
+            subject_type, subject_id)
+        if not project_id:
+            return _error('协作对象不存在或未关联项目', 404,
+                          'COLLABORATION_SUBJECT_NOT_FOUND')
+        denied = _require_project(actor, project_id)
+    if denied:
+        return denied
+    rows = (CollaborationSession.query.filter_by(
+        subject_type=subject_type, subject_id=subject_id)
+        .order_by(CollaborationSession.created_at.desc())
+        .limit(100).all())
+    return jsonify({'items': [row.to_dict() for row in rows],
+                    'total': len(rows)})
 
 
 @api_bp.route('/collaboration-sessions', methods=['POST'])
@@ -1386,15 +2283,28 @@ def create_collaboration_session():
         subject_id = int(data.get('subject_id'))
     except (TypeError, ValueError):
         return _error('subject_id 必须是整数', 400, 'INVALID_SUBJECT_ID')
-    project_id = data.get('project_id')
-    if project_id is None:
-        project_id = _collaboration_subject_project_id(subject_type, subject_id)
-    try:
-        project_id = int(project_id)
-    except (TypeError, ValueError):
-        return _error('无法从协作对象确定 project_id', 400,
-                      'COLLABORATION_PROJECT_REQUIRED')
-    denied = _require_project(actor, project_id, write=True)
+    topic = db.session.get(Topic, subject_id) if subject_type == 'topic' else None
+    if subject_type == 'topic':
+        if not topic or topic.status == 'deleted':
+            return _error('课题不存在', 404, 'TOPIC_NOT_FOUND')
+        if topic.board == 'case_review':
+            return _error(
+                '用例评审课题请使用 subject_type=case_review', 400,
+                'TOPIC_SUBJECT_TYPE_MISMATCH')
+        denied = _require_topic_collaboration_manager(actor, topic)
+        project = _topic_project(topic)
+        project_id = project.id if project else None
+    else:
+        project_id = data.get('project_id')
+        if project_id is None:
+            project_id = _collaboration_subject_project_id(
+                subject_type, subject_id)
+        try:
+            project_id = int(project_id)
+        except (TypeError, ValueError):
+            return _error('无法从协作对象确定 project_id', 400,
+                          'COLLABORATION_PROJECT_REQUIRED')
+        denied = _require_project(actor, project_id, write=True)
     if denied:
         return denied
     subject_error = _validate_collaboration_subject(
@@ -1404,9 +2314,20 @@ def create_collaboration_session():
     agent_identity = str(data.get('agent_identity') or '').strip()
     if not agent_identity:
         return _error('agent_identity 必填', 400, 'AGENT_IDENTITY_REQUIRED')
+    if len(agent_identity) > 160:
+        return _error('agent_identity 不能超过 160 字符', 400,
+                      'AGENT_IDENTITY_TOO_LONG')
+    if (subject_type in ('case_review', 'topic')
+            and agent_identity.lower() in (
+                'developer-ai', 'developer-ai:case-review',
+                'developer-ai:topic')):
+        return _error('请使用能区分团队、人员或 AI 实例的唯一身份标识', 400,
+                      'AGENT_IDENTITY_TOO_GENERIC')
     try:
-        default_scopes = (DEFAULT_CASE_REVIEW_SCOPES
-                          if subject_type == 'case_review' else None)
+        default_scopes = (
+            DEFAULT_CASE_REVIEW_SCOPES
+            if subject_type == 'case_review'
+            else (DEFAULT_TOPIC_SCOPES if subject_type == 'topic' else None))
         scopes = normalize_scopes(data.get('scopes'), default_scopes)
     except ValueError as exc:
         return _error(str(exc), 400, 'INVALID_COLLABORATION_SCOPE')
@@ -1430,18 +2351,32 @@ def create_collaboration_session():
             'invitation_returned_once': True,
         })
         return jsonify(payload), 200
+    if subject_type in ('case_review', 'topic'):
+        same_identity = CollaborationSession.query.filter_by(
+            subject_type=subject_type,
+            subject_id=subject_id,
+            agent_identity=agent_identity,
+        ).order_by(CollaborationSession.created_at.desc()).all()
+        if any(row.effective_status(now_cst_naive()) in ('pending', 'active')
+               for row in same_identity):
+            return _error('该 Developer AI 身份已有待兑换或生效中的会话', 409,
+                          'COLLABORATION_IDENTITY_ACTIVE')
     try:
-        invite_minutes = min(max(int(data.get('invitation_ttl_minutes') or 30), 5), 1440)
-        token_minutes = min(max(int(data.get('token_ttl_minutes') or 120), 5), 1440)
+        invite_minutes = int(data.get('invitation_ttl_minutes') or 30)
+        token_minutes = int(data.get('token_ttl_minutes') or 120)
         max_calls = min(max(int(data.get('max_calls') or 500), 1), 5000)
     except (TypeError, ValueError):
         return _error('TTL/max_calls 必须是整数', 400,
                       'INVALID_COLLABORATION_LIMIT')
+    if (not 5 <= invite_minutes <= COLLABORATION_MAX_TTL_MINUTES
+            or not 5 <= token_minutes <= COLLABORATION_MAX_TTL_MINUTES):
+        return _error('邀请和Token有效期必须在5分钟到72小时之间', 400,
+                      'COLLABORATION_TTL_OUT_OF_RANGE')
 
     invitation_code = generate_invitation_code()
     now = now_cst_naive()
     row = CollaborationSession(
-        project_id=int(project_id),
+        project_id=(int(project_id) if project_id is not None else None),
         subject_type=subject_type,
         subject_id=subject_id,
         agent_identity=agent_identity[:160],
@@ -1544,6 +2479,7 @@ def exchange_collaboration_session():
         'subject': {'type': row.subject_type, 'id': row.subject_id},
         'agent_identity': row.agent_identity,
         'scopes': row.scopes_json or [],
+        'bootstrap': _collaboration_bootstrap(row, access_token),
     })
 
 
@@ -1559,7 +2495,7 @@ def get_collaboration_session(session_id):
     row = db.session.get(CollaborationSession, session_id)
     if not row:
         return _error('协作会话不存在', 404, 'COLLABORATION_SESSION_NOT_FOUND')
-    denied = _require_project(actor, row.project_id)
+    denied = _require_collaboration_session_manager(actor, row)
     if denied:
         return denied
     payload = row.to_dict()
@@ -1582,7 +2518,7 @@ def revoke_collaboration_session(session_id):
     row = db.session.get(CollaborationSession, session_id)
     if not row:
         return _error('协作会话不存在', 404, 'COLLABORATION_SESSION_NOT_FOUND')
-    denied = _require_project(actor, row.project_id, write=True)
+    denied = _require_collaboration_session_manager(actor, row, write=True)
     if denied:
         return denied
     idem, replay = _idempotency_begin(actor)
@@ -1606,3 +2542,87 @@ def revoke_collaboration_session(session_id):
                '%s:%s' % (row.subject_type, row.subject_id), actor,
                {'reason': row.revoke_reason})
     return _commit_payload(idem, row.to_dict(), 200)
+
+
+@api_bp.route('/collaboration-sessions/<int:session_id>/deadline',
+              methods=['PATCH'])
+def update_collaboration_session_deadline(session_id):
+    """Extend a supported collaboration session without rotating its secret.
+
+    Pending sessions update the invitation deadline. Exchanged sessions update
+    the existing access token deadline. An effectively expired session may be
+    re-enabled because its persisted lifecycle status remains pending/active.
+    """
+    disabled = _disabled_response()
+    if disabled:
+        return disabled
+    actor = _actor()
+    if not actor:
+        return _error('未登录', 401, 'AUTH_REQUIRED')
+    if actor['type'] == 'collaboration':
+        return _error('临时协作 Token 不能修改会话截止时间', 403,
+                      'COLLABORATION_SCOPE_DENIED')
+    row = db.session.get(CollaborationSession, session_id)
+    if not row:
+        return _error('协作会话不存在', 404,
+                      'COLLABORATION_SESSION_NOT_FOUND')
+    denied = _require_collaboration_session_manager(actor, row, write=True)
+    if denied:
+        return denied
+    if row.subject_type not in ('case_review', 'topic'):
+        return _error('当前资源类型不支持协作链接延期', 400,
+                      'COLLABORATION_DEADLINE_UNSUPPORTED')
+    if row.status in ('revoked', 'completed'):
+        return _error('已撤销或已完成的会话不能延期', 409,
+                      'COLLABORATION_SESSION_TERMINAL')
+    if row.max_calls and (row.call_count or 0) >= row.max_calls:
+        return _error('调用额度已用尽，不能仅通过延期恢复', 409,
+                      'COLLABORATION_CALLS_EXHAUSTED')
+
+    idem, replay = _idempotency_begin(actor)
+    if replay:
+        return replay
+    data = request.get_json(silent=True) or {}
+    now = now_cst_naive()
+    try:
+        deadline = _parse_collaboration_deadline(data.get('expires_at'), now)
+    except ValueError as exc:
+        db.session.rollback()
+        return _error(str(exc), 400, 'INVALID_COLLABORATION_DEADLINE')
+
+    if row.status == 'pending':
+        target = 'invitation_expires_at'
+        old_deadline = row.invitation_expires_at
+        row.invitation_expires_at = deadline
+    elif row.status == 'active':
+        target = 'token_expires_at'
+        old_deadline = row.token_expires_at
+        row.token_expires_at = deadline
+    else:
+        db.session.rollback()
+        return _error('当前会话状态不支持延期', 409,
+                      'COLLABORATION_SESSION_NOT_EXTENDABLE')
+
+    detail = {
+        'target': target,
+        'old_expires_at': str(old_deadline) if old_deadline else None,
+        'expires_at': str(deadline),
+        'link_rotated': False,
+    }
+    db.session.add(CollaborationSessionEvent(
+        session_id=row.id,
+        event_type='deadline_updated',
+        actor_type=actor['type'],
+        actor_id=actor['id'],
+        actor_name=actor['name'],
+        detail_json=detail,
+    ))
+    _add_audit('update_deadline', 'collaboration_session', row.id,
+               '%s:%s' % (row.subject_type, row.subject_id), actor, detail)
+    payload = row.to_dict()
+    payload.update({
+        'deadline_field': target,
+        'expires_at': str(deadline),
+        'link_rotated': False,
+    })
+    return _commit_payload(idem, payload, 200)

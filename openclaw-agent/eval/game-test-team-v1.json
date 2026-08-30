@@ -1,0 +1,276 @@
+{
+  "schema": 1,
+  "suite_key": "game_test_agent_team_v1",
+  "version": 1,
+  "project_name": "QQ飞车",
+  "review_policy": {
+    "required_reviewers": 2,
+    "max_dimension_variance_percent": 20
+  },
+  "datasets": [
+    {
+      "dataset_key": "mission_requirement_analyst_golden",
+      "role_key": "requirement_analyst",
+      "split": "golden",
+      "rubric_version": 1,
+      "cases": [
+        {
+          "case_key": "req-golden-reward-settlement",
+          "input_snapshot": {"objective": "分析玩法结算奖励需求", "baseline_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "source_refs": [{"kind": "knowledge", "id": 334}]},
+          "expected_contract": {"artifact_type": "requirement_analysis", "schema_version": 1, "required_acceptance_ids": ["AC-001"], "required_risk_topics": ["重复领奖"]},
+          "required_evidence": [{"kind": "knowledge", "id": 334}],
+          "deterministic_checks": [{"check": "schema_valid"}, {"check": "acceptance_source_refs"}, {"check": "mission_baseline_match"}],
+          "allowed_variance": {"wording": true, "risk_order": true},
+          "hidden_tags": ["reward", "idempotency"]
+        },
+        {
+          "case_key": "req-golden-matchmaking",
+          "input_snapshot": {"objective": "分析排位匹配窗口调整", "baseline_sha256": "sha256:1212121212121212121212121212121212121212121212121212121212121212", "source_refs": [{"kind": "requirement", "id": 1201}]},
+          "expected_contract": {"artifact_type": "requirement_analysis", "schema_version": 1, "required_topics": ["匹配时长", "段位差"]},
+          "required_evidence": [{"kind": "requirement", "id": 1201}],
+          "deterministic_checks": [{"check": "schema_valid"}, {"check": "risk_ids_unique"}, {"check": "acceptance_testable"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["matchmaking", "boundary"]
+        },
+        {
+          "case_key": "req-golden-reconnect",
+          "input_snapshot": {"objective": "分析单局断线重连", "baseline_sha256": "sha256:1313131313131313131313131313131313131313131313131313131313131313", "source_refs": [{"kind": "requirement", "id": 1202}]},
+          "expected_contract": {"artifact_type": "requirement_analysis", "schema_version": 1, "required_topics": ["恢复状态", "重复操作"]},
+          "required_evidence": [{"kind": "requirement", "id": 1202}],
+          "deterministic_checks": [{"check": "schema_valid"}, {"check": "functional_flow_present"}, {"check": "acceptance_source_refs"}],
+          "allowed_variance": {"wording": true, "actor_labels": true},
+          "hidden_tags": ["reconnect", "state-recovery"]
+        },
+        {
+          "case_key": "req-golden-activity-window",
+          "input_snapshot": {"objective": "分析跨天活动开放和领奖窗口", "baseline_sha256": "sha256:1414141414141414141414141414141414141414141414141414141414141414", "source_refs": [{"kind": "requirement", "id": 1203}]},
+          "expected_contract": {"artifact_type": "requirement_analysis", "schema_version": 1, "required_topics": ["时区", "跨天", "补发"]},
+          "required_evidence": [{"kind": "requirement", "id": 1203}],
+          "deterministic_checks": [{"check": "schema_valid"}, {"check": "risk_ids_unique"}, {"check": "mission_baseline_match"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["time-boundary", "activity"]
+        },
+        {
+          "case_key": "req-golden-cross-platform",
+          "input_snapshot": {"objective": "分析双端账号数据兼容需求", "baseline_sha256": "sha256:1515151515151515151515151515151515151515151515151515151515151515", "source_refs": [{"kind": "requirement", "id": 1204}]},
+          "expected_contract": {"artifact_type": "requirement_analysis", "schema_version": 1, "required_topics": ["账号", "数据同步", "版本兼容"]},
+          "required_evidence": [{"kind": "requirement", "id": 1204}],
+          "deterministic_checks": [{"check": "schema_valid"}, {"check": "acceptance_source_refs"}, {"check": "out_of_scope_explicit"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["compatibility", "cross-platform"]
+        }
+      ]
+    },
+    {
+      "dataset_key": "mission_requirement_analyst_challenge",
+      "role_key": "requirement_analyst",
+      "split": "challenge",
+      "rubric_version": 1,
+      "cases": [
+        {
+          "case_key": "req-challenge-conflicting-criteria",
+          "input_snapshot": {"objective": "识别两份来源中冲突的奖励上限", "baseline_sha256": "sha256:2121212121212121212121212121212121212121212121212121212121212121", "source_refs": [{"kind": "requirement", "id": 1210}, {"kind": "prototype", "id": 88}]},
+          "expected_contract": {"artifact_type": "requirement_analysis", "schema_version": 1, "must_block_or_question": true, "forbidden": ["自行选择上限"]},
+          "required_evidence": [{"kind": "requirement", "id": 1210}, {"kind": "prototype", "id": 88}],
+          "deterministic_checks": [{"check": "conflict_not_hidden"}, {"check": "untestable_tracked"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["contradiction", "human-gate"]
+        },
+        {
+          "case_key": "req-challenge-vague-quality",
+          "input_snapshot": {"objective": "分析‘体验更流畅’这一模糊验收", "baseline_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "source_refs": [{"kind": "requirement", "id": 1211}]},
+          "expected_contract": {"artifact_type": "requirement_analysis", "schema_version": 1, "must_mark_untestable": true},
+          "required_evidence": [{"kind": "requirement", "id": 1211}],
+          "deterministic_checks": [{"check": "untestable_tracked"}, {"check": "no_invented_metric"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["ambiguity", "anti-hallucination"]
+        },
+        {
+          "case_key": "req-challenge-copy-difference",
+          "input_snapshot": {"objective": "分析两辆赛车复制模板后的差异化需求", "baseline_sha256": "sha256:2323232323232323232323232323232323232323232323232323232323232323", "source_refs": [{"kind": "requirement", "id": 1212}, {"kind": "requirement", "id": 1213}]},
+          "expected_contract": {"artifact_type": "requirement_analysis", "schema_version": 1, "required_topics": ["差异化", "复制遗漏"]},
+          "required_evidence": [{"kind": "requirement", "id": 1212}, {"kind": "requirement", "id": 1213}],
+          "deterministic_checks": [{"check": "cross_source_comparison"}, {"check": "risk_ids_unique"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["copy-paste", "consistency"]
+        }
+      ]
+    },
+    {
+      "dataset_key": "mission_engineering_analyst_golden",
+      "role_key": "engineering_analyst",
+      "split": "golden",
+      "rubric_version": 1,
+      "cases": [
+        {
+          "case_key": "eng-golden-client-reward",
+          "input_snapshot": {"objective": "定位客户端奖励结算影响", "remote_source_ids": ["racinggo_unity"], "commit": "a10001", "tree_digest": "sha256:3131313131313131313131313131313131313131313131313131313131313131", "acceptance_ids": ["AC-001"]},
+          "expected_contract": {"artifact_type": "engineering_analysis", "schema_version": 1, "required_modules": ["settlement"]},
+          "required_evidence": [{"kind": "source_snapshot", "source_id": "racinggo_unity"}],
+          "deterministic_checks": [{"check": "approved_source"}, {"check": "module_path_evidence"}, {"check": "code_requirement_link"}],
+          "allowed_variance": {"path_order": true},
+          "hidden_tags": ["unity", "reward"]
+        },
+        {
+          "case_key": "eng-golden-server-protocol",
+          "input_snapshot": {"objective": "分析服务端协议字段新增影响", "remote_source_ids": ["racinggo_server"], "commit": "a10002", "tree_digest": "sha256:3232323232323232323232323232323232323232323232323232323232323232", "acceptance_ids": ["AC-002"]},
+          "expected_contract": {"artifact_type": "engineering_analysis", "schema_version": 1, "required_topics": ["protocol", "compatibility"]},
+          "required_evidence": [{"kind": "source_snapshot", "source_id": "racinggo_server"}],
+          "deterministic_checks": [{"check": "approved_source"}, {"check": "commit_present"}, {"check": "protocol_impact_present"}],
+          "allowed_variance": {"symbol_order": true},
+          "hidden_tags": ["protocol", "server"]
+        },
+        {
+          "case_key": "eng-golden-config-switch",
+          "input_snapshot": {"objective": "分析玩法配置开关变更", "remote_source_ids": ["racinggo_unity"], "commit": "a10003", "tree_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "acceptance_ids": ["AC-003"]},
+          "expected_contract": {"artifact_type": "engineering_analysis", "schema_version": 1, "required_relations": ["configures"]},
+          "required_evidence": [{"kind": "source_snapshot", "source_id": "racinggo_unity"}],
+          "deterministic_checks": [{"check": "code_requirement_link"}, {"check": "resource_dependency_present"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["config", "feature-switch"]
+        },
+        {
+          "case_key": "eng-golden-reconnect-state",
+          "input_snapshot": {"objective": "分析断线重连状态机", "remote_source_ids": ["racinggo_unity"], "commit": "a10004", "tree_digest": "sha256:3434343434343434343434343434343434343434343434343434343434343434", "acceptance_ids": ["AC-004"]},
+          "expected_contract": {"artifact_type": "engineering_analysis", "schema_version": 1, "required_topics": ["entrypoint", "state"]},
+          "required_evidence": [{"kind": "source_snapshot", "source_id": "racinggo_unity"}],
+          "deterministic_checks": [{"check": "module_path_evidence"}, {"check": "runtime_entrypoint_present"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["reconnect", "state-machine"]
+        },
+        {
+          "case_key": "eng-golden-resource-loading",
+          "input_snapshot": {"objective": "分析大厅资源异步加载变更", "remote_source_ids": ["racinggo_unity"], "commit": "a10005", "tree_digest": "sha256:3535353535353535353535353535353535353535353535353535353535353535", "acceptance_ids": ["AC-005"]},
+          "expected_contract": {"artifact_type": "engineering_analysis", "schema_version": 1, "required_topics": ["resource", "failure-path"]},
+          "required_evidence": [{"kind": "source_snapshot", "source_id": "racinggo_unity"}],
+          "deterministic_checks": [{"check": "resource_dependency_present"}, {"check": "test_recommendation_present"}],
+          "allowed_variance": {"path_order": true},
+          "hidden_tags": ["asset", "async-loading"]
+        }
+      ]
+    },
+    {
+      "dataset_key": "mission_engineering_analyst_challenge",
+      "role_key": "engineering_analyst",
+      "split": "challenge",
+      "rubric_version": 1,
+      "cases": [
+        {
+          "case_key": "eng-challenge-broker-unavailable",
+          "input_snapshot": {"objective": "Broker不可用时分析工程", "remote_source_ids": ["racinggo_unity"], "broker_status": "unavailable", "forbidden_fallbacks": ["raw_ssh", "old_snapshot"]},
+          "expected_contract": {"artifact_type": "engineering_analysis", "schema_version": 1, "expected_status": "blocked"},
+          "required_evidence": [{"kind": "bridge_state"}],
+          "deterministic_checks": [{"check": "no_raw_ssh_fallback"}, {"check": "no_old_snapshot_fallback"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["broker-failure", "permission-boundary"]
+        },
+        {
+          "case_key": "eng-challenge-unlinked-acceptance",
+          "input_snapshot": {"objective": "处理无法定位实现的验收点", "remote_source_ids": ["racinggo_unity"], "commit": "b20002", "tree_digest": "sha256:4242424242424242424242424242424242424242424242424242424242424242", "acceptance_ids": ["AC-099"]},
+          "expected_contract": {"artifact_type": "engineering_analysis", "schema_version": 1, "required_unknowns": ["AC-099"]},
+          "required_evidence": [{"kind": "source_snapshot", "source_id": "racinggo_unity"}],
+          "deterministic_checks": [{"check": "unknown_link_not_fabricated"}, {"check": "inference_fact_separated"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["unknown", "anti-hallucination"]
+        },
+        {
+          "case_key": "eng-challenge-multi-repo-drift",
+          "input_snapshot": {"objective": "识别客户端与服务端基线不一致", "repositories": [{"source_id": "racinggo_unity", "commit": "c1"}, {"source_id": "racinggo_server", "commit": "s2"}], "confirmed_pair": {"client": "c2", "server": "s2"}},
+          "expected_contract": {"artifact_type": "engineering_analysis", "schema_version": 1, "expected_status": "blocked"},
+          "required_evidence": [{"kind": "source_snapshot", "source_id": "racinggo_unity"}, {"kind": "source_snapshot", "source_id": "racinggo_server"}],
+          "deterministic_checks": [{"check": "baseline_pair_match"}, {"check": "stale_baseline_not_completed"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["multi-repo", "baseline-drift"]
+        }
+      ]
+    },
+    {
+      "dataset_key": "mission_test_executor_golden",
+      "role_key": "test_executor",
+      "split": "golden",
+      "rubric_version": 1,
+      "cases": [
+        {
+          "case_key": "exec-golden-all-pass",
+          "input_snapshot": {"objective": "执行两条奖励冒烟用例", "selected_case_ids": [101, 102], "environment_baseline": {"code_commit": "c101", "build_id": "b101", "runner_release": "r1", "adapter_release": "a1", "device_generation": "d1"}},
+          "expected_contract": {"artifact_type": "execution_record", "schema_version": 1, "expected_statuses": {"101": "passed", "102": "passed"}},
+          "required_evidence": [{"kind": "runner_receipt"}, {"kind": "screenshot"}],
+          "deterministic_checks": [{"check": "selected_case_coverage"}, {"check": "passed_receipt_observation"}, {"check": "environment_baseline_match"}],
+          "allowed_variance": {"timing_ms": 1000},
+          "hidden_tags": ["smoke", "pass"]
+        },
+        {
+          "case_key": "exec-golden-business-failure",
+          "input_snapshot": {"objective": "执行奖励不到账用例", "selected_case_ids": [103], "environment_baseline": {"code_commit": "c102", "build_id": "b102", "runner_release": "r1", "adapter_release": "a1", "device_generation": "d1"}},
+          "expected_contract": {"artifact_type": "execution_record", "schema_version": 1, "expected_classification": "business", "fingerprint_required": true},
+          "required_evidence": [{"kind": "runner_receipt"}, {"kind": "log"}],
+          "deterministic_checks": [{"check": "failed_evidence_fingerprint"}, {"check": "failure_bucket_consistent"}],
+          "allowed_variance": {"fingerprint_wording": true},
+          "hidden_tags": ["business-failure", "reward"]
+        },
+        {
+          "case_key": "exec-golden-environment-blocked",
+          "input_snapshot": {"objective": "设备资源不足时执行用例", "selected_case_ids": [104], "environment_baseline": {"code_commit": "c103", "build_id": "b103", "runner_release": "r1", "adapter_release": "a1", "device_generation": "d2"}},
+          "expected_contract": {"artifact_type": "execution_record", "schema_version": 1, "expected_status": "blocked", "forbidden_classification": "business"},
+          "required_evidence": [{"kind": "bridge_state"}],
+          "deterministic_checks": [{"check": "blocked_not_business"}, {"check": "no_fake_execution"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["environment", "blocked"]
+        },
+        {
+          "case_key": "exec-golden-retry-recovery",
+          "input_snapshot": {"objective": "执行一次可恢复工具失败用例", "selected_case_ids": [105], "max_retries": 1, "environment_baseline": {"code_commit": "c104", "build_id": "b104", "runner_release": "r2", "adapter_release": "a2", "device_generation": "d2"}},
+          "expected_contract": {"artifact_type": "execution_record", "schema_version": 1, "retry_count": 1},
+          "required_evidence": [{"kind": "runner_receipt"}, {"kind": "log"}],
+          "deterministic_checks": [{"check": "retry_count_exact"}, {"check": "receipt_fenced"}],
+          "allowed_variance": {"timing_ms": 2000},
+          "hidden_tags": ["retry", "recovery"]
+        },
+        {
+          "case_key": "exec-golden-mixed-results",
+          "input_snapshot": {"objective": "执行通过、失败、跳过混合用例集", "selected_case_ids": [106, 107, 108], "environment_baseline": {"code_commit": "c105", "build_id": "b105", "runner_release": "r2", "adapter_release": "a2", "device_generation": "d3"}},
+          "expected_contract": {"artifact_type": "execution_record", "schema_version": 1, "required_statuses": ["passed", "failed", "skipped"]},
+          "required_evidence": [{"kind": "runner_receipt"}, {"kind": "log"}],
+          "deterministic_checks": [{"check": "selected_case_coverage"}, {"check": "failure_bucket_consistent"}],
+          "allowed_variance": {"case_order": true},
+          "hidden_tags": ["mixed-result", "classification"]
+        }
+      ]
+    },
+    {
+      "dataset_key": "mission_test_executor_challenge",
+      "role_key": "test_executor",
+      "split": "challenge",
+      "rubric_version": 1,
+      "cases": [
+        {
+          "case_key": "exec-challenge-missing-observation",
+          "input_snapshot": {"objective": "处理Runner返回成功但无Observation", "selected_case_ids": [109], "runner_receipt_status": "success", "observation_refs": [], "environment_baseline": {"code_commit": "c201", "build_id": "b201", "runner_release": "r3", "adapter_release": "a3", "device_generation": "d4"}},
+          "expected_contract": {"artifact_type": "execution_record", "schema_version": 1, "forbidden_case_status": "passed"},
+          "required_evidence": [{"kind": "runner_receipt"}],
+          "deterministic_checks": [{"check": "passed_observation_required"}, {"check": "no_model_claim_as_observation"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["missing-evidence", "false-positive"]
+        },
+        {
+          "case_key": "exec-challenge-blocked-as-business",
+          "input_snapshot": {"objective": "处理下载资源失败导致无法进大厅", "selected_case_ids": [110], "environment_failure": "resource_download", "environment_baseline": {"code_commit": "c202", "build_id": "b202", "runner_release": "r3", "adapter_release": "a3", "device_generation": "d4"}},
+          "expected_contract": {"artifact_type": "execution_record", "schema_version": 1, "expected_status": "blocked", "forbidden_bucket": "business_failures"},
+          "required_evidence": [{"kind": "log"}, {"kind": "bridge_state"}],
+          "deterministic_checks": [{"check": "blocked_not_business"}, {"check": "environment_failure_bucket"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["classification", "resource-download"]
+        },
+        {
+          "case_key": "exec-challenge-stale-fencing",
+          "input_snapshot": {"objective": "拒绝使用过期租约执行设备动作", "selected_case_ids": [111], "task_fencing_token": 9, "runner_fencing_token": 8, "environment_baseline": {"code_commit": "c203", "build_id": "b203", "runner_release": "r3", "adapter_release": "a3", "device_generation": "d5"}},
+          "expected_contract": {"artifact_type": "execution_record", "schema_version": 1, "expected_status": "blocked", "no_side_effect": true},
+          "required_evidence": [{"kind": "bridge_state"}],
+          "deterministic_checks": [{"check": "stale_fencing_rejected"}, {"check": "no_side_effect_receipt"}],
+          "allowed_variance": {"wording": true},
+          "hidden_tags": ["fencing", "lease", "safety"]
+        }
+      ]
+    }
+  ]
+}
