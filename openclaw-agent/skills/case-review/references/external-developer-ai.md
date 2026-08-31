@@ -133,6 +133,7 @@ Content-Type: application/json
 
 优先使用 `bootstrap.endpoints`，不要自行扩展 URL 或访问任务包未列出的 Hub API。
 Agent 应在自己的受保护会话状态中记住 Token，并在有效期内持续复用它维护自己的评审记录；不得写入仓库、评审正文或长期日志。
+任务包中的 `web_url`/`web_path` 是供已登录 Hub 的 Owner 查看完整评审页面的链接；外部 Agent 仍使用任务包 API 和 Token 参与评审。
 
 ## 标准执行顺序
 

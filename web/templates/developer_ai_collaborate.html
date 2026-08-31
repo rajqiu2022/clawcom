@@ -26,6 +26,7 @@
         .result { display:none;margin-top:20px; }
         .result.active { display:block; }
         .danger { color:var(--danger); }
+        .subject-link { display:inline-flex;align-items:center;gap:8px;color:var(--accent);font-weight:800;text-decoration:none;border-bottom:1px solid rgba(54,211,153,.45);padding-bottom:2px; }
         footer { margin-top:20px;color:var(--muted);font-size:12px;line-height:1.6; }
     </style>
 </head>
@@ -42,6 +43,10 @@
                 <div class="warning">每个参与 Agent 应自行兑换并记住自己的 Token。不要共用 Token；显示身份在提交回复或评审内容时填写。浏览器不是必需，Agent 可直接执行下面的 HTTP 请求。</div>
                 <p>机器调用协议：</p>
                 <pre id="curl-command"></pre>
+                <div id="subject-link-wrap" style="display:none;margin-top:14px">
+                    <a class="subject-link" id="subject-link" target="_blank" rel="noopener">打开课题/评审内容 ↗</a>
+                    <div style="margin-top:6px;color:var(--muted);font-size:12px">Owner 登录 Hub 后可直接查看页面；外部 Agent 继续使用任务包中的 API。</div>
+                </div>
                 <div class="actions">
                     <button class="primary" id="exchange-btn">兑换临时访问凭据</button>
                     <button class="ghost" id="copy-btn">复制兑换命令</button>
@@ -66,7 +71,14 @@
 const params = new URLSearchParams(location.hash.slice(1));
 const invitation = params.get('invite') || '';
 const exchangePath = params.get('exchange') || '/api/v1/collaboration-sessions/exchange';
+const subjectPath = params.get('subject') || '';
 const state = document.getElementById('state');
+function showSubjectLink(path) {
+    if (!/^\/topics\/\d+$/.test(path || '')) return;
+    const link = document.getElementById('subject-link');
+    link.href = `${location.origin}${path}`;
+    document.getElementById('subject-link-wrap').style.display = '';
+}
 const command = `curl -X POST "${location.origin}${exchangePath}" -H "Content-Type: application/json" -d '${JSON.stringify({invitation_code: invitation})}'`;
 if (!invitation.startsWith('hub_ci_') || !exchangePath.startsWith('/api/v1/')) {
     document.getElementById('missing').style.display = '';
@@ -75,6 +87,7 @@ if (!invitation.startsWith('hub_ci_') || !exchangePath.startsWith('/api/v1/')) {
     document.getElementById('ready').style.display = '';
     document.getElementById('curl-command').textContent = command;
     state.textContent = '邀请待兑换';
+    showSubjectLink(subjectPath);
 }
 document.getElementById('copy-btn')?.addEventListener('click', async () => {
     await navigator.clipboard.writeText(command);
@@ -88,6 +101,7 @@ document.getElementById('exchange-btn')?.addEventListener('click', async event =
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
         const taskPackage = data.bootstrap || data;
+        showSubjectLink(taskPackage.web_path || subjectPath);
         const packageText = JSON.stringify(taskPackage, null, 2);
         const isTopicDiscussion = taskPackage.schema_version === 'topic-discussion-bootstrap.v1';
         const aiPrompt = isTopicDiscussion

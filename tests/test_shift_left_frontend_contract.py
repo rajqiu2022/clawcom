@@ -24,6 +24,9 @@ class ShiftLeftFrontendContractTest(unittest.TestCase):
         self.assertIn("#invite=${encodeURIComponent(data.invitation_code)}", self.reports)
         self.assertIn("#invite=${encodeURIComponent(data.invitation_code)}", self.topic)
         self.assertIn('location.hash.slice(1)', self.handoff)
+        self.assertIn("params.get('subject')", self.handoff)
+        self.assertIn('id="subject-link"', self.handoff)
+        self.assertIn("subject=${encodeURIComponent(`/topics/${TOPIC_ID}`)}", self.topic)
 
     def test_handoff_does_not_exchange_until_explicit_click(self):
         self.assertIn("getElementById('exchange-btn')?.addEventListener('click'", self.handoff)
@@ -31,6 +34,7 @@ class ShiftLeftFrontendContractTest(unittest.TestCase):
         self.assertIn('每个参与 Agent 应自行兑换并记住自己的 Token', self.handoff)
         self.assertIn('为另一个 Agent 签发独立 Token', self.handoff)
         self.assertIn('浏览器不是必需', self.handoff)
+        self.assertIn('打开课题/评审内容', self.handoff)
 
     def test_case_review_handoff_is_ready_for_external_ai(self):
         self.assertIn('defaultCaseReviewDeveloperAiIdentity', self.topic)

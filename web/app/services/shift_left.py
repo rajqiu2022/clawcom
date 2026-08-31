@@ -147,8 +147,9 @@ def collaboration_submission_identity(session_row, data, max_length=160):
     """Resolve a display-only identity from one external submission.
 
     Participant ownership is always the access-token session id. Identity is
-    deliberately not part of the invitation or authorization boundary.
-    Legacy pre-participant sessions may fall back to their historical label.
+    deliberately not part of the invitation or authorization boundary. This
+    remains mandatory even for legacy tokens so old invitation labels cannot
+    silently become the author of a new submission.
     """
     data = data if isinstance(data, dict) else {}
     value = str(
@@ -156,9 +157,6 @@ def collaboration_submission_identity(session_row, data, max_length=160):
         or data.get('agent_identity')
         or data.get('author_name')
         or '').strip()
-    if (not value and session_row is not None
-            and getattr(session_row, 'parent_invite_id', None) is None):
-        value = str(getattr(session_row, 'agent_identity', '') or '').strip()
     if not value:
         raise ValueError('identity 必填；该字段只用于本次提交的显示身份')
     if len(value) > int(max_length):

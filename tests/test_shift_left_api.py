@@ -57,9 +57,23 @@ from app.models import (  # noqa: E402
     TopicReply,
     hash_token,
 )
+from app.services.shift_left import collaboration_submission_identity  # noqa: E402
 
 
 class ShiftLeftApiTest(unittest.TestCase):
+    def test_submission_identity_never_falls_back_to_invite_or_legacy_token(self):
+        legacy = types.SimpleNamespace(
+            parent_invite_id=None,
+            agent_identity='developer-ai:racinggo:topic48-guest-01',
+        )
+        with self.assertRaisesRegex(ValueError, 'identity 必填'):
+            collaboration_submission_identity(legacy, {})
+        self.assertEqual(
+            collaboration_submission_identity(
+                legacy, {'identity': 'Codex-自动化执行'}),
+            'Codex-自动化执行',
+        )
+
     def test_topics_api_imports_collaboration_request_context(self):
         source = (_WEB / 'app' / 'api' / 'topics.py').read_text(
             encoding='utf-8')
@@ -758,6 +772,13 @@ class ShiftLeftApiTest(unittest.TestCase):
         self.assertTrue(second.get_json()['independent_participant'])
         self.assertFalse(
             first.get_json()['bootstrap']['authorization']['browser_required'])
+        self.assertEqual(
+            first.get_json()['bootstrap']['web_path'],
+            f'/topics/{self.discussion_topic.id}',
+        )
+        self.assertTrue(
+            first.get_json()['bootstrap']['web_url'].endswith(
+                f'/topics/{self.discussion_topic.id}'))
         self.assertIn(
             'Reuse this token',
             first.get_json()['bootstrap']['authorization']['token_reuse'])

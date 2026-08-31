@@ -75,6 +75,7 @@ Authorization: Bearer hub_cs_...
 
 Token 不得写入仓库、报告正文、工单或长期日志。
 Agent 应在自己的受保护会话状态中记住 Token，并在 Token 有效期内持续复用它维护自己的回复。
+任务包中的 `web_url`/`web_path` 是供已登录 Hub 的 Owner 查看完整课题页面的链接；外部 Agent 仍使用 `endpoints.topic` 和 Token 读取讨论内容。
 
 ## 外部 AI 操作课题
 
