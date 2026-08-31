@@ -27,6 +27,8 @@ class ShiftLeftFrontendContractTest(unittest.TestCase):
         self.assertIn("params.get('subject')", self.handoff)
         self.assertIn('/api/v1/collaboration-sessions/preview', self.handoff)
         self.assertIn('id="subject-link"', self.handoff)
+        self.assertIn('`https://${location.hostname}${path}`', self.handoff)
+        self.assertNotIn('link.href = `${location.origin}${path}`', self.handoff)
         self.assertIn("subject=${encodeURIComponent(`/topics/${TOPIC_ID}`)}", self.topic)
 
     def test_handoff_does_not_exchange_until_explicit_click(self):

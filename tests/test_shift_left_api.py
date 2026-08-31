@@ -793,9 +793,9 @@ class ShiftLeftApiTest(unittest.TestCase):
             first.get_json()['bootstrap']['web_path'],
             f'/topics/{self.discussion_topic.id}',
         )
-        self.assertTrue(
-            first.get_json()['bootstrap']['web_url'].endswith(
-                f'/topics/{self.discussion_topic.id}'))
+        self.assertEqual(
+            first.get_json()['bootstrap']['web_url'],
+            f'https://clawteam.woa.com/topics/{self.discussion_topic.id}')
         self.assertIn(
             'Reuse this token',
             first.get_json()['bootstrap']['authorization']['token_reuse'])

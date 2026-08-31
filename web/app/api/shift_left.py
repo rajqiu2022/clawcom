@@ -5,6 +5,7 @@
 """
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 
 from flask import current_app, g, jsonify, request, session
@@ -77,6 +78,16 @@ def _error(message, status=400, code='INVALID_REQUEST', **extra):
     payload = {'error': message, 'code': code}
     payload.update(extra)
     return jsonify(payload), status
+
+
+def _owner_web_url(path):
+    """Build the browser/Owner URL, distinct from the Agent API endpoint."""
+    base = (
+        current_app.config.get('HUB_WEB_URL')
+        or os.environ.get('HUB_WEB_URL')
+        or 'https://clawteam.woa.com'
+    )
+    return str(base).rstrip('/') + str(path)
 
 
 def _parse_collaboration_deadline(raw, now=None):
@@ -2133,7 +2144,7 @@ def _case_review_bootstrap(row, access_token):
         'api_base_url': api_base,
         'subject': {'type': 'case_review', 'id': topic_id},
         'web_path': '/topics/%d' % topic_id,
-        'web_url': '%s/topics/%d' % (api_base, topic_id),
+        'web_url': _owner_web_url('/topics/%d' % topic_id),
         'agent_identity': None,
         'identity_mode': 'per_submission',
         'participant_session_id': row.id,
@@ -2212,7 +2223,7 @@ def _topic_bootstrap(row, access_token):
         'api_base_url': api_base,
         'subject': {'type': 'topic', 'id': topic_id},
         'web_path': '/topics/%d' % topic_id,
-        'web_url': '%s/topics/%d' % (api_base, topic_id),
+        'web_url': _owner_web_url('/topics/%d' % topic_id),
         'agent_identity': None,
         'identity_mode': 'per_submission',
         'participant_session_id': row.id,
@@ -2505,7 +2516,7 @@ def preview_collaboration_session():
             'title': topic.title,
         },
         'web_path': web_path,
-        'web_url': request.url_root.rstrip('/') + web_path,
+        'web_url': _owner_web_url(web_path),
         'invitation_expires_at': str(row.invitation_expires_at),
         'token_issued': False,
     })

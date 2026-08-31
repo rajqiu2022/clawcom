@@ -76,7 +76,7 @@ const state = document.getElementById('state');
 function showSubjectLink(path, title = '') {
     if (!/^\/topics\/\d+$/.test(path || '')) return;
     const link = document.getElementById('subject-link');
-    link.href = `${location.origin}${path}`;
+    link.href = `https://${location.hostname}${path}`;
     link.textContent = title ? `打开「${title}」 ↗` : '打开课题/评审内容 ↗';
     document.getElementById('subject-link-wrap').style.display = '';
 }
