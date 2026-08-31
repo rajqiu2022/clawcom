@@ -27,8 +27,10 @@ class ShiftLeftFrontendContractTest(unittest.TestCase):
 
     def test_handoff_does_not_exchange_until_explicit_click(self):
         self.assertIn("getElementById('exchange-btn')?.addEventListener('click'", self.handoff)
-        self.assertIn("history.replaceState(null, '', location.pathname)", self.handoff)
+        self.assertNotIn("history.replaceState(null, '', location.pathname)", self.handoff)
         self.assertIn('每个参与 Agent 应自行兑换并记住自己的 Token', self.handoff)
+        self.assertIn('为另一个 Agent 签发独立 Token', self.handoff)
+        self.assertIn('浏览器不是必需', self.handoff)
 
     def test_case_review_handoff_is_ready_for_external_ai(self):
         self.assertIn('defaultCaseReviewDeveloperAiIdentity', self.topic)

@@ -39,7 +39,7 @@
         <div class="card-body">
             <div id="missing" class="warning" style="display:none">链接中没有有效邀请。请让 Hub 操作者重新生成 Developer AI 协作链接。</div>
             <div id="ready" style="display:none">
-                <div class="warning">每个参与 Agent 应自行兑换并记住自己的 Token。不要共用 Token；显示身份在提交回复或评审内容时填写。</div>
+                <div class="warning">每个参与 Agent 应自行兑换并记住自己的 Token。不要共用 Token；显示身份在提交回复或评审内容时填写。浏览器不是必需，Agent 可直接执行下面的 HTTP 请求。</div>
                 <p>机器调用协议：</p>
                 <pre id="curl-command"></pre>
                 <div class="actions">
@@ -108,7 +108,8 @@ document.getElementById('exchange-btn')?.addEventListener('click', async event =
         document.getElementById('result').classList.add('active');
         document.getElementById('task-package').textContent = packageText;
         state.textContent = '凭据已签发';
-        history.replaceState(null, '', location.pathname);
+        event.currentTarget.disabled = false;
+        event.currentTarget.textContent = '为另一个 Agent 签发独立 Token';
         document.getElementById('copy-prompt-btn').onclick = async () => navigator.clipboard.writeText(aiPrompt);
         document.getElementById('copy-package-btn').onclick = async () => navigator.clipboard.writeText(packageText);
         document.getElementById('copy-token-btn').onclick = async () => navigator.clipboard.writeText(data.access_token || '');

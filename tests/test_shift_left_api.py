@@ -756,6 +756,11 @@ class ShiftLeftApiTest(unittest.TestCase):
         )
         self.assertTrue(first.get_json()['independent_participant'])
         self.assertTrue(second.get_json()['independent_participant'])
+        self.assertFalse(
+            first.get_json()['bootstrap']['authorization']['browser_required'])
+        self.assertIn(
+            'Reuse this token',
+            first.get_json()['bootstrap']['authorization']['token_reuse'])
         self.assertFalse(first.get_json()['previous_token_invalidated'])
         self.assertFalse(second.get_json()['previous_token_invalidated'])
 

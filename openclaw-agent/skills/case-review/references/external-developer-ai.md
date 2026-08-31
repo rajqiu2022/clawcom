@@ -115,6 +115,8 @@ Content-Type: application/json
 
 邀请参数位于 URL fragment，不会随页面请求发送给服务器。解析 `invite` 和 `exchange` 后调用：
 
+不需要打开浏览器或点击页面按钮。浏览器入口只是协议说明页；Agent 可以直接解析完整链接并执行下面的 HTTP 请求。未实际调用 exchange 前，不得根据旧任务包或页面按钮状态判断身份仍被绑定。
+
 ```http
 POST {HUB_BASE}/api/v1/collaboration-sessions/exchange
 Content-Type: application/json
@@ -130,6 +132,7 @@ Content-Type: application/json
 ```
 
 优先使用 `bootstrap.endpoints`，不要自行扩展 URL 或访问任务包未列出的 Hub API。
+Agent 应在自己的受保护会话状态中记住 Token，并在有效期内持续复用它维护自己的评审记录；不得写入仓库、评审正文或长期日志。
 
 ## 标准执行顺序
 

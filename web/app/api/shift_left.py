@@ -2142,6 +2142,8 @@ def _case_review_bootstrap(row, access_token):
             'type': 'bearer',
             'header': 'Authorization: Bearer <access_token>',
             'access_token': access_token,
+            'browser_required': False,
+            'token_reuse': 'Reuse this token for all writes owned by this participant session.',
             'storage_warning': 'Do not store this token in source code, reports, or logs.',
         },
         'endpoints': {
@@ -2217,6 +2219,9 @@ def _topic_bootstrap(row, access_token):
             'type': 'bearer',
             'header': 'Authorization: Bearer <access_token>',
             'access_token': access_token,
+            'browser_required': False,
+            'token_reuse': (
+                'Reuse this token for all replies owned by this participant session.'),
             'storage_warning': (
                 'Do not store this token in source code, reports, or logs.'),
         },
