@@ -46,6 +46,7 @@ from app.services.shift_left import (
     FINDING_FEEDBACK_LABELS,
     build_baseline_fingerprint,
     canonical_json,
+    collaboration_submission_identity,
     generate_access_token,
     generate_invitation_code,
     normalize_scopes,
@@ -117,7 +118,7 @@ def _actor():
             'type': 'collaboration',
             'id': collaboration.id,
             'key': 'collaboration:%s' % collaboration.id,
-            'name': collaboration.agent_identity,
+            'name': 'external-participant:%s' % collaboration.id,
             'collaboration': collaboration,
         }
 
@@ -146,8 +147,7 @@ def _actor():
 def _independence_key(actor):
     """Stable reviewer/fixer identity across renewed collaboration sessions."""
     if actor['type'] == 'collaboration':
-        identity = str(actor['collaboration'].agent_identity or '').strip().lower()
-        return 'developer_ai:%s' % identity
+        return 'developer_ai_session:%s' % actor['collaboration'].id
     return actor['key']
 
 
@@ -1799,6 +1799,13 @@ def create_case_review_comment(topic_id):
         return _error('评审意见不能为空', 400, 'COMMENT_REQUIRED')
     if len(content) > 20000:
         return _error('评审意见不能超过 20000 字符', 400, 'COMMENT_TOO_LONG')
+    display_identity = actor['name']
+    if actor['type'] == 'collaboration':
+        try:
+            display_identity = collaboration_submission_identity(
+                actor['collaboration'], data, max_length=100)
+        except ValueError as exc:
+            return _error(str(exc), 400, 'INVALID_SUBMISSION_IDENTITY')
     verdict = str(data.get('verdict') or 'comment').strip().lower()
     if verdict not in ('comment', 'approve', 'reject'):
         return _error('verdict 仅支持 comment/approve/reject', 400,
@@ -1834,7 +1841,7 @@ def create_case_review_comment(topic_id):
         return replay
     row = CaseReviewComment(
         round_id=review_round.id,
-        author_name=actor['name'][:100],
+        author_name=display_identity[:100],
         author_claw_id=actor['id'] if actor['type'] == 'claw' else None,
         author_user_id=actor['id'] if actor['type'] == 'user' else None,
         collaboration_session_id=(
@@ -1893,8 +1900,9 @@ def update_case_review_record(topic_id, review_id):
     if denied:
         return denied
     data = request.get_json(silent=True) or {}
-    if not any(key in data for key in ('content', 'score')):
-        return _error('至少提供 content 或 score', 400,
+    if not any(key in data for key in ('identity', 'agent_identity',
+                                       'author_name', 'content', 'score')):
+        return _error('至少提供 identity、content 或 score', 400,
                       'REVIEW_RECORD_UPDATE_REQUIRED')
     new_content = None
     new_score = row.score
@@ -1920,6 +1928,15 @@ def update_case_review_record(topic_id, review_id):
                 return _error('score 必须是 1-10 的整数', 400,
                               'INVALID_SCORE')
             new_score = score
+    new_identity = None
+    if actor['type'] == 'collaboration' and any(
+            key in data for key in ('identity', 'agent_identity',
+                                    'author_name')):
+        try:
+            new_identity = collaboration_submission_identity(
+                actor['collaboration'], data, max_length=100)
+        except ValueError as exc:
+            return _error(str(exc), 400, 'INVALID_SUBMISSION_IDENTITY')
     idem, replay = _idempotency_begin(actor)
     if replay:
         return replay
@@ -1927,6 +1944,8 @@ def update_case_review_record(topic_id, review_id):
         row.content = new_content
     if 'score' in data:
         row.score = new_score
+    if new_identity is not None:
+        row.author_name = new_identity
     row.is_edited = True
     row.updated_at = now_cst_naive()
     _add_audit('update_review_record', 'case_review', topic.id, topic.title,
@@ -2113,7 +2132,9 @@ def _case_review_bootstrap(row, access_token):
         'schema_version': 'case-review-bootstrap.v1',
         'api_base_url': api_base,
         'subject': {'type': 'case_review', 'id': topic_id},
-        'agent_identity': row.agent_identity,
+        'agent_identity': None,
+        'identity_mode': 'per_submission',
+        'participant_session_id': row.id,
         'expires_at': str(row.token_expires_at),
         'max_calls': row.max_calls,
         'scopes': row.scopes_json or [],
@@ -2138,7 +2159,7 @@ def _case_review_bootstrap(row, access_token):
             'GET context first and obey its scope, open round, mark legend, and links.',
             'GET cases page by page; review only cases returned by this endpoint.',
             'GET reviews to read all currently submitted review records.',
-            'POST one evidence-based record to reviews with score 1-10.',
+            'POST one evidence-based record with identity, content, and score 1-10.',
             'PATCH or DELETE only records whose owned_by_me flag is true.',
             'PUT node marks only when useful; every write needs a unique Idempotency-Key.',
             'Do not approve or reject unless case_review:decision is explicitly present.',
@@ -2150,11 +2171,13 @@ def _case_review_bootstrap(row, access_token):
                 'priority', 'consistency',
             ],
             'create_body': {
+                'identity': '<display identity chosen for this submission>',
                 'content': '<evidence-based review in Markdown>',
                 'score': '<integer 1-10>',
                 'round_id': '<open_round_id from context>',
             },
             'update_body': {
+                'identity': '<updated display identity; optional>',
                 'content': '<updated review in Markdown; optional>',
                 'score': '<integer 1-10 or null; optional>',
             },
@@ -2184,7 +2207,9 @@ def _topic_bootstrap(row, access_token):
         'schema_version': 'topic-discussion-bootstrap.v1',
         'api_base_url': api_base,
         'subject': {'type': 'topic', 'id': topic_id},
-        'agent_identity': row.agent_identity,
+        'agent_identity': None,
+        'identity_mode': 'per_submission',
+        'participant_session_id': row.id,
         'expires_at': str(row.token_expires_at),
         'max_calls': row.max_calls,
         'scopes': row.scopes_json or [],
@@ -2204,7 +2229,7 @@ def _topic_bootstrap(row, access_token):
         'workflow': [
             'GET endpoints.topic first and read the topic plus existing replies.',
             'Reply only when it adds relevant evidence, analysis, or a clear question.',
-            'POST endpoints.reply with content and a unique Idempotency-Key.',
+            'POST endpoints.reply with identity, content, and a unique Idempotency-Key.',
             'PATCH or DELETE only replies whose owned_by_me flag is true.',
             'Every PATCH or DELETE also needs a unique Idempotency-Key.',
             'Do not browse other topics or expand beyond this invitation subject.',
@@ -2212,10 +2237,14 @@ def _topic_bootstrap(row, access_token):
         ],
         'reply_contract': {
             'create_body': {
+                'identity': '<display identity chosen for this reply>',
                 'content': '<Markdown reply>',
                 'reply_to_id': '<optional existing reply id>',
             },
-            'update_body': {'content': '<updated Markdown reply>'},
+            'update_body': {
+                'identity': '<updated display identity; optional>',
+                'content': '<updated Markdown reply; optional>',
+            },
             'delete_rule': (
                 'DELETE endpoints.owned_reply after replacing <reply_id>; '
                 'only owned_by_me=true replies may be changed or deleted.'),
@@ -2259,10 +2288,25 @@ def list_collaboration_sessions():
     if denied:
         return denied
     rows = (CollaborationSession.query.filter_by(
-        subject_type=subject_type, subject_id=subject_id)
+        subject_type=subject_type, subject_id=subject_id,
+        parent_invite_id=None)
         .order_by(CollaborationSession.created_at.desc())
         .limit(100).all())
-    return jsonify({'items': [row.to_dict() for row in rows],
+    counts = {}
+    if rows:
+        counts = dict(db.session.query(
+            CollaborationSession.parent_invite_id,
+            func.count(CollaborationSession.id),
+        ).filter(
+            CollaborationSession.parent_invite_id.in_(
+                [row.id for row in rows])
+        ).group_by(CollaborationSession.parent_invite_id).all())
+    items = []
+    for row in rows:
+        item = row.to_dict()
+        item['participant_count'] = int(counts.get(row.id, 0))
+        items.append(item)
+    return jsonify({'items': items,
                     'total': len(rows)})
 
 
@@ -2311,18 +2355,14 @@ def create_collaboration_session():
         project_id, subject_type, subject_id)
     if subject_error:
         return _error(subject_error, 400, 'INVALID_COLLABORATION_SUBJECT')
+    # This is an optional invitation label for managers. Participant display
+    # identity is supplied with each reply/review and never authorizes access.
     agent_identity = str(data.get('agent_identity') or '').strip()
-    if not agent_identity:
+    if subject_type not in ('case_review', 'topic') and not agent_identity:
         return _error('agent_identity 必填', 400, 'AGENT_IDENTITY_REQUIRED')
     if len(agent_identity) > 160:
         return _error('agent_identity 不能超过 160 字符', 400,
                       'AGENT_IDENTITY_TOO_LONG')
-    if (subject_type in ('case_review', 'topic')
-            and agent_identity.lower() in (
-                'developer-ai', 'developer-ai:case-review',
-                'developer-ai:topic')):
-        return _error('请使用能区分团队、人员或 AI 实例的唯一身份标识', 400,
-                      'AGENT_IDENTITY_TOO_GENERIC')
     try:
         default_scopes = (
             DEFAULT_CASE_REVIEW_SCOPES
@@ -2351,16 +2391,6 @@ def create_collaboration_session():
             'invitation_returned_once': True,
         })
         return jsonify(payload), 200
-    if subject_type in ('case_review', 'topic'):
-        same_identity = CollaborationSession.query.filter_by(
-            subject_type=subject_type,
-            subject_id=subject_id,
-            agent_identity=agent_identity,
-        ).order_by(CollaborationSession.created_at.desc()).all()
-        if any(row.effective_status(now_cst_naive()) in ('pending', 'active')
-               for row in same_identity):
-            return _error('该 Developer AI 身份已有待兑换或生效中的会话', 409,
-                          'COLLABORATION_IDENTITY_ACTIVE')
     try:
         invite_minutes = int(data.get('invitation_ttl_minutes') or 30)
         token_minutes = int(data.get('token_ttl_minutes') or 120)
@@ -2450,28 +2480,105 @@ def exchange_collaboration_session():
     if row.status not in ('pending', 'active'):
         return _error('邀请码已使用或已撤销', 409,
                       'INVITATION_ALREADY_USED')
-    if row.max_calls and (row.call_count or 0) >= row.max_calls:
-        return _error('协作会话调用额度已用尽', 409,
-                      'COLLABORATION_CALLS_EXHAUSTED')
-
-    token_rotated = row.status == 'active'
+    if row.subject_type not in ('case_review', 'topic'):
+        token_rotated = row.status == 'active'
+        access_token = generate_access_token()
+        row.access_token_hash = secret_hash(access_token)
+        row.status = 'active'
+        row.exchanged_at = row.exchanged_at or now
+        row.last_activity_at = now
+        row.token_expires_at = now + timedelta(
+            seconds=row.token_ttl_seconds or 7200)
+        db.session.add(CollaborationSessionEvent(
+            session_id=row.id,
+            event_type=('token_rotated' if token_rotated else 'exchanged'),
+            actor_type='collaboration',
+            actor_id=row.id,
+            actor_name=row.agent_identity,
+            detail_json={
+                'token_expires_at': str(row.token_expires_at),
+                'previous_token_invalidated': token_rotated,
+            },
+        ))
+        try:
+            db.session.commit()
+        except SQLAlchemyError:
+            db.session.rollback()
+            current_app.logger.exception(
+                'exchange collaboration session failed')
+            return _error('邀请码兑换失败', 500,
+                          'COLLABORATION_EXCHANGE_FAILED')
+        return jsonify({
+            'access_token': access_token,
+            'expires_at': str(row.token_expires_at),
+            'subject': {'type': row.subject_type, 'id': row.subject_id},
+            'agent_identity': row.agent_identity,
+            'scopes': row.scopes_json or [],
+            'token_rotated': token_rotated,
+            'previous_token_invalidated': token_rotated,
+            'link_expires_at': str(row.invitation_expires_at),
+            'bootstrap': _collaboration_bootstrap(row, access_token),
+        })
     access_token = generate_access_token()
-    row.access_token_hash = secret_hash(access_token)
+    token_expires_at = now + timedelta(
+        seconds=row.token_ttl_seconds or 7200)
+    participant_nonce = generate_invitation_code()
+    participant = CollaborationSession(
+        project_id=row.project_id,
+        subject_type=row.subject_type,
+        subject_id=row.subject_id,
+        # Display identity belongs to each submission, not the invitation or
+        # bearer token. Keep the participant session intentionally anonymous.
+        agent_identity='',
+        scopes_json=list(row.scopes_json or []),
+        invitation_hash=secret_hash('participant:' + participant_nonce),
+        access_token_hash=secret_hash(access_token),
+        status='active',
+        invitation_expires_at=row.invitation_expires_at,
+        token_expires_at=token_expires_at,
+        token_ttl_seconds=row.token_ttl_seconds or 7200,
+        max_calls=row.max_calls or 500,
+        call_count=0,
+        created_by_type=row.created_by_type,
+        created_by_id=row.created_by_id,
+        created_by_name=row.created_by_name,
+        creator_actor_key='invite:%s' % row.id,
+        create_idempotency_key='participant:%s' % secret_hash(
+            participant_nonce)[:32],
+        create_request_hash=payload_hash({
+            'invite_id': row.id,
+            'participant_nonce': participant_nonce,
+        }),
+        parent_invite_id=row.id,
+        exchanged_at=now,
+        last_activity_at=now,
+    )
+    db.session.add(participant)
+    db.session.flush()
     row.status = 'active'
     row.exchanged_at = row.exchanged_at or now
     row.last_activity_at = now
-    row.token_expires_at = now + timedelta(seconds=row.token_ttl_seconds or 7200)
     db.session.add(CollaborationSessionEvent(
         session_id=row.id,
-        event_type=('token_rotated' if token_rotated else 'exchanged'),
+        event_type='participant_issued',
         actor_type='collaboration',
-        actor_id=row.id,
-        actor_name=row.agent_identity,
+        actor_id=participant.id,
+        actor_name='',
         detail_json={
-            'token_expires_at': str(row.token_expires_at),
+            'participant_session_id': participant.id,
+            'token_expires_at': str(token_expires_at),
             'link_expires_at': str(row.invitation_expires_at),
-            'previous_token_invalidated': token_rotated,
+            'previous_token_invalidated': False,
         },
+    ))
+    db.session.add(CollaborationSessionEvent(
+        session_id=participant.id,
+        event_type='token_issued',
+        actor_type='collaboration',
+        actor_id=participant.id,
+        actor_name='',
+        detail_json={'invite_id': row.id,
+                     'token_expires_at': str(token_expires_at)},
     ))
     try:
         db.session.commit()
@@ -2482,14 +2589,18 @@ def exchange_collaboration_session():
                       'COLLABORATION_EXCHANGE_FAILED')
     return jsonify({
         'access_token': access_token,
-        'expires_at': str(row.token_expires_at),
+        'expires_at': str(token_expires_at),
         'subject': {'type': row.subject_type, 'id': row.subject_id},
-        'agent_identity': row.agent_identity,
+        'agent_identity': None,
+        'identity_mode': 'per_submission',
+        'participant_session_id': participant.id,
+        'invite_id': row.id,
+        'independent_participant': True,
         'scopes': row.scopes_json or [],
-        'token_rotated': token_rotated,
-        'previous_token_invalidated': token_rotated,
+        'token_rotated': False,
+        'previous_token_invalidated': False,
         'link_expires_at': str(row.invitation_expires_at),
-        'bootstrap': _collaboration_bootstrap(row, access_token),
+        'bootstrap': _collaboration_bootstrap(participant, access_token),
     })
 
 
@@ -2540,6 +2651,14 @@ def revoke_collaboration_session(session_id):
     row.revoked_at = now
     row.revoked_by = actor['name']
     row.revoke_reason = str(data.get('reason') or 'manual_revoke')[:500]
+    children = CollaborationSession.query.filter_by(
+        parent_invite_id=row.id).all()
+    for child in children:
+        if child.status not in ('revoked', 'completed'):
+            child.status = 'revoked'
+            child.revoked_at = now
+            child.revoked_by = actor['name']
+            child.revoke_reason = 'parent_invite_revoked'
     db.session.add(CollaborationSessionEvent(
         session_id=row.id,
         event_type='revoked',
@@ -2559,9 +2678,9 @@ def revoke_collaboration_session(session_id):
 def update_collaboration_session_deadline(session_id):
     """Extend a supported collaboration session without rotating its secret.
 
-    Pending sessions update the invitation deadline. Exchanged sessions update
-    the existing access token deadline. An effectively expired session may be
-    re-enabled because its persisted lifecycle status remains pending/active.
+    The deadline belongs to the reusable invitation. Already issued participant
+    tokens keep their own expiry; an Agent can exchange the valid link again
+    when it needs a new independent token.
     """
     disabled = _disabled_response()
     if disabled:
@@ -2600,18 +2719,13 @@ def update_collaboration_session_deadline(session_id):
         db.session.rollback()
         return _error(str(exc), 400, 'INVALID_COLLABORATION_DEADLINE')
 
-    if row.status == 'pending':
+    if row.parent_invite_id is not None:
+        db.session.rollback()
+        return _error('参与 Token 会话不能作为邀请链接延期', 409,
+                      'COLLABORATION_PARTICIPANT_NOT_EXTENDABLE')
+    if row.status in ('pending', 'active'):
         target = 'invitation_expires_at'
         old_deadline = row.invitation_expires_at
-        row.invitation_expires_at = deadline
-    elif row.status == 'active':
-        target = 'token_expires_at'
-        old_deadline = row.token_expires_at
-        row.token_expires_at = deadline
-        # The same collaboration link remains the recovery path when an
-        # external Agent loses or expires its short-lived token. Extending an
-        # active session therefore moves both deadlines without rotating the
-        # invitation secret or current access token.
         row.invitation_expires_at = deadline
     else:
         db.session.rollback()

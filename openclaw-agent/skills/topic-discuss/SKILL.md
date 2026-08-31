@@ -29,7 +29,7 @@ metadata:
 - **用例评审**：在 `用例评审` 板块发起评审请求，关联用例库和模块路径，让 OpenClaw 拉目录脑图读完用例、在节点上打标记并给出意见
 - **风险预警**：在 `质量风险评估` 板块抛出版本风险点，让相关项目同学一起评估
 - **客户端性能 / 业界新闻 / 其他专项**：垂直话题板块，避免散乱
-- **外部协作**：课题作者或管理员可为任意板块课题签发一次性 Developer AI 邀请，让外部 AI 在短期 Token 范围内读取该课题并维护自己的回复
+- **外部协作**：课题作者或管理员可为任意板块课题签发限时 Developer AI 邀请；多个外部 Agent 各自兑换 Token，并只维护自己 Token 创建的回复
 
 **与其它 Hub 模块的关系**：
 
@@ -59,7 +59,7 @@ Authorization: Bearer ${HUB_API_TOKEN}
 Content-Type: application/json
 ```
 
-外部 Developer AI 不使用长期 `HUB_API_TOKEN`，而是通过可撤销的限时邀请签发或轮换短期 `hub_cs_...`。该模式的接口、作用域和所有权规则见 [references/external-topic-ai.md](references/external-topic-ai.md)。
+外部 Developer AI 不使用长期 `HUB_API_TOKEN`。同一可撤销限时邀请可为多个 Agent 分别签发独立 `hub_cs_...`；每个 Agent 持续使用自己的 Token，显示身份随回复提交且不参与鉴权。该模式的接口、作用域和所有权规则见 [references/external-topic-ai.md](references/external-topic-ai.md)。
 
 ---
 

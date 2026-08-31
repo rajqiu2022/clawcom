@@ -23,6 +23,7 @@ from app.services.review_visibility import (
     normalize_visibility,
     visible_topic_filter,
 )
+from app.services.shift_left import collaboration_submission_identity
 
 
 def _sync_library_review_status(topic, new_lib_status):
@@ -75,7 +76,7 @@ def _get_caller_info():
     collaboration = getattr(g, '_collaboration_session', None)
     if collaboration:
         return {
-            'username': collaboration.agent_identity,
+            'username': 'external-participant:%s' % collaboration.id,
             'user_id': None,
             'claw_id': None,
             'role': 'external_collaboration',
@@ -1003,6 +1004,16 @@ def reply_topic(topic_id):
         return jsonify({'error': '回复内容不能为空'}), 400
 
     collaboration = caller.get('collaboration')
+    display_identity = caller['username']
+    if collaboration:
+        try:
+            display_identity = collaboration_submission_identity(
+                collaboration, data, max_length=160)
+        except ValueError as exc:
+            return jsonify({
+                'error': str(exc),
+                'code': 'INVALID_SUBMISSION_IDENTITY',
+            }), 400
     idempotency_row = None
     if collaboration:
         from app.api.shift_left import _actor as _collaboration_actor
@@ -1039,7 +1050,7 @@ def reply_topic(topic_id):
         content=data['content'],
         author_claw_id=caller.get('claw_id'),
         author_user_id=caller.get('user_id'),
-        author_name=caller['username'],
+        author_name=display_identity,
         collaboration_session_id=(collaboration.id if collaboration else None),
         reply_to_id=data.get('reply_to_id'),
     )
@@ -1047,7 +1058,7 @@ def reply_topic(topic_id):
     topic.reply_count = (topic.reply_count or 0) + 1
     topic.last_reply_at = datetime.now()
 
-    notified = _notify_topic_participants(topic, '回复', '%s 发表了回复' % caller['username'],
+    notified = _notify_topic_participants(topic, '回复', '%s 发表了回复' % display_identity,
                                exclude_claw_id=caller.get('claw_id'))
     db.session.flush()
     payload = reply.to_dict()
@@ -1065,7 +1076,7 @@ def reply_topic(topic_id):
         notify_claw(cid)
 
     log_action('reply', 'topic', topic.id, topic.title,
-               operator=caller['username'],
+               operator=display_identity,
                detail='回复课题「%s」' % topic.title)
 
     return response
@@ -1111,10 +1122,23 @@ def update_reply(topic_id, reply_id):
             return jsonify({'error': '只能修改自己的回复'}), 403
 
     data = request.get_json(silent=True) or {}
-    content = str(data.get('content') or '').strip()
-    if not content:
-        return jsonify({'error': '回复内容不能为空'}), 400
-    reply.content = content
+    identity_keys = ('identity', 'agent_identity', 'author_name')
+    if 'content' not in data and not any(key in data for key in identity_keys):
+        return jsonify({'error': '至少提供 identity 或 content'}), 400
+    if 'content' in data:
+        content = str(data.get('content') or '').strip()
+        if not content:
+            return jsonify({'error': '回复内容不能为空'}), 400
+        reply.content = content
+    if collaboration and any(key in data for key in identity_keys):
+        try:
+            reply.author_name = collaboration_submission_identity(
+                collaboration, data, max_length=160)
+        except ValueError as exc:
+            return jsonify({
+                'error': str(exc),
+                'code': 'INVALID_SUBMISSION_IDENTITY',
+            }), 400
     reply.updated_at = datetime.now()
     payload = reply.to_dict()
     payload['owned_by_me'] = True
@@ -1128,7 +1152,7 @@ def update_reply(topic_id, reply_id):
         response = (jsonify(payload), 200)
 
     log_action('update', 'topic_reply', reply.id, topic.title,
-               operator=caller['username'],
+               operator=(reply.author_name if collaboration else caller['username']),
                detail='修改课题「%s」中的本人回复' % topic.title)
     return response
 

@@ -24,7 +24,6 @@ Content-Type: application/json
 {
   "subject_type": "case_review",
   "subject_id": 22,
-  "agent_identity": "developer-ai:racinggo:alice-codex",
   "invitation_ttl_minutes": 30,
   "token_ttl_minutes": 120,
   "max_calls": 500
@@ -34,7 +33,7 @@ Content-Type: application/json
 参数约束：
 
 - `subject_id`：现有 `case_review` Topic ID；
-- `agent_identity`：必须区分团队、人员或 AI 实例，不能使用 `developer-ai:case-review` 等通用占位值；
+- 邀请不绑定 `agent_identity`；显示身份由每条评审记录的 `identity` 参数提供；
 - `invitation_ttl_minutes`、`token_ttl_minutes`：5-4320（最长 72 小时），缺省分别为 30、120；
 - `max_calls`：1-5000，缺省 500；
 - 重试相同创建请求时复用相同 `Idempotency-Key`，但邀请码明文只在首次创建响应中返回。
@@ -93,7 +92,7 @@ Content-Type: application/json
 截止时间必须晚于当前时间，且最长只能延至当前时间后 72 小时。会话处于：
 
 - `pending`：更新邀请的 `invitation_expires_at`；
-- `active`：同时更新邀请与现有临时密钥的截止时间；
+- `active`：只更新邀请链接截止时间；已经签发的参与 Token 保持各自有效期；
 - 有效期已过但底层仍为 `pending` 或 `active`：允许延期恢复；
 - `revoked`、`completed` 或调用额度已耗尽：不能通过延期恢复。
 
@@ -123,7 +122,7 @@ Content-Type: application/json
 {"invitation_code":"hub_ci_xxx"}
 ```
 
-同一邀请链接在 `link_expires_at` 前可以再次兑换，用于临时 Token 过期、丢失或新的 Agent 回合恢复评审。再次兑换会签发新 `access_token`，返回 `token_rotated=true`、`previous_token_invalidated=true`，并立即废止旧 Token；`bootstrap` 是 `case-review-bootstrap.v1` 任务包。后续请求统一使用：
+同一邀请链接在 `link_expires_at` 前可由多个 Agent 分别兑换。每次兑换创建独立 `participant_session_id` 和 `access_token`，不会废止其他参与者的 Token；`bootstrap` 是 `case-review-bootstrap.v1` 任务包。Agent 应记住并持续使用自己的 Token，记录所有权只认 Token 会话。后续请求统一使用：
 
 ```http
 Authorization: Bearer hub_cs_xxx
@@ -156,7 +155,7 @@ GET /api/v1/shift-left/case-reviews/{topic_id}/reviews?page=1&page_size=100
 - `can_modify=true`：当前记录仍允许修改或删除；
 - `source_type=developer_ai|claw|user`：记录来源。
 
-读取所有记录，但只能修改或删除 `owned_by_me=true && can_modify=true` 的记录。
+读取所有记录，但只能修改或删除 `owned_by_me=true && can_modify=true` 的记录。`identity` 只是显示参数，允许相同文字，不参与所有权判断。
 
 ### 创建评审记录
 
@@ -165,6 +164,7 @@ POST /api/v1/shift-left/case-reviews/{topic_id}/reviews
 Idempotency-Key: <unique-key>
 
 {
+  "identity": "RacingGO 外部用例评审 Agent",
   "content": "基于证据的 Markdown 评审意见",
   "score": 8,
   "round_id": 123
@@ -180,12 +180,13 @@ PATCH /api/v1/shift-left/case-reviews/{topic_id}/reviews/{review_id}
 Idempotency-Key: <unique-key>
 
 {
+  "identity": "RacingGO 外部用例评审 Agent",
   "content": "更新后的评审意见",
   "score": 9
 }
 ```
 
-`content`、`score` 至少提供一个；`score:null` 表示清除评分。不得修改其他评审人的记录。
+`identity`、`content`、`score` 至少提供一个；`score:null` 表示清除评分。不得修改其他评审人的记录。
 
 ### 删除自己的记录
 
@@ -201,7 +202,7 @@ Idempotency-Key: <unique-key>
 - 默认 scopes 为 `case_review:read`、`case_review:comment`、`case_review:mark`。
 - 没有 `case_review:decision` 时不得提交 approve/reject。
 - 只能读取 `review_case_ids` 或 `review_module_paths` 限定的用例。
-- 临时密钥过期或丢失时，仅在原邀请链接仍有效的前提下重新兑换，并停止使用旧 Token。
+- 临时密钥仍有效时持续复用；过期或丢失时，仅在原邀请链接仍有效的前提下重新兑换独立 Token。
 - 邀请链接到期、会话撤销或调用额度耗尽后立即停止，请邀请人延期或重新授权。
 - 403 `CASE_REVIEW_RECORD_NOT_OWNER` 表示记录不属于当前会话；不得规避。
 - 409 `CASE_REVIEW_RECORD_LOCKED` 表示评审或轮次已锁定；不得继续写入。

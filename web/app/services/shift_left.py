@@ -143,6 +143,29 @@ def generate_access_token():
     return 'hub_cs_' + secrets.token_urlsafe(40)
 
 
+def collaboration_submission_identity(session_row, data, max_length=160):
+    """Resolve a display-only identity from one external submission.
+
+    Participant ownership is always the access-token session id. Identity is
+    deliberately not part of the invitation or authorization boundary.
+    Legacy pre-participant sessions may fall back to their historical label.
+    """
+    data = data if isinstance(data, dict) else {}
+    value = str(
+        data.get('identity')
+        or data.get('agent_identity')
+        or data.get('author_name')
+        or '').strip()
+    if (not value and session_row is not None
+            and getattr(session_row, 'parent_invite_id', None) is None):
+        value = str(getattr(session_row, 'agent_identity', '') or '').strip()
+    if not value:
+        raise ValueError('identity 必填；该字段只用于本次提交的显示身份')
+    if len(value) > int(max_length):
+        raise ValueError('identity 不能超过 %s 字符' % int(max_length))
+    return value
+
+
 def normalize_scopes(raw_scopes, default_scopes=None):
     defaults = default_scopes or DEFAULT_REVIEW_SCOPES
     scopes = raw_scopes if isinstance(raw_scopes, list) else list(defaults)

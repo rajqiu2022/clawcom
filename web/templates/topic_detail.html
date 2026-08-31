@@ -486,7 +486,7 @@ function defaultCaseReviewDeveloperAiIdentity() {
 }
 
 function caseAiSessionStatus(status) {
-    return ({pending:'待兑换', active:'使用中', revoked:'已撤销', expired:'已过期',
+    return ({pending:'待首次兑换', active:'可继续兑换', revoked:'已撤销', expired:'已过期',
         exhausted:'额度用尽', completed:'已完成'})[status] || status || '未知';
 }
 
@@ -505,16 +505,15 @@ async function loadCaseReviewCollaborationSessions(host, subjectType = 'case_rev
         host.innerHTML = rows.map(row => {
             const live = row.status === 'pending' || row.status === 'active';
             const extendable = live || row.status === 'expired';
-            const usage = `${row.call_count || 0}/${row.max_calls || 0}`;
-            const deadline = row.token_expires_at || row.invitation_expires_at || '';
-            const deadlineLabel = row.token_expires_at ? 'Token 截止' : '邀请截止';
+            const participants = Number(row.participant_count || 0);
+            const deadline = row.invitation_expires_at || '';
             return `<div style="display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:11px 0;border-top:1px solid var(--border)">
                 <div style="min-width:0">
                     <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
-                        <strong style="font-size:.86rem;overflow-wrap:anywhere">${_esc(row.agent_identity || '')}</strong>
+                        <strong style="font-size:.86rem;overflow-wrap:anywhere">协作邀请 #${row.id}</strong>
                         <span class="review-badge ${live ? 'review-badge-reviewing' : 'review-badge-closed'}">${_esc(caseAiSessionStatus(row.status))}</span>
                     </div>
-                    <div style="font-size:.76rem;color:var(--text-muted);margin-top:4px">调用 ${usage} · ${deadlineLabel} ${_esc(deadline || '-')}</div>
+                    <div style="font-size:.76rem;color:var(--text-muted);margin-top:4px">已签发 ${participants} 个独立 Token · 邀请截止 ${_esc(deadline || '-')}</div>
                 </div>
                 <div style="display:flex;gap:6px;align-items:center">
                     ${extendable ? `<button class="btn btn-ghost btn-sm" data-case-ai-extend="${row.id}">延期</button>` : ''}
@@ -585,29 +584,26 @@ async function createCaseReviewDeveloperAiLink(subjectType = 'case_review') {
     const isTopic = subjectType === 'topic';
     const subjectLabel = isTopic ? '课题讨论' : '用例评审';
     const scopeHint = isTopic
-        ? '只允许读取本课题、发表回复，以及修改或删除该临时身份自己的回复。不能浏览或操作其他课题。'
-        : '默认只允许读取本评审范围内的用例、增加评论和节点标记，不允许直接通过或驳回评审。';
+        ? '只允许读取本课题和发表回复。每个 Agent 用自己的 Token 维护自己的回复；显示身份由每条回复自行填写。'
+        : '默认只允许读取本评审范围内的用例、增加评论和节点标记。每个 Agent 用自己的 Token 维护自己的记录。';
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
     overlay.innerHTML = `<div class="modal" style="max-width:620px">
         <h3 class="modal-title">邀请 Developer AI 参与${subjectLabel}</h3>
         <p style="color:var(--text-muted);line-height:1.6">${scopeHint}</p>
-        <div class="form-group"><label>Developer AI 唯一身份</label><input id="_case_ai_identity" class="form-input" value="${_esc(defaultDeveloperAiIdentity(subjectType))}" placeholder="例如 developer-ai:racinggo-client:alice-codex"></div>
-        <div style="font-size:.76rem;color:var(--text-muted);margin:-8px 0 14px">用于隔离不同外部参与者及其写入记录。请保留自动生成值，或改成能区分团队、人员和 AI 实例的名称。</div>
+        <div style="font-size:.82rem;color:var(--text-muted);margin:0 0 14px;padding:10px 12px;border:1px solid var(--border);border-radius:10px">同一链接可交给多个 Agent。每个 Agent 会兑换独立 Token，回复所有权绑定 Token；显示身份由 Agent 在提交内容时填写。</div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px">
             <div class="form-group"><label>邀请有效期（分钟，最长72小时）</label><input id="_case_ai_invite" class="form-input" type="number" min="5" max="4320" value="30"></div>
             <div class="form-group"><label>Token 有效期（分钟，最长72小时）</label><input id="_case_ai_token" class="form-input" type="number" min="5" max="4320" value="120"></div>
             <div class="form-group"><label>最大调用次数</label><input id="_case_ai_calls" class="form-input" type="number" min="10" max="5000" value="500"></div>
         </div>
-        <div class="modal-actions"><button class="btn btn-ghost" id="_case_ai_cancel">取消</button><button class="btn btn-primary" id="_case_ai_create">生成一次性链接</button></div>
+        <div class="modal-actions"><button class="btn btn-ghost" id="_case_ai_cancel">取消</button><button class="btn btn-primary" id="_case_ai_create">生成协作链接</button></div>
         <div style="margin-top:18px"><div style="font-size:.78rem;font-weight:700;letter-spacing:.08em;color:var(--text-muted)">已签发会话</div><div id="_case_ai_sessions"></div></div>
     </div>`;
     document.body.appendChild(overlay);
     loadCaseReviewCollaborationSessions(overlay.querySelector('#_case_ai_sessions'), subjectType);
     overlay.querySelector('#_case_ai_cancel').onclick = () => overlay.remove();
     overlay.querySelector('#_case_ai_create').onclick = async () => {
-        const identity = overlay.querySelector('#_case_ai_identity').value.trim();
-        if (!identity) { showToast('请填写 Developer AI 身份标识', 'error'); return; }
         const key = `${subjectType}-${TOPIC_ID}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         try {
             const response = await fetch('/api/v1/collaboration-sessions', {
@@ -615,7 +611,6 @@ async function createCaseReviewDeveloperAiLink(subjectType = 'case_review') {
                 headers:{'Content-Type':'application/json','Idempotency-Key':key},
                 body:JSON.stringify({
                     subject_type:subjectType, subject_id:TOPIC_ID,
-                    agent_identity:identity,
                     invitation_ttl_minutes:Number(overlay.querySelector('#_case_ai_invite').value || 30),
                     token_ttl_minutes:Number(overlay.querySelector('#_case_ai_token').value || 120),
                     max_calls:Number(overlay.querySelector('#_case_ai_calls').value || 500),
@@ -628,7 +623,7 @@ async function createCaseReviewDeveloperAiLink(subjectType = 'case_review') {
             overlay.querySelector('.modal').innerHTML = `
                 <h3 class="modal-title">协作链接已生成</h3>
                 <p style="color:var(--text-muted);line-height:1.6">请把完整链接直接交给目标 Developer AI。兑换后会返回限定到本${subjectLabel}的任务包，无需另读 Hub 文档。</p>
-                <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">会话 #${data.id} · ${_esc(identity)}</div>
+                <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:8px">邀请 #${data.id} · 多 Agent 独立 Token</div>
                 <textarea id="_case_ai_link" class="form-input" rows="5" readonly>${_esc(link)}</textarea>
                 <div class="modal-actions"><button class="btn btn-ghost" id="_case_ai_done">完成</button><button class="btn btn-primary" id="_case_ai_copy">复制链接</button></div>`;
             overlay.querySelector('#_case_ai_done').onclick = () => overlay.remove();

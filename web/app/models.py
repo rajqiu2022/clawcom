@@ -8709,6 +8709,9 @@ class CollaborationSession(db.Model):
     creator_actor_key = db.Column(db.String(80), nullable=False)
     create_idempotency_key = db.Column(db.String(128), nullable=False)
     create_request_hash = db.Column(db.String(64), nullable=False)
+    parent_invite_id = db.Column(
+        db.Integer, nullable=True, index=True,
+        comment='兑换该 Token 会话的根邀请 ID；NULL 表示邀请或旧版会话')
     exchanged_at = db.Column(db.DateTime)
     last_activity_at = db.Column(db.DateTime)
     revoked_at = db.Column(db.DateTime)
@@ -8731,6 +8734,10 @@ class CollaborationSession(db.Model):
             return self.status
         if self.status == 'pending' and self.invitation_expires_at <= now:
             return 'expired'
+        if (self.status == 'active' and self.parent_invite_id is None
+                and not self.access_token_hash
+                and self.invitation_expires_at <= now):
+            return 'expired'
         if self.status == 'active' and self.token_expires_at and self.token_expires_at <= now:
             return 'expired'
         if self.max_calls and (self.call_count or 0) >= self.max_calls:
@@ -8746,6 +8753,8 @@ class CollaborationSession(db.Model):
             'project_id': self.project_id,
             'subject': {'type': self.subject_type, 'id': self.subject_id},
             'agent_identity': self.agent_identity,
+            'invite_id': self.parent_invite_id or self.id,
+            'participant_session': self.parent_invite_id is not None,
             'scopes': self.scopes_json or [],
             'status': self.effective_status(),
             'invitation_expires_at': str(self.invitation_expires_at),

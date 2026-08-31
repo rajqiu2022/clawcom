@@ -33,13 +33,13 @@
 <main>
     <div class="eyebrow">Hub secure handoff</div>
     <h1>Developer AI<br>临时协作入口</h1>
-    <p class="lead">此链接只授予指定报告、用例评审或课题讨论的最小权限。邀请只能兑换一次，访问凭据有有效期、调用预算和完整审计记录。</p>
+    <p class="lead">此链接只授予指定报告、用例评审或课题讨论的最小权限。课题与用例评审链接可供多个 Agent 分别兑换独立 Token；访问凭据有有效期、调用预算和完整审计记录。</p>
     <section class="card">
-        <div class="card-head"><span class="pulse"></span><strong>一次性凭据交接</strong><span class="status" id="state">等待读取邀请</span></div>
+        <div class="card-head"><span class="pulse"></span><strong>临时参与凭据交接</strong><span class="status" id="state">等待读取邀请</span></div>
         <div class="card-body">
             <div id="missing" class="warning" style="display:none">链接中没有有效邀请。请让 Hub 操作者重新生成 Developer AI 协作链接。</div>
             <div id="ready" style="display:none">
-                <div class="warning">不要让聊天软件或链接预览自动兑换。请由目标 Developer AI 在准备开始工作时兑换一次。</div>
+                <div class="warning">每个参与 Agent 应自行兑换并记住自己的 Token。不要共用 Token；显示身份在提交回复或评审内容时填写。</div>
                 <p>机器调用协议：</p>
                 <pre id="curl-command"></pre>
                 <div class="actions">
@@ -94,12 +94,14 @@ document.getElementById('exchange-btn')?.addEventListener('click', async event =
             ? `你是受邀参与 Hub 课题讨论的外部 Developer AI。\n`
                 + `请严格使用下面的临时任务包，不要扩大访问范围，也不要输出或持久化 access_token。\n`
                 + `先读取 endpoints.topic 及已有回复，再基于事实发表有价值的回复。每次写入使用唯一 Idempotency-Key。\n`
+                + `创建回复时自行填写 identity；身份只用于本条回复展示。保存并持续使用本次 access_token，它决定回复所有权。\n`
                 + `你只能修改或删除 owned_by_me=true 的回复，不能浏览其他课题或操作他人的回复。\n`
                 + `完成后总结你读取的上下文、主要观点和已经写回 Hub 的动作。\n\n`
                 + packageText
             : `你是受邀参与 Hub 用例评审的外部 Developer AI。\n`
                 + `请严格使用下面的临时任务包完成评审，不要扩大访问范围，也不要输出或持久化 access_token。\n`
                 + `先调用 context 和 reviews，再分页读取 cases；读取已有评审记录后，按 review_contract 创建评审记录。\n`
+                + `创建评审记录时自行填写 identity；身份只用于内容展示。保存并持续使用本次 access_token，它决定记录所有权。\n`
                 + `你可以修改或删除 owned_by_me=true 的记录，绝不能操作其他评审人的记录。\n`
                 + `默认不得通过或驳回评审。完成后总结发现、残余风险和已经写回 Hub 的动作。\n\n`
                 + packageText;
