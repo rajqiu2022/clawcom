@@ -8685,7 +8685,7 @@ class AnalysisRuleReplay(db.Model):
 
 
 class CollaborationSession(db.Model):
-    """一次性邀请兑换的任务级短期 API 会话。"""
+    """可撤销邀请链接签发的任务级短期 API 会话。"""
     __tablename__ = 'collaboration_sessions'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)

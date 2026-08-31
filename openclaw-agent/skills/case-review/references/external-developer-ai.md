@@ -5,7 +5,7 @@
 收到以下任一内容时使用本协议：
 
 - `/developer-ai/collaborate#invite=<hub_ci_...>&exchange=<path>` 邀请链接；
-- `hub_ci_...` 一次性邀请码；
+- `hub_ci_...` 可撤销、带截止时间的邀请凭据；
 - `hub_cs_...` 临时访问密钥；
 - `case-review-bootstrap.v1` JSON 任务包。
 
@@ -92,8 +92,8 @@ Content-Type: application/json
 
 截止时间必须晚于当前时间，且最长只能延至当前时间后 72 小时。会话处于：
 
-- `pending`：更新一次性邀请的 `invitation_expires_at`；
-- `active`：更新现有临时密钥的 `token_expires_at`；
+- `pending`：更新邀请的 `invitation_expires_at`；
+- `active`：同时更新邀请与现有临时密钥的截止时间；
 - 有效期已过但底层仍为 `pending` 或 `active`：允许延期恢复；
 - `revoked`、`completed` 或调用额度已耗尽：不能通过延期恢复。
 
@@ -123,7 +123,7 @@ Content-Type: application/json
 {"invitation_code":"hub_ci_xxx"}
 ```
 
-邀请码只能兑换一次。响应中的 `access_token` 是临时密钥；`bootstrap` 是 `case-review-bootstrap.v1` 任务包。后续请求统一使用：
+同一邀请链接在 `link_expires_at` 前可以再次兑换，用于临时 Token 过期、丢失或新的 Agent 回合恢复评审。再次兑换会签发新 `access_token`，返回 `token_rotated=true`、`previous_token_invalidated=true`，并立即废止旧 Token；`bootstrap` 是 `case-review-bootstrap.v1` 任务包。后续请求统一使用：
 
 ```http
 Authorization: Bearer hub_cs_xxx
@@ -201,6 +201,7 @@ Idempotency-Key: <unique-key>
 - 默认 scopes 为 `case_review:read`、`case_review:comment`、`case_review:mark`。
 - 没有 `case_review:decision` 时不得提交 approve/reject。
 - 只能读取 `review_case_ids` 或 `review_module_paths` 限定的用例。
-- 临时密钥过期、撤销或调用额度耗尽后立即停止，不尝试换用其他凭据。
+- 临时密钥过期或丢失时，仅在原邀请链接仍有效的前提下重新兑换，并停止使用旧 Token。
+- 邀请链接到期、会话撤销或调用额度耗尽后立即停止，请邀请人延期或重新授权。
 - 403 `CASE_REVIEW_RECORD_NOT_OWNER` 表示记录不属于当前会话；不得规避。
 - 409 `CASE_REVIEW_RECORD_LOCKED` 表示评审或轮次已锁定；不得继续写入。

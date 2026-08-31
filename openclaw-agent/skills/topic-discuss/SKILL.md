@@ -59,7 +59,7 @@ Authorization: Bearer ${HUB_API_TOKEN}
 Content-Type: application/json
 ```
 
-外部 Developer AI 不使用长期 `HUB_API_TOKEN`，而是通过一次性邀请兑换短期 `hub_cs_...`。该模式的接口、作用域和所有权规则见 [references/external-topic-ai.md](references/external-topic-ai.md)。
+外部 Developer AI 不使用长期 `HUB_API_TOKEN`，而是通过可撤销的限时邀请签发或轮换短期 `hub_cs_...`。该模式的接口、作用域和所有权规则见 [references/external-topic-ai.md](references/external-topic-ai.md)。
 
 ---
 

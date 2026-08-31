@@ -43,6 +43,7 @@ from app.models import (  # noqa: E402
     CaseReviewNodeMark,
     CaseReviewRound,
     CollaborationSession,
+    CollaborationSessionEvent,
     OpenClawInstance,
     Project,
     ShiftLeftFinding,
@@ -711,6 +712,82 @@ class ShiftLeftApiTest(unittest.TestCase):
                          deleted.get_data(as_text=True))
         self.assertTrue(deleted.get_json()['deleted'])
 
+    def test_topic_collaboration_link_can_rotate_temporary_token(self):
+        created = self.client.post(
+            '/api/v1/collaboration-sessions',
+            json={
+                'subject_type': 'topic',
+                'subject_id': self.discussion_topic.id,
+                'agent_identity': 'developer-ai:racinggo:topic-renewal',
+                'invitation_ttl_minutes': 4320,
+                'token_ttl_minutes': 120,
+            },
+            headers={'Idempotency-Key': 'topic-collaboration-renewal-create'},
+        )
+        self.assertEqual(created.status_code, 201, created.get_data(as_text=True))
+        invitation = created.get_json()['invitation_code']
+        session_id = created.get_json()['id']
+
+        with self.client.session_transaction() as sess:
+            sess.clear()
+        first = self.client.post(
+            '/api/v1/collaboration-sessions/exchange',
+            json={'invitation_code': invitation},
+        )
+        second = self.client.post(
+            '/api/v1/collaboration-sessions/exchange',
+            json={'invitation_code': invitation},
+        )
+        self.assertEqual(first.status_code, 200, first.get_data(as_text=True))
+        self.assertEqual(second.status_code, 200, second.get_data(as_text=True))
+        first_token = first.get_json()['access_token']
+        second_token = second.get_json()['access_token']
+        self.assertNotEqual(first_token, second_token)
+        self.assertFalse(first.get_json()['token_rotated'])
+        self.assertTrue(second.get_json()['token_rotated'])
+        self.assertTrue(second.get_json()['previous_token_invalidated'])
+
+        stale = self.client.get(
+            f'/api/v1/topics/{self.discussion_topic.id}',
+            headers={'Authorization': f'Bearer {first_token}'},
+        )
+        renewed = self.client.get(
+            f'/api/v1/topics/{self.discussion_topic.id}',
+            headers={'Authorization': f'Bearer {second_token}'},
+        )
+        self.assertEqual(stale.status_code, 401, stale.get_data(as_text=True))
+        self.assertEqual(renewed.status_code, 200, renewed.get_data(as_text=True))
+
+        row = db.session.get(CollaborationSession, session_id)
+        row.token_expires_at = datetime.now() - timedelta(minutes=1)
+        db.session.commit()
+        after_expiry = self.client.post(
+            '/api/v1/collaboration-sessions/exchange',
+            json={'invitation_code': invitation},
+        )
+        self.assertEqual(
+            after_expiry.status_code, 200, after_expiry.get_data(as_text=True))
+        self.assertTrue(after_expiry.get_json()['token_rotated'])
+
+        row = db.session.get(CollaborationSession, session_id)
+        row.invitation_expires_at = datetime.now() - timedelta(minutes=1)
+        db.session.commit()
+        link_expired = self.client.post(
+            '/api/v1/collaboration-sessions/exchange',
+            json={'invitation_code': invitation},
+        )
+        self.assertEqual(link_expired.status_code, 410)
+        self.assertEqual(
+            link_expired.get_json()['code'], 'INVITATION_EXPIRED')
+        event_types = [
+            item.event_type
+            for item in CollaborationSessionEvent.query.filter_by(
+                session_id=session_id).order_by(
+                    CollaborationSessionEvent.id.asc()).all()
+        ]
+        self.assertEqual(event_types.count('exchanged'), 1)
+        self.assertEqual(event_types.count('token_rotated'), 2)
+
     def test_projectless_topic_can_issue_scoped_external_invite(self):
         created = self.client.post(
             '/api/v1/collaboration-sessions',
@@ -890,6 +967,11 @@ class ShiftLeftApiTest(unittest.TestCase):
                          extended.get_data(as_text=True))
         self.assertEqual(extended.get_json()['deadline_field'], 'token_expires_at')
         self.assertFalse(extended.get_json()['link_rotated'])
+        row = db.session.get(CollaborationSession, session_id)
+        self.assertEqual(
+            row.invitation_expires_at.replace(microsecond=0),
+            active_deadline.replace(microsecond=0),
+        )
 
         with self.client.session_transaction() as sess:
             sess.clear()

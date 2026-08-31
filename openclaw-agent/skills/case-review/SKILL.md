@@ -1,6 +1,6 @@
 ---
 name: case-review
-description: "用例评审 Skill。负责发起评审、读取概要和用例、提交与维护评审记录、评分、整改、关闭和总结；支持 Hub 内 Agent 长期凭据，以及外部研发 AI 通过一次性邀请链接兑换临时密钥参与评审。当用户要求发起用例评审、评审用例、处理评审意见，或提供 Developer AI 协作链接/临时任务包时触发。"
+description: "用例评审 Skill。负责发起评审、读取概要和用例、提交与维护评审记录、评分、整改、关闭和总结；支持 Hub 内 Agent 长期凭据，以及外部研发 AI 通过可撤销限时邀请签发或轮换临时密钥参与评审。当用户要求发起用例评审、评审用例、处理评审意见，或提供 Developer AI 协作链接/临时任务包时触发。"
 metadata: { "openclaw": { "category": "testing", "emoji": "📋" } }
 ---
 

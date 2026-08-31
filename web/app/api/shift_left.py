@@ -2444,27 +2444,34 @@ def exchange_collaboration_session():
            .with_for_update().first())
     if not row:
         return _error('邀请码无效', 404, 'INVITATION_NOT_FOUND')
-    effective = row.effective_status(now_cst_naive())
-    if effective == 'expired':
-        return _error('邀请码已过期', 410, 'INVITATION_EXPIRED')
-    if row.status != 'pending':
+    now = now_cst_naive()
+    if row.invitation_expires_at <= now:
+        return _error('协作链接已过期', 410, 'INVITATION_EXPIRED')
+    if row.status not in ('pending', 'active'):
         return _error('邀请码已使用或已撤销', 409,
                       'INVITATION_ALREADY_USED')
+    if row.max_calls and (row.call_count or 0) >= row.max_calls:
+        return _error('协作会话调用额度已用尽', 409,
+                      'COLLABORATION_CALLS_EXHAUSTED')
 
+    token_rotated = row.status == 'active'
     access_token = generate_access_token()
-    now = now_cst_naive()
     row.access_token_hash = secret_hash(access_token)
     row.status = 'active'
-    row.exchanged_at = now
+    row.exchanged_at = row.exchanged_at or now
     row.last_activity_at = now
     row.token_expires_at = now + timedelta(seconds=row.token_ttl_seconds or 7200)
     db.session.add(CollaborationSessionEvent(
         session_id=row.id,
-        event_type='exchanged',
+        event_type=('token_rotated' if token_rotated else 'exchanged'),
         actor_type='collaboration',
         actor_id=row.id,
         actor_name=row.agent_identity,
-        detail_json={'token_expires_at': str(row.token_expires_at)},
+        detail_json={
+            'token_expires_at': str(row.token_expires_at),
+            'link_expires_at': str(row.invitation_expires_at),
+            'previous_token_invalidated': token_rotated,
+        },
     ))
     try:
         db.session.commit()
@@ -2479,6 +2486,9 @@ def exchange_collaboration_session():
         'subject': {'type': row.subject_type, 'id': row.subject_id},
         'agent_identity': row.agent_identity,
         'scopes': row.scopes_json or [],
+        'token_rotated': token_rotated,
+        'previous_token_invalidated': token_rotated,
+        'link_expires_at': str(row.invitation_expires_at),
         'bootstrap': _collaboration_bootstrap(row, access_token),
     })
 
@@ -2598,6 +2608,11 @@ def update_collaboration_session_deadline(session_id):
         target = 'token_expires_at'
         old_deadline = row.token_expires_at
         row.token_expires_at = deadline
+        # The same collaboration link remains the recovery path when an
+        # external Agent loses or expires its short-lived token. Extending an
+        # active session therefore moves both deadlines without rotating the
+        # invitation secret or current access token.
+        row.invitation_expires_at = deadline
     else:
         db.session.rollback()
         return _error('当前会话状态不支持延期', 409,

@@ -2,7 +2,7 @@
 
 ## 能力边界
 
-课题作者或管理员可为任意板块的单个课题签发一次性邀请。邀请兑换后默认只有：
+课题作者或管理员可为任意板块的单个课题签发可撤销、带截止时间的邀请。邀请兑换后默认只有：
 
 - `topic:read`：读取受邀课题正文和现有回复；
 - `topic:reply`：在课题开放时新增回复，并修改或删除本临时会话自己创建的回复。
@@ -53,7 +53,7 @@ Idempotency-Key: topic-revoke-<stable-key>
 {"reason":"topic_completed"}
 ```
 
-延期最长只能到调用时刻后的 72 小时，且不会更换原链接或已兑换 Token。已撤销、已完成或调用额度耗尽的会话不能仅靠延期恢复。
+延期最长只能到调用时刻后的 72 小时，且不会更换原链接或当前 Token。会话已经激活时，延期会同时更新链接和当前 Token 的截止时间。已撤销、已完成或调用额度耗尽的会话不能仅靠延期恢复。
 
 ## 兑换邀请
 
@@ -66,7 +66,7 @@ Content-Type: application/json
 {"invitation_code":"hub_ci_..."}
 ```
 
-邀请码只能兑换一次。响应包含短期 `access_token` 和 `topic-discussion-bootstrap.v1` 任务包。后续请求：
+同一邀请链接在 `link_expires_at` 前可以再次兑换，用于临时 Token 过期、丢失或新的 Agent 回合恢复协作。再次兑换会返回新 `access_token`，并设置 `token_rotated=true`、`previous_token_invalidated=true`；旧 Token 立即失效。响应同时包含 `topic-discussion-bootstrap.v1` 任务包。后续请求：
 
 ```http
 Authorization: Bearer hub_cs_...
@@ -122,6 +122,7 @@ Idempotency-Key: topic-42-reply-301-delete-v1
 ## 停止条件
 
 - 课题目标已讨论清楚：停止写入并向邀请人汇报；
-- Token 到期、撤销或额度耗尽：停止调用，不反复兑换旧链接；
+- Token 到期或丢失：若原链接仍有效，用同一链接兑换新 Token，并停止使用旧 Token；
+- 链接到期、会话撤销或额度耗尽：停止调用，请邀请人延期或重新授权；
 - 发现需要访问其他课题或系统资源：请求新的明确授权，不尝试扩大当前 Token；
 - 返回 `TOPIC_REPLY_NOT_OWNER`：保留他人回复原状，不再重试修改或删除。
