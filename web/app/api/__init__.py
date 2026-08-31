@@ -11,6 +11,7 @@ PUBLIC_PATHS = [
     '/api/v1/test-reports/shared/',  # 测试报告分享外链匿名只读（MEMORY #134）
     '/api/v1/knowledge/shared/',    # 知识分享外链匿名只读与 Markdown 下载
     '/api/v1/collaboration-sessions/exchange',  # 有效协作链接签发/轮换短期 Token
+    '/api/v1/collaboration-sessions/preview',  # 邀请持有者只读解析目标页面
     '/api/v1/chat-room-invites/exchange',  # 聊天室外部邀请兑换
     '/api/v1/chat-room-sessions/renew',     # 外部成员短期 Token 续期
 ]

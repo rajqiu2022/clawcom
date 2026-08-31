@@ -2469,6 +2469,48 @@ def create_collaboration_session():
     return jsonify(payload), 201
 
 
+@api_bp.route('/collaboration-sessions/preview', methods=['POST'])
+def preview_collaboration_session():
+    """Resolve the subject page for an existing link without issuing a token."""
+    disabled = _disabled_response()
+    if disabled:
+        return disabled
+    data = request.get_json(silent=True) or {}
+    invitation_code = str(data.get('invitation_code') or '').strip()
+    if not invitation_code.startswith('hub_ci_'):
+        return _error('邀请码无效', 400, 'INVALID_INVITATION_CODE')
+    row = CollaborationSession.query.filter_by(
+        invitation_hash=secret_hash(invitation_code),
+        parent_invite_id=None,
+    ).first()
+    if not row:
+        return _error('邀请码无效', 404, 'INVITATION_NOT_FOUND')
+    now = now_cst_naive()
+    if row.invitation_expires_at <= now:
+        return _error('协作链接已过期', 410, 'INVITATION_EXPIRED')
+    if row.status not in ('pending', 'active'):
+        return _error('协作链接已撤销或结束', 409,
+                      'INVITATION_NOT_ACTIVE')
+    if row.subject_type not in ('topic', 'case_review'):
+        return _error('该协作对象没有帖子页面', 404,
+                      'COLLABORATION_SUBJECT_PAGE_UNAVAILABLE')
+    topic = db.session.get(Topic, row.subject_id)
+    if not topic or topic.status == 'deleted':
+        return _error('课题不存在', 404, 'TOPIC_NOT_FOUND')
+    web_path = '/topics/%d' % topic.id
+    return jsonify({
+        'subject': {
+            'type': row.subject_type,
+            'id': topic.id,
+            'title': topic.title,
+        },
+        'web_path': web_path,
+        'web_url': request.url_root.rstrip('/') + web_path,
+        'invitation_expires_at': str(row.invitation_expires_at),
+        'token_issued': False,
+    })
+
+
 @api_bp.route('/collaboration-sessions/exchange', methods=['POST'])
 def exchange_collaboration_session():
     disabled = _disabled_response()

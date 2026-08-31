@@ -25,6 +25,7 @@ class ShiftLeftFrontendContractTest(unittest.TestCase):
         self.assertIn("#invite=${encodeURIComponent(data.invitation_code)}", self.topic)
         self.assertIn('location.hash.slice(1)', self.handoff)
         self.assertIn("params.get('subject')", self.handoff)
+        self.assertIn('/api/v1/collaboration-sessions/preview', self.handoff)
         self.assertIn('id="subject-link"', self.handoff)
         self.assertIn("subject=${encodeURIComponent(`/topics/${TOPIC_ID}`)}", self.topic)
 

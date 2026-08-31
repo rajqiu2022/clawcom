@@ -751,6 +751,23 @@ class ShiftLeftApiTest(unittest.TestCase):
 
         with self.client.session_transaction() as sess:
             sess.clear()
+        preview = self.client.post(
+            '/api/v1/collaboration-sessions/preview',
+            json={'invitation_code': invitation},
+        )
+        self.assertEqual(preview.status_code, 200, preview.get_data(as_text=True))
+        self.assertEqual(preview.get_json()['web_path'],
+                         f'/topics/{self.discussion_topic.id}')
+        self.assertEqual(preview.get_json()['subject']['id'],
+                         self.discussion_topic.id)
+        self.assertEqual(preview.get_json()['subject']['title'],
+                         self.discussion_topic.title)
+        self.assertEqual(
+            CollaborationSession.query.filter_by(
+                parent_invite_id=session_id).count(), 0)
+        self.assertEqual(
+            db.session.get(CollaborationSession, session_id).status, 'pending')
+
         first = self.client.post(
             '/api/v1/collaboration-sessions/exchange',
             json={'invitation_code': invitation},

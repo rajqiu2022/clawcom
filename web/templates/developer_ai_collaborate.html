@@ -73,11 +73,23 @@ const invitation = params.get('invite') || '';
 const exchangePath = params.get('exchange') || '/api/v1/collaboration-sessions/exchange';
 const subjectPath = params.get('subject') || '';
 const state = document.getElementById('state');
-function showSubjectLink(path) {
+function showSubjectLink(path, title = '') {
     if (!/^\/topics\/\d+$/.test(path || '')) return;
     const link = document.getElementById('subject-link');
     link.href = `${location.origin}${path}`;
+    link.textContent = title ? `打开「${title}」 ↗` : '打开课题/评审内容 ↗';
     document.getElementById('subject-link-wrap').style.display = '';
+}
+async function previewSubject() {
+    if (subjectPath) { showSubjectLink(subjectPath); return; }
+    try {
+        const response = await fetch('/api/v1/collaboration-sessions/preview', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({invitation_code:invitation}),
+        });
+        const data = await response.json();
+        if (response.ok) showSubjectLink(data.web_path, data.subject?.title || '');
+    } catch (_) { /* Preview failure must not block direct token exchange. */ }
 }
 const command = `curl -X POST "${location.origin}${exchangePath}" -H "Content-Type: application/json" -d '${JSON.stringify({invitation_code: invitation})}'`;
 if (!invitation.startsWith('hub_ci_') || !exchangePath.startsWith('/api/v1/')) {
@@ -87,7 +99,7 @@ if (!invitation.startsWith('hub_ci_') || !exchangePath.startsWith('/api/v1/')) {
     document.getElementById('ready').style.display = '';
     document.getElementById('curl-command').textContent = command;
     state.textContent = '邀请待兑换';
-    showSubjectLink(subjectPath);
+    previewSubject();
 }
 document.getElementById('copy-btn')?.addEventListener('click', async () => {
     await navigator.clipboard.writeText(command);
