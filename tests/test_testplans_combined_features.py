@@ -66,6 +66,10 @@ def test_task_modal_has_fullscreen_mindmap_selection_and_library_sync():
         "sync-library-preview",
         "sync-library-restore",
         "还原同步前数据",
+        "taskCasePickerSummary",
+        "覆盖用例总数",
+        "选中节点",
+        "compactTaskModulePaths",
     ):
         assert marker in source
 

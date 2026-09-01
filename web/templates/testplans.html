@@ -557,6 +557,13 @@
 .tp-case-picker-box { border:1px solid var(--border); border-radius:9px; padding:10px 12px; background:var(--bg-secondary); }
 .tp-case-picker-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .tp-case-picker-summary { min-width:0; color:var(--text-secondary); font-size:.8rem; line-height:1.5; }
+.tp-case-picker-total { display:flex; align-items:baseline; gap:5px; color:var(--text-primary); font-weight:600; }
+.tp-case-picker-total strong { color:var(--accent); font-size:1rem; font-variant-numeric:tabular-nums; }
+.tp-case-picker-nodes { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:6px; }
+.tp-case-picker-label { color:var(--text-muted); flex:0 0 auto; }
+.tp-case-picker-chip { display:inline-flex; align-items:center; max-width:190px; padding:2px 7px; border:1px solid var(--border); border-radius:5px; background:var(--bg-card); color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tp-case-picker-more { color:var(--accent); font-weight:600; }
+.tp-case-picker-note { margin-top:4px; color:var(--text-muted); font-size:.72rem; }
 .tp-case-picker-actions { display:flex; gap:7px; flex:0 0 auto; }
 .tp-mindmap-overlay { position:fixed; inset:0; z-index:12000; background:rgba(8,10,13,.92); padding:18px; }
 .tp-mindmap-panel { height:100%; display:grid; grid-template-rows:auto 1fr; overflow:hidden; border:1px solid var(--border); border-radius:12px; background:var(--bg-card); box-shadow:0 24px 70px rgba(0,0,0,.45); }
@@ -2872,16 +2879,20 @@ async function deletePlan(planId) {
 // ===== 用例库脑图节点选择 =====
 let _taskMindmapCache = {};
 let _taskCasePickerState = null;
+let _taskCasePickerSummarySeq = 0;
 
 function initTaskCasePicker(task) {
     const filter = (task && task.case_filter) || {};
     const modules = new Set(filter.module_paths || []);
     const cases = new Set((filter.case_ids || []).map(Number));
+    const caseRefs = new Map((filter.selected_case_refs || []).map(ref => [
+        Number(ref.source_case_id), ref,
+    ]));
     const explicitlyNone = !!filter.select_none;
     _taskCasePickerState = {
         libraryId: task && task.library_id ? String(task.library_id) : '',
         all: !explicitlyNone && modules.size === 0 && cases.size === 0,
-        modules, cases, dirty: false, view: null,
+        modules, cases, caseRefs, dirty: false, view: null,
         existing: !!(task && task.id),
         originalFilter: task && task.case_filter ? JSON.parse(JSON.stringify(task.case_filter)) : null,
     };
@@ -2896,18 +2907,111 @@ function taskCasePickerSelectedIds() {
     return selected;
 }
 
-function refreshTaskCasePickerSummary() {
-    const host = document.getElementById('tm-case-picker-summary');
-    if (!host || !_taskCasePickerState) return;
-    if (_taskCasePickerState.all) {
-        host.innerHTML = '<strong style="color:var(--accent)">已选择整个用例库</strong><br>保存后会关联库内全部用例';
+function normalizeTaskModulePath(path) {
+    return String(path || '').trim().replace(/^\/+|\/+$/g, '');
+}
+
+function compactTaskModulePaths(paths) {
+    const normalized = Array.from(new Set(Array.from(paths || []).map(normalizeTaskModulePath)));
+    normalized.sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b, 'zh-CN'));
+    return normalized.filter((path, index, all) => !all.slice(0, index).some(parent =>
+        parent === '' || path === parent || path.startsWith(parent + '/')));
+}
+
+function indexTaskMindmap(data) {
+    const modules = new Map();
+    const cases = new Map();
+    (function walk(node) {
+        if (!node) return;
+        if (node.node_type === CaseMindmap.NODE_MODULE) {
+            modules.set(normalizeTaskModulePath(node.module_path), node);
+        } else if (node.node_type === CaseMindmap.NODE_CASE) {
+            cases.set(Number(node.case_id), node);
+        }
+        (node.children || []).forEach(walk);
+    })(data);
+    return {modules, cases};
+}
+
+function taskCasePickerSummary(data) {
+    const state = _taskCasePickerState;
+    const index = indexTaskMindmap(data);
+    if (state.all) {
+        return {
+            names: [data.text || '整个用例库'],
+            nodeCount: 1,
+            totalCases: Number(data.total_case_count ?? data.case_count ?? 0),
+            entireLibrary: true,
+        };
+    }
+
+    const modulePaths = compactTaskModulePaths(state.modules);
+    const names = [];
+    let totalCases = 0;
+    modulePaths.forEach(path => {
+        const node = index.modules.get(path);
+        names.push({text:(node && node.text) || path || '未分类', title:path || '未分类'});
+        totalCases += Number(node && node.case_count || 0);
+    });
+
+    let standaloneCases = 0;
+    state.cases.forEach(id => {
+        const node = index.cases.get(Number(id));
+        const ref = state.caseRefs.get(Number(id));
+        const casePath = normalizeTaskModulePath(
+            (node && node.module_path) || (ref && ref.module_path) || '');
+        const covered = modulePaths.some(path =>
+            path === '' || casePath === path || casePath.startsWith(path + '/'));
+        if (covered) return;
+        const title = (node && node.text) || (ref && ref.title) || `用例 #${id}`;
+        names.push({text:title, title:casePath ? `${casePath} / ${title}` : title});
+        totalCases += 1;
+        standaloneCases += 1;
+    });
+
+    return {
+        names,
+        nodeCount: modulePaths.length + standaloneCases,
+        totalCases,
+        entireLibrary: false,
+    };
+}
+
+function renderTaskCasePickerSummary(host, summary) {
+    if (!summary.nodeCount) {
+        host.innerHTML = '<strong style="color:var(--red)">尚未选择任何用例</strong><br>可进入全屏脑图勾选';
         return;
     }
-    const m = _taskCasePickerState.modules.size;
-    const c = _taskCasePickerState.cases.size;
-    host.innerHTML = (m || c)
-        ? `<strong>已选择 ${m} 个目录、${c} 条独立用例</strong><br>目录包含其全部下级用例`
-        : '<strong style="color:var(--red)">尚未选择任何用例</strong><br>可进入全屏脑图勾选';
+    const shown = summary.names.slice(0, 5).map(item => {
+        const name = typeof item === 'string' ? item : item.text;
+        const title = typeof item === 'string' ? item : item.title;
+        return `<span class="tp-case-picker-chip" title="${esc(title)}">${esc(name)}</span>`;
+    }).join('');
+    const remaining = Math.max(0, summary.nodeCount - Math.min(summary.names.length, 5));
+    host.innerHTML = `
+        <div class="tp-case-picker-total">覆盖用例总数 <strong>${summary.totalCases}</strong> 条</div>
+        <div class="tp-case-picker-nodes">
+            <span class="tp-case-picker-label">选中节点</span>${shown}
+            ${remaining ? `<span class="tp-case-picker-more">+${remaining} 个</span>` : ''}
+        </div>
+        <div class="tp-case-picker-note">${summary.entireLibrary ? '已选择整个用例库' : '目录节点自动包含全部下级用例，并已去重统计'}</div>`;
+}
+
+async function refreshTaskCasePickerSummary() {
+    const host = document.getElementById('tm-case-picker-summary');
+    if (!host || !_taskCasePickerState) return;
+    const seq = ++_taskCasePickerSummarySeq;
+    const libId = _taskCasePickerState.libraryId;
+    host.innerHTML = '<span style="color:var(--text-muted)">正在统计选中节点与覆盖用例…</span>';
+    try {
+        const data = await loadTaskLibraryMindmap(libId);
+        if (seq !== _taskCasePickerSummarySeq || !_taskCasePickerState ||
+            _taskCasePickerState.libraryId !== libId || !host.isConnected) return;
+        renderTaskCasePickerSummary(host, taskCasePickerSummary(data));
+    } catch (e) {
+        if (seq !== _taskCasePickerSummarySeq || !host.isConnected) return;
+        host.innerHTML = `<strong style="color:var(--red)">选中节点统计失败</strong><br>${esc(e.message)}`;
+    }
 }
 
 async function onLibraryChangeForTask(keepSelection = false) {
@@ -2926,6 +3030,7 @@ async function onLibraryChangeForTask(keepSelection = false) {
         _taskCasePickerState.all = true;
         _taskCasePickerState.modules.clear();
         _taskCasePickerState.cases.clear();
+        _taskCasePickerState.caseRefs.clear();
         _taskCasePickerState.dirty = true;
     }
     refreshTaskCasePickerSummary();
