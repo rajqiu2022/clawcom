@@ -4982,6 +4982,14 @@ class TestTask(db.Model):
     # 用例筛选条件（API 创建时更灵活）
     case_filter = db.Column(db.JSON, comment='用例筛选条件，如 {"module_paths":["登录模块"], "priorities":["P0"], "case_ids":[1,2,3]}')
 
+    # 最近一次“同步最新用例库”前的任务用例快照。只保留一份，恢复成功后失效。
+    case_sync_backup_json = db.Column(
+        db.JSON, comment='最近一次用例库同步前的任务用例与执行结果备份')
+    case_sync_backup_created_at = db.Column(
+        db.DateTime, comment='同步备份创建时间')
+    case_sync_backup_restored_at = db.Column(
+        db.DateTime, comment='同步备份恢复时间；非空表示恢复机会已使用')
+
     # 进度和结果
     status = db.Column(db.Enum('assigned', 'pending', 'in_progress', 'completed', 'blocked', 'skipped'),
                        default='assigned',
@@ -5049,6 +5057,15 @@ class TestTask(db.Model):
             'library_id': self.library_id,
             'library_name': self.library.name if self.library else None,
             'case_filter': self.case_filter,
+            'case_sync_backup_available': bool(
+                self.case_sync_backup_json
+                and not self.case_sync_backup_restored_at),
+            'case_sync_backup_created_at': (
+                str(self.case_sync_backup_created_at)
+                if self.case_sync_backup_created_at else None),
+            'case_sync_backup_restored_at': (
+                str(self.case_sync_backup_restored_at)
+                if self.case_sync_backup_restored_at else None),
             'status': self.status,
             'progress': self.progress,
             'result_summary': self.result_summary,
@@ -5187,6 +5204,8 @@ class TestTaskCase(db.Model):
     tapd_bug_id = db.Column(db.String(50), comment='关联的 TAPD Bug ID')
     tapd_bug_url = db.Column(db.String(500), comment='关联的 TAPD Bug 链接')
     case_info_snapshot = db.Column(db.JSON, comment='同步到 Bug 的用例信息快照')
+    case_source_snapshot = db.Column(
+        db.JSON, comment='任务关联时的用例内容快照，用于识别用例库变更')
     bug_sync_status = db.Column(
         db.String(20), default='none',
         comment='Bug 用例信息同步状态：none/synced/failed')

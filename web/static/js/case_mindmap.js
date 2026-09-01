@@ -73,6 +73,7 @@
         '.cmm-mark{flex-shrink:0;cursor:pointer;font-size:0.8rem;opacity:.45;padding:0 2px;border-radius:4px}',
         '.cmm-mark.on{opacity:1}',
         '.cmm-mark:hover{opacity:1;background:rgba(127,127,127,.18)}',
+        '.cmm-check{flex:0 0 auto;width:15px;height:15px;margin:0;cursor:pointer;accent-color:var(--accent)}',
         '.cmm-node.cmm-sel{border-color:var(--accent);box-shadow:0 0 0 2px rgba(88,166,255,.35)}',
         '.cmm-node.cmm-detail{background:transparent;border-style:dashed;',
         'color:var(--text-muted);font-size:0.78rem}',
@@ -114,6 +115,7 @@
         if (isModule && node.case_count) extra += 14 + String(node.case_count).length * 7;
         if (node._loading || node._loadError) extra += 56;
         if ((options.canMark && !isDetail) || node.mark) extra += 22;     // 标记图标
+        if (options.selectable && !isDetail) extra += 22;                 // 复选框
         return Math.max(MIN_W, Math.min(MAX_W, text.length * 13 + extra));
     }
 
@@ -306,6 +308,9 @@
         } else if (this.options.markHint) {
             parts.push('<span>' + esc(this.options.markHint) + '</span>');
         }
+        if (this.options.selectable) {
+            parts.push('<span style="color:var(--accent)">勾选目录可选中整棵子树，勾选用例可精确选择</span>');
+        }
         this.legendEl.innerHTML = parts.join('');
 
         if (this.data && this.data.truncated) {
@@ -337,6 +342,13 @@
         if (node.priority) {
             inner.push('<span class="cmm-prio ' + node.priority.toLowerCase() + '">'
                 + esc(node.priority) + '</span>');
+        }
+        if (this.options.selectable && !isDetail) {
+            var selected = this.options.isSelected
+                ? !!this.options.isSelected(node)
+                : !!((this.options.selectedIds || {})[node.id]);
+            inner.push('<input type="checkbox" class="cmm-check" data-select="1" '
+                + (selected ? 'checked ' : '') + 'aria-label="选择 ' + esc(node.text) + '">');
         }
         inner.push('<span class="cmm-text" title="' + esc(node.text) + '">'
             + esc(node.text) + '</span>');
@@ -442,6 +454,18 @@
                 var node = self._findNode(id);
                 if (!node) return;
 
+                if (ev.target.getAttribute && ev.target.getAttribute('data-select')) {
+                    ev.stopPropagation();
+                    var checked = !!ev.target.checked;
+                    self.options.selectedIds = self.options.selectedIds || {};
+                    if (checked) self.options.selectedIds[node.id] = true;
+                    else delete self.options.selectedIds[node.id];
+                    if (self.options.onSelectionChange) {
+                        self.options.onSelectionChange(node, checked, self);
+                    }
+                    return;
+                }
+
                 if (ev.target.getAttribute && ev.target.getAttribute('data-mark')) {
                     ev.stopPropagation();
                     self._openMarkMenu(el, node);
@@ -466,7 +490,7 @@
 
         this.wrapEl.addEventListener('mousedown', function (ev) {
             if (ev.button !== 0) return;
-            if (ev.target.closest && ev.target.closest('.cmm-menu')) return;
+            if (ev.target.closest && ev.target.closest('.cmm-menu,.cmm-check')) return;
             active = true;
             self._panMoved = false;
             startX = ev.clientX;

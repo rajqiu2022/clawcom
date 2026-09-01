@@ -552,6 +552,20 @@
 
 /* 无计划选中时的空状态 */
 .tp-no-iter-selected { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); font-size: 0.92rem; }
+
+/* 任务用例脑图选择器：沿用用例库脑图，只补任务选择与全屏工作台 */
+.tp-case-picker-box { border:1px solid var(--border); border-radius:9px; padding:10px 12px; background:var(--bg-secondary); }
+.tp-case-picker-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.tp-case-picker-summary { min-width:0; color:var(--text-secondary); font-size:.8rem; line-height:1.5; }
+.tp-case-picker-actions { display:flex; gap:7px; flex:0 0 auto; }
+.tp-mindmap-overlay { position:fixed; inset:0; z-index:12000; background:rgba(8,10,13,.92); padding:18px; }
+.tp-mindmap-panel { height:100%; display:grid; grid-template-rows:auto 1fr; overflow:hidden; border:1px solid var(--border); border-radius:12px; background:var(--bg-card); box-shadow:0 24px 70px rgba(0,0,0,.45); }
+.tp-mindmap-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:12px 16px; border-bottom:1px solid var(--border); }
+.tp-mindmap-toolbar h3 { margin:0; font-size:1rem; }
+.tp-mindmap-toolbar-meta { color:var(--text-muted); font-size:.78rem; }
+.tp-mindmap-host { min-height:0; overflow:hidden; }
+.tp-sync-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:9px; }
+.tp-sync-note { color:var(--text-muted); font-size:.74rem; }
 </style>
 {% endblock %}
 
@@ -577,6 +591,7 @@
 
 {% block scripts %}
 <script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/case_mindmap.js') }}?v={{ cache_bust }}"></script>
 <script>
 // ===== 数据 =====
 let iterations = [];
@@ -2854,61 +2869,156 @@ async function deletePlan(planId) {
     } catch(e) { showToast('删除失败: ' + e.message, 'error'); }
 }
 
-// ===== 用例库节点选择 =====
-let _libraryTreeCache = {};
+// ===== 用例库脑图节点选择 =====
+let _taskMindmapCache = {};
+let _taskCasePickerState = null;
 
-async function onLibraryChangeForTask() {
+function initTaskCasePicker(task) {
+    const filter = (task && task.case_filter) || {};
+    const modules = new Set(filter.module_paths || []);
+    const cases = new Set((filter.case_ids || []).map(Number));
+    const explicitlyNone = !!filter.select_none;
+    _taskCasePickerState = {
+        libraryId: task && task.library_id ? String(task.library_id) : '',
+        all: !explicitlyNone && modules.size === 0 && cases.size === 0,
+        modules, cases, dirty: false, view: null,
+        existing: !!(task && task.id),
+        originalFilter: task && task.case_filter ? JSON.parse(JSON.stringify(task.case_filter)) : null,
+    };
+}
+
+function taskCasePickerSelectedIds() {
+    const selected = {};
+    if (!_taskCasePickerState) return selected;
+    if (_taskCasePickerState.all) selected['mod:'] = true;
+    _taskCasePickerState.modules.forEach(path => { selected[`mod:${path}`] = true; });
+    _taskCasePickerState.cases.forEach(id => { selected[`case:${id}`] = true; });
+    return selected;
+}
+
+function refreshTaskCasePickerSummary() {
+    const host = document.getElementById('tm-case-picker-summary');
+    if (!host || !_taskCasePickerState) return;
+    if (_taskCasePickerState.all) {
+        host.innerHTML = '<strong style="color:var(--accent)">已选择整个用例库</strong><br>保存后会关联库内全部用例';
+        return;
+    }
+    const m = _taskCasePickerState.modules.size;
+    const c = _taskCasePickerState.cases.size;
+    host.innerHTML = (m || c)
+        ? `<strong>已选择 ${m} 个目录、${c} 条独立用例</strong><br>目录包含其全部下级用例`
+        : '<strong style="color:var(--red)">尚未选择任何用例</strong><br>可进入全屏脑图勾选';
+}
+
+async function onLibraryChangeForTask(keepSelection = false) {
     const libId = document.getElementById('tm-lib').value;
     const nodesGroup = document.getElementById('tm-nodes-group');
     const prioGroup = document.getElementById('tm-priority-filter-group');
-    const nodesList = document.getElementById('tm-nodes-list');
-
-    if (!libId) { nodesGroup.style.display = 'none'; prioGroup.style.display = 'none'; return; }
+    if (!libId) {
+        nodesGroup.style.display = 'none'; prioGroup.style.display = 'none';
+        return;
+    }
     nodesGroup.style.display = 'block';
     prioGroup.style.display = 'block';
-    nodesList.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem">加载中...</div>';
-
-    try {
-        if (!_libraryTreeCache[libId]) {
-            _libraryTreeCache[libId] = await API.get(`/testcase-libraries/${libId}/tree`);
-        }
-        const tree = _libraryTreeCache[libId];
-        const dirs = tree.directories || [];
-
-        if (!dirs.length) {
-            nodesList.innerHTML = '<div style="color:var(--text-muted);font-size:0.82rem">无目录结构</div>';
-            return;
-        }
-
-        nodesList.innerHTML = `
-            <label style="display:flex;align-items:center;gap:6px;padding:4px 0;font-size:0.82rem;cursor:pointer;font-weight:600;color:var(--accent)">
-                <input type="checkbox" id="tm-node-all" onchange="toggleAllNodes(this.checked)"> 全部目录
-            </label>
-            <hr style="border:none;border-top:1px solid var(--border);margin:4px 0">
-        ` + dirs.map(d => `
-            <label style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:0.82rem;cursor:pointer">
-                <input type="checkbox" class="tm-node-cb" value="${esc(d)}">
-                <span>📁 ${esc(d)}</span>
-            </label>
-        `).join('');
-    } catch(e) {
-        nodesList.innerHTML = `<div style="color:var(--red);font-size:0.82rem">加载失败: ${e.message}</div>`;
+    if (!_taskCasePickerState) initTaskCasePicker({library_id:libId});
+    if (!keepSelection && _taskCasePickerState.libraryId !== String(libId)) {
+        _taskCasePickerState.libraryId = String(libId);
+        _taskCasePickerState.all = true;
+        _taskCasePickerState.modules.clear();
+        _taskCasePickerState.cases.clear();
+        _taskCasePickerState.dirty = true;
     }
+    refreshTaskCasePickerSummary();
 }
 
-function toggleAllNodes(checked) {
-    document.querySelectorAll('.tm-node-cb').forEach(cb => cb.checked = checked);
+async function loadTaskLibraryMindmap(libId) {
+    if (!_taskMindmapCache[libId]) {
+        _taskMindmapCache[libId] = await API.get(
+            `/testcase-libraries/${libId}/directory-mindmap?max_nodes=5000`);
+    }
+    return _taskMindmapCache[libId];
+}
+
+async function openTaskMindmapPicker() {
+    const libId = document.getElementById('tm-lib').value;
+    if (!libId) { showToast('请先选择用例库', 'warning'); return; }
+    const library = libraries.find(item => String(item.id) === String(libId));
+    const overlay = document.createElement('div');
+    overlay.className = 'tp-mindmap-overlay';
+    overlay.innerHTML = `<div class="tp-mindmap-panel">
+        <div class="tp-mindmap-toolbar">
+            <div><h3>${esc(library ? library.name : `用例库 #${libId}`)} · 脑图选择</h3>
+            <div class="tp-mindmap-toolbar-meta">勾选目录代表选择整棵子树；勾选用例代表精确选择</div></div>
+            <button class="btn btn-primary" id="tm-mindmap-done">完成选择并返回任务</button>
+        </div>
+        <div class="tp-mindmap-host" id="tm-mindmap-host"><div class="tp-empty">正在加载脑图…</div></div>
+    </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('#tm-mindmap-done').onclick = () => {
+        overlay.remove(); refreshTaskCasePickerSummary();
+    };
+    try {
+        const data = await loadTaskLibraryMindmap(libId);
+        const selectedIds = taskCasePickerSelectedIds();
+        _taskCasePickerState.view = CaseMindmap.render(
+            overlay.querySelector('#tm-mindmap-host'), data, {
+                selectable: true,
+                selectedIds,
+                isSelected(node) {
+                    if (node.id === 'mod:') return _taskCasePickerState.all;
+                    if (node.node_type === CaseMindmap.NODE_MODULE) {
+                        return _taskCasePickerState.modules.has(node.module_path || '');
+                    }
+                    if (node.node_type === CaseMindmap.NODE_CASE) {
+                        return _taskCasePickerState.cases.has(Number(node.case_id));
+                    }
+                    return false;
+                },
+                onSelectionChange(node, checked, view) {
+                    if (node.id === 'mod:') {
+                        _taskCasePickerState.all = checked;
+                        if (checked) {
+                            _taskCasePickerState.modules.clear();
+                            _taskCasePickerState.cases.clear();
+                        }
+                    } else {
+                        _taskCasePickerState.all = false;
+                        if (node.node_type === CaseMindmap.NODE_MODULE) {
+                            const path = node.module_path || '';
+                            if (checked) _taskCasePickerState.modules.add(path);
+                            else _taskCasePickerState.modules.delete(path);
+                        } else if (node.node_type === CaseMindmap.NODE_CASE) {
+                            const id = Number(node.case_id);
+                            if (checked) _taskCasePickerState.cases.add(id);
+                            else _taskCasePickerState.cases.delete(id);
+                        }
+                    }
+                    _taskCasePickerState.dirty = true;
+                    view.setOptions({selectedIds:taskCasePickerSelectedIds()});
+                },
+            });
+    } catch (e) {
+        overlay.querySelector('#tm-mindmap-host').innerHTML =
+            `<div class="tp-empty" style="color:var(--red)">脑图加载失败：${esc(e.message)}</div>`;
+    }
 }
 
 function getTaskCaseFilter() {
     const libId = document.getElementById('tm-lib').value;
-    if (!libId) return null;
-    const filter = {};
-    const selectedNodes = Array.from(document.querySelectorAll('.tm-node-cb:checked')).map(cb => cb.value);
-    if (selectedNodes.length > 0) filter.module_paths = selectedNodes;
-    const selectedPrios = Array.from(document.querySelectorAll('.tm-prio-cb:checked')).map(cb => cb.value);
-    if (selectedPrios.length > 0) filter.priorities = selectedPrios;
-    return Object.keys(filter).length > 0 ? filter : null;
+    if (!libId || !_taskCasePickerState) return null;
+    if (_taskCasePickerState.existing && !_taskCasePickerState.dirty) {
+        return _taskCasePickerState.originalFilter;
+    }
+    const filter = {selection_mode:'nodes'};
+    if (!_taskCasePickerState.all) {
+        filter.module_paths = Array.from(_taskCasePickerState.modules);
+        filter.case_ids = Array.from(_taskCasePickerState.cases);
+        filter.select_none = filter.module_paths.length === 0 && filter.case_ids.length === 0;
+    }
+    const priorities = Array.from(
+        document.querySelectorAll('.tm-prio-cb:checked')).map(cb => cb.value);
+    if (priorities.length) filter.priorities = priorities;
+    return filter;
 }
 
 // ===== 任务 CRUD =====
@@ -2919,12 +3029,13 @@ async function openTaskModal(planId, taskId) {
             task = await API.get(`/test-plans/${planId}/tasks/${taskId}`);
         } catch(e) { showToast('加载任务失败', 'error'); return; }
     }
+    initTaskCasePicker(task);
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
     overlay.style.zIndex = '9999';
     overlay.innerHTML = `
-    <div class="modal" style="max-width:560px;max-height:90vh;overflow-y:auto">
+    <div class="modal" style="max-width:680px;max-height:90vh;overflow-y:auto">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
             <h3 style="margin:0;font-size:1.05rem">${taskId ? '编辑测试任务' : '新建测试任务'}</h3>
             <span style="cursor:pointer;font-size:1.2rem;color:var(--text-muted)" onclick="this.closest('.modal-overlay').remove()">✕</span>
@@ -2991,17 +3102,27 @@ async function openTaskModal(planId, taskId) {
             </div>
         </div>
         <div class="tp-form-group" id="tm-nodes-group" style="display:none">
-            <label>关联目录节点 <span style="color:var(--text-muted);font-size:0.78rem">(不选则全部)</span></label>
-            <div id="tm-nodes-list" style="max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:8px;background:var(--bg-secondary)">
-                <div style="color:var(--text-muted);font-size:0.82rem">请先选择用例库</div>
+            <label>关联用例节点</label>
+            <div class="tp-case-picker-box">
+                <div class="tp-case-picker-head">
+                    <div class="tp-case-picker-summary" id="tm-case-picker-summary">请先选择用例库</div>
+                    <div class="tp-case-picker-actions">
+                        <button type="button" class="btn btn-ghost" onclick="openTaskMindmapPicker()">⛶ 全屏脑图选择</button>
+                    </div>
+                </div>
             </div>
+            ${taskId ? `<div class="tp-sync-actions">
+                <button type="button" class="btn btn-ghost" onclick="previewAndSyncTaskCases(${planId},${taskId})">↻ 同步最新用例库</button>
+                <button type="button" class="btn btn-ghost" id="tm-restore-sync" style="${task.case_sync_backup_available ? '' : 'display:none'}" onclick="restoreTaskCaseSync(${planId},${taskId})">还原同步前数据</button>
+                <span class="tp-sync-note">同步前会显示影响预览，并保留一次还原机会</span>
+            </div>` : ''}
         </div>
         <div class="tp-form-group" id="tm-priority-filter-group" style="display:none">
             <label>优先级筛选</label>
             <div style="display:flex;gap:10px;flex-wrap:wrap">
                 ${['P0','P1','P2','P3'].map(p => `
                     <label style="display:flex;align-items:center;gap:4px;font-size:0.82rem;cursor:pointer">
-                        <input type="checkbox" class="tm-prio-cb" value="${p}"> ${p}
+                        <input type="checkbox" class="tm-prio-cb" value="${p}" onchange="if(_taskCasePickerState)_taskCasePickerState.dirty=true"> ${p}
                     </label>
                 `).join('')}
             </div>
@@ -3035,6 +3156,56 @@ async function openTaskModal(planId, taskId) {
     </div>`;
     document.body.appendChild(overlay);
     overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    (task.case_filter && task.case_filter.priorities || []).forEach(priority => {
+        const cb = overlay.querySelector(`.tm-prio-cb[value="${priority}"]`);
+        if (cb) cb.checked = true;
+    });
+    if (task.library_id) onLibraryChangeForTask(true);
+}
+
+async function previewAndSyncTaskCases(planId, taskId) {
+    if (_taskCasePickerState && _taskCasePickerState.dirty) {
+        showToast('脑图选择有未保存修改，请先保存任务后再同步用例库', 'warning');
+        return;
+    }
+    try {
+        const preview = await API.get(
+            `/test-plans/${planId}/tasks/${taskId}/sync-library-preview`);
+        const warning = [
+            '同步会按用例编号、脑图节点ID、目录路径和标题匹配最新节点。',
+            `当前 ${preview.current_total} 条 → 最新 ${preview.latest_total} 条`,
+            `保留结果 ${preview.preserved} 条；内容变化 ${preview.changed} 条；新增 ${preview.added} 条；移除 ${preview.removed} 条。`,
+            preview.executed_results_affected
+                ? `注意：${preview.executed_results_affected} 条已执行结果对应的用例发生变化或移除。`
+                : '当前已执行结果不会被删除或重置。',
+            '操作前会自动备份，可还原一次。确定继续吗？',
+        ].join('\n');
+        const ok = await customConfirm(warning);
+        if (!ok) return;
+        const result = await API.post(
+            `/test-plans/${planId}/tasks/${taskId}/sync-library`,
+            {confirmed:true});
+        showToast(`同步完成：保留 ${result.preserved}，新增 ${result.added}，移除 ${result.removed}`, 'success');
+        const restore = document.getElementById('tm-restore-sync');
+        if (restore) restore.style.display = '';
+    } catch (e) {
+        showToast('同步失败：' + e.message, 'error');
+    }
+}
+
+async function restoreTaskCaseSync(planId, taskId) {
+    const ok = await customConfirm(
+        '将还原到最近一次同步前的用例关联和执行结果。每次备份只能还原一次，确定继续吗？');
+    if (!ok) return;
+    try {
+        const result = await API.post(
+            `/test-plans/${planId}/tasks/${taskId}/sync-library-restore`, {});
+        showToast(`已还原 ${result.restored_cases} 条任务用例`, 'success');
+        const restore = document.getElementById('tm-restore-sync');
+        if (restore) restore.style.display = 'none';
+    } catch (e) {
+        showToast('还原失败：' + e.message, 'error');
+    }
 }
 
 async function saveTask(planId, taskId) {

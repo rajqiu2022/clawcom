@@ -53,3 +53,31 @@ def test_shift_left_tab_is_feature_gated_and_api_driven():
         "transitionShiftLeftFinding",
     ):
         assert marker in source
+
+
+def test_task_modal_has_fullscreen_mindmap_selection_and_library_sync():
+    source = TEMPLATE.read_text(encoding="utf-8")
+    for marker in (
+        "openTaskMindmapPicker",
+        "tp-mindmap-overlay",
+        "CaseMindmap.render",
+        "selectable: true",
+        "同步最新用例库",
+        "sync-library-preview",
+        "sync-library-restore",
+        "还原同步前数据",
+    ):
+        assert marker in source
+
+
+def test_shared_mindmap_renderer_supports_checkbox_selection():
+    source = (
+        TEMPLATE.parents[1] / "static" / "js" / "case_mindmap.js"
+    ).read_text(encoding="utf-8")
+    for marker in (
+        "options.selectable",
+        "data-select=\"1\"",
+        "onSelectionChange",
+        "cmm-check",
+    ):
+        assert marker in source

@@ -31,6 +31,14 @@ from app.services.tapd_bug_case_link import (
     parse_tapd_bug_url,
     sync_task_case_bug_link,
 )
+from app.services.test_task_case_sync import (
+    apply_sync as apply_task_case_sync,
+    build_sync_plan as build_task_case_sync_plan,
+    case_snapshot as build_task_case_source_snapshot,
+    enrich_case_filter,
+    restore_backup as restore_task_case_backup,
+    select_library_cases,
+)
 
 
 def _get_current_user():
@@ -1097,6 +1105,8 @@ def create_test_task(plan_id):
         except (ValueError, TypeError):
             pass
 
+    normalized_case_filter = enrich_case_filter(
+        data.get('library_id'), data.get('case_filter'))
     task = TestTask(
         plan_id=plan_id,
         name=data['name'],
@@ -1108,7 +1118,7 @@ def create_test_task(plan_id):
         end_date=end_date,
         priority=data.get('priority', 'P2'),
         library_id=data.get('library_id'),
-        case_filter=data.get('case_filter'),
+        case_filter=normalized_case_filter,
         status=data.get('status', 'assigned'),
         created_by=created_by,
     )
@@ -1124,39 +1134,13 @@ def create_test_task(plan_id):
 
     # 如果关联了用例库，根据 case_filter 筛选用例导入到 task_cases
     if task.library_id:
-        query = TestCase.query.filter_by(
-            library_id=task.library_id
-        ).filter(TestCase.is_placeholder != True)
-
-        cf = task.case_filter or {}
-        module_paths = cf.get('module_paths', [])
-        priorities = cf.get('priorities', [])
-        case_ids = cf.get('case_ids', [])
-        types = cf.get('types', [])
-
-        if module_paths:
-            # 支持节点前缀匹配：module_path 以指定路径开头
-            import_or_filters = []
-            for mp in module_paths:
-                import_or_filters.append(TestCase.module_path == mp)
-                import_or_filters.append(TestCase.module_path.like(mp + '/%'))
-            query = query.filter(db.or_(*import_or_filters))
-
-        if priorities:
-            query = query.filter(TestCase.priority.in_(priorities))
-
-        if case_ids:
-            query = query.filter(TestCase.id.in_(case_ids))
-
-        if types:
-            query = query.filter(TestCase.type.in_(types))
-
-        cases = query.all()
+        cases = select_library_cases(task.library_id, task.case_filter)
         for case in cases:
             tc = TestTaskCase(
                 task_id=task.id,
                 case_id=case.id,
                 status='pending',
+                case_source_snapshot=build_task_case_source_snapshot(case),
             )
             db.session.add(tc)
         task.total_cases = len(cases)
@@ -1180,8 +1164,11 @@ def update_test_task(plan_id, task_id):
     task = TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
     data = request.get_json()
 
+    old_library_id = task.library_id
+    old_case_filter = json.dumps(
+        task.case_filter or {}, ensure_ascii=False, sort_keys=True)
     updatable_fields = ['name', 'description', 'task_type',
-                        'priority', 'library_id', 'status', 'progress',
+                        'priority', 'status', 'progress',
                         'result_summary', 'bug_count']
     old_status = task.status
     for field in updatable_fields:
@@ -1225,20 +1212,19 @@ def update_test_task(plan_id, task_id):
         task.tapd_bug_ids = data['tapd_bug_ids']
         task.bug_count = len(data['tapd_bug_ids']) if data['tapd_bug_ids'] else 0
 
-    # 如果关联了新用例库，重新导入
-    if 'library_id' in data and data['library_id'] != task.library_id:
-        # 清除旧关联
-        TestTaskCase.query.filter_by(task_id=task.id).delete()
-        if data['library_id']:
-            cases = TestCase.query.filter_by(
-                library_id=data['library_id']
-            ).filter(TestCase.is_placeholder != True).all()
-            for case in cases:
-                tc = TestTaskCase(task_id=task.id, case_id=case.id, status='pending')
-                db.session.add(tc)
-            task.total_cases = len(cases)
-        else:
-            task.total_cases = 0
+    if 'library_id' in data or 'case_filter' in data:
+        task.library_id = data.get('library_id', task.library_id)
+        task.case_filter = enrich_case_filter(
+            task.library_id, data.get('case_filter', task.case_filter))
+        new_case_filter = json.dumps(
+            task.case_filter or {}, ensure_ascii=False, sort_keys=True)
+        if (task.library_id != old_library_id
+                or new_case_filter != old_case_filter):
+            apply_task_case_sync(task, TestPlan.query.get(plan_id))
+            backup = dict(task.case_sync_backup_json or {})
+            backup['library_id'] = old_library_id
+            backup['case_filter'] = json.loads(old_case_filter)
+            task.case_sync_backup_json = backup
 
     # 重算用例统计
     _recalc_task_case_stats(task)
@@ -1248,7 +1234,97 @@ def update_test_task(plan_id, task_id):
         _recalc_plan_stats(plan)
 
     db.session.commit()
-    return jsonify(task.to_dict())
+    return jsonify(task.to_dict(with_cases=True))
+
+
+def _task_case_sync_payload(task, sync_plan):
+    payload = dict(sync_plan['summary'])
+    payload.update({
+        'task_id': task.id,
+        'library_id': task.library_id,
+        'library_name': task.library.name if task.library else '',
+        'backup_available': bool(
+            task.case_sync_backup_json
+            and not task.case_sync_backup_restored_at),
+        'samples': {
+            'added': [case.title for case in sync_plan['added'][:8]],
+            'removed': [((row.case.title if row.case else '')
+                         or ('用例#%s' % row.case_id))
+                        for row in sync_plan['removed'][:8]],
+            'changed': [item['case'].title for item in sync_plan['matches']
+                        if item['changed']][:8],
+        },
+    })
+    return payload
+
+
+@api_bp.route(
+    '/test-plans/<int:plan_id>/tasks/<int:task_id>/sync-library-preview',
+    methods=['GET'])
+def preview_test_task_library_sync(plan_id, task_id):
+    """Preview latest-library reconciliation without changing task data."""
+    task = TestTask.query.filter_by(
+        plan_id=plan_id, id=task_id).first_or_404()
+    if not task.library_id:
+        return jsonify({'error': '任务未关联用例库'}), 400
+    return jsonify(_task_case_sync_payload(
+        task, build_task_case_sync_plan(task)))
+
+
+@api_bp.route(
+    '/test-plans/<int:plan_id>/tasks/<int:task_id>/sync-library',
+    methods=['POST'])
+def sync_test_task_library(plan_id, task_id):
+    """Backup and reconcile task cases with the latest library content."""
+    task = TestTask.query.filter_by(
+        plan_id=plan_id, id=task_id).first_or_404()
+    data = request.get_json(silent=True) or {}
+    if data.get('confirmed') is not True:
+        return jsonify({
+            'error': '同步前必须确认可能影响已执行用例结果',
+            'code': 'TASK_CASE_SYNC_CONFIRMATION_REQUIRED',
+        }), 409
+    if not task.library_id:
+        return jsonify({'error': '任务未关联用例库'}), 400
+    plan = TestPlan.query.get(plan_id)
+    sync_plan = apply_task_case_sync(task, plan)
+    _recalc_task_case_stats(task)
+    if plan:
+        _recalc_plan_stats(plan)
+    db.session.commit()
+    payload = _task_case_sync_payload(task, sync_plan)
+    payload.update({
+        'message': '已同步最新用例库，并保存同步前备份',
+        'backup_available': True,
+        'backup_created_at': str(task.case_sync_backup_created_at),
+    })
+    return jsonify(payload)
+
+
+@api_bp.route(
+    '/test-plans/<int:plan_id>/tasks/<int:task_id>/sync-library-restore',
+    methods=['POST'])
+def restore_test_task_library_sync(plan_id, task_id):
+    """Use the single restore opportunity created by the latest sync."""
+    task = TestTask.query.filter_by(
+        plan_id=plan_id, id=task_id).first_or_404()
+    try:
+        result = restore_task_case_backup(task)
+        _recalc_task_case_stats(task)
+        plan = TestPlan.query.get(plan_id)
+        if plan:
+            _recalc_plan_stats(plan)
+        db.session.commit()
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify({
+            'error': str(exc),
+            'code': 'TASK_CASE_SYNC_RESTORE_UNAVAILABLE',
+        }), 409
+    return jsonify(dict({
+        'message': '已还原到最近一次同步前的数据；本次还原机会已使用',
+        'backup_available': False,
+    }, **result))
 
 
 @api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>', methods=['DELETE'])
@@ -1387,39 +1463,8 @@ def add_cases_to_task(plan_id, task_id):
 
     # 方式2：从用例库筛选
     if library_id and not case_ids:
-        query = TestCase.query.filter_by(library_id=library_id).filter(
-            TestCase.is_placeholder != True
-        )
-        module_paths = case_filter.get('module_paths', [])
-        priorities = case_filter.get('priorities', [])
-        types = case_filter.get('types', [])
-        tags = case_filter.get('tags', [])
-        filter_case_ids = case_filter.get('case_ids', [])
-
-        if module_paths:
-            or_filters = []
-            for mp in module_paths:
-                or_filters.append(TestCase.module_path == mp)
-                or_filters.append(TestCase.module_path.like(mp + '/%'))
-            query = query.filter(db.or_(*or_filters))
-
-        if priorities:
-            query = query.filter(TestCase.priority.in_(priorities))
-
-        if filter_case_ids:
-            query = query.filter(TestCase.id.in_(filter_case_ids))
-
-        if types:
-            query = query.filter(TestCase.type.in_(types))
-
-        if tags:
-            # tags 存储在 JSON 字段中，用 LIKE 模糊匹配
-            tag_filters = []
-            for tag in tags:
-                tag_filters.append(TestCase.tags.like(f'%"{tag}"%'))
-            query = query.filter(db.or_(*tag_filters))
-
-        cases = query.all()
+        case_filter = enrich_case_filter(library_id, case_filter)
+        cases = select_library_cases(library_id, case_filter)
         case_ids = [c.id for c in cases]
 
     if not case_ids:
@@ -1437,11 +1482,17 @@ def add_cases_to_task(plan_id, task_id):
 
     added = 0
     skipped = 0
+    case_rows = {case.id: case for case in TestCase.query.filter(
+        TestCase.id.in_(case_ids)).all()}
     for cid in case_ids:
         if cid in existing_ids:
             skipped += 1
             continue
-        tc = TestTaskCase(task_id=task.id, case_id=cid, status='pending')
+        tc = TestTaskCase(
+            task_id=task.id, case_id=cid, status='pending',
+            case_source_snapshot=(
+                build_task_case_source_snapshot(case_rows[cid])
+                if cid in case_rows else None))
         db.session.add(tc)
         existing_ids.add(cid)
         added += 1
@@ -1450,7 +1501,7 @@ def add_cases_to_task(plan_id, task_id):
     if library_id:
         task.library_id = library_id
         if case_filter:
-            task.case_filter = case_filter
+            task.case_filter = enrich_case_filter(library_id, case_filter)
 
     _recalc_task_case_stats(task)
     plan = TestPlan.query.get(plan_id)
