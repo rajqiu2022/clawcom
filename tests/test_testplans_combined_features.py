@@ -70,6 +70,8 @@ def test_task_modal_has_fullscreen_mindmap_selection_and_library_sync():
         "覆盖用例总数",
         "选中节点",
         "compactTaskModulePaths",
+        "select_all",
+        "覆盖用例总数 <strong>0</strong>",
     ):
         assert marker in source
 

@@ -563,6 +563,7 @@
 .tp-case-picker-label { color:var(--text-muted); flex:0 0 auto; }
 .tp-case-picker-chip { display:inline-flex; align-items:center; max-width:190px; padding:2px 7px; border:1px solid var(--border); border-radius:5px; background:var(--bg-card); color:var(--text-secondary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tp-case-picker-more { color:var(--accent); font-weight:600; }
+.tp-case-picker-empty { color:var(--text-muted); }
 .tp-case-picker-note { margin-top:4px; color:var(--text-muted); font-size:.72rem; }
 .tp-case-picker-actions { display:flex; gap:7px; flex:0 0 auto; }
 .tp-mindmap-overlay { position:fixed; inset:0; z-index:12000; background:rgba(8,10,13,.92); padding:18px; }
@@ -2888,10 +2889,10 @@ function initTaskCasePicker(task) {
     const caseRefs = new Map((filter.selected_case_refs || []).map(ref => [
         Number(ref.source_case_id), ref,
     ]));
-    const explicitlyNone = !!filter.select_none;
     _taskCasePickerState = {
         libraryId: task && task.library_id ? String(task.library_id) : '',
-        all: !explicitlyNone && modules.size === 0 && cases.size === 0,
+        // 空选择就是 0 条；只有用户主动勾选根节点时才代表整个用例库。
+        all: filter.select_all === true,
         modules, cases, caseRefs, dirty: false, view: null,
         existing: !!(task && task.id),
         originalFilter: task && task.case_filter ? JSON.parse(JSON.stringify(task.case_filter)) : null,
@@ -2979,7 +2980,13 @@ function taskCasePickerSummary(data) {
 
 function renderTaskCasePickerSummary(host, summary) {
     if (!summary.nodeCount) {
-        host.innerHTML = '<strong style="color:var(--red)">尚未选择任何用例</strong><br>可进入全屏脑图勾选';
+        host.innerHTML = `
+            <div class="tp-case-picker-total">覆盖用例总数 <strong>0</strong> 条</div>
+            <div class="tp-case-picker-nodes">
+                <span class="tp-case-picker-label">选中节点</span>
+                <span class="tp-case-picker-empty">未选择</span>
+            </div>
+            <div class="tp-case-picker-note">进入全屏脑图勾选目录或用例</div>`;
         return;
     }
     const shown = summary.names.slice(0, 5).map(item => {
@@ -3027,7 +3034,7 @@ async function onLibraryChangeForTask(keepSelection = false) {
     if (!_taskCasePickerState) initTaskCasePicker({library_id:libId});
     if (!keepSelection && _taskCasePickerState.libraryId !== String(libId)) {
         _taskCasePickerState.libraryId = String(libId);
-        _taskCasePickerState.all = true;
+        _taskCasePickerState.all = false;
         _taskCasePickerState.modules.clear();
         _taskCasePickerState.cases.clear();
         _taskCasePickerState.caseRefs.clear();
@@ -3111,11 +3118,20 @@ async function openTaskMindmapPicker() {
 function getTaskCaseFilter() {
     const libId = document.getElementById('tm-lib').value;
     if (!libId || !_taskCasePickerState) return null;
-    if (_taskCasePickerState.existing && !_taskCasePickerState.dirty) {
+    const original = _taskCasePickerState.originalFilter || {};
+    const originalHasExplicitSelection = original.select_all === true
+        || original.select_none === true
+        || (original.module_paths || []).length > 0
+        || (original.case_ids || []).length > 0
+        || (original.selected_case_refs || []).length > 0;
+    if (_taskCasePickerState.existing && !_taskCasePickerState.dirty
+        && originalHasExplicitSelection) {
         return _taskCasePickerState.originalFilter;
     }
     const filter = {selection_mode:'nodes'};
-    if (!_taskCasePickerState.all) {
+    if (_taskCasePickerState.all) {
+        filter.select_all = true;
+    } else {
         filter.module_paths = Array.from(_taskCasePickerState.modules);
         filter.case_ids = Array.from(_taskCasePickerState.cases);
         filter.select_none = filter.module_paths.length === 0 && filter.case_ids.length === 0;

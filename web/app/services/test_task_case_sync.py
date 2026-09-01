@@ -130,6 +130,10 @@ def select_library_cases(library_id, raw_filter):
     if not library_id:
         return []
     case_filter = raw_filter or {}
+    # 关联了用例库不等于选择整个库。空筛选必须是 0 条，只有显式
+    # select_all 才允许把全库导入任务，避免新建/同步时意外扩张范围。
+    if not case_filter:
+        return []
     query = TestCase.query.filter(
         TestCase.library_id == int(library_id),
         TestCase.is_placeholder != True,  # noqa: E712
@@ -152,8 +156,10 @@ def select_library_cases(library_id, raw_filter):
     if case_filter.get('selection_mode') == 'nodes':
         if case_filter.get('select_none') is True:
             return []
-        if not module_paths and not case_ids and not references:
+        if case_filter.get('select_all') is True:
             return candidates
+        if not module_paths and not case_ids and not references:
+            return []
         return [case for case in candidates if (
             (module_paths and _matches_module(case, module_paths))
             or case.id in case_ids or case.id in reference_ids)]

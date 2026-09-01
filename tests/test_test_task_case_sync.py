@@ -91,13 +91,27 @@ class TestTaskCaseSyncTest(unittest.TestCase):
         })
         self.assertEqual({a.id, b.id}, {row.id for row in selected})
 
+    def test_empty_selection_is_zero_and_all_requires_explicit_flag(self):
+        a = self._case('A', '登录', '主流程')
+        b = self._case('B', '排行榜', '玩法')
+        self.assertEqual([], select_library_cases(self.library.id, None))
+        self.assertEqual([], select_library_cases(self.library.id, {
+            'selection_mode': 'nodes',
+        }))
+        selected = select_library_cases(self.library.id, {
+            'selection_mode': 'nodes',
+            'select_all': True,
+        })
+        self.assertEqual({a.id, b.id}, {row.id for row in selected})
+
     def test_sync_preserves_matches_backs_up_and_restores_once(self):
         a = self._case('A', '登录', '主流程', {'steps': ['old']})
         b = self._case('B', '排行榜', '玩法')
         removed = self._case('X', '旧活动', '活动')
         task = TestTask(
             plan_id=self.plan.id, name='任务', library_id=self.library.id,
-            case_filter={'selection_mode': 'nodes'}, status='in_progress')
+            case_filter={'selection_mode': 'nodes', 'select_all': True},
+            status='in_progress')
         db.session.add(task)
         db.session.flush()
         for case, status in ((a, 'passed'), (b, 'blocked'), (removed, 'failed')):
