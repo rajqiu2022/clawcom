@@ -77,6 +77,14 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
         ):
             self.assertIn(marker, text)
 
+    def test_vditor_uses_hub_surface_colors(self):
+        text = (ROOT / 'web' / 'templates' / 'knowledge.html').read_text(
+            encoding='utf-8')
+        self.assertIn('.vditor--dark .vditor-content', text)
+        self.assertIn('background:var(--bg-card) !important', text)
+        self.assertIn('background:var(--bg-secondary) !important', text)
+        self.assertNotIn('background: #1a1b2e !important', text)
+
 
 if __name__ == '__main__':
     unittest.main()

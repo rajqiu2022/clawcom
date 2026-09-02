@@ -8,19 +8,28 @@
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700&display=swap');
 
-/* Vditor 暗色主题修正 */
-.vditor { border: 1px solid var(--border) !important; border-radius: 8px !important; }
+/* Vditor 跟随 Hub 当前主题，不使用组件自带的蓝黑底色 */
+.vditor { border: 1px solid var(--border) !important; border-radius: 8px !important; background:var(--bg-card) !important; color:var(--text-primary) !important; }
 .vditor--dark .vditor-ir .vditor-reset,
 .vditor--dark .vditor-sv,
-.vditor--dark .vditor-reset { color: #e2e8f0 !important; font-size: 0.92rem !important; line-height: 1.7 !important; }
-.vditor--dark { background: #1a1b2e !important; }
-.vditor--dark .vditor-toolbar { background: #1e1f33 !important; border-bottom: 1px solid var(--border) !important; }
-.vditor--dark .vditor-toolbar button { color: #94a3b8 !important; }
-.vditor--dark .vditor-toolbar button:hover { color: #e2e8f0 !important; }
-.vditor--dark .vditor-ir pre.vditor-reset { background: #1a1b2e !important; }
-.vditor--dark .vditor-reset code { background: #2a2b3e !important; color: #a5b4fc !important; }
+.vditor--dark .vditor-reset { color:var(--text-primary) !important; font-size:0.92rem !important; line-height:1.7 !important; }
+.vditor--dark,
+.vditor--dark .vditor-content,
+.vditor--dark .vditor-ir,
+.vditor--dark .vditor-ir .vditor-reset,
+.vditor--dark .vditor-ir pre.vditor-reset,
+.vditor--dark .vditor-sv,
+.vditor--dark .vditor-wysiwyg,
+.vditor--dark .vditor-preview,
+.vditor--dark .vditor-preview__action { background:var(--bg-card) !important; color:var(--text-primary) !important; }
+.vditor--dark .vditor-toolbar { background:var(--bg-secondary) !important; border-bottom:1px solid var(--border) !important; }
+.vditor--dark .vditor-toolbar button { color:var(--text-secondary) !important; }
+.vditor--dark .vditor-toolbar button:hover { color:var(--text-primary) !important; background:var(--bg-hover) !important; }
+.vditor--dark .vditor-reset code { background:var(--bg-secondary) !important; color:var(--accent) !important; }
 .vditor--dark .vditor-reset blockquote { border-left-color: var(--accent) !important; }
 .vditor--dark .vditor-ir .vditor-reset a { color: var(--accent) !important; }
+.vditor--dark .vditor-counter,
+.vditor--dark .vditor-resize { background:var(--bg-secondary) !important; color:var(--text-muted) !important; border-color:var(--border) !important; }
 
 /* ===== 知识卡片网格 ===== */
 .knowledge-grid {
