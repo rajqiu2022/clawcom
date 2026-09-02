@@ -76,6 +76,9 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
             '关联测试迭代', '选择所属模块',
             'copyJournalPageLink', 'applyJournalDeepLink',
             '/knowledge/wiki/',
+            'data-journal-status="normal"', 'data-journal-status="archived"',
+            'archiveJournalPage', 'restoreJournalPage',
+            'permanentlyDeleteJournalPage',
         ):
             self.assertIn(marker, text)
 
@@ -91,6 +94,14 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
         text = (ROOT / 'web' / 'app' / 'views' / '__init__.py').read_text(
             encoding='utf-8')
         self.assertIn("@views_bp.route('/knowledge/wiki/<int:page_id>')", text)
+
+    def test_permanent_delete_requires_two_ui_confirmations(self):
+        text = (ROOT / 'web' / 'templates' / 'knowledge.html').read_text(
+            encoding='utf-8')
+        start = text.index('async function permanentlyDeleteJournalPage()')
+        end = text.index('\nasync function ', start + 20)
+        function = text[start:end]
+        self.assertEqual(function.count('await customConfirm('), 2)
 
 
 if __name__ == '__main__':

@@ -145,6 +145,26 @@ Idempotency-Key: journal-rollback:<page_id>:<target>:<stable-key>
 
 回退不会删除历史，而是创建 Revision 6。纪要不允许匿名分享或物理删除；不要调用普通知识的 share/delete API。
 
+### 页面状态、归档与永久删除
+
+页面 `journal_status` 为 `normal` 或 `archived`。归档后仍可读取、比较和恢复，但不能编辑或回退：
+
+```text
+POST /api/v1/knowledge/{page_id}/archive
+POST /api/v1/knowledge/{page_id}/restore
+```
+
+永久删除会同时删除页面正文和全部 Revision，不可恢复。只有用户明确要求永久删除时才能调用，并必须提交确认字段：
+
+```http
+DELETE /api/v1/knowledge/{page_id}/permanent
+Content-Type: application/json
+
+{"confirmed": true}
+```
+
+不要把归档误当删除；通常优先归档。永久删除后应 GET 页面确认返回 404。
+
 ### Wiki 直达链接
 
 页面稳定链接为：

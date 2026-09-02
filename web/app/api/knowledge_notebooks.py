@@ -19,10 +19,13 @@ from app.models import (
     AuditLog,
     KnowledgeEntry,
     KnowledgeEntryRevision,
+    KnowledgeDistribution,
+    KnowledgeFavorite,
     KnowledgeNotebook,
     OpenClawInstance,
     Project,
     TestIteration,
+    Topic,
 )
 
 
@@ -387,7 +390,7 @@ def get_knowledge_journal_page(page_id):
     if not page:
         return _error('PAGE_NOT_FOUND', '纪要页面不存在或无权访问', 404)
     payload = page.to_dict()
-    payload['can_edit'] = True
+    payload['can_edit'] = not bool(page.archived_at)
     return jsonify(payload)
 
 
@@ -427,6 +430,9 @@ def create_knowledge_revision(page_id):
     page = _journal_page(page_id, actor, lock=True)
     if not page:
         return _error('PAGE_NOT_FOUND', '纪要页面不存在或无权访问', 404)
+    if page.archived_at:
+        return _error(
+            'JOURNAL_PAGE_ARCHIVED', '页面已归档，请恢复后再编辑', 409)
     data = request.get_json() or {}
     title = str(data.get('title') or page.title or '').strip()[:255]
     content = str(data.get('content') if data.get('content') is not None
@@ -500,6 +506,9 @@ def rollback_knowledge_revision(page_id):
     page = _journal_page(page_id, actor, lock=True)
     if not page:
         return _error('PAGE_NOT_FOUND', '纪要页面不存在或无权访问', 404)
+    if page.archived_at:
+        return _error(
+            'JOURNAL_PAGE_ARCHIVED', '页面已归档，请恢复后再回退', 409)
     data = request.get_json() or {}
     try:
         target_no = int(data.get('target_revision') or 0)
@@ -525,3 +534,65 @@ def rollback_knowledge_revision(page_id):
         'page': page.to_dict(),
         'revision': revision.to_dict(with_content=True),
     }), 201
+
+
+@api_bp.route('/knowledge/<int:page_id>/archive', methods=['POST'])
+def archive_knowledge_journal_page(page_id):
+    actor = _actor()
+    page = _journal_page(page_id, actor, lock=True)
+    if not page:
+        return _error('PAGE_NOT_FOUND', '纪要页面不存在或无权访问', 404)
+    if page.archived_at:
+        return jsonify(page.to_dict())
+    page.archived_at = datetime.now()
+    page.lock_version = int(page.lock_version or 0) + 1
+    _audit('archive', page.id, page.title, actor, {
+        'notebook_id': page.notebook_id,
+        'current_revision': page.current_revision})
+    db.session.commit()
+    return jsonify(page.to_dict())
+
+
+@api_bp.route('/knowledge/<int:page_id>/restore', methods=['POST'])
+def restore_knowledge_journal_page(page_id):
+    actor = _actor()
+    page = _journal_page(page_id, actor, lock=True)
+    if not page:
+        return _error('PAGE_NOT_FOUND', '纪要页面不存在或无权访问', 404)
+    if not page.archived_at:
+        return jsonify(page.to_dict())
+    page.archived_at = None
+    page.lock_version = int(page.lock_version or 0) + 1
+    _audit('restore', page.id, page.title, actor, {
+        'notebook_id': page.notebook_id,
+        'current_revision': page.current_revision})
+    db.session.commit()
+    return jsonify(page.to_dict())
+
+
+@api_bp.route('/knowledge/<int:page_id>/permanent', methods=['DELETE'])
+def permanently_delete_knowledge_journal_page(page_id):
+    actor = _actor()
+    page = _journal_page(page_id, actor, lock=True)
+    if not page:
+        return _error('PAGE_NOT_FOUND', '纪要页面不存在或无权访问', 404)
+    data = request.get_json(silent=True) or {}
+    if data.get('confirmed') is not True:
+        return _error(
+            'PERMANENT_DELETE_CONFIRMATION_REQUIRED',
+            '永久删除必须显式提交 confirmed=true', 400)
+    page_info = {
+        'page_id': page.id, 'title': page.title,
+        'notebook_id': page.notebook_id,
+        'revision_count': len(page.revisions),
+    }
+    Topic.query.filter_by(review_knowledge_id=page.id).update(
+        {'review_knowledge_id': None})
+    KnowledgeDistribution.query.filter_by(
+        knowledge_id=page.id).delete(synchronize_session=False)
+    KnowledgeFavorite.query.filter_by(
+        knowledge_id=page.id).delete(synchronize_session=False)
+    _audit('permanent_delete', page.id, page.title, actor, page_info)
+    db.session.delete(page)
+    db.session.commit()
+    return jsonify(dict({'deleted': True}, **page_info))

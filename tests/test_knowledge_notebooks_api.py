@@ -249,6 +249,48 @@ class KnowledgeNotebooksApiTest(unittest.TestCase):
             normalize_journal_markdown_media(
                 '![截图](output/journal_attachments/screenshot.png)')
 
+    def test_archive_restore_and_permanent_delete_lifecycle(self):
+        notebook_id, page_id = self._create_notebook_and_page()
+        archived = self.client.post(
+            f'/api/v1/knowledge/{page_id}/archive')
+        self.assertEqual(archived.status_code, 200)
+        self.assertEqual(archived.get_json()['journal_status'], 'archived')
+        self.assertTrue(archived.get_json()['archived_at'])
+        detail = self.client.get(
+            f'/api/v1/knowledge/journal-pages/{page_id}').get_json()
+        self.assertFalse(detail['can_edit'])
+
+        blocked_edit = self.client.post(
+            f'/api/v1/knowledge/{page_id}/revisions', json={
+                'expected_revision': 1, 'title': '归档后编辑',
+                'content': '不应保存',
+            }, headers={'Idempotency-Key': 'archived-edit'})
+        self.assertEqual(blocked_edit.status_code, 409)
+        self.assertEqual(blocked_edit.get_json()['code'],
+                         'JOURNAL_PAGE_ARCHIVED')
+
+        restored = self.client.post(
+            f'/api/v1/knowledge/{page_id}/restore')
+        self.assertEqual(restored.status_code, 200)
+        self.assertEqual(restored.get_json()['journal_status'], 'normal')
+        self.assertIsNone(restored.get_json()['archived_at'])
+
+        missing_confirmation = self.client.delete(
+            f'/api/v1/knowledge/{page_id}/permanent', json={})
+        self.assertEqual(missing_confirmation.status_code, 400)
+        self.assertEqual(missing_confirmation.get_json()['code'],
+                         'PERMANENT_DELETE_CONFIRMATION_REQUIRED')
+
+        deleted = self.client.delete(
+            f'/api/v1/knowledge/{page_id}/permanent',
+            json={'confirmed': True})
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(deleted.get_json()['deleted'])
+        self.assertEqual(deleted.get_json()['notebook_id'], notebook_id)
+        self.assertIsNone(db.session.get(KnowledgeEntry, page_id))
+        self.assertEqual(KnowledgeEntryRevision.query.filter_by(
+            knowledge_id=page_id).count(), 0)
+
 
 if __name__ == '__main__':
     unittest.main()

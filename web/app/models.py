@@ -732,6 +732,7 @@ class KnowledgeEntry(db.Model):
             'current_revision': int(self.current_revision or 0),
             'lock_version': int(self.lock_version or 0),
             'archived_at': str(self.archived_at) if self.archived_at else None,
+            'journal_status': 'archived' if self.archived_at else 'normal',
             'source_openclaw_id': self.source_openclaw_id,
             'source_openclaw_name': (self.source_openclaw.name
                                      if self.source_openclaw else None),

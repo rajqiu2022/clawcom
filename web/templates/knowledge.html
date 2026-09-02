@@ -218,6 +218,10 @@
 .kn-wiki-history { border-left:1px solid var(--border); }
 .kn-wiki-pane-head { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:48px; padding:10px 12px; border-bottom:1px solid var(--border); }
 .kn-wiki-pane-head strong { font-size:.83rem; letter-spacing:.04em; }
+.kn-wiki-state-tabs { display:grid; grid-template-columns:1fr 1fr; gap:5px; padding:8px 10px; border-bottom:1px solid var(--border); }
+.kn-wiki-state-tab { padding:6px 8px; border:1px solid transparent; border-radius:6px; background:transparent; color:var(--text-muted); cursor:pointer; font-size:.76rem; }
+.kn-wiki-state-tab:hover { color:var(--text-primary); background:var(--bg-hover); }
+.kn-wiki-state-tab.active { color:var(--accent); border-color:var(--accent); background:var(--accent-dim); font-weight:700; }
 .kn-wiki-notebook { padding:10px 12px; border-bottom:1px solid var(--border); cursor:pointer; }
 .kn-wiki-notebook:hover,.kn-wiki-notebook.active { background:var(--bg-hover); box-shadow:inset 3px 0 0 var(--accent); }
 .kn-wiki-notebook small { display:block; margin-top:3px; color:var(--text-muted); }
@@ -272,6 +276,7 @@
         <aside class="kn-wiki-side">
             <div class="kn-wiki-pane-head"><strong>纪要本与模块</strong><button class="btn btn-sm btn-primary" onclick="createJournalNotebook()">＋纪要本</button></div>
             <div id="journal-notebook-list"></div>
+            <div class="kn-wiki-state-tabs"><button class="kn-wiki-state-tab active" data-journal-status="normal" onclick="setJournalPageStatus('normal')">正常</button><button class="kn-wiki-state-tab" data-journal-status="archived" onclick="setJournalPageStatus('archived')">归档</button></div>
             <div id="journal-module-tree"></div>
         </aside>
         <section class="kn-wiki-main">
@@ -282,6 +287,9 @@
                     <button class="btn btn-sm btn-ghost" id="journal-copy-link" onclick="copyJournalPageLink()" style="display:none">复制页面链接</button>
                     <button class="btn btn-sm btn-ghost" id="journal-compare" onclick="compareJournalRevisions()" style="display:none">版本对比</button>
                     <button class="btn btn-sm btn-primary" id="journal-edit" onclick="editJournalPage()" style="display:none">编辑</button>
+                    <button class="btn btn-sm btn-ghost" id="journal-archive" onclick="archiveJournalPage()" style="display:none">归档</button>
+                    <button class="btn btn-sm btn-success" id="journal-restore" onclick="restoreJournalPage()" style="display:none">恢复</button>
+                    <button class="btn btn-sm btn-danger" id="journal-delete" onclick="permanentlyDeleteJournalPage()" style="display:none">删除</button>
                 </div>
             </div>
             <div class="kn-wiki-body" id="journal-page-view"><div class="kn-wiki-empty"><div><div style="font-size:2.2rem;margin-bottom:10px">▤</div>选择纪要本和模块页面，或新建第一个页面</div></div></div>
@@ -981,6 +989,7 @@ let journalPage = null;
 let journalRevisions = [];
 let journalVditor = null;
 let journalSuppressUrl = false;
+let journalPageStatus = 'normal';
 
 function journalProjectId() {
     const option = $('#filter-project').selectedOptions[0];
@@ -994,6 +1003,9 @@ function journalEmpty(message) {
     $('#journal-edit').style.display = 'none';
     $('#journal-compare').style.display = 'none';
     $('#journal-copy-link').style.display = 'none';
+    $('#journal-archive').style.display = 'none';
+    $('#journal-restore').style.display = 'none';
+    $('#journal-delete').style.display = 'none';
     $('#journal-revision-list').innerHTML = '';
     $('#journal-revision-count').textContent = '';
 }
@@ -1012,7 +1024,7 @@ async function loadJournalNotebooks() {
         const result = await API.listKnowledgeNotebooks(projectId);
         journalNotebooks = result.items || [];
         $('#journal-notebook-list').innerHTML = journalNotebooks.length
-            ? journalNotebooks.map(row => `<div class="kn-wiki-notebook ${journalNotebook && journalNotebook.id===row.id?'active':''}" onclick="selectJournalNotebook(${row.id})"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.version_name || '未标注版本')} · ${row.pages.length} 页 · r${row.version}</small></div>`).join('')
+            ? journalNotebooks.map(row => { const archived=(row.pages||[]).filter(page=>page.archived_at).length; return `<div class="kn-wiki-notebook ${journalNotebook && journalNotebook.id===row.id?'active':''}" onclick="selectJournalNotebook(${row.id})"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.version_name || '未标注版本')} · 正常 ${row.pages.length-archived} · 归档 ${archived} · r${row.version}</small></div>`; }).join('')
             : '<div style="padding:14px;color:var(--text-muted);font-size:.8rem">当前项目还没有版本纪要本</div>';
         if (!journalNotebooks.length) {
             journalNotebook = null; journalPage = null;
@@ -1033,11 +1045,16 @@ async function selectJournalNotebook(id, skipReloadList=false) {
             $$('.kn-wiki-notebook').forEach(el => el.classList.remove('active'));
             loadJournalNotebooks();
         }
-        $('#journal-add-page').style.display = '';
+        $('#journal-add-page').style.display = journalPageStatus === 'normal' ? '' : 'none';
         renderJournalModuleTree();
-        const pages = journalNotebook.pages || [];
+        const pages = journalPagesForCurrentStatus();
         if (pages.length) await openJournalPage(pages[0].id);
-        else { journalPage = null; journalEmpty('该纪要本尚无页面，点击“＋页面”开始记录'); $('#journal-add-page').style.display=''; }
+        else {
+            journalPage = null;
+            journalEmpty(journalPageStatus === 'archived'
+                ? '暂无归档页面' : '该纪要本尚无正常页面，点击“＋页面”开始记录');
+            $('#journal-add-page').style.display = journalPageStatus === 'normal' ? '' : 'none';
+        }
     } catch (err) { showToast('纪要本加载失败: ' + err.message, 'error'); }
 }
 
@@ -1045,10 +1062,29 @@ function renderJournalModuleTree() {
     if (!journalNotebook) return;
     const pages = journalNotebook.pages || [];
     $('#journal-module-tree').innerHTML = (journalNotebook.modules || []).map(moduleName => {
-        const rows = pages.filter(page => page.module_name === moduleName && !page.archived_at);
+        const rows = pages.filter(page => page.module_name === moduleName &&
+            (journalPageStatus === 'archived' ? !!page.archived_at : !page.archived_at));
         return `<div class="kn-wiki-module">${escapeHtml(moduleName)} · ${rows.length}</div>` +
             (rows.length ? rows.map(page => `<div class="kn-wiki-page-link ${journalPage&&journalPage.id===page.id?'active':''}" onclick="openJournalPage(${page.id})"><span>›</span><span>${escapeHtml(page.title)}</span></div>`).join('') : '<div style="padding:3px 20px 8px;color:var(--text-muted);font-size:.72rem">暂无页面</div>');
     }).join('');
+}
+
+function journalPagesForCurrentStatus() {
+    return (journalNotebook && journalNotebook.pages || []).filter(page =>
+        journalPageStatus === 'archived' ? !!page.archived_at : !page.archived_at);
+}
+
+async function setJournalPageStatus(status) {
+    journalPageStatus = status === 'archived' ? 'archived' : 'normal';
+    $$('.kn-wiki-state-tab').forEach(button => button.classList.toggle(
+        'active', button.dataset.journalStatus === journalPageStatus));
+    journalPage = null;
+    renderJournalModuleTree();
+    const pages = journalPagesForCurrentStatus();
+    if (pages.length) await openJournalPage(pages[0].id);
+    else journalEmpty(journalPageStatus === 'archived'
+        ? '暂无归档页面' : '该纪要本尚无正常页面，点击“＋页面”开始记录');
+    $('#journal-add-page').style.display = journalPageStatus === 'normal' && journalNotebook ? '' : 'none';
 }
 
 async function createJournalNotebook() {
@@ -1079,6 +1115,7 @@ async function createJournalNotebook() {
 
 async function createJournalPage() {
     if (!journalNotebook) return;
+    journalPageStatus = 'normal';
     const title = await customPrompt({title:'新建纪要页面',msg:'页面标题',placeholder:'例如：登录态方案调整'});
     if (!title) return;
     const moduleName = await selectJournalOption({
@@ -1127,11 +1164,15 @@ async function openJournalPage(id) {
         journalPage = await API.getKnowledgeJournalPage(id);
         cancelJournalEdit();
         $('#journal-page-title').textContent = journalPage.title;
-        $('#journal-page-meta').textContent = `${journalPage.module_name || '未分类'} · Revision ${journalPage.current_revision} · 更新于 ${journalPage.updated_at || '-'}`;
+        const archived = !!journalPage.archived_at;
+        $('#journal-page-meta').textContent = `${archived ? '已归档' : '正常'} · ${journalPage.module_name || '未分类'} · Revision ${journalPage.current_revision} · 更新于 ${journalPage.updated_at || '-'}`;
         $('#journal-page-view').innerHTML = `<div class="markdown-body" style="line-height:1.8;font-size:.94rem">${renderMarkdown(journalPage.content)}</div>`;
-        $('#journal-edit').style.display = '';
+        $('#journal-edit').style.display = archived ? 'none' : '';
         $('#journal-compare').style.display = '';
         $('#journal-copy-link').style.display = '';
+        $('#journal-archive').style.display = archived ? 'none' : '';
+        $('#journal-restore').style.display = archived ? '' : 'none';
+        $('#journal-delete').style.display = '';
         renderJournalModuleTree();
         await loadJournalRevisions();
         const canonicalPath = `/knowledge/wiki/${journalPage.id}`;
@@ -1165,6 +1206,9 @@ async function applyJournalDeepLink() {
     if (!pageId) return false;
     try {
         const page = await API.getKnowledgeJournalPage(pageId);
+        journalPageStatus = page.archived_at ? 'archived' : 'normal';
+        $$('.kn-wiki-state-tab').forEach(button => button.classList.toggle(
+            'active', button.dataset.journalStatus === journalPageStatus));
         const projectOption = Array.from($('#filter-project').options).find(
             option => Number(option.dataset.projectId || 0) === Number(page.project_id));
         if (!projectOption) throw new Error('当前账号没有该 Wiki 所属项目');
@@ -1187,6 +1231,47 @@ async function applyJournalDeepLink() {
         showToast('Wiki 直达失败: ' + err.message, 'error');
         return false;
     }
+}
+
+async function archiveJournalPage() {
+    if (!journalPage || !await customConfirm('归档后页面将移入“归档”页签，可随时恢复。确定归档？')) return;
+    try {
+        await API.archiveKnowledgeJournalPage(journalPage.id);
+        journalNotebook = await API.getKnowledgeNotebook(journalNotebook.id);
+        journalPageStatus = 'archived';
+        $$('.kn-wiki-state-tab').forEach(button => button.classList.toggle('active', button.dataset.journalStatus === 'archived'));
+        renderJournalModuleTree(); await openJournalPage(journalPage.id);
+        showToast('页面已归档', 'success');
+    } catch (err) { showToast('归档失败: ' + err.message, 'error'); }
+}
+
+async function restoreJournalPage() {
+    if (!journalPage) return;
+    try {
+        await API.restoreKnowledgeJournalPage(journalPage.id);
+        journalNotebook = await API.getKnowledgeNotebook(journalNotebook.id);
+        journalPageStatus = 'normal';
+        $$('.kn-wiki-state-tab').forEach(button => button.classList.toggle('active', button.dataset.journalStatus === 'normal'));
+        renderJournalModuleTree(); await openJournalPage(journalPage.id);
+        showToast('页面已恢复', 'success');
+    } catch (err) { showToast('恢复失败: ' + err.message, 'error'); }
+}
+
+async function permanentlyDeleteJournalPage() {
+    if (!journalPage) return;
+    if (!await customConfirm('删除后页面正文及全部版本将永久消失，无法恢复。是否继续？')) return;
+    if (!await customConfirm(`再次确认：永久删除“${journalPage.title}”？`)) return;
+    const notebookId = journalNotebook.id;
+    try {
+        await API.permanentlyDeleteKnowledgeJournalPage(journalPage.id);
+        history.replaceState({}, '', '/knowledge');
+        journalNotebook = await API.getKnowledgeNotebook(notebookId);
+        journalPage = null; renderJournalModuleTree();
+        const pages = journalPagesForCurrentStatus();
+        if (pages.length) await openJournalPage(pages[0].id);
+        else journalEmpty(journalPageStatus === 'archived' ? '暂无归档页面' : '暂无正常页面');
+        showToast('页面已永久删除', 'success');
+    } catch (err) { showToast('删除失败: ' + err.message, 'error'); }
 }
 
 async function loadJournalRevisions() {

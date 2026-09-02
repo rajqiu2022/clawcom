@@ -107,6 +107,16 @@ const API = {
         return this.request('POST', `/knowledge/${id}/rollback`, data,
             {'Idempotency-Key': idempotencyKey});
     },
+    archiveKnowledgeJournalPage(id) {
+        return this.post(`/knowledge/${id}/archive`, {});
+    },
+    restoreKnowledgeJournalPage(id) {
+        return this.post(`/knowledge/${id}/restore`, {});
+    },
+    permanentlyDeleteKnowledgeJournalPage(id) {
+        return this.request('DELETE', `/knowledge/${id}/permanent`,
+            {confirmed:true});
+    },
 
     // Projects
     listProjects() { return this.get('/projects'); },
