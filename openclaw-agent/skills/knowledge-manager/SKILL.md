@@ -53,6 +53,14 @@ POST /knowledge/{page_id}/rollback
 
 ### 创建纪要本
 
+先从测试计划读取当前项目已有迭代，禁止手写或猜测迭代 ID：
+
+```text
+GET /api/v1/test-iterations?project_id={project_id}
+```
+
+从响应中选择 `id`，再创建纪要本；`iteration_id` 必须属于同一项目，Hub 会拒绝跨项目关联。未指定 `version_name` 时，Hub 自动使用迭代的 version_name/name。
+
 ```http
 POST /api/v1/knowledge-notebooks
 Authorization: Bearer {HUB_API_TOKEN}
@@ -61,7 +69,7 @@ Content-Type: application/json
 {
   "project_id": 6,
   "title": "RacingGO M3版本测试纪要",
-  "version_name": "M3"
+  "iteration_id": 12
 }
 ```
 
@@ -70,6 +78,8 @@ Content-Type: application/json
 ### 创建模块页面
 
 创建页面必须携带稳定的 `Idempotency-Key`。同一逻辑请求重放时复用原键；新操作生成新键。
+
+`module_name` 必须从 `GET /knowledge-notebooks/{notebook_id}` 返回的 `modules` 数组中选择，不允许自行编造模块名。
 
 ```http
 POST /api/v1/knowledge-notebooks/{notebook_id}/pages

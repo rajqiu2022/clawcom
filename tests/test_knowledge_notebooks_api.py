@@ -34,6 +34,7 @@ from app.api import api_bp  # noqa: E402
 from app.models import (  # noqa: E402
     KnowledgeEntry, KnowledgeEntryRevision, KnowledgeNotebook,
     OpenClawInstance, Project, User, hash_token,
+    TestIteration as IterationModel,
 )
 
 
@@ -110,6 +111,28 @@ class KnowledgeNotebooksApiTest(unittest.TestCase):
         self.assertEqual(
             self.client.get(f'/api/v1/knowledge/{page_id}').status_code,
             404)
+
+    def test_notebook_iteration_must_come_from_same_project(self):
+        self._login(self.owner)
+        own = IterationModel(
+            name='M3迭代', version_name='M3', project_id=self.project.id)
+        foreign = IterationModel(
+            name='Other迭代', project_id=self.other_project.id)
+        db.session.add_all([own, foreign]); db.session.commit()
+        created = self.client.post('/api/v1/knowledge-notebooks', json={
+            'project_id': self.project.id, 'title': 'M3纪要',
+            'iteration_id': own.id,
+        })
+        rejected = self.client.post('/api/v1/knowledge-notebooks', json={
+            'project_id': self.project.id, 'title': '错误纪要',
+            'iteration_id': foreign.id,
+        })
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.get_json()['iteration_id'], own.id)
+        self.assertEqual(created.get_json()['version_name'], 'M3')
+        self.assertEqual(rejected.status_code, 409)
+        self.assertEqual(rejected.get_json()['code'],
+                         'ITERATION_PROJECT_MISMATCH')
 
     def test_page_create_replays_idempotently(self):
         self._login(self.owner)

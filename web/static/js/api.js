@@ -82,6 +82,9 @@ const API = {
     listKnowledgeNotebooks(projectId) {
         return this.get(`/knowledge-notebooks?project_id=${encodeURIComponent(projectId)}`);
     },
+    listTestIterations(projectId) {
+        return this.get(`/test-iterations?project_id=${encodeURIComponent(projectId)}`);
+    },
     getKnowledgeNotebook(id) { return this.get(`/knowledge-notebooks/${id}`); },
     createKnowledgeNotebook(data) { return this.post('/knowledge-notebooks', data); },
     createKnowledgeNotebookPage(id, data, idempotencyKey) {

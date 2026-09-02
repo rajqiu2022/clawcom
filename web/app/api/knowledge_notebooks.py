@@ -21,6 +21,7 @@ from app.models import (
     KnowledgeNotebook,
     OpenClawInstance,
     Project,
+    TestIteration,
 )
 
 
@@ -243,11 +244,25 @@ def create_knowledge_notebook():
     title = str(data.get('title') or '').strip()[:255]
     if not project or not title:
         return _error('INVALID_NOTEBOOK', '项目和纪要标题必填', 400)
+    iteration = None
+    if data.get('iteration_id') not in (None, ''):
+        try:
+            iteration_id = int(data.get('iteration_id'))
+        except (TypeError, ValueError):
+            return _error('INVALID_ITERATION', '测试迭代 ID 格式错误', 400)
+        iteration = db.session.get(TestIteration, iteration_id)
+        if not iteration or int(iteration.project_id or 0) != project_id:
+            return _error(
+                'ITERATION_PROJECT_MISMATCH',
+                '测试迭代不存在或不属于当前项目', 409)
     row = KnowledgeNotebook(
         project_id=project_id,
         title=title,
-        version_name=str(data.get('version_name') or '').strip()[:120],
-        iteration_id=data.get('iteration_id') or None,
+        version_name=str(
+            data.get('version_name')
+            or (iteration.version_name if iteration else '')
+            or (iteration.name if iteration else '')).strip()[:120],
+        iteration_id=iteration.id if iteration else None,
         modules_json=_modules(data.get('modules')),
         status='active',
         created_by_type=actor['type'], created_by_id=actor['id'],

@@ -1041,9 +1041,21 @@ async function createJournalNotebook() {
     if (!projectId) { showToast('请先选择项目', 'error'); return; }
     const title = await customPrompt({title:'新建版本纪要本',msg:'纪要本名称',placeholder:'例如：RacingGO M3版本测试纪要'});
     if (!title) return;
-    const versionName = await customPrompt({title:'版本标识',msg:'版本名称（可选）',placeholder:'例如：M3 / α03'});
     try {
-        const row = await API.createKnowledgeNotebook({project_id:projectId,title:title.trim(),version_name:(versionName||'').trim()});
+        const iterations = await API.listTestIterations(projectId);
+        const iterationId = await selectJournalOption({
+            title:'关联测试迭代', label:'测试计划中的项目迭代',
+            placeholder:'不关联测试迭代',
+            options:(iterations||[]).map(row => ({
+                value:String(row.id),
+                label:`${row.name}${row.version_name ? ` · ${row.version_name}` : ''} · ${row.status}`,
+            })),
+        });
+        if (iterationId === null) return;
+        const row = await API.createKnowledgeNotebook({
+            project_id:projectId, title:title.trim(),
+            iteration_id:iterationId ? Number(iterationId) : null,
+        });
         showToast('纪要本已创建', 'success');
         journalNotebook = row;
         await loadJournalNotebooks();
@@ -1054,8 +1066,11 @@ async function createJournalPage() {
     if (!journalNotebook) return;
     const title = await customPrompt({title:'新建纪要页面',msg:'页面标题',placeholder:'例如：登录态方案调整'});
     if (!title) return;
-    const defaultModule = (journalNotebook.modules || [])[0] || '';
-    const moduleName = await customPrompt({title:'所属模块',msg:'输入模块名称：\n' + (journalNotebook.modules || []).join(' / '),placeholder:defaultModule});
+    const moduleName = await selectJournalOption({
+        title:'选择所属模块', label:'纪要模块', placeholder:'请选择模块',
+        required:true,
+        options:(journalNotebook.modules||[]).map(name => ({value:name,label:name})),
+    });
     if (!moduleName) return;
     try {
         const page = await API.createKnowledgeNotebookPage(journalNotebook.id, {
@@ -1066,6 +1081,30 @@ async function createJournalPage() {
         await openJournalPage(page.id);
         showToast('页面已创建', 'success');
     } catch (err) { showToast('创建失败: ' + err.message, 'error'); }
+}
+
+function selectJournalOption({title,label,placeholder,options,required=false}) {
+    return new Promise(resolve => {
+        const overlay=document.createElement('div');
+        overlay.className='modal-overlay active'; overlay.style.zIndex='12000';
+        const choices=(options||[]).map(item => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`).join('');
+        overlay.innerHTML=`<div class="modal" style="max-width:520px">
+            <div class="modal-title">${escapeHtml(title)}</div>
+            <label class="form-label">${escapeHtml(label)}</label>
+            <select class="form-select" id="journal-option-select">
+                <option value="">${escapeHtml(placeholder || '请选择')}</option>${choices}
+            </select>
+            <div class="modal-actions"><button class="btn btn-ghost" data-action="cancel">取消</button><button class="btn btn-primary" data-action="confirm">确定</button></div>
+        </div>`;
+        document.body.appendChild(overlay);
+        const finish=value=>{overlay.remove();resolve(value);};
+        overlay.querySelector('[data-action="cancel"]').onclick=()=>finish(null);
+        overlay.querySelector('[data-action="confirm"]').onclick=()=>{
+            const value=overlay.querySelector('#journal-option-select').value;
+            if(required&&!value){showToast('请选择一个模块','error');return;}
+            finish(value);
+        };
+    });
 }
 
 async function openJournalPage(id) {

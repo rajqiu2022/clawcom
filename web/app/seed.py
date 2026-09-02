@@ -379,6 +379,7 @@ POST /heartbeat 返回:
 
 ### 项目版本测试纪要（项目内 owner/Agent 协作）
 - GET|POST /api/v1/knowledge-notebooks — 查询/创建纪要本
+- GET /api/v1/test-iterations?project_id= — 创建前选择测试计划已有迭代
 - GET /api/v1/knowledge-notebooks/{id} — 模块与页面
 - POST /api/v1/knowledge-notebooks/{id}/pages — 创建页面（需 Idempotency-Key）
 - GET /api/v1/knowledge/journal-pages/{page_id} — 当前版本
@@ -387,6 +388,7 @@ POST /heartbeat 返回:
 - POST /api/v1/knowledge/{page_id}/rollback — 追加式回退
 
 纪要保存必须带 expected_revision + Idempotency-Key；409 时回读最新版本，禁止使用 PUT /knowledge/{id} 强行覆盖。
+iteration_id 必须从同项目 test-iterations 下拉选项取得；module_name 必须从纪要本 modules 返回值选择，禁止手写猜测。
 
 ### Memos 经验沉淀
 - GET /api/v1/memos/tags — 标签列表（7 类）

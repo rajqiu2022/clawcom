@@ -72,6 +72,8 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
             'loadJournalNotebooks', 'createJournalNotebook',
             'saveJournalPage', 'compareJournalRevisions',
             'rollbackJournalRevision', 'journal-vditor',
+            'listTestIterations', 'selectJournalOption',
+            '关联测试迭代', '选择所属模块',
         ):
             self.assertIn(marker, text)
 
