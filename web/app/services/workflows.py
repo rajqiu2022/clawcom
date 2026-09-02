@@ -896,7 +896,7 @@ def normalize_step(step, idx):
     }
     if metrics_schema is not None:
         normalized['metrics_schema'] = copy.deepcopy(metrics_schema)
-    for key in ('required_metrics', 'required_evidence'):
+    for key in ('required_metrics', 'required_evidence', 'required_outputs'):
         if key in step:
             normalized[key] = _as_list(step.get(key))
     if 'allow_empty_contract_fields' in step:
@@ -1803,10 +1803,15 @@ def _contract_path_exists(payload, path):
     return True
 
 
-def _contract_field_present(payload, path):
+def _contract_field_present(payload, path, allow_empty_array=False):
     if not _contract_path_exists(payload, path):
         return False
     value = _dig(payload, path)
+    # Empty result sets are legitimate outputs for queue/list operations.  A
+    # present [] means "evaluated and found none", not "worker forgot field".
+    # Evidence and metrics remain strict unless explicitly configured.
+    if allow_empty_array and isinstance(value, list):
+        return True
     return value not in (None, '', [], {})
 
 
@@ -1866,7 +1871,12 @@ def validate_step_result_contract(step, result):
     sections = {
         'metrics': _contract_fields(step.get('required_metrics')),
         'evidence': _contract_fields(step.get('required_evidence')),
-        'outputs': _contract_fields(step.get('outputs')),
+        # Definitions may declare every possible output for downstream
+        # mapping while requiring only the branch-common subset.  Definitions
+        # without required_outputs keep the legacy strict behavior.
+        'outputs': _contract_fields(
+            step.get('required_outputs')
+            if 'required_outputs' in step else step.get('outputs')),
     }
     allow_empty = (
         step.get('allow_empty_contract_fields')
@@ -1881,7 +1891,8 @@ def validate_step_result_contract(step, result):
             if not (
                 _contract_path_exists(payload, field)
                 if field in empty_is_valid
-                else _contract_field_present(payload, field)
+                else _contract_field_present(
+                    payload, field, allow_empty_array=(section == 'outputs'))
             )
         ]
         if absent:

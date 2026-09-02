@@ -55,13 +55,15 @@ def _artifact_items(evidence, run_id, step_id):
                 uri = str(value.get('uri') or value.get('url') or value.get('path') or '')
                 metadata.update(value.get('metadata') or {})
                 for key in ('stage', 'case_id', 'snapshot_id', 'ui_tree_id',
-                            'console_id', 'related_ids'):
+                            'console_id', 'related_ids', 'status', 'code',
+                            'reason'):
                     if value.get(key) not in (None, ''):
                         metadata[key] = value.get(key)
             else:
                 uri = str(value)
             if '://' not in uri:
-                metadata['original_ref'] = uri
+                metadata['original_ref'] = (
+                    uri or str(metadata.get('status') or ''))
                 uri = 'artifact://workflow-run/%s/%s/%s/%s' % (
                     run_id, step_id, raw_type, index)
             artifact_type = str(raw_type or 'artifact').strip().lower().replace('-', '_')
@@ -80,19 +82,46 @@ def _artifact_items(evidence, run_id, step_id):
 
 
 def _coverage_from_artifacts(artifacts, has_findings=False):
-    types = {str(item.get('type') or '') for item in artifacts}
+    def channel_state(aliases):
+        matched = [
+            item for item in artifacts
+            if str(item.get('type') or '') in aliases]
+        if not matched:
+            return 'missing'
+        statuses = {
+            str((item.get('metadata') or {}).get('status')
+                or (item.get('metadata') or {}).get('original_ref')
+                or '').strip().lower()
+            for item in matched
+        }
+        if statuses and statuses <= {'not_applicable'}:
+            return 'not_applicable'
+        return 'complete'
+
     return {
-        'case_result': 'complete' if has_findings or types & {
+        'case_result': ('complete' if has_findings else channel_state({
             'case_result', 'case_results', 'case_summary', 'settlement_report',
-            'result', 'results'} else 'missing',
-        'ui_snapshot': 'complete' if types & {
-            'ui_snapshot', 'snapshot', 'snapshots', 'ui_tree'} else 'missing',
-        'console': 'complete' if types & {
+            'result', 'results'})),
+        'ui_snapshot': channel_state({
+            'ui_snapshot', 'snapshot', 'snapshots', 'ui_tree'}),
+        'console': channel_state({
             'console', 'console_log', 'console_logs', 'stdout_tail',
-            'unity_log'} else 'missing',
-        'screenshots': 'complete' if types & {
-            'screenshot', 'screenshots', 'image', 'images'} else 'missing',
+            'unity_log'}),
+        'screenshots': channel_state({
+            'screenshot', 'screenshots', 'image', 'images'}),
     }
+
+
+def _not_applicable_is_complete(run):
+    definition = getattr(run, 'definition', None)
+    payload = getattr(definition, 'definition_json', None)
+    context = payload.get('context') if isinstance(payload, dict) else {}
+    profile = (
+        context.get('evidence_profile')
+        if isinstance(context, dict) else {})
+    return bool(
+        isinstance(profile, dict)
+        and profile.get('not_applicable_is_complete') is True)
 
 
 def _analysis_run(run, actor):
@@ -261,7 +290,7 @@ def ingest_workflow_result(run, step, data, actor='workflow'):
         'coverage': coverage,
         'artifacts': artifacts,
         'required_evidence': required_evidence,
-    })
+    }, not_applicable_is_complete=_not_applicable_is_complete(run))
     if manifest is None:
         manifest = WorkflowEvidenceManifest(
             project_id=run.project_id,

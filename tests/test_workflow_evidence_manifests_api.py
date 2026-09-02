@@ -48,6 +48,10 @@ from app.models import (  # noqa: E402
     WorkflowEvidenceManifest,
     WorkflowRun,
 )
+from app.services.evidence_manifests import normalize_manifest  # noqa: E402
+from app.services.workflow_result_ingestion import (  # noqa: E402
+    _coverage_from_artifacts,
+)
 
 
 class WorkflowEvidenceManifestApiTest(unittest.TestCase):
@@ -154,6 +158,25 @@ class WorkflowEvidenceManifestApiTest(unittest.TestCase):
         self.assertEqual(incomplete.get_json()['classification'],
                          'ANALYSIS_INCOMPLETE')
         self.assertEqual(incomplete.get_json()['revision'], 2)
+
+    def test_empty_runtime_branch_preserves_not_applicable_coverage(self):
+        artifacts = [{
+            'type': channel,
+            'uri': f'artifact://run/1/{channel}',
+            'metadata': {'status': 'not_applicable'},
+        } for channel in ('case_result', 'ui_snapshot', 'console', 'screenshots')]
+        coverage = _coverage_from_artifacts(artifacts)
+        strict = normalize_manifest({
+            'coverage': coverage, 'artifacts': artifacts,
+        })
+        empty_branch = normalize_manifest({
+            'coverage': coverage, 'artifacts': artifacts,
+        }, not_applicable_is_complete=True)
+
+        self.assertEqual(set(coverage.values()), {'not_applicable'})
+        self.assertEqual(strict['completeness_status'], 'incomplete')
+        self.assertEqual(empty_branch['completeness_status'], 'complete')
+        self.assertEqual(empty_branch['missing_required'], [])
 
     def test_complete_evidence_allows_idempotent_no_risk_and_blocks_regression(self):
         complete_coverage = {

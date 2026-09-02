@@ -817,6 +817,31 @@ class WorkflowServiceTest(unittest.TestCase):
         self.assertFalse(missing['valid'])
         self.assertEqual(missing['missing']['outputs'], ['backup_branch'])
 
+    def test_empty_output_array_is_present_but_empty_evidence_is_not(self):
+        contract = workflows.validate_step_result_contract({
+            'outputs': ['lease_ids'],
+            'required_evidence': ['trace_refs'],
+        }, {
+            'outputs': {'lease_ids': []},
+            'evidence': {'trace_refs': []},
+        })
+        self.assertFalse(contract['valid'])
+        self.assertNotIn('outputs', contract['missing'])
+        self.assertEqual(contract['missing']['evidence'], ['trace_refs'])
+
+    def test_required_outputs_can_be_branch_common_subset(self):
+        step = workflows.normalize_step({
+            'id': 'empty_queue',
+            'outputs': ['lease_ids', 'ready_candidate_keys', 'step_result'],
+            'required_outputs': ['step_result'],
+        }, 0)
+        contract = workflows.validate_step_result_contract(step, {
+            'outputs': {'step_result': 'QUALIFICATION_EMPTY_QUEUE'},
+        })
+        self.assertEqual(step['required_outputs'], ['step_result'])
+        self.assertTrue(contract['valid'])
+        self.assertEqual(contract['declared']['outputs'], ['step_result'])
+
     def test_warn_contract_policy_allows_progress_but_keeps_invalid_code(self):
         step = workflows.normalize_step({
             'id': 'legacy',

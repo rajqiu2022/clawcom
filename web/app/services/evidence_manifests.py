@@ -139,23 +139,27 @@ def normalize_artifacts(value):
     return result
 
 
-def evidence_completeness(coverage, required_evidence):
+def evidence_completeness(
+        coverage, required_evidence, not_applicable_is_complete=False):
     missing = []
     for key in required_evidence:
         status = coverage.get(key, 'missing')
         # A field listed as required must be complete. Optional platform data
         # such as logcat may legitimately be not_applicable by simply staying
         # outside required_evidence.
-        if status != 'complete':
+        if status != 'complete' and not (
+                not_applicable_is_complete and status == 'not_applicable'):
             missing.append({'type': key, 'status': status})
     return ('complete' if not missing else 'incomplete'), missing
 
 
-def normalize_manifest(data):
+def normalize_manifest(data, not_applicable_is_complete=False):
     coverage = normalize_coverage(data.get('coverage'))
     required = normalize_required_evidence(data.get('required_evidence'))
     artifacts = normalize_artifacts(data.get('artifacts'))
-    completeness, missing = evidence_completeness(coverage, required)
+    completeness, missing = evidence_completeness(
+        coverage, required,
+        not_applicable_is_complete=not_applicable_is_complete)
     return {
         'coverage': coverage,
         'required_evidence': required,
