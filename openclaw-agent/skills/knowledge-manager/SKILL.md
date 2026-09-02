@@ -1,3 +1,8 @@
+---
+name: knowledge-manager
+description: 管理 Hub 正式知识、Memos 经验和项目版本测试纪要；在沉淀知识、记录需求变动/用例设计问题/质量问题、查看或回退纪要版本时使用。
+---
+
 # 知识库管理 (knowledge-manager)
 
 ## 简介
@@ -5,7 +10,10 @@
 本 Skill 是**经验存储分层规则（Rule #15 `experience-storage-layering`）的执行手册**：
 规则定义"什么内容应该进哪一层、何时该升级"，本 Skill 定义"该调哪个 API、给哪些参数"。
 
-OpenClaw 的经验存储分三层（与 Rule #15 对齐）：
+OpenClaw 的经验存储分三层（与 Rule #15 对齐）。其中 MySQL 正式知识层包含两种不同载体：
+
+- **普通知识文章**：长期 SOP、方法、FAQ，走 draft → 审核 → approved。
+- **版本测试纪要**：项目版本过程事实，项目内 owner/Agent 直接协作；每次保存生成不可变 Revision，不走普通审核流。
 
 | 层 | 物理载体 | 写入端点 | 适用内容（一句话） |
 |---|---|---|---|
@@ -13,7 +21,109 @@ OpenClaw 的经验存储分三层（与 Rule #15 对齐）：
 | **Memos 层** | **外部 Memos**（`http://your-hub-host:5230`），Hub 代写；每条笔记带 `#claw-{Claw名}` 隔离空间 + `#openclaw/{tag}/{scope}`；**visibility=PROTECTED**（勿用 PRIVATE，Memos 0.24 List API 不返回 PRIVATE） | `POST /api/v1/memos/upsert`、`POST /api/v1/memos/deposit`；查自己的：`GET /api/v1/memos/search?claw_only=true`；按 uid 直读：`GET /api/v1/memos/memo/{uid}` | 每日零碎、待验证经验、碎片观察（**不会出现在 Hub 知识库列表**） |
 | **MySQL 层（Hub 正式知识库）** | `KnowledgeEntry` 表（draft → pending_review → approved） | `POST /api/v1/knowledge`、`PUT /api/v1/knowledge/{id}` 改 status | 已验证长期知识、SOP、FAQ、模板、可复用项目经验、结构化问题/风险/进展 |
 
-**触发词**：知识库、经验沉淀、知识搜索、Memos、知识审核、知识共享、沉淀知识、升级经验、知识分层、规则#15、任务上下文包、preflight
+**触发词**：知识库、经验沉淀、知识搜索、Memos、知识审核、知识共享、沉淀知识、升级经验、知识分层、版本纪要、测试纪要、研发需求变动、AI用例设计问题、质量问题、版本对比、回退纪要、规则#15、任务上下文包、preflight
+
+## 版本测试纪要：先判断是否应使用
+
+以下内容应写入版本测试纪要，而不是创建普通知识文章：
+
+- 某个版本周期内的需求调整、范围变化和策划确认；
+- AI 用例设计的遗漏、偏差、不可执行条件及修订结论；
+- 当前版本质量问题、风险、阻塞和处理决策；
+- 测试进展、环境/自动化问题、跨角色约定和待办。
+
+跨版本长期稳定、已验证可复用的方法，仍应沉淀为普通正式知识。不要把临时聊天全文或模型思考过程写进纪要。
+
+### 纪要 API
+
+所有调用使用 `{HUB_URL}/api/v1`、当前 Bearer Token 和 JSON。Agent 直接请求 API，不需要打开浏览器。
+
+```text
+GET  /knowledge-notebooks?project_id={project_id}
+POST /knowledge-notebooks
+GET  /knowledge-notebooks/{notebook_id}
+POST /knowledge-notebooks/{notebook_id}/pages
+GET  /knowledge/journal-pages/{page_id}
+GET  /knowledge/{page_id}/revisions
+GET  /knowledge/{page_id}/revisions/{revision_no}
+POST /knowledge/{page_id}/revisions
+GET  /knowledge/{page_id}/compare?from={old}&to={new}
+POST /knowledge/{page_id}/rollback
+```
+
+### 创建纪要本
+
+```http
+POST /api/v1/knowledge-notebooks
+Authorization: Bearer {HUB_API_TOKEN}
+Content-Type: application/json
+
+{
+  "project_id": 6,
+  "title": "RacingGO M3版本测试纪要",
+  "version_name": "M3"
+}
+```
+
+缺省模块包括：研发需求变动、AI用例设计问题、质量问题、测试进展与决策、环境与自动化问题、风险与待办。需要自定义时在创建请求中传 `modules` 数组。
+
+### 创建模块页面
+
+创建页面必须携带稳定的 `Idempotency-Key`。同一逻辑请求重放时复用原键；新操作生成新键。
+
+```http
+POST /api/v1/knowledge-notebooks/{notebook_id}/pages
+Idempotency-Key: journal-page:<notebook_id>:<stable-key>
+
+{
+  "title": "登录态方案调整",
+  "module_name": "研发需求变动",
+  "content": "# 登录态方案调整\n\n...",
+  "change_summary": "创建需求变动记录"
+}
+```
+
+### 保存新版本
+
+先 GET 页面取得 `current_revision`，再保存。禁止猜测版本号，也禁止用旧 `PUT /knowledge/{id}` 覆盖纪要正文。
+
+```http
+POST /api/v1/knowledge/{page_id}/revisions
+Idempotency-Key: journal-revision:<page_id>:<stable-key>
+
+{
+  "expected_revision": 3,
+  "title": "登录态方案调整",
+  "module_name": "研发需求变动",
+  "content": "# 登录态方案调整\n\n更新后的结论...",
+  "change_summary": "补充策划确认后的恢复规则"
+}
+```
+
+- 成功后独立 GET 页面和版本列表，确认 `current_revision` 已增加。
+- HTTP 409 `KNOWLEDGE_REVISION_CONFLICT` 表示其他协作者已保存；必须回读最新版本、比较差异后再决定如何合并，不得盲目重试或覆盖。
+- HTTP 409 `IDEMPOTENCY_KEY_REUSED` 表示同一键被用于不同内容；停止并生成新的逻辑操作键。
+
+### 对比与回退
+
+```text
+GET /api/v1/knowledge/{page_id}/compare?from=2&to=5
+```
+
+返回 Markdown 行级 `diff` 和 added/removed 统计。回退前必须先对比目标版本与当前版本：
+
+```http
+POST /api/v1/knowledge/{page_id}/rollback
+Idempotency-Key: journal-rollback:<page_id>:<target>:<stable-key>
+
+{
+  "expected_revision": 5,
+  "target_revision": 2,
+  "change_summary": "恢复到 Revision 2：撤销尚未生效的方案"
+}
+```
+
+回退不会删除历史，而是创建 Revision 6。纪要不允许匿名分享或物理删除；不要调用普通知识的 share/delete API。
 
 ---
 

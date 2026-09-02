@@ -351,7 +351,7 @@ POST /heartbeat 返回:
     {
         'name': 'knowledge-manager',
         'display_name': '知识库管理',
-        'description': '管理知识经验存储体系：内部知识库（CRUD/审核/分发）、Memos 经验沉淀（7 类标签）、LLM 自动知识提取。',
+        'description': '管理知识经验存储体系：正式知识、Memos 经验沉淀，以及项目版本测试纪要的模块化协作、版本对比与回退。',
         'category': 'standard',
         'is_standard': True,
         'trigger_phrase': '知识库',
@@ -377,6 +377,17 @@ POST /heartbeat 返回:
 - POST /api/v1/knowledge/{id}/review — 审核（approve/reject）
 - POST /api/v1/knowledge/{id}/distribute — 共享分发
 
+### 项目版本测试纪要（项目内 owner/Agent 协作）
+- GET|POST /api/v1/knowledge-notebooks — 查询/创建纪要本
+- GET /api/v1/knowledge-notebooks/{id} — 模块与页面
+- POST /api/v1/knowledge-notebooks/{id}/pages — 创建页面（需 Idempotency-Key）
+- GET /api/v1/knowledge/journal-pages/{page_id} — 当前版本
+- GET|POST /api/v1/knowledge/{page_id}/revisions — 历史/保存新版本
+- GET /api/v1/knowledge/{page_id}/compare?from=&to= — Markdown 差异
+- POST /api/v1/knowledge/{page_id}/rollback — 追加式回退
+
+纪要保存必须带 expected_revision + Idempotency-Key；409 时回读最新版本，禁止使用 PUT /knowledge/{id} 强行覆盖。
+
 ### Memos 经验沉淀
 - GET /api/v1/memos/tags — 标签列表（7 类）
 - GET /api/v1/memos/search — 搜索知识
@@ -389,7 +400,7 @@ method=测试方法 | bug-standard=Bug标准 | bug-pattern=Bug模式
 perf-baseline=性能基线 | pitfall=踩坑记录 | workflow=流程规范 | best-practice=最佳实践
 
 ## 触发词
-- 搜索知识、沉淀知识、知识审核、知识共享、Memos、经验沉淀
+- 搜索知识、沉淀知识、知识审核、知识共享、版本纪要、需求变动、AI用例设计问题、质量问题、版本对比、回退纪要、Memos、经验沉淀
 ''',
     },
     {
