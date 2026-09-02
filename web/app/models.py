@@ -270,7 +270,7 @@ class AgentProfile(db.Model):
     updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
 
     def to_dict(self):
-        return {
+        data = {
             'id': self.id,
             'profile_key': self.profile_key,
             'name': self.name,
@@ -286,6 +286,7 @@ class AgentProfile(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
+        return data
 
 
 class AgentPost(db.Model):
@@ -315,7 +316,7 @@ class AgentPost(db.Model):
     )
 
     def to_dict(self):
-        return {
+        data = {
             'id': self.id,
             'post_key': self.post_key,
             'name': self.name,
@@ -329,6 +330,7 @@ class AgentPost(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
+        return data
 
 
 class AgentPostAssignment(db.Model):
@@ -714,7 +716,7 @@ class KnowledgeEntry(db.Model):
         self.shared_at = None
 
     def to_dict(self):
-        return {
+        data = {
             'id': self.id,
             'memos_id': self.memos_id,
             'title': self.title,
@@ -759,6 +761,13 @@ class KnowledgeEntry(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
+        if (self.entry_type or 'article') == 'test_journal':
+            latest = max(self.revisions, key=lambda row: row.revision_no,
+                         default=None)
+            data['journal_author'] = self.created_by or ''
+            data['last_editor_name'] = (
+                latest.editor_name if latest else (self.created_by or ''))
+        return data
 
 
 class KnowledgeEntryRevision(db.Model):

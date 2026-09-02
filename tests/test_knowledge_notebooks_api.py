@@ -259,6 +259,8 @@ class KnowledgeNotebooksApiTest(unittest.TestCase):
         detail = self.client.get(
             f'/api/v1/knowledge/journal-pages/{page_id}').get_json()
         self.assertFalse(detail['can_edit'])
+        self.assertEqual(detail['journal_author'], 'owner')
+        self.assertEqual(detail['last_editor_name'], 'owner')
 
         blocked_edit = self.client.post(
             f'/api/v1/knowledge/{page_id}/revisions', json={

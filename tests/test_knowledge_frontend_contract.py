@@ -77,8 +77,10 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
             'copyJournalPageLink', 'applyJournalDeepLink',
             '/knowledge/wiki/',
             'data-journal-status="normal"', 'data-journal-status="archived"',
-            'archiveJournalPage', 'restoreJournalPage',
+            'archiveJournalPage',
             'permanentlyDeleteJournalPage',
+            'openJournalArchiveModal', 'restoreArchivedJournalPage',
+            'journalPageRequestSeq', '最后编辑', '归档日期',
         ):
             self.assertIn(marker, text)
 
@@ -98,10 +100,11 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
     def test_permanent_delete_requires_two_ui_confirmations(self):
         text = (ROOT / 'web' / 'templates' / 'knowledge.html').read_text(
             encoding='utf-8')
-        start = text.index('async function permanentlyDeleteJournalPage()')
-        end = text.index('\nasync function ', start + 20)
-        function = text[start:end]
-        self.assertEqual(function.count('await customConfirm('), 2)
+        for name in ('permanentlyDeleteJournalPage', 'deleteArchivedJournalPage'):
+            start = text.index(f'async function {name}(')
+            end = text.find('\nasync function ', start + 20)
+            function = text[start:end if end > 0 else len(text)]
+            self.assertEqual(function.count('await customConfirm('), 2)
 
 
 if __name__ == '__main__':
