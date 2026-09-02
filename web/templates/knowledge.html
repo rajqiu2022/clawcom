@@ -279,6 +279,7 @@
                 <div class="kn-wiki-title"><h2 id="journal-page-title">版本测试过程纪要</h2><div class="kn-wiki-title-meta" id="journal-page-meta">选择左侧页面开始阅读</div></div>
                 <div style="display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end">
                     <button class="btn btn-sm btn-ghost" id="journal-add-page" onclick="createJournalPage()" style="display:none">＋页面</button>
+                    <button class="btn btn-sm btn-ghost" id="journal-copy-link" onclick="copyJournalPageLink()" style="display:none">复制页面链接</button>
                     <button class="btn btn-sm btn-ghost" id="journal-compare" onclick="compareJournalRevisions()" style="display:none">版本对比</button>
                     <button class="btn btn-sm btn-primary" id="journal-edit" onclick="editJournalPage()" style="display:none">编辑</button>
                 </div>
@@ -441,6 +442,9 @@ function switchTab(tab) {
     $('#tab-journal').style.display = tab === 'journal' ? 'block' : 'none';
     if (tab === 'pending') loadPending();
     if (tab === 'journal') loadJournalNotebooks();
+    if (tab !== 'journal' && /^\/knowledge\/wiki\/\d+\/?$/.test(location.pathname)) {
+        history.pushState({}, '', '/knowledge');
+    }
 }
 
 function onKnowledgeProjectChange() {
@@ -976,6 +980,7 @@ let journalNotebook = null;
 let journalPage = null;
 let journalRevisions = [];
 let journalVditor = null;
+let journalSuppressUrl = false;
 
 function journalProjectId() {
     const option = $('#filter-project').selectedOptions[0];
@@ -988,6 +993,7 @@ function journalEmpty(message) {
     $('#journal-page-meta').textContent = message;
     $('#journal-edit').style.display = 'none';
     $('#journal-compare').style.display = 'none';
+    $('#journal-copy-link').style.display = 'none';
     $('#journal-revision-list').innerHTML = '';
     $('#journal-revision-count').textContent = '';
 }
@@ -1125,9 +1131,62 @@ async function openJournalPage(id) {
         $('#journal-page-view').innerHTML = `<div class="markdown-body" style="line-height:1.8;font-size:.94rem">${renderMarkdown(journalPage.content)}</div>`;
         $('#journal-edit').style.display = '';
         $('#journal-compare').style.display = '';
+        $('#journal-copy-link').style.display = '';
         renderJournalModuleTree();
         await loadJournalRevisions();
+        const canonicalPath = `/knowledge/wiki/${journalPage.id}`;
+        if (!journalSuppressUrl && location.pathname !== canonicalPath) {
+            history.pushState({}, '', canonicalPath);
+        }
     } catch (err) { showToast('页面加载失败: ' + err.message, 'error'); }
+}
+
+async function copyJournalPageLink() {
+    if (!journalPage) return;
+    const url = `${location.origin}/knowledge/wiki/${journalPage.id}`;
+    try {
+        await navigator.clipboard.writeText(url);
+        showToast('Wiki 页面链接已复制', 'success');
+    } catch (_) {
+        const input=document.createElement('input'); input.value=url;
+        document.body.appendChild(input); input.select(); document.execCommand('copy'); input.remove();
+        showToast('Wiki 页面链接已复制', 'success');
+    }
+}
+
+function journalPageIdFromLocation() {
+    const match = location.pathname.match(/^\/knowledge\/wiki\/(\d+)\/?$/);
+    if (match) return Number(match[1]);
+    return Number(new URLSearchParams(location.search).get('wiki_page_id') || 0) || null;
+}
+
+async function applyJournalDeepLink() {
+    const pageId = journalPageIdFromLocation();
+    if (!pageId) return false;
+    try {
+        const page = await API.getKnowledgeJournalPage(pageId);
+        const projectOption = Array.from($('#filter-project').options).find(
+            option => Number(option.dataset.projectId || 0) === Number(page.project_id));
+        if (!projectOption) throw new Error('当前账号没有该 Wiki 所属项目');
+        $('#filter-project').value = projectOption.value;
+        $$('.tab-item').forEach(tab => tab.classList.toggle('active', tab.dataset.tab === 'journal'));
+        $('#tab-browse').style.display = 'none';
+        $('#tab-pending').style.display = 'none';
+        $('#tab-journal').style.display = 'block';
+        journalSuppressUrl = true;
+        await loadJournalNotebooks();
+        if (!journalNotebook || journalNotebook.id !== page.notebook_id) {
+            await selectJournalNotebook(page.notebook_id, true);
+        }
+        await openJournalPage(page.id);
+        history.replaceState({}, '', `/knowledge/wiki/${page.id}`);
+        journalSuppressUrl = false;
+        return true;
+    } catch (err) {
+        journalSuppressUrl = false;
+        showToast('Wiki 直达失败: ' + err.message, 'error');
+        return false;
+    }
 }
 
 async function loadJournalRevisions() {
@@ -1255,6 +1314,7 @@ async function initPage() {
 
     loadKnowledge();
     loadPending();
+    await applyJournalDeepLink();
 }
 
 initPage();

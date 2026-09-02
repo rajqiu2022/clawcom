@@ -81,6 +81,16 @@ Content-Type: application/json
 
 `module_name` 必须从 `GET /knowledge-notebooks/{notebook_id}` 返回的 `modules` 数组中选择，不允许自行编造模块名。
 
+图片必须先上传到 Hub，再把返回 URL 写入 Markdown：
+
+```http
+POST /api/v1/upload/image
+Content-Type: multipart/form-data
+image=@screenshot.png
+```
+
+使用返回的相对地址：`![说明](/static/uploads/...)`。禁止写 `file://`、Windows 盘符、workspace 路径或 `http://IP:18800`；Hub 会把指向自身 `/static/uploads/` 的 HTTP(S) 绝对地址自动改为相对地址，避免 HTTPS 页面混合内容裂图。
+
 ```http
 POST /api/v1/knowledge-notebooks/{notebook_id}/pages
 Idempotency-Key: journal-page:<notebook_id>:<stable-key>
@@ -134,6 +144,16 @@ Idempotency-Key: journal-rollback:<page_id>:<target>:<stable-key>
 ```
 
 回退不会删除历史，而是创建 Revision 6。纪要不允许匿名分享或物理删除；不要调用普通知识的 share/delete API。
+
+### Wiki 直达链接
+
+页面稳定链接为：
+
+```text
+https://clawteam.woa.com/knowledge/wiki/{page_id}
+```
+
+打开后自动选择项目、纪要本和页面。Agent 在消息、报告或任务中引用 Wiki 时应提供该链接，不要只给纪要本名称。
 
 ---
 

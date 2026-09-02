@@ -3,6 +3,7 @@
 import difflib
 import hashlib
 import json
+import re
 from datetime import datetime
 
 from flask import jsonify, request
@@ -33,6 +34,38 @@ DEFAULT_MODULES = [
     '环境与自动化问题',
     '风险与待办',
 ]
+
+_MARKDOWN_IMAGE = re.compile(r'(!\[[^\]]*\]\()\s*([^\s)]+)([^)]*\))')
+
+
+def normalize_journal_markdown_media(content):
+    """Keep Hub uploads same-origin and reject Agent-local image references."""
+    text = str(content or '')
+
+    def replace(match):
+        prefix, url, suffix = match.groups()
+        rendered = url.strip().replace('\\', '/')
+        lowered = rendered.lower()
+        if lowered.startswith('file:') or re.match(r'^[a-z]:/', lowered):
+            raise ValueError(
+                'Wiki 图片不能引用 Agent 本机路径；请先上传到 '
+                'POST /api/v1/upload/image，再使用返回的 /static/uploads/... URL')
+        static_match = re.match(
+            r'^https?://[^/]+(/static/uploads/[^?#\s]+(?:[?#][^\s]*)?)$',
+            rendered, flags=re.IGNORECASE)
+        if static_match:
+            rendered = static_match.group(1)
+        elif lowered.startswith('http://'):
+            raise ValueError(
+                'HTTPS Wiki 不能引用 HTTP 图片；请上传到 Hub 或使用 HTTPS URL')
+        elif not (lowered.startswith('https://')
+                  or lowered.startswith('/static/uploads/')):
+            raise ValueError(
+                'Wiki 图片地址必须是 Hub /static/uploads/... 或 HTTPS URL；'
+                'Agent 本机相对路径无法被其他协作者读取')
+        return prefix + rendered + suffix
+
+    return _MARKDOWN_IMAGE.sub(replace, text)
 
 
 def _actor():
@@ -154,6 +187,10 @@ def _modules(value):
 def _create_revision(page, actor, title, content, summary,
                      expected_revision, idempotency_key,
                      rollback_from=None):
+    try:
+        content = normalize_journal_markdown_media(content)
+    except ValueError as exc:
+        return None, _error('INVALID_JOURNAL_MEDIA_URL', str(exc), 400)
     current = int(page.current_revision or 0)
     try:
         expected = int(expected_revision)

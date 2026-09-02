@@ -74,6 +74,8 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
             'rollbackJournalRevision', 'journal-vditor',
             'listTestIterations', 'selectJournalOption',
             '关联测试迭代', '选择所属模块',
+            'copyJournalPageLink', 'applyJournalDeepLink',
+            '/knowledge/wiki/',
         ):
             self.assertIn(marker, text)
 
@@ -84,6 +86,11 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
         self.assertIn('background:var(--bg-card) !important', text)
         self.assertIn('background:var(--bg-secondary) !important', text)
         self.assertNotIn('background: #1a1b2e !important', text)
+
+    def test_wiki_deep_link_view_route_is_present(self):
+        text = (ROOT / 'web' / 'app' / 'views' / '__init__.py').read_text(
+            encoding='utf-8')
+        self.assertIn("@views_bp.route('/knowledge/wiki/<int:page_id>')", text)
 
 
 if __name__ == '__main__':

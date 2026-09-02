@@ -386,9 +386,11 @@ POST /heartbeat 返回:
 - GET|POST /api/v1/knowledge/{page_id}/revisions — 历史/保存新版本
 - GET /api/v1/knowledge/{page_id}/compare?from=&to= — Markdown 差异
 - POST /api/v1/knowledge/{page_id}/rollback — 追加式回退
+- GET /knowledge/wiki/{page_id} — 指定 Wiki 页面直达链接
 
 纪要保存必须带 expected_revision + Idempotency-Key；409 时回读最新版本，禁止使用 PUT /knowledge/{id} 强行覆盖。
 iteration_id 必须从同项目 test-iterations 下拉选项取得；module_name 必须从纪要本 modules 返回值选择，禁止手写猜测。
+图片先 POST /api/v1/upload/image，再在 Markdown 使用返回的 /static/uploads/... 相对路径；禁止 file://、盘符、workspace 路径和 http://IP:18800。
 
 ### Memos 经验沉淀
 - GET /api/v1/memos/tags — 标签列表（7 类）

@@ -31,6 +31,7 @@ _stub('flask_socketio', SocketIO=_Noop, emit=_Noop(),
 from flask import Flask, g  # noqa: E402
 from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
+from app.api.knowledge_notebooks import normalize_journal_markdown_media  # noqa: E402
 from app.models import (  # noqa: E402
     KnowledgeEntry, KnowledgeEntryRevision, KnowledgeNotebook,
     OpenClawInstance, Project, User, hash_token,
@@ -234,6 +235,19 @@ class KnowledgeNotebooksApiTest(unittest.TestCase):
         self.assertEqual([item['id'] for item in listing], [article.id])
         self.assertIsNotNone(db.session.get(KnowledgeEntry, page_id))
         self.assertEqual(KnowledgeNotebook.query.count(), 1)
+
+    def test_journal_media_normalizes_hub_http_url_and_rejects_local_path(self):
+        normalized = normalize_journal_markdown_media(
+            '![截图](http://9.134.11.169:18800/static/uploads/20260902/a.png)')
+        self.assertEqual(
+            normalized,
+            '![截图](/static/uploads/20260902/a.png)')
+        with self.assertRaisesRegex(ValueError, '不能引用 Agent 本机路径'):
+            normalize_journal_markdown_media(
+                '![截图](F:/agent/workspace/screenshot.png)')
+        with self.assertRaisesRegex(ValueError, '相对路径无法'):
+            normalize_journal_markdown_media(
+                '![截图](output/journal_attachments/screenshot.png)')
 
 
 if __name__ == '__main__':

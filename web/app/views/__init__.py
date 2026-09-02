@@ -386,6 +386,12 @@ def knowledge_base():
     return render_template('knowledge.html')
 
 
+@views_bp.route('/knowledge/wiki/<int:page_id>')
+def knowledge_wiki_page(page_id):
+    """Stable authenticated deep link; page ACL is enforced by the API."""
+    return render_template('knowledge.html')
+
+
 @views_bp.route('/k/<token>')
 @views_bp.route('/knowledge/share/<token>')
 def knowledge_share_page(token):
