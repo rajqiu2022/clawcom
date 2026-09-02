@@ -607,6 +607,53 @@ class DailyReport(db.Model):
         }
 
 
+class KnowledgeNotebook(db.Model):
+    """项目版本测试纪要本。"""
+    __tablename__ = 'knowledge_notebooks'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'),
+                           nullable=False, index=True)
+    title = db.Column(db.String(255), nullable=False)
+    version_name = db.Column(db.String(120), default='')
+    iteration_id = db.Column(db.Integer, db.ForeignKey('test_iterations.id'),
+                             nullable=True, index=True)
+    modules_json = db.Column(db.JSON)
+    status = db.Column(db.String(20), nullable=False, default='active', index=True)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    created_by_type = db.Column(db.String(20), nullable=False, default='user')
+    created_by_id = db.Column(db.Integer)
+    created_by_name = db.Column(db.String(100), default='')
+    created_at = db.Column(db.DateTime, default=_now)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+    project = db.relationship('Project', backref='knowledge_notebooks')
+    iteration = db.relationship('TestIteration', backref='knowledge_notebooks')
+
+    def to_dict(self, with_pages=False):
+        data = {
+            'id': self.id,
+            'project_id': self.project_id,
+            'project_name': self.project.name if self.project else None,
+            'title': self.title,
+            'version_name': self.version_name or '',
+            'iteration_id': self.iteration_id,
+            'modules': self.modules_json or [],
+            'status': self.status,
+            'version': int(self.version or 1),
+            'created_by_type': self.created_by_type,
+            'created_by_id': self.created_by_id,
+            'created_by_name': self.created_by_name or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+        if with_pages:
+            pages = sorted(self.pages, key=lambda row: (
+                str(row.module_name or ''), str(row.title or ''), row.id))
+            data['pages'] = [page.to_dict() for page in pages]
+        return data
+
+
 class KnowledgeEntry(db.Model):
     """知识条目"""
     __tablename__ = 'knowledge_entries'
@@ -620,6 +667,13 @@ class KnowledgeEntry(db.Model):
     scope = db.Column(db.String(50), nullable=False, default='global')
     project_name = db.Column(db.String(100), default=None)
     module_name = db.Column(db.String(100), default=None)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), index=True)
+    entry_type = db.Column(db.String(30), nullable=False, default='article', index=True)
+    notebook_id = db.Column(db.Integer, db.ForeignKey('knowledge_notebooks.id'),
+                            nullable=True, index=True)
+    current_revision = db.Column(db.Integer, nullable=False, default=0)
+    lock_version = db.Column(db.Integer, nullable=False, default=0)
+    archived_at = db.Column(db.DateTime)
     source_openclaw_id = db.Column(
         db.Integer, db.ForeignKey('openclaw_instances.id'))
     source_type = db.Column(
@@ -640,6 +694,9 @@ class KnowledgeEntry(db.Model):
 
     source_openclaw = db.relationship('OpenClawInstance',
                                       backref='knowledge_entries')
+    project = db.relationship('Project', backref='knowledge_entries')
+    notebook = db.relationship('KnowledgeNotebook', backref=db.backref(
+        'pages', cascade='all, delete-orphan'))
 
     def enable_share(self, refresh=False):
         """Enable anonymous sharing and return the active token."""
@@ -669,6 +726,12 @@ class KnowledgeEntry(db.Model):
             'scope': self.scope,
             'project_name': self.project_name,
             'module_name': self.module_name,
+            'project_id': self.project_id,
+            'entry_type': self.entry_type or 'article',
+            'notebook_id': self.notebook_id,
+            'current_revision': int(self.current_revision or 0),
+            'lock_version': int(self.lock_version or 0),
+            'archived_at': str(self.archived_at) if self.archived_at else None,
             'source_openclaw_id': self.source_openclaw_id,
             'source_openclaw_name': (self.source_openclaw.name
                                      if self.source_openclaw else None),
@@ -695,6 +758,57 @@ class KnowledgeEntry(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
+
+
+class KnowledgeEntryRevision(db.Model):
+    """知识页面不可变版本；回退也只会追加新版本。"""
+    __tablename__ = 'knowledge_entry_revisions'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    knowledge_id = db.Column(db.Integer, db.ForeignKey('knowledge_entries.id'),
+                             nullable=False, index=True)
+    revision_no = db.Column(db.Integer, nullable=False)
+    title = db.Column(db.String(255), nullable=False)
+    content_markdown = db.Column(db.Text, nullable=False)
+    content_sha256 = db.Column(db.String(64), nullable=False)
+    change_summary = db.Column(db.String(500), default='')
+    based_on_revision = db.Column(db.Integer)
+    rollback_from_revision = db.Column(db.Integer)
+    editor_type = db.Column(db.String(20), nullable=False)
+    editor_id = db.Column(db.Integer)
+    editor_name = db.Column(db.String(100), default='')
+    idempotency_key = db.Column(db.String(128), nullable=False)
+    request_sha256 = db.Column(db.String(64), nullable=False)
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    knowledge = db.relationship('KnowledgeEntry', backref=db.backref(
+        'revisions', cascade='all, delete-orphan', order_by='KnowledgeEntryRevision.revision_no'))
+
+    __table_args__ = (
+        db.UniqueConstraint('knowledge_id', 'revision_no',
+                            name='uq_knowledge_revision_no'),
+        db.UniqueConstraint('editor_type', 'editor_id', 'idempotency_key',
+                            name='uq_knowledge_revision_idem'),
+    )
+
+    def to_dict(self, with_content=False):
+        data = {
+            'id': self.id,
+            'knowledge_id': self.knowledge_id,
+            'revision_no': self.revision_no,
+            'title': self.title,
+            'content_sha256': self.content_sha256,
+            'change_summary': self.change_summary or '',
+            'based_on_revision': self.based_on_revision,
+            'rollback_from_revision': self.rollback_from_revision,
+            'editor_type': self.editor_type,
+            'editor_id': self.editor_id,
+            'editor_name': self.editor_name or '',
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+        if with_content:
+            data['content'] = self.content_markdown
+        return data
 
 
 class KnowledgeDistribution(db.Model):

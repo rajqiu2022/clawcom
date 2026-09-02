@@ -4,16 +4,22 @@
 const API = {
     base: '/api/v1',
 
-    async request(method, path, data = null) {
+    async request(method, path, data = null, headers = {}) {
         const opts = {
             method,
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...headers },
         };
         if (data) opts.body = JSON.stringify(data);
 
         const resp = await fetch(`${this.base}${path}`, opts);
         const json = await resp.json();
-        if (!resp.ok) throw new Error(json.error || `HTTP ${resp.status}`);
+        if (!resp.ok) {
+            const error = new Error(json.error || `HTTP ${resp.status}`);
+            error.code = json.code || '';
+            error.details = json.details || {};
+            error.status = resp.status;
+            throw error;
+        }
         return json;
     },
 
@@ -73,6 +79,31 @@ const API = {
         return this.post(`/knowledge/${id}/share${refresh ? '?refresh=1' : ''}`);
     },
     unshareKnowledge(id) { return this.del(`/knowledge/${id}/share`); },
+    listKnowledgeNotebooks(projectId) {
+        return this.get(`/knowledge-notebooks?project_id=${encodeURIComponent(projectId)}`);
+    },
+    getKnowledgeNotebook(id) { return this.get(`/knowledge-notebooks/${id}`); },
+    createKnowledgeNotebook(data) { return this.post('/knowledge-notebooks', data); },
+    createKnowledgeNotebookPage(id, data, idempotencyKey) {
+        return this.request('POST', `/knowledge-notebooks/${id}/pages`, data,
+            {'Idempotency-Key': idempotencyKey});
+    },
+    getKnowledgeJournalPage(id) { return this.get(`/knowledge/journal-pages/${id}`); },
+    listKnowledgeRevisions(id) { return this.get(`/knowledge/${id}/revisions`); },
+    getKnowledgeRevision(id, revision) {
+        return this.get(`/knowledge/${id}/revisions/${revision}`);
+    },
+    createKnowledgeRevision(id, data, idempotencyKey) {
+        return this.request('POST', `/knowledge/${id}/revisions`, data,
+            {'Idempotency-Key': idempotencyKey});
+    },
+    compareKnowledgeRevisions(id, fromRevision, toRevision) {
+        return this.get(`/knowledge/${id}/compare?from=${fromRevision}&to=${toRevision}`);
+    },
+    rollbackKnowledgeRevision(id, data, idempotencyKey) {
+        return this.request('POST', `/knowledge/${id}/rollback`, data,
+            {'Idempotency-Key': idempotencyKey});
+    },
 
     // Projects
     listProjects() { return this.get('/projects'); },

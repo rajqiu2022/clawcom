@@ -73,6 +73,15 @@ def _entry_payload(entry, favorite_ids=None):
     return payload
 
 
+def _journal_entry_visible(entry):
+    if getattr(entry, 'entry_type', 'article') != 'test_journal':
+        return True
+    from app.api.knowledge_notebooks import _actor, _can_access_project
+    project_id = entry.project_id or (
+        entry.notebook.project_id if entry.notebook else None)
+    return _can_access_project(_actor(), project_id)
+
+
 def _owned_claw_ids(user, claw):
     if claw is not None and getattr(claw, 'id', None):
         return {int(claw.id)}
@@ -170,7 +179,10 @@ def upload_image():
 @api_bp.route('/knowledge', methods=['GET'])
 def list_knowledge():
     """查询知识（支持 scope/category/project/source_type 筛选）"""
-    query = KnowledgeEntry.query
+    # 版本纪要在独立 Wiki 工作台展示，避免混入普通知识卡片和审核流程。
+    query = KnowledgeEntry.query.filter(
+        db.or_(KnowledgeEntry.entry_type == 'article',
+               KnowledgeEntry.entry_type.is_(None)))
 
     scope = request.args.get('scope')
     category = request.args.get('category')
@@ -398,6 +410,8 @@ def batch_import_knowledge():
 def get_knowledge(entry_id):
     """获取单条知识详情"""
     entry = db.get_or_404(KnowledgeEntry, entry_id)
+    if not _journal_entry_visible(entry):
+        return jsonify({'error': '知识条目不存在'}), 404
     return jsonify(_entry_payload(entry))
 
 
@@ -422,13 +436,18 @@ def export_shared_knowledge(token):
 @api_bp.route('/knowledge/<int:entry_id>/export.md', methods=['GET'])
 def export_knowledge(entry_id):
     """下载单条知识的 Markdown 文件。"""
-    return _markdown_response(db.get_or_404(KnowledgeEntry, entry_id))
+    entry = db.get_or_404(KnowledgeEntry, entry_id)
+    if not _journal_entry_visible(entry):
+        return jsonify({'error': '知识条目不存在'}), 404
+    return _markdown_response(entry)
 
 
 @api_bp.route('/knowledge/<int:entry_id>/favorite', methods=['POST'])
 def favorite_knowledge(entry_id):
     """收藏知识；重复调用保持幂等。"""
-    db.get_or_404(KnowledgeEntry, entry_id)
+    entry = db.get_or_404(KnowledgeEntry, entry_id)
+    if not _journal_entry_visible(entry):
+        return jsonify({'error': '知识条目不存在'}), 404
     try:
         owner = _favorite_owner()
     except ValueError as exc:
@@ -479,6 +498,11 @@ def unfavorite_knowledge(entry_id):
 def share_knowledge(entry_id):
     """启用或刷新匿名分享链接。"""
     entry = db.get_or_404(KnowledgeEntry, entry_id)
+    if entry.entry_type == 'test_journal':
+        return jsonify({
+            'error': '版本测试纪要当前仅允许项目内协作，不生成匿名外链',
+            'code': 'JOURNAL_EXTERNAL_SHARE_DISABLED',
+        }), 409
     if not _may_manage_share(entry):
         return jsonify({'error': '仅创建者、Agent owner 或管理员可管理分享'}), 403
     refresh = request.args.get('refresh') in ('1', 'true', 'True', 'yes')
@@ -511,6 +535,13 @@ def unshare_knowledge(entry_id):
 def update_knowledge(entry_id):
     """更新知识"""
     entry = KnowledgeEntry.query.get_or_404(entry_id)
+    if not _journal_entry_visible(entry):
+        return jsonify({'error': '知识条目不存在'}), 404
+    if entry.entry_type == 'test_journal':
+        return jsonify({
+            'error': '版本纪要必须通过 revisions API 保存，不能原地覆盖',
+            'code': 'VERSIONED_KNOWLEDGE_REQUIRES_REVISION',
+        }), 409
     data = request.get_json()
 
     for field in ['title', 'content', 'category', 'scope',
@@ -673,6 +704,11 @@ def distribute_knowledge(entry_id):
 def delete_knowledge(entry_id):
     """删除知识条目"""
     entry = KnowledgeEntry.query.get_or_404(entry_id)
+    if entry.entry_type == 'test_journal':
+        return jsonify({
+            'error': '版本纪要不能物理删除，请通过归档保留历史',
+            'code': 'VERSIONED_KNOWLEDGE_DELETE_FORBIDDEN',
+        }), 409
 
     # Clear foreign key references in topics
     Topic.query.filter_by(review_knowledge_id=entry_id).update(

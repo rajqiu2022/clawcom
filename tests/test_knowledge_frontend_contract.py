@@ -64,6 +64,17 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
                 f"{name}: {result.stderr.decode('utf-8', errors='replace')}",
             )
 
+    def test_version_journal_workspace_and_revision_actions_are_present(self):
+        text = (ROOT / 'web' / 'templates' / 'knowledge.html').read_text(
+            encoding='utf-8')
+        for marker in (
+            'data-tab="journal"', 'kn-wiki-shell',
+            'loadJournalNotebooks', 'createJournalNotebook',
+            'saveJournalPage', 'compareJournalRevisions',
+            'rollbackJournalRevision', 'journal-vditor',
+        ):
+            self.assertIn(marker, text)
+
 
 if __name__ == '__main__':
     unittest.main()

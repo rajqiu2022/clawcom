@@ -201,6 +201,39 @@
     background: rgba(16,185,129,.2);
     border-color: #10b981;
 }
+
+/* ===== 版本测试纪要：紧凑三栏 Wiki 工作台 ===== */
+.kn-wiki-shell { display:grid; grid-template-columns:250px minmax(0,1fr) 270px; min-height:680px; border:1px solid var(--border); border-radius:12px; overflow:hidden; background:var(--bg-card); }
+.kn-wiki-side,.kn-wiki-history { background:var(--bg-secondary); min-width:0; }
+.kn-wiki-side { border-right:1px solid var(--border); }
+.kn-wiki-history { border-left:1px solid var(--border); }
+.kn-wiki-pane-head { display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:48px; padding:10px 12px; border-bottom:1px solid var(--border); }
+.kn-wiki-pane-head strong { font-size:.83rem; letter-spacing:.04em; }
+.kn-wiki-notebook { padding:10px 12px; border-bottom:1px solid var(--border); cursor:pointer; }
+.kn-wiki-notebook:hover,.kn-wiki-notebook.active { background:var(--bg-hover); box-shadow:inset 3px 0 0 var(--accent); }
+.kn-wiki-notebook small { display:block; margin-top:3px; color:var(--text-muted); }
+.kn-wiki-module { padding:10px 12px 4px; color:var(--text-muted); font-size:.72rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
+.kn-wiki-page-link { display:flex; gap:7px; align-items:flex-start; padding:7px 12px 7px 20px; color:var(--text-secondary); font-size:.82rem; cursor:pointer; border-left:2px solid transparent; }
+.kn-wiki-page-link:hover,.kn-wiki-page-link.active { color:var(--text-primary); background:var(--bg-hover); border-left-color:var(--accent); }
+.kn-wiki-main { min-width:0; display:flex; flex-direction:column; }
+.kn-wiki-toolbar { min-height:58px; display:flex; align-items:center; justify-content:space-between; gap:14px; padding:10px 18px; border-bottom:1px solid var(--border); }
+.kn-wiki-title { min-width:0; }
+.kn-wiki-title h2 { margin:0; font-size:1.04rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.kn-wiki-title-meta { margin-top:4px; color:var(--text-muted); font-size:.74rem; }
+.kn-wiki-body { flex:1; overflow:auto; padding:24px 30px; }
+.kn-wiki-empty { display:flex; min-height:420px; align-items:center; justify-content:center; text-align:center; color:var(--text-muted); }
+.kn-revision-item { padding:10px 12px; border-bottom:1px solid var(--border); cursor:pointer; }
+.kn-revision-item:hover { background:var(--bg-hover); }
+.kn-revision-top { display:flex; justify-content:space-between; gap:8px; font-size:.78rem; }
+.kn-revision-no { color:var(--accent); font-weight:700; font-family:"JetBrains Mono",monospace; }
+.kn-revision-summary { margin-top:5px; color:var(--text-secondary); font-size:.76rem; line-height:1.4; }
+.kn-revision-editor { margin-top:4px; color:var(--text-muted); font-size:.7rem; }
+.kn-wiki-editor { display:none; padding:18px; overflow:auto; }
+.kn-wiki-editor.active { display:block; }
+.kn-diff { margin:0; padding:14px; background:#111318; border:1px solid var(--border); border-radius:8px; overflow:auto; max-height:60vh; font:12px/1.55 "JetBrains Mono",monospace; white-space:pre-wrap; }
+.kn-diff-add { color:#7ee787; background:rgba(46,160,67,.12); }
+.kn-diff-del { color:#ffa198; background:rgba(248,81,73,.12); }
+@media(max-width:1100px){.kn-wiki-shell{grid-template-columns:220px minmax(0,1fr)}.kn-wiki-history{display:none}}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/vditor@3.10.8/dist/index.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
@@ -208,7 +241,7 @@
 
 {% block top_actions %}
 <div style="display:flex;gap:10px;align-items:center">
-    <select id="filter-project" class="form-select" style="min-width:140px" onchange="loadKnowledge()">
+    <select id="filter-project" class="form-select" style="min-width:140px" onchange="onKnowledgeProjectChange()">
         <option value="">全部项目</option>
     </select>
     <button class="btn btn-primary btn-sm" onclick="showCreateModal()" style="white-space:nowrap;padding:6px 14px;font-size:0.82rem">+ 新增知识</button>
@@ -218,8 +251,44 @@
 {% block content %}
 <div class="tab-bar">
     <div class="tab-item active" data-tab="browse" onclick="switchTab('browse')">浏览</div>
+    <div class="tab-item" data-tab="journal" onclick="switchTab('journal')">版本纪要</div>
     <div class="tab-item" data-tab="pending" onclick="switchTab('pending')">
         待审核 <span id="pending-badge" style="background:var(--yellow);color:#000;border-radius:99px;padding:1px 7px;font-size:0.75rem;margin-left:4px;display:none"></span>
+    </div>
+</div>
+
+<!-- 项目版本测试纪要 -->
+<div id="tab-journal" style="display:none">
+    <div class="kn-wiki-shell">
+        <aside class="kn-wiki-side">
+            <div class="kn-wiki-pane-head"><strong>纪要本与模块</strong><button class="btn btn-sm btn-primary" onclick="createJournalNotebook()">＋纪要本</button></div>
+            <div id="journal-notebook-list"></div>
+            <div id="journal-module-tree"></div>
+        </aside>
+        <section class="kn-wiki-main">
+            <div class="kn-wiki-toolbar">
+                <div class="kn-wiki-title"><h2 id="journal-page-title">版本测试过程纪要</h2><div class="kn-wiki-title-meta" id="journal-page-meta">选择左侧页面开始阅读</div></div>
+                <div style="display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end">
+                    <button class="btn btn-sm btn-ghost" id="journal-add-page" onclick="createJournalPage()" style="display:none">＋页面</button>
+                    <button class="btn btn-sm btn-ghost" id="journal-compare" onclick="compareJournalRevisions()" style="display:none">版本对比</button>
+                    <button class="btn btn-sm btn-primary" id="journal-edit" onclick="editJournalPage()" style="display:none">编辑</button>
+                </div>
+            </div>
+            <div class="kn-wiki-body" id="journal-page-view"><div class="kn-wiki-empty"><div><div style="font-size:2.2rem;margin-bottom:10px">▤</div>选择纪要本和模块页面，或新建第一个页面</div></div></div>
+            <div class="kn-wiki-editor" id="journal-page-editor">
+                <div style="display:grid;grid-template-columns:1fr 210px;gap:10px;margin-bottom:10px">
+                    <input class="form-input" id="journal-edit-title" placeholder="页面标题">
+                    <select class="form-select" id="journal-edit-module"></select>
+                </div>
+                <div id="journal-vditor"></div>
+                <input class="form-input" id="journal-change-summary" placeholder="本次修改说明（会显示在版本历史中）" style="margin-top:10px">
+                <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:12px"><button class="btn btn-ghost" onclick="cancelJournalEdit()">取消</button><button class="btn btn-primary" onclick="saveJournalPage()">保存新版本</button></div>
+            </div>
+        </section>
+        <aside class="kn-wiki-history">
+            <div class="kn-wiki-pane-head"><strong>版本历史</strong><span id="journal-revision-count" style="font-size:.72rem;color:var(--text-muted)"></span></div>
+            <div id="journal-revision-list"></div>
+        </aside>
     </div>
 </div>
 
@@ -360,7 +429,14 @@ function switchTab(tab) {
     $(`.tab-item[data-tab="${tab}"]`).classList.add('active');
     $('#tab-browse').style.display = tab === 'browse' ? 'block' : 'none';
     $('#tab-pending').style.display = tab === 'pending' ? 'block' : 'none';
+    $('#tab-journal').style.display = tab === 'journal' ? 'block' : 'none';
     if (tab === 'pending') loadPending();
+    if (tab === 'journal') loadJournalNotebooks();
+}
+
+function onKnowledgeProjectChange() {
+    loadKnowledge();
+    if ($('#tab-journal').style.display !== 'none') loadJournalNotebooks();
 }
 
 const statusColors = {
@@ -384,7 +460,8 @@ const categoryLabels = {
 
 function escapeHtml(str) {
     if (!str) return '';
-    return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
 function getSubmitterInfo(e) {
@@ -884,6 +961,223 @@ async function saveKnowledge() {
     }
 }
 
+// ===== 项目版本测试纪要 Wiki =====
+let journalNotebooks = [];
+let journalNotebook = null;
+let journalPage = null;
+let journalRevisions = [];
+let journalVditor = null;
+
+function journalProjectId() {
+    const option = $('#filter-project').selectedOptions[0];
+    return Number(option && option.dataset.projectId || 0) || null;
+}
+
+function journalEmpty(message) {
+    $('#journal-page-view').innerHTML = `<div class="kn-wiki-empty"><div><div style="font-size:2.2rem;margin-bottom:10px">▤</div>${escapeHtml(message)}</div></div>`;
+    $('#journal-page-title').textContent = '版本测试过程纪要';
+    $('#journal-page-meta').textContent = message;
+    $('#journal-edit').style.display = 'none';
+    $('#journal-compare').style.display = 'none';
+    $('#journal-revision-list').innerHTML = '';
+    $('#journal-revision-count').textContent = '';
+}
+
+async function loadJournalNotebooks() {
+    const projectId = journalProjectId();
+    if (!projectId) {
+        journalNotebooks = []; journalNotebook = null; journalPage = null;
+        $('#journal-notebook-list').innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:.8rem">请先在页面右上角选择项目</div>';
+        $('#journal-module-tree').innerHTML = '';
+        $('#journal-add-page').style.display = 'none';
+        journalEmpty('选择一个项目查看版本纪要');
+        return;
+    }
+    try {
+        const result = await API.listKnowledgeNotebooks(projectId);
+        journalNotebooks = result.items || [];
+        $('#journal-notebook-list').innerHTML = journalNotebooks.length
+            ? journalNotebooks.map(row => `<div class="kn-wiki-notebook ${journalNotebook && journalNotebook.id===row.id?'active':''}" onclick="selectJournalNotebook(${row.id})"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.version_name || '未标注版本')} · ${row.pages.length} 页 · r${row.version}</small></div>`).join('')
+            : '<div style="padding:14px;color:var(--text-muted);font-size:.8rem">当前项目还没有版本纪要本</div>';
+        if (!journalNotebooks.length) {
+            journalNotebook = null; journalPage = null;
+            $('#journal-module-tree').innerHTML = '';
+            $('#journal-add-page').style.display = 'none';
+            journalEmpty('新建纪要本后即可按模块记录测试过程');
+        } else {
+            const keep = journalNotebook && journalNotebooks.find(row => row.id === journalNotebook.id);
+            await selectJournalNotebook((keep || journalNotebooks[0]).id, true);
+        }
+    } catch (err) { showToast('纪要本加载失败: ' + err.message, 'error'); }
+}
+
+async function selectJournalNotebook(id, skipReloadList=false) {
+    try {
+        journalNotebook = await API.getKnowledgeNotebook(id);
+        if (!skipReloadList) {
+            $$('.kn-wiki-notebook').forEach(el => el.classList.remove('active'));
+            loadJournalNotebooks();
+        }
+        $('#journal-add-page').style.display = '';
+        renderJournalModuleTree();
+        const pages = journalNotebook.pages || [];
+        if (pages.length) await openJournalPage(pages[0].id);
+        else { journalPage = null; journalEmpty('该纪要本尚无页面，点击“＋页面”开始记录'); $('#journal-add-page').style.display=''; }
+    } catch (err) { showToast('纪要本加载失败: ' + err.message, 'error'); }
+}
+
+function renderJournalModuleTree() {
+    if (!journalNotebook) return;
+    const pages = journalNotebook.pages || [];
+    $('#journal-module-tree').innerHTML = (journalNotebook.modules || []).map(moduleName => {
+        const rows = pages.filter(page => page.module_name === moduleName && !page.archived_at);
+        return `<div class="kn-wiki-module">${escapeHtml(moduleName)} · ${rows.length}</div>` +
+            (rows.length ? rows.map(page => `<div class="kn-wiki-page-link ${journalPage&&journalPage.id===page.id?'active':''}" onclick="openJournalPage(${page.id})"><span>›</span><span>${escapeHtml(page.title)}</span></div>`).join('') : '<div style="padding:3px 20px 8px;color:var(--text-muted);font-size:.72rem">暂无页面</div>');
+    }).join('');
+}
+
+async function createJournalNotebook() {
+    const projectId = journalProjectId();
+    if (!projectId) { showToast('请先选择项目', 'error'); return; }
+    const title = await customPrompt({title:'新建版本纪要本',msg:'纪要本名称',placeholder:'例如：RacingGO M3版本测试纪要'});
+    if (!title) return;
+    const versionName = await customPrompt({title:'版本标识',msg:'版本名称（可选）',placeholder:'例如：M3 / α03'});
+    try {
+        const row = await API.createKnowledgeNotebook({project_id:projectId,title:title.trim(),version_name:(versionName||'').trim()});
+        showToast('纪要本已创建', 'success');
+        journalNotebook = row;
+        await loadJournalNotebooks();
+    } catch (err) { showToast('创建失败: ' + err.message, 'error'); }
+}
+
+async function createJournalPage() {
+    if (!journalNotebook) return;
+    const title = await customPrompt({title:'新建纪要页面',msg:'页面标题',placeholder:'例如：登录态方案调整'});
+    if (!title) return;
+    const defaultModule = (journalNotebook.modules || [])[0] || '';
+    const moduleName = await customPrompt({title:'所属模块',msg:'输入模块名称：\n' + (journalNotebook.modules || []).join(' / '),placeholder:defaultModule});
+    if (!moduleName) return;
+    try {
+        const page = await API.createKnowledgeNotebookPage(journalNotebook.id, {
+            title:title.trim(), module_name:moduleName.trim(), content:'# ' + title.trim(), change_summary:'创建页面'
+        }, crypto.randomUUID());
+        journalNotebook = await API.getKnowledgeNotebook(journalNotebook.id);
+        renderJournalModuleTree();
+        await openJournalPage(page.id);
+        showToast('页面已创建', 'success');
+    } catch (err) { showToast('创建失败: ' + err.message, 'error'); }
+}
+
+async function openJournalPage(id) {
+    try {
+        journalPage = await API.getKnowledgeJournalPage(id);
+        cancelJournalEdit();
+        $('#journal-page-title').textContent = journalPage.title;
+        $('#journal-page-meta').textContent = `${journalPage.module_name || '未分类'} · Revision ${journalPage.current_revision} · 更新于 ${journalPage.updated_at || '-'}`;
+        $('#journal-page-view').innerHTML = `<div class="markdown-body" style="line-height:1.8;font-size:.94rem">${renderMarkdown(journalPage.content)}</div>`;
+        $('#journal-edit').style.display = '';
+        $('#journal-compare').style.display = '';
+        renderJournalModuleTree();
+        await loadJournalRevisions();
+    } catch (err) { showToast('页面加载失败: ' + err.message, 'error'); }
+}
+
+async function loadJournalRevisions() {
+    if (!journalPage) return;
+    const result = await API.listKnowledgeRevisions(journalPage.id);
+    journalRevisions = result.items || [];
+    $('#journal-revision-count').textContent = `${journalRevisions.length} 个版本`;
+    $('#journal-revision-list').innerHTML = journalRevisions.map(row => `
+        <div class="kn-revision-item" onclick="viewJournalRevision(${row.revision_no})">
+            <div class="kn-revision-top"><span class="kn-revision-no">R${row.revision_no}</span><span>${String(row.created_at||'').slice(0,16)}</span></div>
+            <div class="kn-revision-summary">${escapeHtml(row.change_summary || '未填写修改说明')}</div>
+            <div class="kn-revision-editor">${escapeHtml(row.editor_name || '未知')} ${row.rollback_from_revision ? `· 恢复自 R${row.rollback_from_revision}` : ''}</div>
+            ${row.revision_no !== journalPage.current_revision ? `<button class="btn btn-sm btn-ghost" style="margin-top:7px" onclick="event.stopPropagation();rollbackJournalRevision(${row.revision_no})">恢复此版本</button>` : ''}
+        </div>`).join('');
+}
+
+async function viewJournalRevision(revisionNo) {
+    if (!journalPage) return;
+    const revision = await API.getKnowledgeRevision(journalPage.id, revisionNo);
+    $('#journal-page-title').textContent = revision.title;
+    $('#journal-page-meta').textContent = `历史 Revision ${revision.revision_no} · ${revision.editor_name} · ${revision.created_at}`;
+    $('#journal-page-view').innerHTML = `<div style="padding:8px 12px;margin-bottom:14px;border:1px solid var(--yellow);border-radius:7px;color:var(--yellow);font-size:.8rem">正在查看历史版本，当前版本为 R${journalPage.current_revision}。点击左侧页面返回最新内容。</div><div class="markdown-body">${renderMarkdown(revision.content)}</div>`;
+}
+
+function initJournalVditor(content) {
+    if (journalVditor) { journalVditor.setValue(content || ''); return; }
+    journalVditor = new Vditor('journal-vditor', {
+        height:440, mode:'ir', theme:'dark', cache:{enable:false}, value:content || '',
+        toolbar:['headings','bold','italic','strike','|','list','ordered-list','check','|','quote','code','inline-code','|','upload','link','table','|','undo','redo','|','preview','fullscreen'],
+        upload:{url:'/api/v1/upload/image',fieldName:'image',max:10*1024*1024,accept:'image/*',multiple:false,
+            format(files,responseText){try{const res=JSON.parse(responseText);if(res.url)return JSON.stringify({msg:'',code:0,data:{errFiles:[],succMap:{[files[0].name]:res.url}}});}catch(e){}return responseText;}},
+    });
+}
+
+function editJournalPage() {
+    if (!journalPage || !journalNotebook) return;
+    $('#journal-page-view').style.display = 'none';
+    $('#journal-page-editor').classList.add('active');
+    $('#journal-edit-title').value = journalPage.title;
+    $('#journal-edit-module').innerHTML = (journalNotebook.modules||[]).map(name => `<option value="${escapeHtml(name)}" ${name===journalPage.module_name?'selected':''}>${escapeHtml(name)}</option>`).join('');
+    $('#journal-change-summary').value = '';
+    setTimeout(() => initJournalVditor(journalPage.content || ''), 60);
+}
+
+function cancelJournalEdit() {
+    $('#journal-page-editor').classList.remove('active');
+    $('#journal-page-view').style.display = '';
+}
+
+async function saveJournalPage() {
+    if (!journalPage || !journalVditor) return;
+    const data = {
+        expected_revision:journalPage.current_revision,
+        title:$('#journal-edit-title').value.trim(),
+        module_name:$('#journal-edit-module').value,
+        content:journalVditor.getValue().trim(),
+        change_summary:$('#journal-change-summary').value.trim() || '更新页面',
+    };
+    if (!data.title || !data.content) { showToast('标题和正文不能为空', 'error'); return; }
+    try {
+        const result = await API.createKnowledgeRevision(journalPage.id, data, crypto.randomUUID());
+        journalPage = result.page;
+        journalNotebook = await API.getKnowledgeNotebook(journalNotebook.id);
+        cancelJournalEdit(); renderJournalModuleTree(); await openJournalPage(journalPage.id);
+        showToast(`已保存 Revision ${journalPage.current_revision}`, 'success');
+    } catch (err) { showToast('保存失败: ' + err.message, 'error'); }
+}
+
+async function compareJournalRevisions() {
+    if (!journalPage || journalRevisions.length < 2) { showToast('至少需要两个版本才能对比', 'error'); return; }
+    const older = await customPrompt({title:'版本对比',msg:'输入较早版本号',placeholder:String(journalRevisions[1].revision_no)});
+    if (!older) return;
+    const newer = await customPrompt({title:'版本对比',msg:'输入较新版本号',placeholder:String(journalPage.current_revision)});
+    if (!newer) return;
+    try {
+        const result = await API.compareKnowledgeRevisions(journalPage.id, Number(older), Number(newer));
+        const overlay = document.createElement('div'); overlay.className='modal-overlay active'; overlay.style.zIndex='12000';
+        const diff = (result.diff||[]).map(line => `<span class="${line.startsWith('+')&&!line.startsWith('+++')?'kn-diff-add':line.startsWith('-')&&!line.startsWith('---')?'kn-diff-del':''}">${escapeHtml(line)}\n</span>`).join('');
+        overlay.innerHTML=`<div class="modal" style="max-width:980px"><div class="modal-title">Revision ${older} → ${newer}</div><div style="color:var(--text-muted);font-size:.8rem;margin-bottom:10px">新增 ${result.stats.added} 行，删除 ${result.stats.removed} 行</div><pre class="kn-diff">${diff||'两个版本正文一致'}</pre><div class="modal-actions"><button class="btn btn-primary" onclick="this.closest('.modal-overlay').remove()">关闭</button></div></div>`;
+        document.body.appendChild(overlay);
+    } catch (err) { showToast('对比失败: ' + err.message, 'error'); }
+}
+
+async function rollbackJournalRevision(revisionNo) {
+    if (!journalPage || !await customConfirm(`将创建一个新版本，并把内容恢复为 Revision ${revisionNo}。继续？`)) return;
+    try {
+        const result = await API.rollbackKnowledgeRevision(journalPage.id, {
+            expected_revision:journalPage.current_revision,
+            target_revision:revisionNo,
+            change_summary:`恢复到 Revision ${revisionNo}`,
+        }, crypto.randomUUID());
+        journalPage = result.page;
+        journalNotebook = await API.getKnowledgeNotebook(journalNotebook.id);
+        renderJournalModuleTree(); await openJournalPage(journalPage.id);
+        showToast(`已创建恢复版本 R${journalPage.current_revision}`, 'success');
+    } catch (err) { showToast('恢复失败: ' + err.message, 'error'); }
+}
+
 async function deleteEntry(id) {
     if (!await customConfirm('确定删除该知识条目？')) return;
     try {
@@ -903,7 +1197,7 @@ async function initPage() {
         const projects = await API.listProjects();
         const sel = $('#filter-project');
         sel.innerHTML = '<option value="">全部项目</option>' +
-            projects.map(p => `<option value="${p.name}">${p.name}</option>`).join('');
+            projects.map(p => `<option value="${p.name}" data-project-id="${p.id}">${p.name}</option>`).join('');
         initProjectFilter(sel, typeof loadKnowledge === 'function' ? loadKnowledge : null);
         // 编辑弹窗的项目下拉也填充
         const editSel = $('#edit-project');
