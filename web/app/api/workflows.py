@@ -1821,6 +1821,13 @@ def _worker_id_from_payload(data, claw):
     return str((data or {}).get('worker_id') or f'claw:{claw.id}').strip()
 
 
+def _locked_workflow_step(run_id, step_id):
+    """Lock the latest Step row before claim/fencing validation and mutation."""
+    return (WorkflowRunStep.query
+            .filter_by(run_id=run_id, step_id=step_id)
+            .with_for_update().first_or_404())
+
+
 def _clear_step_claim(step):
     step.claimed_by = ''
     step.claimed_at = None
@@ -3495,9 +3502,7 @@ def claim_workflow_step(run_id, step_id):
     run = WorkflowRun.query.get_or_404(run_id)
     if run.status not in ('running', 'retrying'):
         return jsonify({'error': 'Workflow Run 当前不可执行'}), 409
-    step = (WorkflowRunStep.query
-            .filter_by(run_id=run_id, step_id=step_id)
-            .with_for_update().first_or_404())
+    step = _locked_workflow_step(run_id, step_id)
     config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
     direct_policy = direct_execution_lease(step.step_type, config)
     direct_claim = direct_execution_claim_allowed(
@@ -3568,8 +3573,7 @@ def heartbeat_workflow_step(run_id, step_id):
     data = request.get_json() or {}
     worker_id = _worker_id_from_payload(data, claw)
     run = WorkflowRun.query.get_or_404(run_id)
-    step = WorkflowRunStep.query.filter_by(
-        run_id=run_id, step_id=step_id).first_or_404()
+    step = _locked_workflow_step(run_id, step_id)
     if run.status not in ('running', 'retrying'):
         return _workflow_lifecycle_conflict(
             run, step, operation='heartbeat')
@@ -3606,8 +3610,7 @@ def progress_workflow_step(run_id, step_id):
     data = request.get_json() or {}
     reporter = str(data.get('worker_id') or data.get('reporter') or f'claw:{claw.id}').strip()
     run = WorkflowRun.query.get_or_404(run_id)
-    step = WorkflowRunStep.query.filter_by(
-        run_id=run_id, step_id=step_id).first_or_404()
+    step = _locked_workflow_step(run_id, step_id)
     if run.status not in ('running', 'retrying'):
         return _workflow_lifecycle_conflict(
             run, step, operation='progress')
@@ -3717,7 +3720,7 @@ def update_workflow_step_display_status(run_id, step_id):
         return jsonify({'error': 'workflow run 不存在'}), 404
     if run.status == 'cancelled':
         return jsonify({'error': 'Workflow Run 已终止，不能修改节点状态'}), 409
-    step = WorkflowRunStep.query.filter_by(run_id=run_id, step_id=step_id).first_or_404()
+    step = _locked_workflow_step(run_id, step_id)
     if not _can_change_workflow_step_status(run, step):
         return jsonify({'error': '只有节点执行 Agent、owner 或管理员可以修改节点状态'}), 403
     data = request.get_json() or {}
@@ -3780,10 +3783,7 @@ def report_workflow_step_result(run_id, step_id):
     if idem_response:
         return idem_response
     run = WorkflowRun.query.get_or_404(run_id)
-    step = WorkflowRunStep.query.filter_by(
-        run_id=run_id,
-        step_id=step_id,
-    ).first_or_404()
+    step = _locked_workflow_step(run_id, step_id)
     data = request.get_json() or {}
     if (run.status in ('succeeded', 'failed', 'blocked', 'cancelled')
             and not (run.status == 'blocked'

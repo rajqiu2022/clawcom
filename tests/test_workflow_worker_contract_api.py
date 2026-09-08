@@ -1,4 +1,5 @@
 import sys
+import inspect
 import json
 import types
 import unittest
@@ -887,6 +888,28 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(
             'IDEMPOTENCY_KEY_REUSED', conflict.get_json()['code'])
+
+    def test_claim_protected_write_routes_lock_step_before_validation(self):
+        helper_source = inspect.getsource(
+            workflows_api._locked_workflow_step)
+        self.assertIn('.with_for_update()', helper_source)
+        handlers = (
+            workflows_api.claim_workflow_step,
+            workflows_api.heartbeat_workflow_step,
+            workflows_api.progress_workflow_step,
+            workflows_api.update_workflow_step_display_status,
+            workflows_api.report_workflow_step_result,
+        )
+        for handler in handlers:
+            with self.subTest(handler=handler.__name__):
+                source = inspect.getsource(handler)
+                self.assertIn('_locked_workflow_step(', source)
+        result_source = inspect.getsource(
+            workflows_api.report_workflow_step_result)
+        self.assertLess(
+            result_source.index('_workflow_idempotency_begin()'),
+            result_source.index('_locked_workflow_step('),
+        )
 
     def test_missing_declared_output_is_contract_invalid_and_blocks(self):
         self.agent_step.step_config_json = {'outputs': ['required_output']}
