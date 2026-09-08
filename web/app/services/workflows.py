@@ -6,6 +6,10 @@ state rules can be tested without booting the Hub app.
 
 import copy
 
+from app.services.workflow_direct_execution import (
+    normalize_direct_execution_lease,
+)
+
 VALID_STEP_TYPES = {
     'worker_task',
     'agent_task',
@@ -932,6 +936,11 @@ def normalize_step(step, idx):
         normalized['notify_agent_on_start'] = bool(step.get('notify_agent_on_start'))
     if 'require_fencing_token' in step:
         normalized['require_fencing_token'] = bool(step.get('require_fencing_token'))
+    if 'direct_execution_lease' in step:
+        normalized['direct_execution_lease'] = normalize_direct_execution_lease(
+            step.get('direct_execution_lease'),
+            path=f'steps[{idx}].direct_execution_lease',
+        )
     # These are orchestration policies, not executor-only hints. Preserve the
     # canonical top-level shape while continuing to read the legacy values
     # already shipped under ``inputs`` by Flow #12/#25.

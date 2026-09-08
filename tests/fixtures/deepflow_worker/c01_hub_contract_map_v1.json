@@ -15,8 +15,8 @@
   },
   "worker_source": {
     "branch": "codex/agent-direct",
-    "head_commit": "e0f96f7193db5a18f7cba63539844b6553a37452",
-    "remote_tracking_commit": "e84c4dc207d0583a6b5261a509f0b94026c2543b",
+    "head_commit": "e436800",
+    "remote_tracking_commit": "bd03603",
     "worktree_dirty": true,
     "agent_direct_entrypoint": "src/sidecar_v2.py",
     "v4_canary_entrypoint": "src/codex_worker_v4_entry.py",
@@ -38,7 +38,11 @@
       "path": "/api/v1/workflow-runs/<int:run_id>/steps/<step_id>/claim",
       "methods": ["POST"],
       "authority": "hub",
-      "supported_step_types": ["worker_task"]
+      "supported_step_types": [
+        "worker_task",
+        "agent_task_with_direct_execution_lease"
+      ],
+      "direct_claim_scope": "runner_operation"
     },
     "step_heartbeat": {
       "path": "/api/v1/workflow-runs/<int:run_id>/steps/<step_id>/heartbeat",
@@ -50,7 +54,10 @@
       "methods": ["POST"],
       "authority": "hub",
       "idempotency": "actor_and_idempotency_key",
-      "fencing_required_for_step_types": ["worker_task"]
+      "fencing_required_for_step_types": [
+        "worker_task_when_configured",
+        "agent_task_with_direct_execution_lease"
+      ]
     },
     "resource_lease_acquire": {
       "path": "/api/v1/resource-leases/acquire",
@@ -146,13 +153,13 @@
   "gaps": [
     {
       "id": "H01_AGENT_DIRECT_ADMISSION",
-      "status": "open",
-      "summary": "agent_task lacks an atomic claim/admission path for capacity and waiting reasons; the existing claim endpoint intentionally accepts only worker_task"
+      "status": "implemented_local",
+      "summary": "agent_task has an opt-in runner_operation claim path; capacity queue and waiting reason aggregation remain open"
     },
     {
       "id": "H02_AGENT_DIRECT_FENCING",
-      "status": "open",
-      "summary": "agent_task result and progress writes do not require the WorkflowRunStep fencing token"
+      "status": "implemented_local",
+      "summary": "agent_task with direct_execution_lease now requires the WorkflowRunStep fencing token across heartbeat, progress and result"
     },
     {
       "id": "H02_RUN_RECONCILIATION",
@@ -161,8 +168,8 @@
     },
     {
       "id": "W02_DIRECT_OPERATION_JOURNAL",
-      "status": "open",
-      "summary": "agent_direct runs sidecar_v2, so codex_worker_v4 WorkerStateStore does not provide its production operation journal"
+      "status": "implemented_local_unwired",
+      "summary": "Worker commit e436800 adds the consolidated DeepFlow operation journal and deterministic dispatcher in WeComStore, but sidecar_v2 tool wiring and DeepFlow real-runner integration are not enabled"
     },
     {
       "id": "H03_ATTACHMENT_IDEMPOTENCY",

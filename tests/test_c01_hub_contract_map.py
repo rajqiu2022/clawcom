@@ -92,7 +92,7 @@ class C01HubContractMapTest(unittest.TestCase):
                     routes[route["path"]]
                 ))
 
-    def test_direct_gaps_are_explicit_and_not_green(self):
+    def test_direct_claim_mapping_tracks_opt_in_implementation(self):
         gaps = {item["id"]: item for item in self.mapping["gaps"]}
         claim_source = inspect.getsource(workflow_api.claim_workflow_step)
         result_source = inspect.getsource(
@@ -100,22 +100,29 @@ class C01HubContractMapTest(unittest.TestCase):
         )
         self.assertIn("step.step_type != 'worker_task'", claim_source)
         self.assertIn(
-            "if claw and step.step_type == 'worker_task'", result_source
+            "workflow_step_claim_required", result_source
         )
         self.assertEqual(
-            ["worker_task"],
+            ["worker_task", "agent_task_with_direct_execution_lease"],
             self.mapping["routes"]["step_claim"]["supported_step_types"],
         )
         self.assertFalse(
             self.mapping["worker_source"]["v4_store_used_by_agent_direct"]
         )
-        for gap_id in (
-            "H01_AGENT_DIRECT_ADMISSION",
-            "H02_AGENT_DIRECT_FENCING",
-            "W02_DIRECT_OPERATION_JOURNAL",
-        ):
-            self.assertIn(gap_id, gaps)
-            self.assertNotEqual("complete", gaps[gap_id]["status"])
+        self.assertEqual(
+            "implemented_local",
+            gaps["H01_AGENT_DIRECT_ADMISSION"]["status"],
+        )
+        self.assertEqual(
+            "implemented_local",
+            gaps["H02_AGENT_DIRECT_FENCING"]["status"],
+        )
+        self.assertNotEqual(
+            "complete", gaps["W02_DIRECT_OPERATION_JOURNAL"]["status"])
+        self.assertEqual(
+            "implemented_local_unwired",
+            gaps["W02_DIRECT_OPERATION_JOURNAL"]["status"],
+        )
 
     def test_deepflow_contract_is_candidate_not_release(self):
         contract = self.mapping["deepflow_contract"]

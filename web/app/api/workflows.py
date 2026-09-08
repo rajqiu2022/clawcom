@@ -95,6 +95,12 @@ from app.services.workflow_result_ingestion import (
     ingest_workflow_result,
     link_report_to_evidence,
 )
+from app.services.workflow_direct_execution import (
+    direct_execution_claim_allowed,
+    direct_execution_lease,
+    workflow_step_claim_required,
+    workflow_step_fencing_required,
+)
 
 
 # F1：running step 心跳/进度硬超时（秒）。超过后按 retry_max 有限重试，用尽则阻断，
@@ -1845,8 +1851,14 @@ def _claim_error_response(code, step, status=409):
 
 
 def _require_active_step_claim(step, claw, worker_id, fencing_token=None):
+    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+    effective_step_type = (
+        'worker_task'
+        if workflow_step_claim_required(step.step_type, config)
+        else step.step_type
+    )
     state = active_step_claim_state(
-        step.step_type,
+        effective_step_type,
         getattr(step, 'claimed_claw_id', None),
         step.claimed_by,
         getattr(step, 'claim_expires_at', None),
@@ -1857,9 +1869,8 @@ def _require_active_step_claim(step, claw, worker_id, fencing_token=None):
     if not state.get('active'):
         return _claim_error_response(
             state.get('reason') or 'claim_required', step)
-    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
     fencing_required = bool(
-        config.get('require_fencing_token')
+        workflow_step_fencing_required(step.step_type, config)
         or current_app.config.get('WORKFLOW_FENCING_REQUIRED', False))
     if fencing_token in (None, ''):
         if fencing_required:
@@ -3480,7 +3491,6 @@ def claim_workflow_step(run_id, step_id):
         return idem_response
     data = request.get_json() or {}
     worker_id = _worker_id_from_payload(data, claw)
-    lease_seconds = normalize_step_lease_seconds(data.get('lease_seconds'))
     now = datetime.now()
     run = WorkflowRun.query.get_or_404(run_id)
     if run.status not in ('running', 'retrying'):
@@ -3488,12 +3498,29 @@ def claim_workflow_step(run_id, step_id):
     step = (WorkflowRunStep.query
             .filter_by(run_id=run_id, step_id=step_id)
             .with_for_update().first_or_404())
-    if step.step_type != 'worker_task':
+    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+    direct_policy = direct_execution_lease(step.step_type, config)
+    direct_claim = direct_execution_claim_allowed(
+        step.step_type, config, data.get('claim_scope'))
+    if step.step_type == 'agent_task' and direct_policy and not direct_claim:
+        return _workflow_api_error(
+            'DIRECT_EXECUTION_SCOPE_REQUIRED',
+            'Agent Direct Runner claim requires claim_scope=runner_operation',
+            status=409,
+            details={
+                'step_id': step.step_id,
+                'claim_scope': data.get('claim_scope'),
+            })
+    if step.step_type != 'worker_task' and not direct_claim:
         return _workflow_api_error(
             'INVALID_STEP_TYPE',
             'Only worker_task steps can be claimed by Job Service',
             status=409,
             details={'step_id': step.step_id, 'step_type': step.step_type})
+    lease_seconds = normalize_step_lease_seconds(
+        data.get('lease_seconds')
+        if data.get('lease_seconds') is not None
+        else (direct_policy or {}).get('lease_seconds'))
     if step.status not in ('running', 'retrying'):
         return jsonify({'error': 'Workflow Step 当前不可执行'}), 409
     if not _step_belongs_to_claw(step, claw.id):
@@ -3520,7 +3547,13 @@ def claim_workflow_step(run_id, step_id):
     step.claimed_claw_id = claw.id
     step.claim_lease_seconds = lease_seconds
     step.claim_expires_at = now + timedelta(seconds=lease_seconds)
-    body = {'ok': True, 'step': _step_runtime_payload(step), 'lease_seconds': lease_seconds}
+    body = {
+        'ok': True,
+        'step': _step_runtime_payload(step),
+        'lease_seconds': lease_seconds,
+        'claim_scope': (
+            'runner_operation' if direct_claim else 'worker_task'),
+    }
     _workflow_idempotency_store(idem_record, 200, body)
     db.session.commit()
     return jsonify(body)
@@ -3557,7 +3590,8 @@ def heartbeat_workflow_step(run_id, step_id):
     step.health_status = 'healthy'
     step.health_checked_at = now
     _apply_step_progress(step, data, worker_id, now)
-    if step.step_type == 'worker_task':
+    if workflow_step_claim_required(
+            step.step_type, step.step_config_json or {}):
         _renew_step_claim(step, now)
     db.session.commit()
     return jsonify({'ok': True, 'step': _step_runtime_payload(step)})
@@ -3597,7 +3631,8 @@ def progress_workflow_step(run_id, step_id):
         step.missed_heartbeat_count = 0
         step.health_status = 'healthy'
         step.health_checked_at = now
-        if step.step_type == 'worker_task':
+        if workflow_step_claim_required(
+                step.step_type, step.step_config_json or {}):
             _renew_step_claim(step, now)
     db.session.commit()
     return jsonify({'ok': True, 'step': _step_runtime_payload(step)})
@@ -3687,7 +3722,8 @@ def update_workflow_step_display_status(run_id, step_id):
         return jsonify({'error': '只有节点执行 Agent、owner 或管理员可以修改节点状态'}), 403
     data = request.get_json() or {}
     claw = get_current_claw()
-    if claw and step.step_type == 'worker_task':
+    if claw and workflow_step_claim_required(
+            step.step_type, step.step_config_json or {}):
         worker_id = _worker_id_from_payload(data, claw)
         claim_error = _require_active_step_claim(
             step, claw, worker_id,
@@ -3761,7 +3797,8 @@ def report_workflow_step_result(run_id, step_id):
     claw = get_current_claw()
     if claw and not _step_belongs_to_claw(step, claw.id):
         return jsonify({'error': '此 Step 不属于当前 OpenClaw'}), 403
-    if claw and step.step_type == 'worker_task':
+    if claw and workflow_step_claim_required(
+            step.step_type, step.step_config_json or {}):
         worker_id = _worker_id_from_payload(data, claw)
         claim_error = _require_active_step_claim(
             step, claw, worker_id,

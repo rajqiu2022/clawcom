@@ -738,6 +738,156 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
             run_id=self.run.id, step_id='agent_step').first()
         self.assertEqual(step.status, 'passed')
 
+    def test_agent_direct_runner_claim_requires_scope_and_fencing(self):
+        self.agent_step.step_config_json = {
+            'direct_execution_lease': {
+                'schema': 1,
+                'required': True,
+                'scope': 'runner_operation',
+                'lease_seconds': 240,
+            },
+        }
+        db.session.commit()
+
+        missing_scope = self._post('agent_step', 'claim', {
+            'worker_id': 'direct-worker-a',
+        })
+        claimed = self._post('agent_step', 'claim', {
+            'worker_id': 'direct-worker-a',
+            'claim_scope': 'runner_operation',
+        })
+        self.assertEqual(missing_scope.status_code, 409)
+        self.assertEqual(
+            'DIRECT_EXECUTION_SCOPE_REQUIRED',
+            missing_scope.get_json()['code'],
+        )
+        self.assertEqual(claimed.status_code, 200, claimed.get_data(as_text=True))
+        self.assertEqual('runner_operation', claimed.get_json()['claim_scope'])
+        self.assertEqual(240, claimed.get_json()['lease_seconds'])
+        fencing_token = claimed.get_json()['step']['claim_fencing_token']
+
+        missing_fence = self._post('agent_step', 'heartbeat', {
+            'worker_id': 'direct-worker-a',
+        })
+        accepted_heartbeat = self._post('agent_step', 'heartbeat', {
+            'worker_id': 'direct-worker-a',
+            'fencing_token': fencing_token,
+        })
+        stale_result = self._post('agent_step', 'result', {
+            'worker_id': 'direct-worker-a',
+            'fencing_token': fencing_token + 1,
+            'status': 'passed',
+            'summary': 'must be rejected',
+        })
+        accepted_result = self._post('agent_step', 'result', {
+            'worker_id': 'direct-worker-a',
+            'fencing_token': fencing_token,
+            'status': 'passed',
+            'summary': 'runner result accepted',
+        })
+
+        self.assertEqual(missing_fence.status_code, 409)
+        self.assertEqual(
+            'fencing_token_required', missing_fence.get_json()['code'])
+        self.assertEqual(
+            accepted_heartbeat.status_code, 200,
+            accepted_heartbeat.get_data(as_text=True))
+        self.assertEqual(stale_result.status_code, 409)
+        self.assertEqual(
+            'fencing_token_stale', stale_result.get_json()['code'])
+        self.assertEqual(
+            accepted_result.status_code, 200,
+            accepted_result.get_data(as_text=True))
+        refreshed = WorkflowRunStep.query.filter_by(
+            run_id=self.run.id, step_id='agent_step').first()
+        self.assertEqual('passed', refreshed.status)
+        self.assertEqual('', refreshed.claimed_by)
+
+    def test_agent_direct_expired_claim_rejects_old_fencing_owner(self):
+        self.agent_step.step_config_json = {
+            'direct_execution_lease': {
+                'schema': 1,
+                'required': True,
+                'scope': 'runner_operation',
+                'lease_seconds': 60,
+            },
+        }
+        db.session.commit()
+        first = self._post('agent_step', 'claim', {
+            'worker_id': 'direct-worker-a',
+            'claim_scope': 'runner_operation',
+        })
+        first_token = first.get_json()['step']['claim_fencing_token']
+        step = WorkflowRunStep.query.filter_by(
+            run_id=self.run.id, step_id='agent_step').first()
+        step.claim_expires_at = datetime.now() - timedelta(seconds=1)
+        db.session.commit()
+        reclaimed = self._post('agent_step', 'claim', {
+            'worker_id': 'direct-worker-b',
+            'claim_scope': 'runner_operation',
+        })
+        self.assertEqual(
+            reclaimed.status_code, 200, reclaimed.get_data(as_text=True))
+        second_token = reclaimed.get_json()['step']['claim_fencing_token']
+
+        late = self._post('agent_step', 'result', {
+            'worker_id': 'direct-worker-a',
+            'fencing_token': first_token,
+            'status': 'passed',
+            'summary': 'late old result',
+        })
+        accepted = self._post('agent_step', 'result', {
+            'worker_id': 'direct-worker-b',
+            'fencing_token': second_token,
+            'status': 'passed',
+            'summary': 'current owner result',
+        })
+
+        self.assertEqual(first.status_code, 200, first.get_data(as_text=True))
+        self.assertEqual(first_token + 1, second_token)
+        self.assertEqual(late.status_code, 409)
+        self.assertEqual('claim_owner_mismatch', late.get_json()['code'])
+        self.assertEqual(accepted.status_code, 200, accepted.get_data(as_text=True))
+
+    def test_agent_direct_result_ack_loss_replays_same_response(self):
+        self.agent_step.step_config_json = {
+            'direct_execution_lease': {
+                'schema': 1,
+                'required': True,
+                'scope': 'runner_operation',
+                'lease_seconds': 180,
+            },
+        }
+        db.session.commit()
+        claimed = self._post('agent_step', 'claim', {
+            'worker_id': 'direct-worker-a',
+            'claim_scope': 'runner_operation',
+        })
+        fencing_token = claimed.get_json()['step']['claim_fencing_token']
+        headers = dict(
+            self._headers(),
+            **{'Idempotency-Key': 'direct-result-ack-loss-1'},
+        )
+        body = {
+            'worker_id': 'direct-worker-a',
+            'fencing_token': fencing_token,
+            'status': 'passed',
+            'summary': 'persisted exactly once',
+            'outputs': {'result_sha256': 'a' * 64},
+        }
+
+        first = self._post_with_headers('agent_step', 'result', body, headers)
+        replay = self._post_with_headers('agent_step', 'result', body, headers)
+        conflict = self._post_with_headers(
+            'agent_step', 'result', dict(body, summary='different'), headers)
+
+        self.assertEqual(first.status_code, 200, first.get_data(as_text=True))
+        self.assertEqual(replay.status_code, 200, replay.get_data(as_text=True))
+        self.assertEqual(first.get_json(), replay.get_json())
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(
+            'IDEMPOTENCY_KEY_REUSED', conflict.get_json()['code'])
+
     def test_missing_declared_output_is_contract_invalid_and_blocks(self):
         self.agent_step.step_config_json = {'outputs': ['required_output']}
         db.session.commit()
