@@ -1,0 +1,173 @@
+{
+  "schema": "hub.deepflow-worker.c01-map@1",
+  "status": "hub_verified_worker_partial",
+  "observed_at": "2026-09-08",
+  "hub_source": {
+    "branch": "codex/long-agent-control-plane-pilot",
+    "head_commit": "139ef0bbd7ac3bea23c7775222c1e4454e171064",
+    "worktree_dirty": true,
+    "authoritative_files": {
+      "workflow_api": "web/app/api/workflows.py",
+      "models": "web/app/models.py",
+      "resource_lease_api": "web/app/api/resource_leases.py",
+      "report_api": "web/app/api/test_reports.py"
+    }
+  },
+  "worker_source": {
+    "branch": "codex/agent-direct",
+    "head_commit": "e0f96f7193db5a18f7cba63539844b6553a37452",
+    "remote_tracking_commit": "e84c4dc207d0583a6b5261a509f0b94026c2543b",
+    "worktree_dirty": true,
+    "agent_direct_entrypoint": "src/sidecar_v2.py",
+    "v4_canary_entrypoint": "src/codex_worker_v4_entry.py",
+    "v4_store_used_by_agent_direct": false
+  },
+  "deepflow_contract": {
+    "schema": "deepflow.racinggo.operations@1",
+    "contract_sha256": "22391264b5279ff8c6cc8b1bd87dac70253e0b8252965942fa621a0ebb1e52b0",
+    "source": "DeepFlow_Hub_Worker_Incremental_r3_2026-09-08/configs/contracts/racinggo_operations_v1.json",
+    "production_release": false
+  },
+  "routes": {
+    "run_create": {
+      "path": "/api/v1/workflow-runs",
+      "methods": ["POST"],
+      "authority": "hub"
+    },
+    "step_claim": {
+      "path": "/api/v1/workflow-runs/<int:run_id>/steps/<step_id>/claim",
+      "methods": ["POST"],
+      "authority": "hub",
+      "supported_step_types": ["worker_task"]
+    },
+    "step_heartbeat": {
+      "path": "/api/v1/workflow-runs/<int:run_id>/steps/<step_id>/heartbeat",
+      "methods": ["POST"],
+      "authority": "hub"
+    },
+    "step_result": {
+      "path": "/api/v1/workflow-runs/<int:run_id>/steps/<step_id>/result",
+      "methods": ["POST"],
+      "authority": "hub",
+      "idempotency": "actor_and_idempotency_key",
+      "fencing_required_for_step_types": ["worker_task"]
+    },
+    "resource_lease_acquire": {
+      "path": "/api/v1/resource-leases/acquire",
+      "methods": ["POST"],
+      "authority": "hub"
+    }
+  },
+  "models": {
+    "run_binding": {
+      "model": "WorkflowRun",
+      "fields": [
+        "id",
+        "definition_id",
+        "project_id",
+        "idempotency_key",
+        "idempotency_request_hash",
+        "controller_run_id",
+        "correlation_id",
+        "trigger_source",
+        "context_json",
+        "business_conclusion",
+        "automation_conclusion",
+        "evidence_ingest_status",
+        "outcomes_json"
+      ],
+      "snapshot_paths": [
+        "context_json.workflow_definition_snapshot",
+        "context_json.assignment_snapshot",
+        "context_json.execution_input_snapshot",
+        "context_json.testcase_library_snapshot"
+      ]
+    },
+    "step_execution": {
+      "model": "WorkflowRunStep",
+      "fields": [
+        "run_id",
+        "step_id",
+        "step_type",
+        "attempt_no",
+        "status",
+        "step_config_json",
+        "claimed_by",
+        "claimed_claw_id",
+        "claim_expires_at",
+        "claim_lease_seconds",
+        "claim_fencing_token",
+        "heartbeat_at",
+        "progress_json",
+        "outputs_json",
+        "metrics_json",
+        "evidence_json",
+        "logs_json",
+        "blocker_json",
+        "contract_result_json"
+      ]
+    },
+    "write_idempotency": {
+      "model": "WorkflowOperationIdempotency",
+      "fields": [
+        "actor_type",
+        "actor_id",
+        "idempotency_key",
+        "method",
+        "path",
+        "request_hash",
+        "response_status",
+        "response_body_json",
+        "expires_at"
+      ],
+      "unique_scope": ["actor_type", "actor_id", "idempotency_key"]
+    },
+    "resource_lease": {
+      "model": "ResourceLease",
+      "fields": [
+        "lease_group_id",
+        "resource_key",
+        "resource_type",
+        "active_slot",
+        "owner_type",
+        "owner_id",
+        "controller_run_id",
+        "status",
+        "ttl_seconds",
+        "idempotency_key",
+        "request_hash",
+        "heartbeat_at",
+        "expires_at",
+        "released_at"
+      ],
+      "active_exclusion": "active_slot_unique"
+    }
+  },
+  "gaps": [
+    {
+      "id": "H01_AGENT_DIRECT_ADMISSION",
+      "status": "open",
+      "summary": "agent_task lacks an atomic claim/admission path for capacity and waiting reasons; the existing claim endpoint intentionally accepts only worker_task"
+    },
+    {
+      "id": "H02_AGENT_DIRECT_FENCING",
+      "status": "open",
+      "summary": "agent_task result and progress writes do not require the WorkflowRunStep fencing token"
+    },
+    {
+      "id": "H02_RUN_RECONCILIATION",
+      "status": "partial",
+      "summary": "step heartbeat health and bounded timeout exist, but durable Run-to-Worker result reconciliation is not represented by one authoritative receipt"
+    },
+    {
+      "id": "W02_DIRECT_OPERATION_JOURNAL",
+      "status": "open",
+      "summary": "agent_direct runs sidecar_v2, so codex_worker_v4 WorkerStateStore does not provide its production operation journal"
+    },
+    {
+      "id": "H03_ATTACHMENT_IDEMPOTENCY",
+      "status": "deferred_m2",
+      "summary": "the Hub attachment upload route does not persist an idempotency key or content hash even though the Worker publisher sends an idempotency key"
+    }
+  ]
+}
