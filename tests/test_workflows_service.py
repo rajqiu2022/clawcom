@@ -617,10 +617,12 @@ class WorkflowServiceTest(unittest.TestCase):
             run={
                 'id': 7,
                 'run_name': 'Demo Run',
+                'workflow_definition_version': 21,
                 'context': {'branch': 'qa_auto_test'},
             },
             step={
                 'step_id': 'analyze_report',
+                'attempt_no': 3,
                 'name': '分析报告',
                 'runner': 'agent.skill.test-report-manager',
                 'config': {
@@ -632,6 +634,8 @@ class WorkflowServiceTest(unittest.TestCase):
             outputs={'editor_report': {'report_id': 123}},
         )
         self.assertEqual(payload['run_id'], 7)
+        self.assertEqual(payload['attempt_no'], 3)
+        self.assertEqual(payload['definition_version'], 21)
         self.assertEqual(payload['step_id'], 'analyze_report')
         self.assertEqual(payload['runner'], 'agent.skill.test-report-manager')
         self.assertEqual(payload['outputs']['editor_report']['report_id'], 123)

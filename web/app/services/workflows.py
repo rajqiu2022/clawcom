@@ -1563,6 +1563,14 @@ def build_workflow_agent_task_payload(run, step, outputs=None):
     payload = {
         'kind': 'workflow_agent_task',
         'run_id': run_id,
+        'attempt_no': step.get('attempt_no') or 1,
+        'definition_version': (
+            run.get('definition_version')
+            or run.get('workflow_definition_version')
+            or (
+                context.get('execution_input_snapshot', {}) or {}
+            ).get('workflow_definition_version')
+        ),
         'run_name': run.get('run_name') or run.get('workflow_name') or '',
         'step_id': step_id,
         'step_name': step.get('name') or config.get('name') or step_id,

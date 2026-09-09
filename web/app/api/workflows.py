@@ -612,10 +612,10 @@ def _workflow_api_error(code, message, status=400, details=None):
 
 
 def _workflow_lifecycle_conflict(run, step=None, operation='write'):
-    """Return a stable, non-retryable contract for writes after Run terminal."""
+    """Return a stable, non-retryable contract for writes after terminal state."""
     return _workflow_api_error(
         'HUB_LIFECYCLE_CONFLICT',
-        'Workflow Run is already terminal; stop retrying this write and '
+        'Workflow Run or Step is already terminal; stop retrying this write and '
         'preserve the local receipt for reconciliation',
         status=409,
         details={
@@ -2285,13 +2285,15 @@ def _dispatch_agent_task(step):
         )
         existing = AgentTask.query.filter_by(task_id=task_id, claw_id=target_claw_id).first()
         if not existing:
+            task_payload = dict(payload)
+            task_payload['task_id'] = task_id
             task = AgentTask(
                 claw_id=target_claw_id,
                 task_id=task_id,
                 task_type='workflow_agent_task',
                 command=step.runner or '',
                 target_path='',
-                payload=jsonify_safe(payload),
+                payload=jsonify_safe(task_payload),
                 status='pending',
             )
             db.session.add(task)
@@ -3991,6 +3993,9 @@ def report_workflow_step_result(run_id, step_id):
     if (run.status in ('succeeded', 'failed', 'blocked', 'cancelled')
             and not (run.status == 'blocked'
                      and data.get('force_recover') is True)):
+        return _workflow_lifecycle_conflict(
+            run, step, operation='result')
+    if step.status in ('passed', 'failed', 'skipped'):
         return _workflow_lifecycle_conflict(
             run, step, operation='result')
     try:

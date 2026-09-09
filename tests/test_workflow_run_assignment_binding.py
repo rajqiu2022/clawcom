@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 import unittest
@@ -365,6 +366,12 @@ class WorkflowRunAssignmentApiTest(unittest.TestCase):
         self.assertEqual(
             [7], steps['peer_review_finalize'].step_config_json[
                 'executor_claw_ids'])
+        task = AgentTask.query.filter_by(
+            task_id=f'workflow_{run.id}_execute_1', claw_id=11).one()
+        task_payload = json.loads(task.payload)
+        self.assertEqual(task.task_id, task_payload['task_id'])
+        self.assertEqual(1, task_payload['attempt_no'])
+        self.assertEqual(21, task_payload['definition_version'])
 
     def test_assignment_snapshot_keeps_create_idempotency_replay_stable(self):
         body = {
@@ -437,6 +444,45 @@ class WorkflowRunAssignmentApiTest(unittest.TestCase):
             self.assertFalse(body['details']['retryable'])
             self.assertEqual('stop_and_reconcile', body['details']['worker_action'])
             self.assertEqual(operation, body['details']['operation'])
+
+    def test_terminal_step_result_cannot_be_overwritten_while_run_advances(self):
+        created = self.client.post(
+            '/api/v1/workflow-runs',
+            json={
+                'definition_id': self.definition.id,
+                'worker_claw_id': 11,
+                'start_vars': {
+                    'worker_claw_id': 11,
+                    'reviewer_claw_id': 7,
+                },
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(201, created.status_code)
+        run = WorkflowRun.query.one()
+        step = WorkflowRunStep.query.filter_by(
+            run_id=run.id, step_id='execute').one()
+        step.status = 'passed'
+        step.summary = 'authoritative result'
+        step.outputs_json = {'step_result': {'complete': True}}
+        run.status = 'running'
+        run.current_step_id = 'peer_review_finalize'
+        db.session.commit()
+
+        response = self.client.post(
+            f'/api/v1/workflow-runs/{run.id}/steps/execute/result',
+            json={'status': 'blocked', 'summary': 'late provider epilogue'},
+            headers=self._headers(),
+        )
+
+        self.assertEqual(409, response.status_code, response.get_data(as_text=True))
+        body = response.get_json()
+        self.assertEqual('HUB_LIFECYCLE_CONFLICT', body['code'])
+        self.assertEqual('passed', body['details']['step_status'])
+        db.session.refresh(step)
+        self.assertEqual('passed', step.status)
+        self.assertEqual('authoritative result', step.summary)
+        self.assertEqual({'step_result': {'complete': True}}, step.outputs_json)
 
     def test_reviewer_dispatch_and_finalizer_receipt_gate(self):
         created = self.client.post(
