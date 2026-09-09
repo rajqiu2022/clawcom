@@ -1578,10 +1578,19 @@ def build_workflow_agent_task_payload(run, step, outputs=None):
         'progress_api': '/api/v1/workflow-runs/%s/steps/%s/progress' % (run_id, step_id),
         'result_api': '/api/v1/workflow-runs/%s/steps/%s/result' % (run_id, step_id),
     }
-    if config.get('notification_delivery_mode') == 'outbox':
+    config_inputs = (
+        config.get('inputs') if isinstance(config.get('inputs'), dict) else {})
+    delivery_mode = (
+        config.get('notification_delivery_mode')
+        or config_inputs.get('notification_delivery_mode'))
+    notification_policy = (
+        config.get('notification_policy')
+        if isinstance(config.get('notification_policy'), dict)
+        else config_inputs.get('notification_policy'))
+    if delivery_mode == 'outbox':
         payload['notification_delivery_mode'] = 'outbox'
-    if isinstance(config.get('notification_policy'), dict):
-        payload['notification_policy'] = dict(config['notification_policy'])
+    if isinstance(notification_policy, dict):
+        payload['notification_policy'] = dict(notification_policy)
     workflow_start = (
         context.get('workflow_start')
         if isinstance(context.get('workflow_start'), dict) else {})

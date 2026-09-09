@@ -650,8 +650,10 @@ class WorkflowServiceTest(unittest.TestCase):
                 'step_id': 'notify_owner',
                 'name': '通知 Owner',
                 'config': {
-                    'notification_delivery_mode': 'outbox',
-                    'notification_policy': policy,
+                    'inputs': {
+                        'notification_delivery_mode': 'outbox',
+                        'notification_policy': policy,
+                    },
                 },
             },
             outputs={'publish_report': {'hub_report_id': 583}},
