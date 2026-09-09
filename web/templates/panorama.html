@@ -534,8 +534,8 @@
                     <option value="test">用例关联 / 风险评估</option>
                 </select>
                 <div id="topo-test-legend" style="display:none;margin-top:6px;line-height:1.6">
-                    <span style="color:#60a5fa">用：关联用例数</span> · <span style="color:#fb923c">险：风险分</span><br>
-                    <span style="color:#94a3b8">— 表示未关联 / 未评估；灰色表示风险未知</span><br>
+                    <span style="color:#60a5fa">关联用例数</span> · <span style="color:#fb923c">风险分</span><br>
+                    <span style="color:#94a3b8">0 或无数据时不显示角标；灰色表示风险未知</span><br>
                     <span>关联数量不代表执行覆盖率</span>
                 </div>
             </div>
@@ -642,6 +642,18 @@ function testMetricState(metric) {
     const assessed = score !== null && score <= 100 && (
         metric?.metrics_payload?.risk_assessed === true || score > 0);
     return {count, score, linked, assessed};
+}
+
+function testMetricBadges(metric) {
+    const state = testMetricState(metric);
+    const badges = [];
+    if (state.linked && state.count > 0) {
+        badges.push({text: String(state.count), color: '#2563eb'});
+    }
+    if (state.assessed && state.score > 0) {
+        badges.push({text: String(state.score), color: state.score >= 80 ? '#dc2626' : '#f97316'});
+    }
+    return badges;
 }
 
 function testMetricColor(metric) {
@@ -1425,18 +1437,14 @@ function drawGraph(canvas, W, H) {
         if (!dimmed) {
             if (topoMetricMode === 'test') {
                 const metric = n.testMetrics || {};
-                const state = testMetricState(metric);
                 const by = n.y - n.radius * 0.7;
                 const gap = 4;
-                const badgeH = 19;
-                const padX = 6;
-                const badges = [
-                    { text: '用' + (state.linked && state.count !== null ? state.count : '—'), color: state.linked ? '#2563eb' : '#475569' },
-                    { text: '险' + (state.assessed ? state.score : '—'), color: state.assessed ? testMetricColor(metric) : '#475569' },
-                ];
-                ctx.font = '600 10px sans-serif';
+                const badgeH = 16;
+                const padX = 5;
+                const badges = testMetricBadges(metric);
+                ctx.font = '600 10px "Segoe UI", sans-serif';
                 const widths = badges.map(b => Math.max(16, ctx.measureText(b.text).width + padX * 2));
-                const totalW = widths[0] + widths[1] + gap;
+                const totalW = widths.reduce((sum, width) => sum + width, 0) + Math.max(0, badges.length - 1) * gap;
                 let bx = n.x + n.radius * 0.75 - totalW / 2;
                 badges.forEach((badge, i) => {
                     const w = widths[i];
