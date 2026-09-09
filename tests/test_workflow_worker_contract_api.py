@@ -570,6 +570,11 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
         self.assertEqual(
             result_accepted.status_code, 200,
             result_accepted.get_data(as_text=True))
+        receipt = result_accepted.get_json()
+        self.assertTrue(receipt['result_accepted'])
+        self.assertEqual('hub.workflow_step_result_receipt@1', receipt['schema'])
+        self.assertEqual('worker_step', receipt['step']['step_id'])
+        self.assertNotIn('steps', receipt)
 
     def test_controlled_worker_task_payload_has_operation_and_fencing_contract(self):
         self.run.context_json = {'workflow_start': {
@@ -934,8 +939,13 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
             'status': 'passed', 'metrics': {'ok': True}, 'outputs': {},
         })
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertTrue(response.get_json()['result_accepted'])
+        readback = self.client.get(
+            f'/api/v1/workflow-runs/{self.run.id}', headers=self._headers())
+        self.assertEqual(200, readback.status_code, readback.get_data(as_text=True))
         step_payload = next(
-            row for row in response.get_json()['steps'] if row['step_id'] == 'agent_step')
+            row for row in readback.get_json()['steps']
+            if row['step_id'] == 'agent_step')
         self.assertEqual(step_payload['status'], 'passed')
         self.assertEqual(step_payload['result_code'], 'CONTRACT_INVALID')
 

@@ -689,6 +689,38 @@ def _workflow_run_create_payload(run, compact=False, idempotent_replay=False):
     }
 
 
+def _workflow_step_result_payload(run, step, compact=False):
+    """Return a bounded commit receipt to authenticated Worker callers."""
+    if not compact:
+        return _run_payload(run, with_steps=True)
+    context = run.context_json if isinstance(run.context_json, dict) else {}
+    definition_snapshot = (
+        context.get('workflow_definition_snapshot')
+        if isinstance(context.get('workflow_definition_snapshot'), dict)
+        else {})
+    definition_version = definition_snapshot.get('version')
+    if definition_version is None and run.definition:
+        definition_version = run.definition.version
+    return {
+        'schema': 'hub.workflow_step_result_receipt@1',
+        'ok': True,
+        'result_accepted': True,
+        'id': run.id,
+        'run_id': run.id,
+        'workflow_run_id': run.id,
+        'status': run.status,
+        'current_step_id': run.current_step_id or '',
+        'definition_version': definition_version,
+        'workflow_definition_version': definition_version,
+        'step': {
+            'step_id': step.step_id,
+            'status': step.status,
+            'attempt_no': int(step.attempt_no or 1),
+        },
+        'readback_url': '/api/v1/workflow-runs/%s' % run.id,
+    }
+
+
 def _parse_workflow_datetime(value, field_name):
     text = str(value or '').strip()
     if not text:
@@ -4065,7 +4097,8 @@ def report_workflow_step_result(run_id, step_id):
         run.finished_at = None
         run.current_step_id = step.step_id
         run.blocker_json = {}
-        body = _run_payload(run, with_steps=True)
+        body = _workflow_step_result_payload(
+            run, step, compact=bool(claw))
         _workflow_idempotency_store(idem_record, 200, body)
         db.session.commit()
         return jsonify(body)
@@ -4220,7 +4253,8 @@ def report_workflow_step_result(run_id, step_id):
         ingestion=ingestion,
     )
     _recompute_run_status(run, _actor_name())
-    body = _run_payload(run, with_steps=True)
+    body = _workflow_step_result_payload(
+        run, step, compact=bool(claw))
     _workflow_idempotency_store(idem_record, 200, body)
     db.session.commit()
     return jsonify(body)
