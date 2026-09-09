@@ -638,6 +638,29 @@ class WorkflowServiceTest(unittest.TestCase):
         self.assertIn('/api/v1/workflow-runs/7/steps/analyze_report/result',
                       payload['result_api'])
 
+    def test_build_agent_task_payload_includes_outbox_delivery_contract(self):
+        policy = {
+            'notification_required': True,
+            'target': 'owner',
+            'version': 'flow36-v12',
+        }
+        payload = workflows.build_workflow_agent_task_payload(
+            run={'id': 36, 'run_name': 'Discovery', 'context': {}},
+            step={
+                'step_id': 'notify_owner',
+                'name': '通知 Owner',
+                'config': {
+                    'notification_delivery_mode': 'outbox',
+                    'notification_policy': policy,
+                },
+            },
+            outputs={'publish_report': {'hub_report_id': 583}},
+        )
+
+        self.assertEqual('outbox', payload['notification_delivery_mode'])
+        self.assertEqual(policy, payload['notification_policy'])
+        self.assertIsNot(policy, payload['notification_policy'])
+
     def test_build_agent_task_payload_includes_shift_left_api_contract(self):
         payload = workflows.build_workflow_agent_task_payload(
             run={'id': 19, 'run_name': '需求闭环', 'context': {}},
