@@ -44,6 +44,11 @@ class WorkflowFrontendContractTest(unittest.TestCase):
         self.assertIn('background:var(--bg-card)', self.template)
         self.assertIn('color:var(--text-primary)', self.template)
 
+    def test_single_selected_agent_is_submitted_as_bound_worker(self):
+        self.assertIn('executorClawIds.length === 1', self.template)
+        self.assertIn(
+            'payload.worker_claw_id = executorClawIds[0]', self.template)
+
 
 if __name__ == '__main__':
     unittest.main()

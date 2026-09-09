@@ -714,6 +714,11 @@ async function openWorkflowStartDialog(definitionRef) {
                 start_vars: startVars,
             };
             if (executorClawIds.length) payload.executor_claw_ids = executorClawIds;
+            // A single selected Agent is the physical Worker for a bound Run.
+            // Submit both fields so the backend can enforce one identity.
+            if (executorClawIds.length === 1) {
+                payload.worker_claw_id = executorClawIds[0];
+            }
             _closeOverlay(overlay, () => resolve(payload));
         };
         overlay.addEventListener('click', e => {
