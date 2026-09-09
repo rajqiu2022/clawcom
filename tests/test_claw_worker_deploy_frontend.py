@@ -39,6 +39,15 @@ class ClawWorkerDeployFrontendTest(unittest.TestCase):
         ):
             self.assertIn(marker, TEMPLATE)
 
+    def test_managed_codex_worker_exposes_restart_control(self):
+        for marker in (
+            'hasCodexAgent',
+            'restartManagedCodexAgent',
+            '/agent/restart',
+            '可恢复的 Workflow 任务将在重连后继续',
+        ):
+            self.assertIn(marker, TEMPLATE)
+
 
 if __name__ == '__main__':
     unittest.main()

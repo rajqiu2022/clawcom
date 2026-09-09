@@ -1489,6 +1489,8 @@ function renderClawCard(c) {
             ${hasWecom ? `<span class="claw-meta-tag" title="已绑定企微机器人">企微</span>` : ''}
             ${c.can_own && hasHermesAgent && !isAgentDeployLocked ? `<button class="btn btn-sm" onclick="event.stopPropagation(); openClawSettingsModal(${c.id})"
                     style="padding:3px 8px;font-size:0.72rem;">设置</button>` : ''}
+            ${c.can_own && hasCodexAgent && !isAgentDeployLocked ? `<button class="btn btn-sm" onclick="event.stopPropagation(); restartManagedCodexAgent(${c.id})"
+                    style="padding:3px 8px;font-size:0.72rem;">重启</button>` : ''}
         </div>
         <div class="claw-desc">${c.responsibilities || '暂无描述'}</div>
         ${deployPanel}
@@ -1621,6 +1623,28 @@ async function restartCurrentHermesAgent() {
         await restartHermesAgentService(settingsClawId, { confirm: true });
     } catch (err) {
         showToast('Hermes Agent 重启失败: ' + err.message, 'error');
+    }
+}
+
+async function restartManagedCodexAgent(clawId) {
+    const c = allClaws.find(item => item.id === clawId);
+    if (!c || !c.has_codex_agent) {
+        showToast('只有通过 Hub 部署成功的 Claw Worker 才支持重启', 'warning');
+        return;
+    }
+    const confirmed = await customConfirm({
+        title: '重启 Claw Worker',
+        msg: '确认重启该 Claw Worker？运行中的 Agent 会话会停止，Hub 中可恢复的 Workflow 任务将在重连后继续。',
+        type: 'warning',
+        okText: '重启',
+    });
+    if (!confirmed) return;
+    try {
+        const result = await API.post(`/openclaws/${clawId}/agent/restart`, {});
+        showToast(result.message || 'Claw Worker 已重启', 'success');
+        await loadClaws();
+    } catch (err) {
+        showToast('Claw Worker 重启失败: ' + err.message, 'error');
     }
 }
 
