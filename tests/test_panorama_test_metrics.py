@@ -10,6 +10,28 @@ _SPEC.loader.exec_module(testcase_panorama_links)
 
 
 class PanoramaTestMetricsTest(unittest.TestCase):
+    def test_default_zero_does_not_mark_risk_assessed(self):
+        result = testcase_panorama_links.agent_test_metric_payload(None, {'bug_count': 0})
+        self.assertFalse(result['metrics_payload']['risk_assessed'])
+        self.assertTrue(result['metrics_payload']['bug_count_recorded'])
+
+    def test_explicit_zero_is_a_real_risk_assessment_and_is_preserved(self):
+        result = testcase_panorama_links.agent_test_metric_payload(None, {'bug_risk_score': 0})
+        self.assertTrue(result['metrics_payload']['risk_assessed'])
+        self.assertFalse(result['metrics_payload']['bug_count_recorded'])
+        updated = testcase_panorama_links.agent_test_metric_payload(result, {'bug_count': 1})
+        self.assertTrue(updated['metrics_payload']['risk_assessed'])
+
+    def test_metadata_alone_cannot_claim_risk_assessment(self):
+        result = testcase_panorama_links.agent_test_metric_payload(None, {
+            'metrics_payload': {'risk_assessed': True}})
+        self.assertFalse(result['metrics_payload']['risk_assessed'])
+
+    def test_invalid_risk_score_is_rejected(self):
+        for value in (True, -1, 101, 'bad'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                testcase_panorama_links.agent_test_metric_payload(None, {'bug_risk_score': value})
+
     def test_agent_payload_cannot_override_system_case_counts(self):
         existing = {
             'direct_case_count': 3,

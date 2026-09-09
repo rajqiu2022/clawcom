@@ -531,8 +531,13 @@
                 <span style="margin-right:6px">视图</span>
                 <select id="topo-metric-mode" class="form-select" style="height:28px;padding:2px 8px;font-size:0.76rem" onchange="setTopoMetricMode(this.value)">
                     <option value="structure">模块结构</option>
-                    <option value="test">测试覆盖/风险</option>
+                    <option value="test">用例关联 / 风险评估</option>
                 </select>
+                <div id="topo-test-legend" style="display:none;margin-top:6px;line-height:1.6">
+                    <span style="color:#60a5fa">用：关联用例数</span> · <span style="color:#fb923c">险：风险分</span><br>
+                    <span style="color:#94a3b8">— 表示未关联 / 未评估；灰色表示风险未知</span><br>
+                    <span>关联数量不代表执行覆盖率</span>
+                </div>
             </div>
             <div class="topo-controls">
                 <button class="topo-ctrl-btn" id="topo-relation-filter-btn" onclick="toggleTopoRelationFilter()" title="只显示从选中节点出发的全部下游关联">关</button>
@@ -608,6 +613,7 @@ function esc(s) { const d = document.createElement('div'); d.textContent = s || 
 
 function setTopoMetricMode(mode) {
     topoMetricMode = mode || 'structure';
+    document.getElementById('topo-test-legend').style.display = topoMetricMode === 'test' ? 'block' : 'none';
     if (currentView === 'topo') renderCurrentView();
 }
 
@@ -626,10 +632,22 @@ async function syncTestcaseLinks() {
     }
 }
 
+function testMetricState(metric) {
+    const number = value => value !== null && value !== undefined && value !== ''
+        && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
+    const count = number(metric?.subtree_case_count);
+    const score = number(metric?.bug_risk_score);
+    const linked = Number(metric?.linked_library_count || 0) > 0 || count > 0;
+    // Positive legacy scores remain usable; default zero/low rows are unknown.
+    const assessed = score !== null && score <= 100 && (
+        metric?.metrics_payload?.risk_assessed === true || score > 0);
+    return {count, score, linked, assessed};
+}
+
 function testMetricColor(metric) {
-    const score = Number(metric?.bug_risk_score ?? 0);
-    const bugCount = Number(metric?.bug_count ?? 0);
-    const value = score || (bugCount > 10 ? 90 : bugCount > 3 ? 65 : bugCount > 0 ? 35 : 0);
+    const state = testMetricState(metric);
+    if (!state.assessed) return '#64748b';
+    const value = state.score;
     if (value >= 80) return '#ef4444';
     if (value >= 55) return '#f97316';
     if (value > 0) return '#eab308';
@@ -1407,17 +1425,16 @@ function drawGraph(canvas, W, H) {
         if (!dimmed) {
             if (topoMetricMode === 'test') {
                 const metric = n.testMetrics || {};
-                const caseCount = Number(metric.subtree_case_count ?? 0);
-                const riskScore = Number(metric.bug_risk_score ?? metric.bug_count ?? 0);
+                const state = testMetricState(metric);
                 const by = n.y - n.radius * 0.7;
                 const gap = 4;
-                const badgeH = 16;
+                const badgeH = 19;
                 const padX = 6;
                 const badges = [
-                    { text: String(caseCount), color: '#2563eb' },
-                    { text: String(riskScore), color: riskScore >= 80 ? '#dc2626' : '#f97316' },
+                    { text: '用' + (state.linked && state.count !== null ? state.count : '—'), color: state.linked ? '#2563eb' : '#475569' },
+                    { text: '险' + (state.assessed ? state.score : '—'), color: state.assessed ? testMetricColor(metric) : '#475569' },
                 ];
-                ctx.font = '700 8px "JetBrains Mono", monospace';
+                ctx.font = '600 10px sans-serif';
                 const widths = badges.map(b => Math.max(16, ctx.measureText(b.text).width + padX * 2));
                 const totalW = widths[0] + widths[1] + gap;
                 let bx = n.x + n.radius * 0.75 - totalW / 2;
@@ -1741,7 +1758,7 @@ function renderDetailContent(m) {
         </div>
 
         <div class="detail-meta">
-            <span class="risk-pill risk-pill-${m.risk_level}">${RISK_LABELS[m.risk_level] || '普通'}</span>
+            <span class="risk-pill risk-pill-${m.risk_level}">模块风险：${RISK_LABELS[m.risk_level] || '普通'}</span>
             <span class="status-badge status-${m.status || 'active'}">${STATUS_LABELS[m.status] || '活跃'}</span>
             ${m.path ? `<span class="path-tag">${esc(m.path)}</span>` : ''}
         </div>
@@ -1754,17 +1771,17 @@ function renderDetailContent(m) {
             <div class="test-focus-card">${esc(m.test_focus)}</div>
         </div>` : ''}
 
-        ${m.test_metrics ? `
         <div class="detail-section">
-            <div class="detail-section-title"><span class="sec-icon">🧪</span> 测试覆盖 / Bug 风险</div>
+            <div class="detail-section-title"><span class="sec-icon">🧪</span> 用例关联 / 风险评估</div>
             <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;font-size:0.78rem">
-                <div class="case-lib-card"><strong>${m.test_metrics.direct_case_count || 0}</strong><span>直接关联用例</span></div>
-                <div class="case-lib-card"><strong>${m.test_metrics.subtree_case_count || 0}</strong><span>含子模块用例</span></div>
-                <div class="case-lib-card"><strong>${m.test_metrics.bug_count || 0}</strong><span>Bug 数</span></div>
-                <div class="case-lib-card"><strong>${m.test_metrics.bug_risk_score || 0}</strong><span>Bug 风险分</span></div>
+                <div class="case-lib-card"><strong>${testMetricState(m.test_metrics).linked ? Number(m.test_metrics.direct_case_count || 0) : '未关联'}</strong><span>直接关联用例</span></div>
+                <div class="case-lib-card"><strong>${testMetricState(m.test_metrics).linked ? testMetricState(m.test_metrics).count ?? '未知' : '未关联'}</strong><span>含子模块用例</span></div>
+                <div class="case-lib-card"><strong>${Number(m.test_metrics?.bug_count) > 0 || m.test_metrics?.metrics_payload?.bug_count_recorded === true ? Number(m.test_metrics?.bug_count || 0) : '暂无统计'}</strong><span>已登记 Bug 数</span></div>
+                <div class="case-lib-card"><strong>${testMetricState(m.test_metrics).assessed ? testMetricState(m.test_metrics).score : '未评估'}</strong><span>风险分</span></div>
             </div>
+            <p style="color:var(--text-secondary);font-size:0.78rem;margin-top:8px">关联用例数不代表已执行覆盖率。未评估不等于低风险。</p>
             <button class="btn btn-sm btn-ghost" style="margin-top:8px" onclick="syncTestcaseLinks()">同步关联</button>
-        </div>` : ''}
+        </div>
 
         ${children.length ? `
         <div class="detail-section">

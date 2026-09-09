@@ -134,6 +134,26 @@ def agent_test_metric_payload(existing, payload):
             'direct_case_count', 'subtree_case_count',
             'linked_library_count', 'linked_directory_count'):
         result[key] = int(_value(current, key, 0) or 0)
+    metadata = dict(_value(current, 'metrics_payload', {}) or {})
+    if result.get('metrics_payload') is not None and not isinstance(result['metrics_payload'], dict):
+        raise ValueError('metrics_payload must be an object')
+    metadata.update(result.get('metrics_payload') or {})
+    # A sync-created zero is not a risk assessment. Explicit zero is valid.
+    metadata['risk_assessed'] = bool(
+        (_value(current, 'metrics_payload', {}) or {}).get('risk_assessed'))
+    metadata['bug_count_recorded'] = bool(
+        (_value(current, 'metrics_payload', {}) or {}).get('bug_count_recorded'))
+    if (payload or {}).get('bug_count') is not None:
+        count = payload['bug_count']
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError('bug_count must be a non-negative integer')
+        metadata['bug_count_recorded'] = True
+    if (payload or {}).get('bug_risk_score') is not None:
+        score = payload['bug_risk_score']
+        if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
+            raise ValueError('bug_risk_score must be an integer from 0 to 100')
+        metadata['risk_assessed'] = True
+    result['metrics_payload'] = metadata
     return result
 
 
