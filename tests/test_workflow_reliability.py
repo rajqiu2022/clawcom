@@ -168,8 +168,49 @@ class WorkflowReliabilityTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(response.get_json()['receipt_origin'], 'authenticated_worker')
         self.assertEqual(self.run.outcomes_json['notification'], 'SENT')
-        self._post('agent_step', 'notification-delivery', dict(delivery, state='failed'))
+        self._post('agent_step', 'notification-delivery',
+                   dict(delivery, state='failed'))
         self.assertEqual(self.run.outcomes_json['notification'], 'SENT')
+
+    def test_outbox_backfills_report_link_from_accepted_producer_result(self):
+        report = self._report()
+        producer_manifest = dict(
+            self._manifest(report),
+            step_id=self.worker_step.step_id,
+            attempt_no=self.worker_step.attempt_no or 1,
+        )
+        self.worker_step.status = 'passed'
+        self.worker_step.outputs_json = {
+            'hub_report_id': report.id,
+            'workflow_report_manifest': producer_manifest,
+        }
+        self.agent_step.step_config_json = {
+            'notification_delivery_mode': 'outbox'}
+        db.session.commit()
+        delivery = {
+            'claw_id': self.claw.id,
+            'run_id': self.run.id,
+            'step_id': self.agent_step.step_id,
+            'attempt_no': self.agent_step.attempt_no or 1,
+            'notification_id': 'outbox-legacy-report-link',
+            'message_sha256': 'b' * 64,
+            'report_id': report.id,
+            'state': 'pending',
+        }
+
+        response = self._post('agent_step', 'result', {
+            'status': 'passed', 'notification_delivery': delivery})
+
+        self.assertEqual(200, response.status_code, response.get_json())
+        artifact = WorkflowArtifact.query.filter_by(
+            run_id=self.run.id,
+            step_id=self.worker_step.step_id,
+            artifact_type='workflow_report',
+            test_report_id=report.id,
+        ).one()
+        self.assertEqual(
+            producer_manifest['content_sha256'],
+            artifact.metadata_json['publisher_manifest']['content_sha256'])
 
     def test_silent_step_never_blindly_replays_retry_budget(self):
         step = self.agent_step

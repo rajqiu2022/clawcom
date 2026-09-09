@@ -1238,6 +1238,45 @@ def _workflow_report_payload(data):
     return report if isinstance(report, dict) else {}
 
 
+def _recover_bound_workflow_report_artifact(run, report_id):
+    """Backfill a report link from an already accepted producer result."""
+    report = TestReport.query.get(report_id)
+    if (not report or report.is_deleted or report.project_id != run.project_id
+            or report.status not in ('published', 'revised')):
+        return None
+    content_sha256 = hashlib.sha256(
+        (report.content or '').encode('utf-8')).hexdigest()
+    for producer in run.steps or []:
+        outputs = (
+            producer.outputs_json
+            if isinstance(producer.outputs_json, dict) else {})
+        manifest = outputs.get('workflow_report_manifest')
+        if not isinstance(manifest, dict):
+            continue
+        expected = {
+            'report_id': report.id,
+            'run_id': run.id,
+            'step_id': producer.step_id,
+            'attempt_no': producer.attempt_no or 1,
+            'report_type': report.report_type,
+            'source_ref_type': report.source_ref_type,
+            'source_ref_id': report.source_ref_id,
+            'content_sha256': content_sha256,
+        }
+        if (type(manifest.get('schema_version')) is not int
+                or manifest.get('schema_version') != 1
+                or any(type(manifest.get(key)) is not type(value)
+                       or manifest.get(key) != value
+                       for key, value in expected.items())):
+            continue
+        artifact = _link_workflow_report_artifact(run, producer, report)
+        artifact.metadata_json = dict(
+            artifact.metadata_json or {}, publisher_manifest=expected)
+        db.session.flush()
+        return artifact
+    return None
+
+
 def _record_notification_delivery(run, step, payload):
     """Store the authenticated Worker's existing outbox receipt, not a second queue."""
     if not isinstance(payload, dict):
@@ -1260,6 +1299,9 @@ def _record_notification_delivery(run, step, payload):
     report_artifact = WorkflowArtifact.query.filter_by(
         run_id=run.id, artifact_type='workflow_report',
         test_report_id=payload.get('report_id')).first()
+    if not report_artifact:
+        report_artifact = _recover_bound_workflow_report_artifact(
+            run, payload.get('report_id'))
     report = TestReport.query.get(payload.get('report_id')) if report_artifact else None
     if (not report or report.is_deleted or report.project_id != run.project_id
             or report.status not in ('published', 'revised')):
