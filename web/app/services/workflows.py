@@ -5,6 +5,8 @@ state rules can be tested without booting the Hub app.
 """
 
 import copy
+import json
+import re
 
 from app.services.workflow_direct_execution import (
     normalize_direct_execution_lease,
@@ -1550,6 +1552,40 @@ def build_workflow_start_context(start_vars=None, context=None, start_mode='imme
     return base
 
 
+def _workflow_referenced_step_ids(step, config):
+    referenced = set()
+    for source in (step, config):
+        dependencies = source.get('depends_on') if isinstance(source, dict) else None
+        if isinstance(dependencies, str):
+            dependencies = [dependencies]
+        if isinstance(dependencies, list):
+            referenced.update(
+                str(value) for value in dependencies
+                if isinstance(value, (str, int)) and str(value)
+            )
+    try:
+        serialized = json.dumps(config, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        serialized = ''
+    referenced.update(
+        match.group(1)
+        for match in re.finditer(
+            r'(?:steps|outputs)\.([A-Za-z0-9_-]+)\.', serialized)
+    )
+    return referenced
+
+
+def _project_workflow_agent_outputs(step, config, outputs):
+    if not isinstance(outputs, dict):
+        return {}
+    required = _workflow_referenced_step_ids(step, config)
+    return {
+        step_id: value
+        for step_id, value in outputs.items()
+        if str(step_id) in required
+    }
+
+
 def build_workflow_agent_task_payload(run, step, outputs=None):
     """Build structured payload consumed by sidecar workflow_agent_task."""
     run = run if isinstance(run, dict) else {}
@@ -1580,7 +1616,8 @@ def build_workflow_agent_task_payload(run, step, outputs=None):
         'references': references,
         'inputs': config.get('inputs') if isinstance(config.get('inputs'), dict) else {},
         'input_vars': config.get('input_vars') if isinstance(config.get('input_vars'), dict) else {},
-        'outputs': outputs if isinstance(outputs, dict) else {},
+        'outputs': _project_workflow_agent_outputs(
+            step, config, outputs),
         'context': context,
         'start_vars': start_vars,
         'progress_api': '/api/v1/workflow-runs/%s/steps/%s/progress' % (run_id, step_id),
