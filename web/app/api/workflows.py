@@ -4279,6 +4279,14 @@ def retry_workflow_step(run_id, step_id):
         run_id=run_id,
         step_id=step_id,
     ).first_or_404()
+    if step.status not in ('blocked', 'failed'):
+        return jsonify({
+            'error': '只有 blocked/failed Step 可以重试',
+            'code': 'WORKFLOW_STEP_NOT_RETRYABLE',
+            'status': step.status,
+        }), 409
+    _expire_workflow_agent_tasks_for_step(
+        run_id, step_id, reason='workflow_step_retried')
     _expire_step_blocked_todos(run_id, step_id)
     step.status = 'pending'
     step.blocker_json = {}
@@ -4322,6 +4330,8 @@ def resume_workflow_run(run_id):
             if step.step_id == from_step:
                 reset = True
             if reset:
+                _expire_workflow_agent_tasks_for_step(
+                    run.id, step.step_id, reason='workflow_run_resumed')
                 _expire_step_blocked_todos(run.id, step.step_id)
                 step.status = 'pending'
                 step.blocker_json = {}

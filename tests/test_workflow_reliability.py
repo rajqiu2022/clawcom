@@ -218,6 +218,34 @@ class WorkflowReliabilityTest(unittest.TestCase):
             self.assertEqual(response.status_code, 409, response.get_json())
             self.assertEqual(response.get_json()['code'], 'EXECUTION_RECONCILIATION_REQUIRED')
 
+    def test_retry_rejects_running_step_without_creating_another_attempt(self):
+        self.run.status = 'running'
+        self.agent_step.status = 'running'
+        db.session.commit()
+        response = self.client.post(
+            '/api/v1/workflow-runs/%s/steps/agent_step/retry' % self.run.id,
+            headers=self._headers(), json={})
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertEqual(response.get_json()['code'], 'WORKFLOW_STEP_NOT_RETRYABLE')
+        self.assertEqual(self.agent_step.status, 'running')
+
+    def test_retry_expires_prior_agent_tasks_before_redispatch(self):
+        self.run.status = 'blocked'
+        self.agent_step.status = 'blocked'
+        task = fixture.AgentTask(
+            claw_id=self.claw.id,
+            task_id='workflow_%s_agent_step_1_%s' % (self.run.id, self.claw.id),
+            task_type='workflow_agent_task',
+            status='running')
+        db.session.add(task)
+        db.session.commit()
+        response = self.client.post(
+            '/api/v1/workflow-runs/%s/steps/agent_step/retry' % self.run.id,
+            headers=self._headers(), json={})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(task.status, 'failed')
+        self.assertEqual(task.error, 'workflow_step_retried')
+
     def test_resolution_requires_authority_and_receipt(self):
         self.agent_step.blocker_json = {'requires_reconciliation': True}
         db.session.commit()
