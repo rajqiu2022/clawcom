@@ -19,4 +19,14 @@ assert.equal(context.testMetricColor({...zero, bug_risk_score: 85}), '#ef4444');
 assert.equal(context.testMetricColor({...zero, bug_count: 12}), '#64748b');
 assert.equal(context.testMetricState({...zero, bug_risk_score: null, metrics_payload: {risk_assessed: true}}).assessed, false);
 assert.equal(context.testMetricState({...zero, bug_risk_score: 'invalid'}).assessed, false);
-console.log('PASS: unknown, linked-empty, assessed-zero, high-risk, missing and malformed values; template JS syntax');
+const badges = metric => JSON.parse(JSON.stringify(context.testMetricBadges(metric)));
+assert.deepEqual(badges(null), []);
+assert.deepEqual(badges(zero), []);
+assert.deepEqual(badges({...zero, linked_library_count: 1, metrics_payload: {risk_assessed: true}}), []);
+assert.deepEqual(badges({...zero, subtree_case_count: 10}), [{text: '10', color: '#2563eb'}]);
+assert.deepEqual(badges({...zero, bug_risk_score: 20}), [{text: '20', color: '#f97316'}]);
+assert.deepEqual(badges({...zero, subtree_case_count: 8, bug_risk_score: 85}), [
+    {text: '8', color: '#2563eb'}, {text: '85', color: '#dc2626'},
+]);
+assert.deepEqual(badges({subtree_case_count: -1, bug_risk_score: 'invalid'}), []);
+console.log('PASS: metric states; numeric-only badges; zero/missing hidden; one/two badges; template JS syntax');
