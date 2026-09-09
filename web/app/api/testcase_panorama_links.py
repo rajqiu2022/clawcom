@@ -353,10 +353,13 @@ def module_test_metrics(module_id):
     if request.method == 'POST':
         data = request.get_json(force=True) or {}
         metric = PanoramaModuleTestMetric.query.filter_by(module_id=module_id).first()
-        base = agent_test_metric_payload(
-            metric.to_dict() if metric else None,
-            data,
-        )
+        try:
+            base = agent_test_metric_payload(
+                metric.to_dict() if metric else None,
+                data,
+            )
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
         metric = _upsert_metric(module_id, base, source=data.get('source') or 'agent')
         db.session.commit()
         return jsonify(metric.to_dict())
