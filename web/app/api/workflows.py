@@ -32,6 +32,7 @@ from app.models import (
     TestReport,
     TEST_REPORT_RISK_LEVELS,
     TEST_REPORT_STATUSES,
+    TEST_REPORT_TYPES,
     User,
     WorkflowApproval,
     WorkflowArtifact,
@@ -1039,12 +1040,26 @@ def _composite_outcomes_enabled(run):
 
 def _sync_run_outcomes(run, result=None, step=None, report=None, ingestion=None):
     """Persist independent business/automation/evidence/report/etc outcomes."""
-    current = run.outcomes_json if isinstance(run.outcomes_json, dict) else {}
+    current = dict(run.outcomes_json or {})
+    # Evidence is recomputed from current Step attempts, not the historical
+    # Run verdict: corrected receipts can close a gap; another case cannot.
+    current['evidence'] = ''
     aggregate = {
         'outputs': _workflow_outputs_context(run),
-        'evidence_ingest_status': run.evidence_ingest_status,
     }
     merged = merge_workflow_run_outcomes(current, aggregate)
+    for row in WorkflowRunStep.query.filter_by(run_id=run.id).all():
+        merged = merge_workflow_run_outcomes(merged, {
+            **((row.contract_result_json or {}).get('outcome_input') or {}),
+            'outputs': row.outputs_json or {}, 'metrics': row.metrics_json or {},
+            'evidence': row.evidence_json or {},
+        }, row.step_config_json)
+    manifest = WorkflowEvidenceManifest.query.filter_by(workflow_run_id=run.id).first()
+    if manifest:
+        merged = merge_workflow_run_outcomes(merged, {
+            'evidence_outcome': ('COMPLETE' if manifest.completeness_status == 'complete'
+                                 else 'ANALYSIS_INCOMPLETE'),
+        })
     if isinstance(result, dict):
         merged = merge_workflow_run_outcomes(
             merged,
@@ -1072,6 +1087,26 @@ def _sync_run_outcomes(run, result=None, step=None, report=None, ingestion=None)
                     else 'ANALYSIS_INCOMPLETE'
                 )
             })
+    deliveries = WorkflowArtifact.query.filter_by(
+        run_id=run.id, artifact_type='workflow_notification_delivery').all()
+    active_attempts = {row.step_id: row.attempt_no or 1
+                       for row in WorkflowRunStep.query.filter_by(run_id=run.id).all()}
+    deliveries = [item for item in deliveries if
+                  (item.metadata_json or {}).get('attempt_no') == active_attempts.get(item.step_id)]
+    if deliveries:
+        states = [(item.metadata_json or {}).get('state') for item in deliveries]
+        merged['notification'] = ('FAILED' if 'failed' in states else
+                                  'PENDING' if 'pending' in states else 'SENT')
+    reports = WorkflowArtifact.query.filter_by(
+        run_id=run.id, artifact_type='workflow_report').all()
+    if reports:
+        report_ids = {item.test_report_id for item in reports}
+        bound = TestReport.query.filter(TestReport.id.in_(report_ids)).all()
+        merged['report'] = ('PUBLISHED' if all(
+            item and not item.is_deleted and item.status in ('published', 'revised')
+            for item in bound) and len(bound) == len(report_ids) else 'FAILED')
+    elif merged.get('report') == 'PUBLISHED':
+        merged['report'] = 'FAILED'  # A URL or Agent claim is not a standard binding.
     run.outcomes_json = merged
     legacy_business = {
         'PASSED': 'COMPLETED',
@@ -1170,6 +1205,104 @@ def _workflow_report_payload(data):
     return report if isinstance(report, dict) else {}
 
 
+def _record_notification_delivery(run, step, payload):
+    """Store the authenticated Worker's existing outbox receipt, not a second queue."""
+    if not isinstance(payload, dict):
+        raise ValueError('notification_delivery outbox receipt is required')
+    for name in ('claw_id', 'run_id', 'attempt_no', 'report_id'):
+        if type(payload.get(name)) is not int or payload[name] <= 0:
+            raise ValueError('notification_delivery IDs must be positive integers')
+    claw = get_current_claw()
+    if not claw or payload.get('claw_id') != claw.id:
+        raise ValueError('notification_delivery must identify the reporting Worker')
+    if (payload.get('run_id') != run.id or payload.get('step_id') != step.step_id
+            or payload.get('attempt_no') != (step.attempt_no or 1)):
+        raise ValueError('notification_delivery Run/Step/attempt mismatch')
+    key = payload.get('notification_id')
+    digest = payload.get('message_sha256')
+    if (not isinstance(key, str) or not key.strip() or len(key) > 200
+            or not isinstance(digest, str) or len(digest) != 64
+            or any(ch not in '0123456789abcdef' for ch in digest)):
+        raise ValueError('notification_delivery needs notification_id and message_sha256')
+    report_artifact = WorkflowArtifact.query.filter_by(
+        run_id=run.id, artifact_type='workflow_report',
+        test_report_id=payload.get('report_id')).first()
+    report = TestReport.query.get(payload.get('report_id')) if report_artifact else None
+    if (not report or report.is_deleted or report.project_id != run.project_id
+            or report.status not in ('published', 'revised')):
+        raise ValueError('notification_delivery requires a bound published report')
+    bound_manifest = (report_artifact.metadata_json or {}).get('publisher_manifest') or {}
+    if bound_manifest and bound_manifest.get('content_sha256') != hashlib.sha256(
+            (report.content or '').encode('utf-8')).hexdigest():
+        raise ValueError('notification_delivery report changed since manifest binding')
+    state = payload.get('state')
+    if state not in ('pending', 'failed', 'sent'):
+        raise ValueError('notification_delivery state must be pending/failed/sent')
+    if state == 'sent':
+        log = (WecomSendLog.query.get(payload['wecom_log_id'])
+               if type(payload.get('wecom_log_id')) is int else None)
+        if (not log or log.status != 'sent' or log.workflow_run_id != run.id
+                or log.workflow_step_id != step.step_id or log.message_hash != digest):
+            log = None
+            receipt = payload.get('delivery_receipt')
+            if (not isinstance(receipt, dict) or receipt.get('transport') != 'wecom'
+                    or type(receipt.get('errcode')) is not int or receipt['errcode'] != 0
+                    or receipt.get('notification_id') != key
+                    or receipt.get('message_sha256') != digest
+                    or not isinstance(receipt.get('received_at'), str)
+                    or not receipt['received_at']):
+                raise ValueError('notification_delivery sent requires Hub log or authenticated Worker transport receipt')
+    artifact = WorkflowArtifact.query.filter_by(
+        run_id=run.id, step_id=step.step_id,
+        name='notification-attempt:%s' % (step.attempt_no or 1),
+        artifact_type='workflow_notification_delivery').first()
+    document = {name: payload.get(name) for name in (
+        'claw_id', 'run_id', 'step_id', 'attempt_no', 'notification_id',
+        'message_sha256', 'report_id', 'state', 'wecom_log_id')}
+    if state == 'sent':
+        document['receipt_origin'] = 'hub' if log else 'authenticated_worker'
+        document['delivery_receipt'] = ({
+            key: payload['delivery_receipt'][key] for key in (
+                'transport', 'errcode', 'notification_id', 'message_sha256', 'received_at')
+        } if not log else {'wecom_log_id': log.id})
+    if artifact:
+        previous = artifact.metadata_json or {}
+        for name in ('claw_id', 'attempt_no', 'notification_id', 'message_sha256', 'report_id'):
+            if previous.get(name) != document[name]:
+                raise ValueError('notification_delivery immutable identity conflicts')
+        if previous.get('state') == 'sent':
+            return artifact
+    else:
+        artifact = WorkflowArtifact(run_id=run.id, step_id=step.step_id,
+            artifact_type='workflow_notification_delivery',
+            name='notification-attempt:%s' % (step.attempt_no or 1))
+        db.session.add(artifact)
+    artifact.metadata_json = document
+    return artifact
+
+
+@api_bp.route('/workflow-runs/<int:run_id>/steps/<step_id>/notification-delivery', methods=['POST'])
+def update_workflow_notification_delivery(run_id, step_id):
+    err = _require_actor()
+    if err:
+        return err
+    run = WorkflowRun.query.get_or_404(run_id)
+    step = _locked_workflow_step(run_id, step_id)
+    claw = get_current_claw()
+    if not claw or not _step_belongs_to_claw(step, claw.id):
+        return jsonify({'error': '此 Step 不属于当前 OpenClaw'}), 403
+    if (step.step_config_json or {}).get('notification_delivery_mode') != 'outbox':
+        return jsonify({'error': 'Step 未启用 outbox 交付'}), 409
+    try:
+        artifact = _record_notification_delivery(run, step, request.get_json() or {})
+    except (ValueError, TypeError) as exc:
+        db.session.rollback()
+        return jsonify({'error': str(exc)}), 400
+    _sync_run_outcomes(run)
+    db.session.commit()
+    return jsonify(artifact.metadata_json)
+
+
 def _report_submitter_fields():
     actor = _actor_identity() or {}
     if actor.get('type') == 'claw':
@@ -1202,9 +1335,41 @@ def _resolve_workflow_report(run, step, data):
             return None, 'test_report_id 必须是整数'
         if not report or report.is_deleted:
             return None, 'Workflow 报告不存在'
+        if report.project_id != run.project_id:
+            return None, 'Workflow 报告必须属于当前 Run 项目'
         if report.report_type != 'workflow':
-            return None, 'Workflow 节点只能绑定 report_type=workflow 的报告'
-        _link_workflow_report_artifact(run, step, report)
+            manifest = data.get('workflow_report_manifest')
+            if (not isinstance(manifest, dict) or type(manifest.get('schema_version')) is not int
+                    or manifest['schema_version'] != 1):
+                return None, 'Publisher 报告需要 workflow_report_manifest v1'
+            if report.report_type not in TEST_REPORT_TYPES or report.status not in ('published', 'revised'):
+                return None, 'Publisher 报告类型不支持或尚未发布'
+            if not (report.content or '').strip():
+                return None, 'Publisher 报告正文不能为空'
+            actor = _actor_identity() or {}
+            author = ((actor.get('type') == 'claw' and report.submitter_claw_id == actor.get('id'))
+                      or (actor.get('type') == 'user' and report.submitter_user_id == actor.get('id')))
+            if not author and not is_admin_user():
+                return None, 'Publisher 报告必须由作者或管理员绑定'
+            expected = {
+                'report_id': report.id, 'run_id': run.id, 'step_id': step.step_id,
+                'attempt_no': step.attempt_no or 1, 'report_type': report.report_type,
+                'source_ref_type': report.source_ref_type,
+                'source_ref_id': report.source_ref_id,
+                'content_sha256': hashlib.sha256((report.content or '').encode('utf-8')).hexdigest(),
+            }
+            if any(type(manifest.get(key)) is not type(value) or manifest.get(key) != value
+                   for key, value in expected.items()):
+                return None, 'Publisher manifest 与报告内容、来源或当前 Run/Step/attempt 不匹配'
+            conflict = WorkflowArtifact.query.filter(
+                WorkflowArtifact.test_report_id == report.id,
+                WorkflowArtifact.artifact_type == 'workflow_report',
+                WorkflowArtifact.run_id != run.id).first()
+            if conflict:
+                return None, 'Publisher 报告已绑定其他 Run'
+        artifact = _link_workflow_report_artifact(run, step, report)
+        if report.report_type != 'workflow':
+            artifact.metadata_json = dict(artifact.metadata_json or {}, publisher_manifest=expected)
         return report, ''
 
     if not report_payload:
@@ -1290,6 +1455,12 @@ def _apply_step_progress(step, data, reporter, now):
     if not detail and isinstance(data.get('detail'), dict):
         detail = data.get('detail')
     if detail:
+        # Hub reconciliation timestamps are not Worker-editable progress fields.
+        detail = dict(detail)
+        detail.pop('hub_reconciliation', None)
+        existing = (step.progress_json or {}).get('hub_reconciliation')
+        if existing:
+            detail['hub_reconciliation'] = existing
         step.progress_json = detail
     return True
 
@@ -1451,7 +1622,7 @@ def _refresh_workflow_step_health(run=None, commit=False):
         q = q.filter(WorkflowRunStep.run_id == run.id)
     changed = False
     touched_runs = {}
-    for step in q.all():
+    for step in q.populate_existing().with_for_update().all():
         auto_block = _step_auto_block_on_heartbeat_loss(step)
         health = compute_step_health(
             step.status,
@@ -1461,7 +1632,8 @@ def _refresh_workflow_step_health(run=None, commit=False):
             max_missed=3,
             progress_at=step.progress_at,
             progress_timeout_sec=300,
-            auto_fail_on_missed=auto_block,
+            auto_fail_on_missed=(auto_block and not (
+                step.claim_expires_at and step.claim_expires_at > now)),
         )
         step.health_status = health['status']
         step.missed_heartbeat_count = health['missed_count']
@@ -1486,7 +1658,6 @@ def _refresh_workflow_step_health(run=None, commit=False):
             progress = step.progress_json if isinstance(step.progress_json, dict) else {}
             reminders = progress.get('hub_reminders') if isinstance(progress.get('hub_reminders'), dict) else {}
             if not reminders.get('no_response_at'):
-                step.progress_at = step.progress_at or now
                 step.progress_phase = 'no_response_reminded'
                 step.progress_message = 'Hub 已提醒模板创建者：节点已派发但执行方长时间未响应'
                 reminders['no_response_at'] = str(now)
@@ -1494,60 +1665,15 @@ def _refresh_workflow_step_health(run=None, commit=False):
                 progress['hub_reminders'] = reminders
                 step.progress_json = progress
                 _dispatch_heartbeat_fallback_task(step.run, step)
-            # F1：无响应硬超时兜底（默认开启）。running step 的心跳/进度停滞超过硬阈值，
-            # 说明执行方一直没回结果（feedback-no-auto-report / CLI 崩溃 / 上下文压缩退出等），
-            # 若一直挂 running，agent 会靠日常节奏/提醒/session 重置反复空转烧 LLM。
-            # → 按 retry_max 有限重试，用尽则阻断，让 run 收敛、停止反复触发执行方。
+            # Silence starts bounded reconciliation; it is not proof that an
+            # operation stopped, so retry_max cannot authorize replay here.
             signal_at = _step_health_signal_at(step)
             signal_age = int((now - signal_at).total_seconds()) if signal_at else None
             cfg = step.step_config_json if isinstance(step.step_config_json, dict) else {}
             hard_timeout_enabled = cfg.get('auto_block_on_no_response') is not False
             if (hard_timeout_enabled and signal_age is not None
                     and signal_age > WORKFLOW_NO_RESPONSE_HARD_TIMEOUT_SEC):
-                retry_max = int(cfg.get('retry_max') or 0)
-                attempts_used = int(step.attempt_no or 1)
-                timeout_min = WORKFLOW_NO_RESPONSE_HARD_TIMEOUT_SEC // 60
-                if attempts_used <= retry_max:
-                    # 有限重试：先失效旧任务，再重派（task_id 含新 attempt_no）
-                    _expire_workflow_agent_tasks_for_step(
-                        step.run_id, step.step_id, reason='workflow_step_no_response_retry')
-                    step.attempt_no = attempts_used + 1
-                    step.started_at = now
-                    step.dispatched_at = now
-                    step.heartbeat_at = None
-                    step.heartbeat_by = ''
-                    step.heartbeat_count = 0
-                    step.missed_heartbeat_count = 0
-                    step.health_status = 'stale'
-                    step.health_checked_at = now
-                    _reset_step_progress(step)
-                    step.progress_at = now
-                    step.progress_by = 'workflow'
-                    step.progress_phase = 'dispatched'
-                    step.progress_message = (
-                        'Hub 无响应超时（%d分钟），自动重试派发（第 %d 次）'
-                        % (timeout_min, step.attempt_no))
-                    _dispatch_step_message(step)
-                    if step.run:
-                        touched_runs[step.run.id] = step.run
-                else:
-                    # 重试用尽 → 阻断，停止无限挂起并关掉陈旧任务
-                    step.status = 'blocked'
-                    step.finished_at = now
-                    _clear_step_claim(step)
-                    step.blocker_json = {
-                        'type': 'workflow_step_no_response',
-                        'message': (
-                            'Workflow 节点派发后超过 %d 分钟无任何心跳/进度，已自动阻断'
-                            '（避免执行方反复空转消耗算力）' % timeout_min),
-                        'last_heartbeat_at': str(step.heartbeat_at) if step.heartbeat_at else None,
-                        'missed_heartbeat_count': step.missed_heartbeat_count or 0,
-                        'attempt_no': step.attempt_no or 1,
-                        'suggested_action': '检查执行 Agent 是否在线/是否回写 result；修复后在页面重试该节点',
-                    }
-                    _expire_workflow_agent_tasks_for_step(
-                        step.run_id, step.step_id, reason='workflow_step_no_response_blocked')
-                    _dispatch_heartbeat_fallback_task(step.run, step)
+                if _reconcile_silent_step(step, now):
                     if step.run:
                         touched_runs[step.run.id] = step.run
     for touched in touched_runs.values():
@@ -1555,6 +1681,60 @@ def _refresh_workflow_step_health(run=None, commit=False):
     if changed and commit:
         db.session.commit()
     return changed
+
+
+def _reconcile_silent_step(step, now):
+    """Bound orphan reconciliation without assuming a timeout stopped side effects."""
+    from app.models import AgentTask
+    if step.claim_expires_at and step.claim_expires_at > now:
+        progress = dict(step.progress_json or {})
+        progress.pop('hub_reconciliation', None)
+        step.progress_json = progress
+        return False  # A live runner lease wins over a slow Provider heartbeat.
+    progress = dict(step.progress_json or {})
+    receipt = dict(progress.get('hub_reconciliation') or {})
+    signal = _step_health_signal_at(step)
+    signal_key = signal.isoformat() if signal else None
+    if (receipt.get('attempt_no') != (step.attempt_no or 1)
+            or receipt.get('signal_at') != signal_key):
+        receipt = {}
+    started = datetime.fromisoformat(receipt['started_at']) if receipt.get('started_at') else now
+    last = datetime.fromisoformat(receipt['checked_at']) if receipt.get('checked_at') else None
+    if last and (now - last).total_seconds() < 300:
+        return False
+    task_ids = [step.agent_task_id] if getattr(step, 'agent_task_id', None) else []
+    for claw_id in (None, step.target_claw_id, _run_worker_claw_id(step.run)):
+        task_ids.append(_workflow_agent_task_id(step.run_id, step.step_id, step.attempt_no, claw_id))
+    tasks = AgentTask.query.filter(AgentTask.task_id.in_(task_ids)).all()
+    receipt.update({
+        'state': 'recovering', 'attempt_no': step.attempt_no or 1,
+        'signal_at': signal_key,
+        'started_at': started.isoformat(), 'checked_at': now.isoformat(),
+        'checks': int(receipt.get('checks') or 0) + 1,
+        'task_states': {task.task_id: task.status for task in tasks},
+        'claim_expired': True, 'side_effects': 'unknown',
+        'worker_action': 'read_journal_and_report_current_attempt',
+    })
+    progress['hub_reconciliation'] = receipt
+    step.progress_json = progress
+    step.progress_phase = 'recovering'
+    step.progress_message = '执行状态待对账：请 Worker 回读当前 attempt 的 Provider、journal 和回执'
+    if (now - started).total_seconds() < 1800:
+        return False
+    receipt['state'] = 'human_gate'
+    step.progress_json = dict(progress, hub_reconciliation=dict(receipt))
+    step.status = 'blocked'
+    step.finished_at = now
+    step.blocker_json = {
+        'type': 'workflow_execution_reconciliation_required', 'code': 'HUMAN_GATE',
+        'message': '执行失联且对账窗口已耗尽；副作用未知，禁止盲目重放',
+        'attempt_no': step.attempt_no or 1, 'requires_reconciliation': True,
+        'reconciliation': receipt,
+    }
+    _expire_workflow_agent_tasks_for_step(step.run_id, step.step_id,
+                                         reason='workflow_reconciliation_required')
+    _clear_step_claim(step)
+    return True
 
 
 def _apply_step_branches(run, step, branch_context):
@@ -1825,7 +2005,7 @@ def _locked_workflow_step(run_id, step_id):
     """Lock the latest Step row before claim/fencing validation and mutation."""
     return (WorkflowRunStep.query
             .filter_by(run_id=run_id, step_id=step_id)
-            .with_for_update().first_or_404())
+            .populate_existing().with_for_update().first_or_404())
 
 
 def _clear_step_claim(step):
@@ -3878,6 +4058,15 @@ def report_workflow_step_result(run_id, step_id):
         step.outputs_json.setdefault('hub_report_id', report.id)
         if report.is_shared and report.share_token:
             step.outputs_json.setdefault('share_url', '/r/%s' % report.share_token)
+    if (step.step_config_json or {}).get('notification_delivery_mode') == 'outbox':
+        try:
+            delivery = _record_notification_delivery(run, step, data.get('notification_delivery'))
+        except (ValueError, TypeError) as exc:
+            db.session.rollback()
+            return jsonify({'error': str(exc)}), 400
+        step.outputs_json['notification_outcome'] = {
+            'pending': 'PENDING', 'failed': 'FAILED', 'sent': 'SENT',
+        }[delivery.metadata_json['state']]
     ingestion = ingest_workflow_result(run, step, dict(
         data, outputs=step.outputs_json, evidence=step.evidence_json),
         actor=step.updated_by or 'workflow')
@@ -3912,7 +4101,11 @@ def report_workflow_step_result(run_id, step_id):
                 'wecom_sent': False,
                 'skip_reason': 'business_pass_or_automation_only',
             })
-    step.contract_result_json = dict(contract, evidence_ingestion=ingestion)
+    step.contract_result_json = dict(contract, evidence_ingestion=ingestion,
+        outcome_input={key: data[key] for key in (
+            'business_outcome', 'business_conclusion', 'business_failure_confirmed',
+            'automation_outcome', 'evidence_outcome', 'evidence_ingest_status',
+        ) if key in data})
     gate = evaluate_step_gates(step.step_config_json or {}, {
         'status': status,
         'summary': step.summary,
@@ -4005,12 +4198,53 @@ def report_workflow_step_result(run_id, step_id):
     return jsonify(body)
 
 
+def _unresolved_execution(run_id):
+    return next((row for row in WorkflowRunStep.query.filter_by(run_id=run_id)
+                 .populate_existing().with_for_update().all()
+                 if (row.blocker_json or {}).get('requires_reconciliation')), None)
+
+
+@api_bp.route('/workflow-runs/<int:run_id>/steps/<step_id>/execution-reconciliation', methods=['POST'])
+def resolve_workflow_execution_reconciliation(run_id, step_id):
+    err = _require_actor()
+    if err:
+        return err
+    run = WorkflowRun.query.get_or_404(run_id)
+    if not _can_manage_definition(run.definition):
+        return jsonify({'error': '只有 Workflow 管理员可以确认副作用已对账'}), 403
+    step = _locked_workflow_step(run_id, step_id)
+    data = request.get_json() or {}
+    if not (step.blocker_json or {}).get('requires_reconciliation'):
+        return jsonify({'error': '当前 Step 没有待对账阻断'}), 409
+    if (type(data.get('attempt_no')) is not int or data['attempt_no'] != (step.attempt_no or 1)
+            or data.get('execution_stopped') is not True
+            or data.get('side_effects_reconciled') is not True
+            or not isinstance(data.get('receipt_ref'), str)
+            or not 1 <= len(data['receipt_ref'].strip()) <= 2048):
+        return jsonify({'error': '需要当前 attempt、停止确认、副作用对账确认及 receipt_ref'}), 400
+    if step.claim_expires_at and step.claim_expires_at > datetime.now():
+        return jsonify({'error': '当前 claim 仍活跃，不能确认停止'}), 409
+    resolution = {key: data[key] for key in (
+        'attempt_no', 'execution_stopped', 'side_effects_reconciled', 'receipt_ref')}
+    step.blocker_json = dict(step.blocker_json, requires_reconciliation=False,
+                            resolution=dict(resolution, resolved_by=_actor_name()))
+    db.session.add(AuditLog(action='execution_reconciled', resource_type='workflow_run',
+        resource_id=run.id, resource_name=run.run_name, operator=_actor_name(),
+        detail=json.dumps({'step_id': step_id, 'attempt_no': step.attempt_no,
+                           'receipt_ref': data['receipt_ref']}, ensure_ascii=False)))
+    db.session.commit()
+    return jsonify({'resolved': True, 'step_id': step_id, 'status': step.status})
+
+
 @api_bp.route('/workflow-runs/<int:run_id>/steps/<step_id>/retry', methods=['POST'])
 def retry_workflow_step(run_id, step_id):
     err = _require_actor()
     if err:
         return err
     run = WorkflowRun.query.get_or_404(run_id)
+    if _unresolved_execution(run_id):
+        return jsonify({'error': '必须先确认旧执行已停止且副作用已对账',
+                        'code': 'EXECUTION_RECONCILIATION_REQUIRED'}), 409
     if run.status == 'cancelled':
         return jsonify({'error': 'Workflow Run 已终止，不能重试步骤'}), 409
     step = WorkflowRunStep.query.filter_by(
@@ -4045,6 +4279,9 @@ def resume_workflow_run(run_id):
     if err:
         return err
     run = WorkflowRun.query.get_or_404(run_id)
+    if _unresolved_execution(run_id):
+        return jsonify({'error': '必须先确认旧执行已停止且副作用已对账',
+                        'code': 'EXECUTION_RECONCILIATION_REQUIRED'}), 409
     if run.status == 'cancelled':
         return jsonify({'error': 'Workflow Run 已终止，不能恢复执行'}), 409
     data = request.get_json() or {}
@@ -4166,6 +4403,9 @@ def restart_workflow_run(run_id):
            .with_for_update().first_or_404())
     if not _can_restart_workflow_run(run):
         return jsonify({'error': '无权重启该 Workflow Run'}), 403
+    if _unresolved_execution(run_id):
+        return jsonify({'error': '必须先确认旧执行已停止且副作用已对账',
+                        'code': 'EXECUTION_RECONCILIATION_REQUIRED'}), 409
     if run.status not in ('blocked', 'failed'):
         return jsonify({
             'error': '只有 blocked/failed Run 可以完整重启',

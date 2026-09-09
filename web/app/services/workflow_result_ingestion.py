@@ -18,9 +18,13 @@ from app.models import (
     ShiftLeftFindingFeedback,
     TestAccount,
     WorkflowEvidenceManifest,
+    WorkflowRunStep,
 )
 from app.services.entity_relations import best_effort_upsert_relations
 from app.services.evidence_manifests import normalize_manifest
+from app.services.workflow_evidence_scope import (
+    evidence_outcome_values, scoped_evidence_missing,
+)
 
 
 def _first_dict(*values):
@@ -242,6 +246,8 @@ def ingest_workflow_result(run, step, data, actor='workflow'):
         outputs.get('flow12_bugs_json'))
     expects_evidence = bool(
         evidence or manifest_payload or findings
+        or evidence_outcome_values(data)
+        or (step.step_config_json or {}).get('evidence_requirements')
         or (step.step_config_json or {}).get('required_evidence'))
     if not expects_evidence:
         return {'status': '', 'manifest_id': None, 'finding_ids': []}
@@ -258,14 +264,24 @@ def ingest_workflow_result(run, step, data, actor='workflow'):
     manifest = WorkflowEvidenceManifest.query.filter_by(
         workflow_run_id=run.id).first()
     artifacts = list(manifest.artifacts_json or []) if manifest else []
-    artifacts.extend(list(manifest_payload.get('artifacts') or []))
-    artifacts.extend(_artifact_items(evidence, run.id, step.step_id))
+    incoming = list(manifest_payload.get('artifacts') or [])
+    incoming.extend(_artifact_items(evidence, run.id, step.step_id))
+    for item in incoming:
+        if isinstance(item, dict):
+            item = dict(item, step_id=step.step_id, metadata=dict(
+                item.get('metadata') or {}, step_id=step.step_id,
+                attempt_no=step.attempt_no or 1))
+        artifacts.append(item)
     deduped_artifacts = []
     seen_artifacts = set()
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             continue
-        key = (str(artifact.get('type') or ''), str(artifact.get('uri') or ''))
+        meta = artifact.get('metadata') or {}
+        key = (str(artifact.get('type') or ''), str(artifact.get('uri') or ''),
+               str(artifact.get('case_id', meta.get('case_id', ''))),
+               str(meta.get('stage', '')), str(meta.get('step_id', '')),
+               str(meta.get('attempt_no', '')), str(meta.get('status', '')))
         if key in seen_artifacts:
             continue
         seen_artifacts.add(key)
@@ -277,8 +293,7 @@ def ingest_workflow_result(run, step, data, actor='workflow'):
     if manifest:
         previous_coverage = manifest.coverage_json or {}
         coverage = {
-            key: ('complete' if 'complete' in (previous_coverage.get(key), value)
-                  else value)
+            key: value
             for key, value in coverage.items()
         }
         for key, value in previous_coverage.items():
@@ -291,6 +306,23 @@ def ingest_workflow_result(run, step, data, actor='workflow'):
         'artifacts': artifacts,
         'required_evidence': required_evidence,
     }, not_applicable_is_complete=_not_applicable_is_complete(run))
+    scopes = []
+    explicit_missing = []
+    for row in WorkflowRunStep.query.filter_by(run_id=run.id).all():
+        scopes.extend(dict(scope, step_id=row.step_id, attempt_no=row.attempt_no or 1)
+                      for scope in (row.step_config_json or {}).get('evidence_requirements') or [])
+        row_result = (dict(data) if row.step_id == step.step_id else {
+            'outputs': row.outputs_json or {}, 'metrics': row.metrics_json or {},
+            'evidence': row.evidence_json or {},
+            **((row.contract_result_json or {}).get('outcome_input') or {}),
+        })
+        explicit_missing.extend(dict(item, step_id=row.step_id)
+                                for item in evidence_outcome_values(row_result)
+                                if item['status'] == 'ANALYSIS_INCOMPLETE')
+    scope_missing = scoped_evidence_missing(scopes, normalized['artifacts'])
+    if explicit_missing or scope_missing:
+        normalized['completeness_status'] = 'incomplete'
+        normalized['missing_required'].extend(scope_missing + explicit_missing)
     if manifest is None:
         manifest = WorkflowEvidenceManifest(
             project_id=run.project_id,

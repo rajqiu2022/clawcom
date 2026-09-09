@@ -54,7 +54,7 @@ WORKFLOW_OUTCOME_VALUES = {
     'automation': {'SUCCEEDED', 'PARTIAL', 'BLOCKED', 'FAILED'},
     'evidence': {'COMPLETE', 'ANALYSIS_INCOMPLETE'},
     'report': {'PUBLISHED', 'DRAFT', 'FAILED', 'NOT_APPLICABLE'},
-    'notification': {'SENT', 'FAILED', 'NOT_REQUIRED'},
+    'notification': {'SENT', 'PENDING', 'FAILED', 'NOT_REQUIRED'},
     'review': {'COMPLETED', 'FAILED', 'INCOMPLETE', 'NOT_ASSIGNED'},
 }
 DEFAULT_STEP_LEASE_SECONDS = 180
@@ -441,6 +441,10 @@ def merge_workflow_run_outcomes(current, result, step_config=None):
         'notification': first('notification_outcome'),
         'review': first('review_outcome'),
     }
+    from app.services.workflow_evidence_scope import evidence_outcome_values
+    evidence_values = evidence_outcome_values(result)
+    if any(item['status'] == 'ANALYSIS_INCOMPLETE' for item in evidence_values):
+        candidates['evidence'] = 'ANALYSIS_INCOMPLETE'
     if candidates['business'] in (None, ''):
         if first('business_failure_confirmed') is True:
             candidates['business'] = 'FAILED'
@@ -477,7 +481,7 @@ def merge_workflow_run_outcomes(current, result, step_config=None):
         },
     }
     sticky_success = {
-        'evidence': 'COMPLETE',
+        'evidence': 'ANALYSIS_INCOMPLETE',
         'report': 'PUBLISHED',
         'notification': 'SENT',
         'review': 'COMPLETED',
@@ -900,9 +904,35 @@ def normalize_step(step, idx):
     }
     if metrics_schema is not None:
         normalized['metrics_schema'] = copy.deepcopy(metrics_schema)
+    if 'evidence_requirements' in step:
+        from app.services.workflow_evidence_scope import normalize_evidence_requirements
+        normalized['evidence_requirements'] = normalize_evidence_requirements(
+            step['evidence_requirements'])
+    if 'notification_delivery_mode' in step:
+        if step['notification_delivery_mode'] not in ('inline', 'outbox'):
+            raise ValueError('notification_delivery_mode must be inline/outbox')
+        normalized['notification_delivery_mode'] = step['notification_delivery_mode']
+        if step['notification_delivery_mode'] == 'outbox':
+            # Move only delivery-success gates; never relax business/artifact gates.
+            import re
+            delivery_gates = []
+            execution_gates = []
+            for gate in normalized['gates']:
+                expression = str(gate.get('expression') or '')
+                if re.fullmatch(r'\s*(metrics|outputs)\.(wecom_sent\s*==\s*true|wecom_errcode\s*==\s*0)\s*', expression):
+                    delivery_gates.append(gate)
+                else:
+                    execution_gates.append(gate)
+            normalized['gates'] = execution_gates
+            normalized['notification_delivery_gates'] = delivery_gates or step.get('notification_delivery_gates', [])
     for key in ('required_metrics', 'required_evidence', 'required_outputs'):
         if key in step:
             normalized[key] = _as_list(step.get(key))
+    if normalized.get('notification_delivery_mode') == 'outbox':
+        for key in ('required_metrics', 'required_outputs'):
+            if key in normalized:
+                normalized[key] = [field for field in normalized[key]
+                                   if field not in ('wecom_sent', 'wecom_errcode')]
     if 'allow_empty_contract_fields' in step:
         allow_empty = step.get('allow_empty_contract_fields')
         if not isinstance(allow_empty, dict):
