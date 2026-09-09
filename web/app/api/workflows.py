@@ -12,6 +12,7 @@ import json
 from uuid import uuid4
 
 from flask import current_app, jsonify, request, session
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 
 from app import db
@@ -2385,6 +2386,10 @@ def _dispatch_step_blocked_notice(step):
         summary=step.summary,
         blocker=step.blocker_json or {},
     )
+    verification_target = (
+        f'workflow_run:{step.run_id}:step:{step.step_id}:'
+        f'attempt:{int(step.attempt_no or 1)}'
+    )
     try:
         from app.api.agent_client import notify_claw
     except Exception:
@@ -2416,11 +2421,29 @@ def _dispatch_step_blocked_notice(step):
                 urgency_level='interrupt',
                 priority='P0',
                 task_category='routine',
+                verification_target=verification_target,
                 enabled=True,
                 created_by='workflow-blocked',
             ))
         if notify_claw:
             notify_claw(claw_id)
+
+
+def _expire_step_blocked_todos(run_id, step_id):
+    """Disable current and legacy one-shot blocker notices before replay."""
+    target_prefix = f'workflow_run:{int(run_id)}:step:{step_id}:'
+    legacy_title = f'Workflow Run #{int(run_id)} {step_id}'
+    rows = ClawTodo.query.filter(
+        ClawTodo.created_by == 'workflow-blocked',
+        ClawTodo.enabled.is_(True),
+        or_(
+            ClawTodo.verification_target.like(target_prefix + '%'),
+            ClawTodo.title.contains(legacy_title),
+        ),
+    ).all()
+    for todo in rows:
+        todo.enabled = False
+    return len(rows)
 
 
 def _run_definition_snapshot(run, steps):
@@ -4251,6 +4274,7 @@ def retry_workflow_step(run_id, step_id):
         run_id=run_id,
         step_id=step_id,
     ).first_or_404()
+    _expire_step_blocked_todos(run_id, step_id)
     step.status = 'pending'
     step.blocker_json = {}
     step.gate_result_json = {}
@@ -4293,6 +4317,7 @@ def resume_workflow_run(run_id):
             if step.step_id == from_step:
                 reset = True
             if reset:
+                _expire_step_blocked_todos(run.id, step.step_id)
                 step.status = 'pending'
                 step.blocker_json = {}
                 step.gate_result_json = {}
@@ -4337,6 +4362,7 @@ def _workflow_restart_step_snapshot(step):
 def _reset_workflow_step_for_full_restart(step, definition_step, actor):
     _expire_workflow_agent_tasks_for_step(
         step.run_id, step.step_id, reason='workflow_run_restarted')
+    _expire_step_blocked_todos(step.run_id, step.step_id)
     config = copy.deepcopy(
         step.step_config_json if isinstance(step.step_config_json, dict)
         else {})

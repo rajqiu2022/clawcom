@@ -39,6 +39,7 @@ from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
 from app.models import (  # noqa: E402
     AuditLog,
+    ClawTodo,
     EntityRelation,
     Project,
     ShiftLeftAnalysisFinding,
@@ -211,6 +212,22 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
             created_by=self.admin.username, updated_by=self.admin.username,
         )
         db.session.add(manifest)
+        db.session.add_all([
+            ClawTodo(
+                openclaw_id=12,
+                title=f'处理 Workflow Run #{run_id} work 节点阻断',
+                schedule_type='once', urgency_level='interrupt',
+                enabled=True, created_by='workflow-blocked',
+            ),
+            ClawTodo(
+                openclaw_id=12,
+                title='structured blocker notice',
+                schedule_type='once', urgency_level='interrupt',
+                verification_target=(
+                    f'workflow_run:{run_id}:step:work:attempt:1'),
+                enabled=True, created_by='workflow-blocked',
+            ),
+        ])
         db.session.commit()
 
         missing_key = self.client.post(
@@ -255,6 +272,10 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
         self.assertEqual(AuditLog.query.filter_by(
             resource_type='workflow_run', resource_id=run_id,
             action='restart').count(), 1)
+        blocker_todos = ClawTodo.query.filter_by(
+            openclaw_id=12, created_by='workflow-blocked').all()
+        self.assertEqual(2, len(blocker_todos))
+        self.assertTrue(all(not todo.enabled for todo in blocker_todos))
 
     def test_definition_can_require_an_explicit_single_worker_binding(self):
         definition_json = dict(self.definition.definition_json or {})
