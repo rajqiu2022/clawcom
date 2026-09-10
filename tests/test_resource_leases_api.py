@@ -139,7 +139,18 @@ class ResourceLeasesApiTest(unittest.TestCase):
         self.assertEqual(qualification.status_code, 409)
         conflict = qualification.get_json()['details']['conflicts'][0]
         self.assertEqual(conflict['owner_id'], str(self.flow_run.id))
+        self.assertEqual(conflict['owner_run_id'], self.flow_run.id)
+        self.assertEqual(conflict['owner_run_status'], 'running')
+        self.assertEqual(conflict['wait_state'], 'waiting_owner_cleanup')
+        self.assertIn(f'Run #{self.flow_run.id}', conflict['wait_message'])
         self.assertGreater(conflict['retry_after_seconds'], 0)
+        self.assertEqual(
+            qualification.get_json()['details']['state'],
+            'WAITING_RESOURCE_CLEANUP')
+        self.assertFalse(
+            qualification.get_json()['details']['business_started'])
+        self.assertEqual(1, ResourceLeaseEvent.query.filter_by(
+            event_type='conflict').count())
         db.session.refresh(self.flow_run)
         self.assertEqual(self.flow_run.status, 'running')
         self.assertEqual(self.flow_run.controller_run_id, 'flow12-cycle')

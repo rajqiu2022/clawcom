@@ -11,7 +11,12 @@ import re
 RUNTIME_SCHEMA_VERSION = 1
 RUNTIME_KINDS = {'claw_worker', 'legacy_sidecar', 'hermes_agent'}
 WORKER_PROVIDERS = {'hermes', 'codex'}
-RUNTIME_MODES = {'legacy_split', 'agent_host_v3', 'codex_host_v4_canary'}
+RUNTIME_MODES = {
+    'legacy_split',
+    'agent_host_v3',
+    'codex_host_v4_canary',
+    'agent_direct',
+}
 CONFIG_OWNERS = {'hub', 'worker'}
 AUTH_MODES = {'', 'subscription', 'timiai_bridge'}
 RUNTIME_SOURCES = {'worker', 'operator', 'deployment'}

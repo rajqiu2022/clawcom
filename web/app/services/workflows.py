@@ -52,10 +52,14 @@ WORKER_RESULT_STATUSES = {'passed', 'failed', 'blocked', 'skipped'}
 WORKFLOW_OUTCOME_VALUES = {
     'business': {'PASSED', 'FAILED', 'INCONCLUSIVE', 'NOT_EXECUTED'},
     'automation': {'SUCCEEDED', 'PARTIAL', 'BLOCKED', 'FAILED'},
-    'evidence': {'COMPLETE', 'ANALYSIS_INCOMPLETE'},
+    'evidence': {'COMPLETE', 'ANALYSIS_INCOMPLETE', 'NOT_REQUIRED'},
     'report': {'PUBLISHED', 'DRAFT', 'FAILED', 'NOT_APPLICABLE'},
     'notification': {'SENT', 'PENDING', 'FAILED', 'NOT_REQUIRED'},
     'review': {'COMPLETED', 'FAILED', 'INCOMPLETE', 'NOT_ASSIGNED'},
+}
+WORKFLOW_CATALOG_KINDS = {'business', 'probe', 'legacy'}
+WORKFLOW_READINESS_VALUES = {
+    'unverified', 'canary', 'stable', 'probe_only', 'legacy', 'blocked',
 }
 DEFAULT_STEP_LEASE_SECONDS = 180
 MIN_STEP_LEASE_SECONDS = 30
@@ -233,8 +237,13 @@ def _same_actor(owner_type, owner_id, actor_type, actor_id):
         return False
 
 
-def can_execute_workflow(owner_type, owner_id, executor_acl, actor_type, actor_id, is_admin=False):
-    """Return whether actor can create a run from a definition."""
+def can_execute_workflow(owner_type, owner_id, executor_acl, actor_type,
+                         actor_id, is_admin=False, editor_acl=None):
+    """Return whether actor can create a run from a definition.
+
+    Product permission semantics are intentionally asymmetric: an editor can
+    both modify and execute a Definition, while an executor can only execute.
+    """
     if is_admin:
         return True
     acl = normalize_executor_acl(executor_acl)
@@ -247,9 +256,13 @@ def can_execute_workflow(owner_type, owner_id, executor_acl, actor_type, actor_i
     except (TypeError, ValueError):
         return False
     if actor_type == 'claw':
-        return actor_id in acl.get('claw_ids', [])
+        if actor_id in acl.get('claw_ids', []):
+            return True
+        return actor_id in normalize_editor_acl(editor_acl).get('claw_ids', [])
     if actor_type == 'user':
-        return actor_id in acl.get('user_ids', [])
+        if actor_id in acl.get('user_ids', []):
+            return True
+        return actor_id in normalize_editor_acl(editor_acl).get('user_ids', [])
     return False
 
 
@@ -414,6 +427,111 @@ def _canonical_outcome(domain, value):
     }
     rendered = aliases.get(domain, {}).get(rendered, rendered)
     return rendered if rendered in WORKFLOW_OUTCOME_VALUES[domain] else ''
+
+
+def workflow_catalog_metadata(definition):
+    """Describe what a Definition proves without inferring production readiness.
+
+    The catalog classification is intentionally conservative.  A successful
+    command/lease probe is not a business test, and a Definition containing a
+    legacy ``worker_task`` is never advertised as Direct-ready merely because
+    it is active. Operators can refine the generated values through the
+    top-level ``workflow_catalog`` object.
+    """
+    definition = definition if isinstance(definition, dict) else {}
+    context = definition.get('context') if isinstance(
+        definition.get('context'), dict) else {}
+    declared = definition.get('workflow_catalog') if isinstance(
+        definition.get('workflow_catalog'), dict) else {}
+    steps = [row for row in (definition.get('steps') or [])
+             if isinstance(row, dict)]
+    has_legacy_worker_task = any(
+        str(row.get('type') or '') == 'worker_task' for row in steps)
+    searchable = ' '.join(str(value or '') for value in (
+        definition.get('key'), definition.get('name'),
+        definition.get('description'), declared.get('validation_scope'))
+    ).casefold()
+    declared_kind = str(declared.get('kind') or '').strip().lower()
+    if has_legacy_worker_task:
+        kind = 'legacy'
+    elif declared_kind in WORKFLOW_CATALOG_KINDS:
+        kind = declared_kind
+    elif any(token in searchable for token in ('probe', '探针', 'contract check')):
+        kind = 'probe'
+    else:
+        kind = 'business'
+
+    default_readiness = {
+        'legacy': 'legacy',
+        'probe': 'probe_only',
+        'business': 'unverified',
+    }[kind]
+    declared_readiness = str(
+        declared.get('readiness') or '').strip().lower()
+    readiness = (
+        default_readiness
+        if has_legacy_worker_task
+        else declared_readiness
+        if declared_readiness in WORKFLOW_READINESS_VALUES
+        else default_readiness)
+    validation_scope = str(
+        declared.get('validation_scope') or {
+            'legacy': 'legacy_execution_path',
+            'probe': 'control_plane_probe',
+            'business': 'business_workflow',
+        }[kind]).strip()
+    return {
+        'kind': kind,
+        'readiness': readiness,
+        'validation_scope': validation_scope[:160],
+        'has_legacy_worker_task': has_legacy_worker_task,
+        'declared': bool(declared),
+    }
+
+
+def workflow_outcome_requirements(definition):
+    """Return which result dimensions a Definition explicitly requires."""
+    definition = definition if isinstance(definition, dict) else {}
+    context = definition.get('context') if isinstance(
+        definition.get('context'), dict) else {}
+    steps = [row for row in (definition.get('steps') or [])
+             if isinstance(row, dict)]
+    catalog = workflow_catalog_metadata(definition)
+    declared = context.get('outcome_requirements') if isinstance(
+        context.get('outcome_requirements'), dict) else {}
+
+    def declared_or(name, inferred):
+        value = declared.get(name)
+        return value if isinstance(value, bool) else bool(inferred)
+
+    evidence = any(
+        row.get('evidence_requirements') or row.get('required_evidence')
+        for row in steps)
+    report = any(
+        any(name in {'hub_report_id', 'test_report_id', 'workflow_report_id',
+                     'report_outcome', 'report_status'}
+            for name in (row.get('outputs') or []))
+        or bool(
+            row.get('analysis').get('enabled')
+            if isinstance(row.get('analysis'), dict) else False)
+        for row in steps)
+    notification = any(
+        row.get('type') == 'notification'
+        or row.get('notification_delivery_mode') == 'outbox'
+        for row in steps)
+    review = any(
+        row.get('assignment_role') == 'reviewer'
+        or row.get('type') == 'approval'
+        or row.get('approval_required') is True
+        for row in steps)
+    return {
+        'business': declared_or('business', catalog['kind'] == 'business'),
+        'automation': declared_or('automation', bool(steps)),
+        'evidence': declared_or('evidence', evidence),
+        'report': declared_or('report', report),
+        'notification': declared_or('notification', notification),
+        'review': declared_or('review', review),
+    }
 
 
 def merge_workflow_run_outcomes(current, result, step_config=None):
@@ -925,6 +1043,12 @@ def normalize_step(step, idx):
                     execution_gates.append(gate)
             normalized['gates'] = execution_gates
             normalized['notification_delivery_gates'] = delivery_gates or step.get('notification_delivery_gates', [])
+    if 'notification_owner_role' in step:
+        owner_role = str(step.get('notification_owner_role') or '').strip()
+        if owner_role not in ('executor', 'reviewer'):
+            raise ValueError(
+                'notification_owner_role must be executor/reviewer')
+        normalized['notification_owner_role'] = owner_role
     for key in ('required_metrics', 'required_evidence', 'required_outputs'):
         if key in step:
             normalized[key] = _as_list(step.get(key))
@@ -1304,6 +1428,23 @@ def normalize_workflow_definition(data):
             raise ValueError('start_vars_schema: expected an object')
         normalized['start_vars_schema'] = copy.deepcopy(
             data.get('start_vars_schema'))
+    if 'workflow_catalog' in data:
+        catalog = data.get('workflow_catalog')
+        if not isinstance(catalog, dict):
+            raise ValueError('workflow_catalog: expected an object')
+        kind = str(catalog.get('kind') or '').strip().lower()
+        readiness = str(catalog.get('readiness') or '').strip().lower()
+        if kind and kind not in WORKFLOW_CATALOG_KINDS:
+            raise ValueError(
+                'workflow_catalog.kind: expected business/probe/legacy')
+        if readiness and readiness not in WORKFLOW_READINESS_VALUES:
+            raise ValueError(
+                'workflow_catalog.readiness: unsupported readiness value')
+        normalized['workflow_catalog'] = {
+            key: copy.deepcopy(value)
+            for key, value in catalog.items()
+            if key in {'kind', 'readiness', 'validation_scope'}
+        }
     return normalized
 
 
@@ -1324,7 +1465,7 @@ def merge_workflow_definition_update(existing_definition, patch):
         for field in (
                 'name', 'description', 'version', 'steps', 'context',
                 'start_vars_schema', 'outcome_status_mode',
-                'composite_outcomes'):
+                'composite_outcomes', 'workflow_catalog'):
             if field in source:
                 merged[field] = source[field]
     if original_key:

@@ -24,7 +24,7 @@ HUB_CAPABILITY_DIGEST = """【Hub 能力索引 · 回复/执行前必读（Rule 
 - 任务上下文 / 记忆路由（GET /api/v1/tasks/{ref_type}/{ref_id}/context）→ agent-operating-protocol
 - 持久笔记（跨 session 保留，随本索引回注）：关键决策写 POST /api/v1/memos/upsert（tag=decision，scope_key=项目/主题）；当前任务上下文写 tag=taskctx、scope_key=todo-{id}/agent_task-{id}（同 scope_key 会滚动更新，处理完成后 Hub 自动归档）。回复前若「你的持久笔记索引」有相关项，先 GET /api/v1/memos/memo/{id} 取全文再作答，勿凭记忆臆测。
 - 工作流四态编排（节点拆分 / 执行者变量 / 节点参考 / 阻断续跑）→ workflow-manager
-- 主 Agent 自主调度 Mission：GET /api/v1/workflow-missions/{id}/definitions 查询项目内可用 Flow；POST /api/v1/workflow-missions/{id}/dispatch 只用于首次启动或切换到不同 Flow。Child Run blocked/failed 且修复后仍要执行同一 Flow 时，优先 POST /api/v1/workflow-runs/{run_id}/restart 原地完整重启，禁止重复 dispatch 制造新 Run；两类写入都需稳定幂等键，禁止传 executor/worker 覆盖字段。
+- 主 Agent 自主调度 Mission：GET /api/v1/workflow-missions/{id}/definitions 查询项目内可用 Flow；POST /api/v1/workflow-missions/{id}/dispatch 用于首次启动、切换 Flow，或 restart 返回 STALE_DEFINITION_SNAPSHOT 后基于最新 Definition 创建同 Flow 替代 Run。普通 blocked/failed 且快照未变时仍优先 POST /api/v1/workflow-runs/{run_id}/restart 原地完整重启；两类写入都需稳定幂等键，禁止传 executor/worker 覆盖字段。
 - 接入注册 / Token / 拉标准包与增量同步 → hub-connect；Skill 市场增删改查 → skill-market-operations
 - 知识库·踩坑沉淀 → knowledge-manager；课题讨论 → topic-discuss；见闻分享 → insight-sharing
 - 测试报告（6 类 / 类别自定义 / 收藏 / 隐藏报告同项目按 ID 可见 / 附件 / 分享外链）→ test-report-manager

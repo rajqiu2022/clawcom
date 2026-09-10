@@ -80,6 +80,7 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
             'archiveJournalPage',
             'permanentlyDeleteJournalPage',
             'openJournalArchiveModal', 'restoreArchivedJournalPage',
+            'deleteJournalNotebook', 'permanentlyDeleteKnowledgeNotebook',
             'journalPageRequestSeq', '最后编辑', '归档日期',
         ):
             self.assertIn(marker, text)
@@ -105,6 +106,30 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
             end = text.find('\nasync function ', start + 20)
             function = text[start:end if end > 0 else len(text)]
             self.assertEqual(function.count('await customConfirm('), 2)
+
+    def test_notebook_delete_is_explicit_and_requires_two_confirmations(self):
+        template = (ROOT / 'web' / 'templates' / 'knowledge.html').read_text(
+            encoding='utf-8')
+        api = (ROOT / 'web' / 'static' / 'js' / 'api.js').read_text(
+            encoding='utf-8')
+        start = template.index('async function deleteJournalNotebook(')
+        end = template.find('\nasync function ', start + 20)
+        function = template[start:end if end > 0 else len(template)]
+        self.assertEqual(function.count('await customConfirm('), 2)
+        self.assertIn('event.stopPropagation()', function)
+        self.assertIn('permanentlyDeleteKnowledgeNotebook', function)
+        self.assertIn("{confirmed:true}", api)
+
+    def test_notebook_navigation_nests_pages_like_a_wiki_tree(self):
+        text = (ROOT / 'web' / 'templates' / 'knowledge.html').read_text(
+            encoding='utf-8')
+        self.assertIn('kn-wiki-notebook-group', text)
+        self.assertIn('kn-wiki-notebook-pages', text)
+        self.assertIn('journalNotebookPagesHtml(row)', text)
+        self.assertNotIn('id="journal-module-tree"', text)
+        tabs = text.index('class="kn-wiki-state-tabs"')
+        notebooks = text.index('id="journal-notebook-list"')
+        self.assertLess(tabs, notebooks)
 
 
 if __name__ == '__main__':

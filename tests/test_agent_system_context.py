@@ -139,6 +139,34 @@ class AgentSystemContextTests(unittest.TestCase):
             first['system_context_digest'], second['system_context_digest'])
         self.assertEqual(64, len(first['system_context_digest']))
 
+    def test_editor_acl_is_included_in_workflow_create_grants(self):
+        definitions = [
+            SimpleNamespace(
+                id=36,
+                status='active',
+                owner_type='claw',
+                owner_id=99,
+                created_by='owner',
+                executor_acl_json={'claw_ids': []},
+                editor_acl_json={'claw_ids': [11]},
+            ),
+            SimpleNamespace(
+                id=37,
+                status='active',
+                owner_type='claw',
+                owner_id=99,
+                created_by='owner',
+                executor_acl_json={'claw_ids': [11]},
+                editor_acl_json={'claw_ids': []},
+            ),
+        ]
+
+        self.assertEqual(
+            [36, 37],
+            agent_system_context.allowed_workflow_create_definition_ids(
+                self.claw, definitions),
+        )
+
     def test_codex_orchestrator_is_intersected_with_workflow_acl(self):
         configured_policy = {
             'allowed_workflow_create_definition_ids': [12, 25, 26],

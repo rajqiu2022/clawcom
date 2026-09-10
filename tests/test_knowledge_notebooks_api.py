@@ -293,6 +293,33 @@ class KnowledgeNotebooksApiTest(unittest.TestCase):
         self.assertEqual(KnowledgeEntryRevision.query.filter_by(
             knowledge_id=page_id).count(), 0)
 
+    def test_permanent_delete_notebook_requires_confirmation_and_cascades(self):
+        notebook_id, page_id = self._create_notebook_and_page()
+
+        missing_confirmation = self.client.delete(
+            f'/api/v1/knowledge-notebooks/{notebook_id}', json={})
+        self.assertEqual(missing_confirmation.status_code, 400)
+        self.assertEqual(missing_confirmation.get_json()['code'],
+                         'PERMANENT_DELETE_CONFIRMATION_REQUIRED')
+
+        self._login(self.outsider)
+        denied = self.client.delete(
+            f'/api/v1/knowledge-notebooks/{notebook_id}',
+            json={'confirmed': True})
+        self.assertEqual(denied.status_code, 404)
+
+        self._login(self.owner)
+        deleted = self.client.delete(
+            f'/api/v1/knowledge-notebooks/{notebook_id}',
+            json={'confirmed': True})
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.get_json()['page_count'], 1)
+        self.assertEqual(deleted.get_json()['revision_count'], 1)
+        self.assertIsNone(db.session.get(KnowledgeNotebook, notebook_id))
+        self.assertIsNone(db.session.get(KnowledgeEntry, page_id))
+        self.assertEqual(KnowledgeEntryRevision.query.filter_by(
+            knowledge_id=page_id).count(), 0)
+
 
 if __name__ == '__main__':
     unittest.main()

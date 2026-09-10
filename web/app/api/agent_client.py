@@ -1048,7 +1048,7 @@ def claw_sidecar_config(claw_id, claw=None):
         agent_type=openclaw    - 旧版 sidecar 自动探测到的 provider
         runtime_kind=claw_worker - 新版 Worker 运行时类型
         runtime_provider=codex - 新版 Worker provider（hermes/codex）
-        runtime_mode=legacy_split - Worker 进程拓扑
+        runtime_mode=legacy_split/agent_direct - Worker 进程拓扑
         runtime_platform=linux - Worker 平台（linux/windows）
         openclaw_bin=/path/...  - 自动探测到的 bin 路径
 

@@ -61,6 +61,21 @@ class WorkerRuntimeValidationTest(unittest.TestCase):
         self.assertEqual(runtime['auth_mode'], 'subscription')
         self.assertEqual(runtime['platform'], 'linux')
 
+    def test_codex_agent_direct_timiai_bridge_is_supported(self):
+        runtime = validate_worker_runtime({
+            'kind': 'claw_worker',
+            'provider': 'codex',
+            'runtime_mode': 'agent_direct',
+            'platform': 'windows',
+            'auth_mode': 'timiai_bridge',
+            'llm_provider': 'timiai',
+            'source_commit': '76500ef',
+            'source': 'operator',
+        })
+        self.assertEqual(runtime['runtime_mode'], 'agent_direct')
+        self.assertEqual(runtime['auth_mode'], 'timiai_bridge')
+        self.assertEqual(runtime['provider'], 'codex')
+
     def test_openclaw_is_retired_as_worker_provider(self):
         with self.assertRaisesRegex(ValueError, 'hermes / codex'):
             validate_worker_runtime({

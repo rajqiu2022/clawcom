@@ -132,6 +132,13 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
         self.assertEqual(first.get_json()['id'], replay.get_json()['id'])
         self.assertFalse(first.get_json()['idempotent_replay'])
         self.assertTrue(replay.get_json()['idempotent_replay'])
+        self.assertEqual('Control Plane Flow', first.get_json()['workflow_name'])
+        self.assertEqual(
+            self.definition.id,
+            first.get_json()['workflow_definition_id'])
+        self.assertEqual(
+            self.definition.version or 1,
+            first.get_json()['workflow_definition_version'])
         self.assertEqual(WorkflowRun.query.count(), 1)
 
     def test_reusing_idempotency_key_with_changed_payload_returns_conflict(self):
@@ -276,6 +283,88 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
             openclaw_id=12, created_by='workflow-blocked').all()
         self.assertEqual(2, len(blocker_todos))
         self.assertTrue(all(not todo.enabled for todo in blocker_todos))
+
+    def test_stale_definition_snapshot_rejects_in_place_restart_idempotently(self):
+        created = self.client.post(
+            '/api/v1/workflow-runs', json=self._run_body('stale-restart'))
+        self.assertEqual(201, created.status_code, created.get_data(as_text=True))
+        run_id = created.get_json()['id']
+        run = db.session.get(WorkflowRun, run_id)
+        step = WorkflowRunStep.query.filter_by(run_id=run_id).first()
+        step.status = 'blocked'
+        step.blocker_json = {'message': 'old release failed'}
+        run.status = 'blocked'
+        run.blocker_json = {'message': 'old release failed'}
+
+        updated = dict(self.definition.definition_json or {})
+        updated['description'] = 'new live definition'
+        updated['version'] = int(self.definition.version or 1) + 1
+        self.definition.definition_json = updated
+        self.definition.version = updated['version']
+        db.session.commit()
+
+        headers = {'Idempotency-Key': 'stale-restart-1'}
+        rejected = self.client.post(
+            f'/api/v1/workflow-runs/{run_id}/restart',
+            json={'reason': 'live definition fixed'}, headers=headers)
+        replay = self.client.post(
+            f'/api/v1/workflow-runs/{run_id}/restart',
+            json={'reason': 'live definition fixed'}, headers=headers)
+
+        self.assertEqual(409, rejected.status_code)
+        self.assertEqual(rejected.get_json(), replay.get_json())
+        body = rejected.get_json()
+        self.assertEqual('STALE_DEFINITION_SNAPSHOT', body['code'])
+        self.assertTrue(body['replacement_required'])
+        self.assertIn('version', body['stale_fields'])
+        self.assertIn('sha256', body['stale_fields'])
+        self.assertEqual(1, WorkflowRun.query.count())
+        self.assertEqual('blocked', db.session.get(WorkflowRun, run_id).status)
+        self.assertEqual(1, AuditLog.query.filter_by(
+            resource_type='workflow_run', resource_id=run_id,
+            action='restart_rejected').count())
+
+    def test_step_retry_clears_previous_attempt_display_state(self):
+        self.definition.definition_json = {
+            'key': 'control-plane-flow',
+            'name': 'Control Plane Flow',
+            'steps': [{
+                'id': 'work', 'name': 'Work', 'type': 'agent_task',
+                'depends_on': [],
+            }],
+            'context': {},
+        }
+        db.session.commit()
+        created = self.client.post(
+            '/api/v1/workflow-runs', json=self._run_body('clean-retry'))
+        self.assertEqual(201, created.status_code, created.get_data(as_text=True))
+        run_id = created.get_json()['id']
+        run = db.session.get(WorkflowRun, run_id)
+        step = WorkflowRunStep.query.filter_by(run_id=run_id).first()
+        previous_attempt = int(step.attempt_no or 0)
+        step.status = 'blocked'
+        step.summary = 'Attempt 3 通过'
+        step.metrics_json = {'passed': True}
+        step.evidence_json = {'receipt': 'old'}
+        step.logs_json = {'tail': 'old'}
+        step.outputs_json = {'result': 'old'}
+        step.blocker_json = {'message': 'actual blocker'}
+        run.status = 'blocked'
+        run.blocker_json = {'message': 'actual blocker'}
+        db.session.commit()
+
+        retried = self.client.post(
+            f'/api/v1/workflow-runs/{run_id}/steps/{step.step_id}/retry')
+        self.assertEqual(200, retried.status_code, retried.get_data(as_text=True))
+        refreshed = db.session.get(WorkflowRunStep, step.id)
+        self.assertEqual(previous_attempt + 1, refreshed.attempt_no)
+        self.assertEqual('', refreshed.summary)
+        self.assertEqual({}, refreshed.metrics_json)
+        self.assertEqual({}, refreshed.evidence_json)
+        self.assertEqual({}, refreshed.logs_json)
+        self.assertEqual({}, refreshed.outputs_json)
+        self.assertNotEqual(
+            {'message': 'actual blocker'}, refreshed.blocker_json)
 
     def test_definition_can_require_an_explicit_single_worker_binding(self):
         definition_json = dict(self.definition.definition_json or {})

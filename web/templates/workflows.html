@@ -11,6 +11,15 @@
             <option value="">全部项目</option>
         </select>
     </label>
+    <label class="wf-project-filter" for="wf-catalog-filter">
+        <span>FLOW TYPE</span>
+        <select id="wf-catalog-filter" class="form-select" onchange="changeWorkflowCatalog(this.value)">
+            <option value="">全部类型</option>
+            <option value="business">业务流程</option>
+            <option value="probe">控制面探针</option>
+            <option value="legacy">旧执行路径</option>
+        </select>
+    </label>
     <button class="btn btn-primary" onclick="startDefaultRun()">启动 RacingGO QA Run</button>
     <button class="btn btn-ghost" onclick="loadAll()">刷新</button>
 </div>
@@ -95,6 +104,10 @@
 .wf-conclusion { border:1px solid var(--border);border-radius:10px;padding:9px 10px;background:var(--bg-secondary);min-width:0; }
 .wf-conclusion b { display:block;color:var(--text-muted);font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;margin-bottom:4px; }
 .wf-conclusion span { display:block;font-weight:800;font-size:.82rem;overflow-wrap:anywhere; }
+.wf-catalog-chip { display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:999px;padding:2px 7px;font-size:.7rem;font-weight:800;background:var(--bg-card); }
+.wf-catalog-business { color:#16a34a;border-color:#22c55e66;background:#22c55e18; }
+.wf-catalog-probe { color:#7c3aed;border-color:#8b5cf666;background:#8b5cf618; }
+.wf-catalog-legacy { color:#d97706;border-color:#f59e0b66;background:#f59e0b18; }
 @media (max-width: 760px) { .wf-conclusions { grid-template-columns:1fr; } }
 .wf-flow-node-title { font-weight:800;line-height:1.35;margin:8px 0 6px; }
 .wf-flow-node-sub { color:var(--text-muted);font-family:monospace;font-size:.72rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
@@ -267,6 +280,7 @@ let currentRunStepArtifacts = {};
 let currentWorkflowReportUrl = '';
 let workflowProjects = [];
 let selectedWorkflowProjectId = '';
+let selectedWorkflowCatalogKind = '';
 const workflowListPaging = {
     definitions: {page: 1, per_page: 10, total: 0, pages: 1},
     runs: {page: 1, per_page: 10, total: 0, pages: 1},
@@ -443,7 +457,18 @@ function pagedPath(path, state, extra) {
 function workflowProjectQuery(extra) {
     const params = Object.assign({}, extra || {});
     if (selectedWorkflowProjectId) params.project_id = selectedWorkflowProjectId;
+    if (selectedWorkflowCatalogKind) params.catalog_kind = selectedWorkflowCatalogKind;
     return params;
+}
+function workflowCatalogLabel(row) {
+    const catalog = (row && row.workflow_catalog) || {};
+    return ({business:'业务流程', probe:'控制面探针', legacy:'旧执行路径'})[catalog.kind] || '未分类';
+}
+function workflowCatalogChip(row) {
+    const catalog = (row && row.workflow_catalog) || {};
+    const kind = catalog.kind || 'business';
+    const readiness = ({stable:'已验收', canary:'灰度中', unverified:'待验收', probe_only:'仅探针', legacy:'待迁移', blocked:'阻断'})[catalog.readiness] || catalog.readiness || '待验收';
+    return `<span class="wf-catalog-chip wf-catalog-${esc(kind)}" title="验证范围：${esc(catalog.validation_scope || '-')}">${esc(workflowCatalogLabel(row))} · ${esc(readiness)}</span>`;
 }
 function workflowProjectName(row) {
     if (!row) return '未归属';
@@ -452,6 +477,17 @@ function workflowProjectName(row) {
     const projectId = Number(row.project_id || (row.definition && row.definition.project_id) || 0);
     const project = workflowProjects.find(item => Number(item.id) === projectId);
     return project ? project.name : (projectId ? `项目 #${projectId}` : '未归属');
+}
+function workflowTemplateLabel(row) {
+    if (!row) return '未标注模板';
+    const definition = row.definition || {};
+    const name = row.workflow_name || row.definition_name || definition.name || definition.workflow_name || '';
+    const definitionId = Number(row.workflow_definition_id || row.definition_id || definition.id || 0);
+    const version = Number(row.workflow_definition_version || 0);
+    const idLabel = definitionId ? `Flow #${definitionId}` : '';
+    const nameLabel = name ? String(name) : idLabel || '未标注模板';
+    const versionLabel = version ? ` · v${version}` : '';
+    return `${nameLabel}${name && idLabel ? `（${idLabel}）` : ''}${versionLabel}`;
 }
 function syncWorkflowProjectUrl(removeRunId) {
     const url = new URL(location.href);
@@ -491,6 +527,15 @@ async function changeWorkflowProject(value) {
         await Promise.all([loadDefinitions(), loadFavoriteDefinitions(), loadRuns()]);
     } catch (e) {
         await customAlert('项目筛选失败：' + e.message, 'error');
+    }
+}
+async function changeWorkflowCatalog(value) {
+    selectedWorkflowCatalogKind = String(value || '');
+    ['definitions','favorites','runs'].forEach(kind => { workflowListPaging[kind].page = 1; });
+    try {
+        await Promise.all([loadDefinitions(), loadFavoriteDefinitions(), loadRuns()]);
+    } catch (e) {
+        await customAlert('Flow 类型筛选失败：' + e.message, 'error');
     }
 }
 function normalizePagedResponse(data, fallbackState) {
@@ -732,6 +777,7 @@ function renderDefinitionList(rows, emptyText) {
             <div style="display:flex;gap:6px;align-items:center">
                 <button class="wf-fav-btn" title="${d.is_favorite ? '取消收藏' : '收藏模板'}" onclick="event.stopPropagation(); toggleDefinitionFavorite(${d.id}, ${d.is_favorite ? 'true' : 'false'})">${d.is_favorite ? '★' : '☆'}</button>
                 <span style="font-weight:700;flex:1">${esc(d.name)}</span>
+                ${workflowCatalogChip(d)}
                 ${d.can_delete ? `<button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteDefinition(${d.id})">删除</button>` : ''}
             </div>
             <div class="wf-meta">ID：${esc(d.id)} · <span class="wf-code">${esc(d.workflow_key)}</span> · v${esc(d.version)} · ${esc(visibilityLabel(d))} · 项目：${esc(d.project_name || '-')} · 创建：${esc(creatorLabel(d))} · 点击查看节点</div>
@@ -784,8 +830,8 @@ async function openDefinition(id) {
         <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
             <button class="btn btn-ghost btn-sm" onclick="toggleDefinitionFavorite(${d.id}, ${d.is_favorite ? 'true' : 'false'})">${d.is_favorite ? '★ 已收藏' : '☆ 收藏模板'}</button>
             ${d.can_execute ? `<button class="btn btn-primary btn-sm" onclick="startRunFromDefinition(${d.id})">基于此模板启动 Run</button>` : ''}
-            ${d.can_manage ? `<button class="btn btn-ghost btn-sm" onclick="addDefinitionExecutor(${d.id})">添加执行者</button>` : ''}
-            ${d.can_manage ? `<button class="btn btn-ghost btn-sm" onclick="manageDefinitionEditors(${d.id})">管理编辑者</button>` : ''}
+            ${d.can_manage ? `<button class="btn btn-ghost btn-sm" onclick="addDefinitionExecutor(${d.id})">添加仅执行者</button>` : ''}
+            ${d.can_manage ? `<button class="btn btn-ghost btn-sm" onclick="manageDefinitionEditors(${d.id})">管理编辑者（可编辑+执行）</button>` : ''}
             ${d.can_change_visibility ? `<button class="btn btn-ghost btn-sm" onclick="toggleDefinitionVisibility(${d.id}, '${esc(d.visibility_scope === 'private' ? 'project' : 'private')}')">${d.visibility_scope === 'private' ? '设为项目共享' : '设为个人可见'}</button>` : ''}
             ${d.can_delete ? `<button class="btn btn-danger btn-sm" onclick="deleteDefinition(${d.id})">删除模板</button>` : ''}
         </div>
@@ -970,13 +1016,13 @@ async function loadRuns(selectId) {
     el.innerHTML = runs.length ? runs.map(r => `
         <div class="wf-item ${r.id === currentRunId ? 'active' : ''}" data-run-id="${r.id}" onclick="openRun(${r.id})">
             <div class="wf-run-head">
-                <span class="wf-run-title">#${r.id} ${esc(r.run_name || r.workflow_name)}</span>
+                <span class="wf-run-title">#${r.id} ${esc(r.run_name || workflowTemplateLabel(r))}</span>
                 <span class="wf-run-actions">
                     ${statusBadge(r.status)}
                     ${r.can_delete ? `<button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteRun(${r.id})">删除</button>` : ''}
                 </span>
             </div>
-            <div class="wf-meta">${esc(r.workflow_name)} · 项目：${esc(workflowProjectName(r))} · 当前：${esc(r.current_step_id || '-')}</div>
+            <div class="wf-meta">${esc(workflowTemplateLabel(r))} · 项目：${esc(workflowProjectName(r))} · 当前：${esc(r.current_step_id || '-')}</div>
         </div>
     `).join('') : '<div class="wf-empty">暂无运行记录</div>';
     el.innerHTML += renderPagination('runs');
@@ -1110,7 +1156,7 @@ async function manageDefinitionEditors(definitionId) {
                 <div class="modal-title">管理 Workflow 编辑者</div>
                 <div class="modal-desc" style="text-align:left;white-space:normal">
                     <div><b>${esc(d.name || '')}</b></div>
-                    <div class="wf-start-hint">Editor 可修改模板内容和节点，但不能管理权限、可见性或删除模板。</div>
+                    <div class="wf-start-hint">Editor 可修改模板内容和节点，也可启动/执行；但不能管理权限、可见性或删除模板。</div>
                 </div>
                 <div class="wf-start-grid">
                     <div class="wf-start-field">
@@ -1279,14 +1325,20 @@ async function openRun(id) {
     const runAlert = (contractInvalidCount || evidenceIncomplete)
         ? `<div class="wf-alert"><strong>执行完成，但结果不满足 Hub 完整性要求</strong><br>${contractInvalidCount ? `${contractInvalidCount} 个节点存在 CONTRACT_INVALID。` : ''}${evidenceIncomplete ? ' Evidence Manifest 未完整入库，不能按“无问题”处理。' : ''}</div>`
         : '';
+    const outcomes = run.outcomes || {};
+    const outcomeRequirements = run.outcome_requirements || {};
+    const outcomeValue = (key, fallback, notRequired) => outcomes[key] || fallback || (outcomeRequirements[key] === false ? notRequired : '待结论');
     const conclusions = `<div class="wf-conclusions">
         <div class="wf-conclusion"><b>Workflow</b><span>${esc(run.workflow_status || run.status || '-')}</span></div>
-        <div class="wf-conclusion"><b>Business</b><span>${esc(run.business_conclusion || '待结论')}</span></div>
-        <div class="wf-conclusion"><b>Automation</b><span>${esc(run.automation_conclusion || '待结论')}</span></div>
+        <div class="wf-conclusion"><b>Business</b><span>${esc(outcomeValue('business', run.business_conclusion, 'NOT_EXECUTED'))}</span></div>
+        <div class="wf-conclusion"><b>Automation</b><span>${esc(outcomeValue('automation', run.automation_conclusion, 'NOT_REQUIRED'))}</span></div>
+        <div class="wf-conclusion"><b>Evidence</b><span>${esc(outcomeValue('evidence', run.evidence_manifest_status, 'NOT_REQUIRED'))}</span></div>
+        <div class="wf-conclusion"><b>Report</b><span>${esc(outcomeValue('report', '', 'NOT_APPLICABLE'))}</span></div>
+        <div class="wf-conclusion"><b>Delivery / Review</b><span>${esc(outcomeValue('notification', '', 'NOT_REQUIRED'))} · ${esc(outcomeValue('review', '', 'NOT_ASSIGNED'))}</span></div>
     </div>`;
     document.getElementById('run-detail').innerHTML = `
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
-            <h2 style="margin:0;flex:1">#${run.id} ${esc(run.run_name || run.workflow_name)}</h2>
+            <h2 style="margin:0;flex:1">#${run.id} ${esc(run.run_name || workflowTemplateLabel(run))}</h2>
             ${statusBadge(run.status)}
             <button class="btn btn-ghost btn-sm" onclick="openRun(${run.id})">刷新</button>
             ${['blocked','failed'].includes(run.status) ? `<button class="btn btn-primary btn-sm" onclick="restartRun(${run.id})">完整重启</button>` : ''}
@@ -1294,7 +1346,11 @@ async function openRun(id) {
             ${run.can_delete ? `<button class="btn btn-danger btn-sm" onclick="deleteRun(${run.id})">删除</button>` : ''}
         </div>
         <div class="wf-meta" style="margin-bottom:12px">
-            模板：${esc(run.workflow_name)} · 项目：${esc(workflowProjectName(run))} · 触发：${esc(run.triggered_by || '-')} · 创建：${esc(run.created_at || '')}
+            模板：${esc(workflowTemplateLabel(run))} · 项目：${esc(workflowProjectName(run))} · 触发：${esc(run.triggered_by || '-')} · 创建：${esc(run.created_at || '')}
+        </div>
+        <div style="display:flex;gap:8px;margin:-4px 0 12px;align-items:center;flex-wrap:wrap">
+            ${workflowCatalogChip(run)}
+            <span class="wf-meta">验证范围：${esc((run.workflow_catalog || {}).validation_scope || '-')}</span>
         </div>
         ${conclusions}
         ${runAlert}

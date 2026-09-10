@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from app import db
 from app.api import api_bp
 from app.api.auth_utils import get_current_claw, get_current_user, is_admin_user
-from app.models import ResourceLease, ResourceLeaseEvent
+from app.models import ResourceLease, ResourceLeaseEvent, WorkflowRun
 from app.services.resource_leases import (
     canonical_request_hash,
     expire_stale_resource_leases,
@@ -106,7 +106,13 @@ def _conflict_payload(rows, now):
     result = []
     for row in sorted(rows, key=lambda item: item.resource_key):
         retry_after = max(0, math.ceil((row.expires_at - now).total_seconds()))
-        result.append({
+        owner_run = None
+        if row.owner_type in {'workflow_run', 'run'}:
+            try:
+                owner_run = db.session.get(WorkflowRun, int(row.owner_id))
+            except (TypeError, ValueError):
+                owner_run = None
+        item = {
             'resource_key': row.resource_key,
             'lease_id': row.id,
             'lease_group_id': row.lease_group_id,
@@ -116,7 +122,22 @@ def _conflict_payload(rows, now):
             'priority': row.priority,
             'expires_at': str(row.expires_at),
             'retry_after_seconds': retry_after,
-        })
+            'wait_state': 'waiting_owner_cleanup',
+            'retryable': True,
+            'suggested_action': 'wait_then_retry_acquire',
+        }
+        if owner_run is not None:
+            item.update({
+                'owner_run_id': owner_run.id,
+                'owner_run_status': owner_run.status,
+                'owner_run_url': f'/workflows?run_id={owner_run.id}',
+                'wait_message': (
+                    f'资源由 Run #{owner_run.id} 占用，等待该 Run 完成清理后重试'),
+            })
+        else:
+            item['wait_message'] = (
+                f'资源由 {row.owner_type}:{row.owner_id} 占用，等待持有方清理后重试')
+        result.append(item)
     return result
 
 
@@ -171,11 +192,19 @@ def acquire_resource_leases():
         ResourceLease.status == 'active',
     ).with_for_update().all())
     if active:
-        db.session.commit()  # retain expiry audit created above
+        conflicts = _conflict_payload(active, now)
+        for row, conflict in zip(
+                sorted(active, key=lambda item: item.resource_key), conflicts):
+            lease_event(row, 'conflict', actor, conflict)
+        db.session.commit()  # retain expiry and conflict audit
         return _error(
             'RESOURCE_LEASE_CONFLICT',
-            'One or more resources are already leased', 409,
-            {'conflicts': _conflict_payload(active, now)})
+            '资源正在被既有任务占用；当前任务尚未开始业务执行', 409,
+            {
+                'state': 'WAITING_RESOURCE_CLEANUP',
+                'business_started': False,
+                'conflicts': conflicts,
+            })
 
     group_id = uuid4().hex
     expires_at = now + timedelta(seconds=ttl_seconds)
@@ -215,10 +244,15 @@ def acquire_resource_leases():
             ResourceLease.active_slot.in_(resource_keys),
             ResourceLease.status == 'active',
         ).all()
+        details = _conflict_payload(conflicts, datetime.now())
         return _error(
             'RESOURCE_LEASE_CONFLICT',
-            'One or more resources were concurrently leased', 409,
-            {'conflicts': _conflict_payload(conflicts, datetime.now())})
+            '资源被其他任务并发取得；当前任务尚未开始业务执行', 409,
+            {
+                'state': 'WAITING_RESOURCE_CLEANUP',
+                'business_started': False,
+                'conflicts': details,
+            })
     for row in rows:
         lease_event(row, 'acquired', actor, {
             'resource_keys': resource_keys,

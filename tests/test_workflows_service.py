@@ -1,9 +1,39 @@
 import importlib.util
+import sys
+import types
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
 
+_WEB_PATH = Path(__file__).resolve().parents[1] / 'web'
+if str(_WEB_PATH) not in sys.path:
+    sys.path.insert(0, str(_WEB_PATH))
+
+
+def _stub(name, **attrs):
+    if name in sys.modules:
+        return
+    module = types.ModuleType(name)
+    for key, value in attrs.items():
+        setattr(module, key, value)
+    sys.modules[name] = module
+
+
+class _Noop:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+    def __getattr__(self, name):
+        return _Noop()
+
+
+_stub('flask_cors', CORS=_Noop)
+_stub('flask_socketio', SocketIO=_Noop, emit=_Noop(),
+      join_room=_Noop(), leave_room=_Noop())
 _MODULE_PATH = Path(__file__).resolve().parents[1] / 'web' / 'app' / 'services' / 'workflows.py'
 _SPEC = importlib.util.spec_from_file_location('workflows', _MODULE_PATH)
 workflows = importlib.util.module_from_spec(_SPEC)
@@ -954,6 +984,60 @@ class WorkflowServiceTest(unittest.TestCase):
             'claw', 12, acl, 'user', 7))
         self.assertFalse(workflows.can_execute_workflow(
             'claw', 12, acl, 'user', 8))
+
+    def test_workflow_editor_acl_also_allows_execution(self):
+        editor_acl = workflows.normalize_editor_acl({
+            'claw_ids': [13],
+            'user_ids': [7],
+        })
+        self.assertTrue(workflows.can_execute_workflow(
+            'claw', 12, {}, 'claw', 13, editor_acl=editor_acl))
+        self.assertTrue(workflows.can_execute_workflow(
+            'claw', 12, {}, 'user', 7, editor_acl=editor_acl))
+        self.assertFalse(workflows.can_execute_workflow(
+            'claw', 12, {}, 'claw', 14, editor_acl=editor_acl))
+
+    def test_workflow_catalog_never_promotes_probe_or_legacy_to_business(self):
+        probe = workflows.workflow_catalog_metadata({
+            'key': 'runner-ack-probe',
+            'name': 'Runner ACK 探针',
+            'steps': [{'id': 'check', 'type': 'agent_task'}],
+        })
+        legacy = workflows.workflow_catalog_metadata({
+            'key': 'old-full-flow',
+            'name': '旧全流程',
+            'workflow_catalog': {'kind': 'business', 'readiness': 'stable'},
+            'steps': [{'id': 'build', 'type': 'worker_task'}],
+        })
+        self.assertEqual('probe', probe['kind'])
+        self.assertEqual('probe_only', probe['readiness'])
+        self.assertEqual('legacy', legacy['kind'])
+        self.assertEqual('legacy', legacy['readiness'])
+
+    def test_outcome_requirements_are_derived_per_definition(self):
+        probe = workflows.workflow_outcome_requirements({
+            'key': 'claim-probe',
+            'workflow_catalog': {'kind': 'probe'},
+            'steps': [{'id': 'claim', 'type': 'agent_task'}],
+        })
+        business = workflows.workflow_outcome_requirements({
+            'key': 'business-flow',
+            'steps': [{
+                'id': 'review',
+                'type': 'agent_task',
+                'assignment_role': 'reviewer',
+                'required_evidence': ['case_result'],
+                'outputs': ['hub_report_id'],
+                'notification_delivery_mode': 'outbox',
+            }],
+        })
+        self.assertFalse(probe['business'])
+        self.assertFalse(probe['evidence'])
+        self.assertTrue(business['business'])
+        self.assertTrue(business['evidence'])
+        self.assertTrue(business['report'])
+        self.assertTrue(business['notification'])
+        self.assertTrue(business['review'])
 
     def test_workflow_manage_acl_requires_owner_or_admin(self):
         acl = workflows.normalize_executor_acl({})

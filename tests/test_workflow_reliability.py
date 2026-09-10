@@ -1,13 +1,24 @@
 """Regression cases from the 2026-09-09 cross-project audit."""
 import hashlib
+import sys
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
-from tests import test_workflow_worker_contract_api as fixture
+_TESTS = Path(__file__).resolve().parent
+if str(_TESTS) not in sys.path:
+    sys.path.insert(0, str(_TESTS))
+
+import test_workflow_worker_contract_api as fixture
 from app import db
 from app.api import workflows as api
-from app.models import WorkflowArtifact, TestReport, WorkflowEvidenceManifest
+from app.models import (
+    WorkflowArtifact,
+    WorkflowRunStep,
+    TestReport,
+    WorkflowEvidenceManifest,
+)
 from app.services.workflows import merge_workflow_run_outcomes, normalize_step
 from app.services.workflow_evidence_scope import scoped_evidence_missing
 
@@ -43,6 +54,46 @@ class WorkflowReliabilityTest(unittest.TestCase):
         self.assertEqual(result['business'], 'FAILED')
         self.assertEqual(merge_workflow_run_outcomes(result, {
             'evidence_outcome': 'COMPLETE'})['evidence'], 'ANALYSIS_INCOMPLETE')
+
+    def test_terminal_probe_does_not_require_business_report_or_evidence(self):
+        self.definition.definition_json = {
+            'key': 'runner-ack-probe',
+            'workflow_catalog': {'kind': 'probe'},
+            'steps': [{'id': 'probe', 'type': 'agent_task'}],
+        }
+        self.run.status = 'succeeded'
+        self.run.finished_at = datetime.now()
+        self.run.context_json = {
+            'workflow_catalog_snapshot': {
+                'kind': 'probe', 'readiness': 'probe_only',
+                'validation_scope': 'control_plane_probe',
+            },
+            'outcome_requirements_snapshot': {
+                'business': False, 'automation': True, 'evidence': False,
+                'report': False, 'notification': False, 'review': False,
+            },
+        }
+        api._sync_run_outcomes(self.run, result={
+            'automation_outcome': 'SUCCEEDED'})
+        with self.app.test_request_context('/'):
+            payload = api._run_payload(self.run)
+        self.assertEqual('NOT_EXECUTED', self.run.outcomes_json['business'])
+        self.assertEqual('NOT_REQUIRED', self.run.outcomes_json['evidence'])
+        self.assertEqual('NOT_APPLICABLE', self.run.outcomes_json['report'])
+        self.assertEqual('NOT_REQUIRED', self.run.outcomes_json['notification'])
+        self.assertEqual('NOT_ASSIGNED', self.run.outcomes_json['review'])
+        self.assertEqual('EVIDENCE_NOT_REQUIRED',
+                         payload['evidence_manifest_status'])
+
+    def test_completed_with_bugs_detail_survives_outcome_aggregation(self):
+        self.run.status = 'succeeded'
+        self.agent_step.outputs_json = {
+            'business_conclusion': 'COMPLETED_WITH_BUGS',
+            'business_failure_confirmed': True,
+        }
+        api._sync_run_outcomes(self.run)
+        self.assertEqual('FAILED', self.run.outcomes_json['business'])
+        self.assertEqual('COMPLETED_WITH_BUGS', self.run.business_conclusion)
 
     def test_scoped_screenshot_must_match_case_and_stage(self):
         requirement = {'case_id': 'Endless', 'stage': 'failure', 'channel': 'screenshots'}
@@ -170,6 +221,47 @@ class WorkflowReliabilityTest(unittest.TestCase):
         self.assertEqual(self.run.outcomes_json['notification'], 'SENT')
         self._post('agent_step', 'notification-delivery', dict(delivery, state='failed'))
         self.assertEqual(self.run.outcomes_json['notification'], 'SENT')
+
+    def test_notification_delivery_is_deduped_across_executor_and_reviewer(self):
+        report = self._report()
+        self.agent_step.step_config_json = {'notification_delivery_mode': 'outbox'}
+        reviewer = WorkflowRunStep(
+            run_id=self.run.id,
+            step_id='reviewer_notify',
+            position=3,
+            name='Reviewer notify',
+            step_type='agent_task',
+            status='running',
+            target_claw_id=self.other_claw.id,
+            attempt_no=1,
+            step_config_json={'notification_delivery_mode': 'outbox'},
+        )
+        db.session.add(reviewer)
+        db.session.commit()
+        base = {
+            'run_id': self.run.id,
+            'attempt_no': 1,
+            'message_sha256': 'b' * 64,
+            'report_id': report.id,
+            'state': 'pending',
+        }
+        first = self._post('agent_step', 'result', {
+            'status': 'passed',
+            'test_report_id': report.id,
+            'workflow_report_manifest': self._manifest(report),
+            'notification_delivery': dict(
+                base, claw_id=self.claw.id, step_id='agent_step',
+                notification_id='executor-notify'),
+        })
+        self.assertEqual(200, first.status_code, first.get_json())
+        second = self._post('reviewer_notify', 'notification-delivery', dict(
+            base, claw_id=self.other_claw.id, step_id='reviewer_notify',
+            notification_id='reviewer-notify'), self.other_token)
+        self.assertEqual(200, second.status_code, second.get_json())
+        self.assertEqual('executor-notify', second.get_json()['notification_id'])
+        self.assertEqual(1, WorkflowArtifact.query.filter_by(
+            run_id=self.run.id,
+            artifact_type='workflow_notification_delivery').count())
 
     def test_silent_step_never_blindly_replays_retry_budget(self):
         step = self.agent_step

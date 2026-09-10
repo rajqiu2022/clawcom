@@ -381,6 +381,7 @@ POST /heartbeat 返回:
 - GET|POST /api/v1/knowledge-notebooks — 查询/创建纪要本
 - GET /api/v1/test-iterations?project_id= — 创建前选择测试计划已有迭代
 - GET /api/v1/knowledge-notebooks/{id} — 模块与页面
+- DELETE /api/v1/knowledge-notebooks/{id} {confirmed:true} — 永久删除纪要本、其中页面及全部版本
 - POST /api/v1/knowledge-notebooks/{id}/pages — 创建页面（需 Idempotency-Key）
 - GET /api/v1/knowledge/journal-pages/{page_id} — 当前版本
 - GET|POST /api/v1/knowledge/{page_id}/revisions — 历史/保存新版本

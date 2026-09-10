@@ -31,7 +31,7 @@ for name, attrs in (
 from flask import Flask  # noqa: E402
 from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
-from app.models import (AuditLog, OpenClawInstance, Project,  # noqa: E402
+from app.models import (AuditLog, ClawSidecarConfig, OpenClawInstance, Project,  # noqa: E402
                         WorkflowDefinition, hash_token)
 
 
@@ -62,6 +62,31 @@ class WorkflowEditorAclApiTest(unittest.TestCase):
             project_id=project.id, project_name='Alpha',
             api_token_hash=hash_token(self.tokens['executor']))
         db.session.add_all([self.owner, self.editor, self.executor]); db.session.flush()
+        self.editor_config = ClawSidecarConfig(
+            claw_id=self.editor.id,
+            agent_type='codex',
+            config_version=3,
+            system_context_policy_json={
+                'allowed_workflow_create_definition_ids': [99],
+                'codex_orchestrator': {
+                    'enabled': True,
+                    'session_key': 'test:editor',
+                    'resume_on': ['blocked'],
+                    'allowed_next_flows': [99],
+                    'max_retries': 1,
+                    'review_success': True,
+                },
+            },
+        )
+        self.executor_config = ClawSidecarConfig(
+            claw_id=self.executor.id,
+            agent_type='codex',
+            config_version=5,
+            system_context_policy_json={
+                'allowed_workflow_create_definition_ids': [99],
+            },
+        )
+        db.session.add_all([self.editor_config, self.executor_config])
         self.definition = WorkflowDefinition(
             workflow_key='editable-flow', name='Editable Flow',
             project_id=project.id, definition_json={
@@ -100,6 +125,26 @@ class WorkflowEditorAclApiTest(unittest.TestCase):
             f'/api/v1/workflow-definitions/{self.definition.id}',
             headers=self.headers('editor'))
         self.assertEqual(200, visible.status_code, visible.get_json())
+        self.assertTrue(visible.get_json()['can_execute'])
+
+        config = ClawSidecarConfig.query.get(self.editor.id)
+        self.assertEqual(
+            [self.definition.id, 99],
+            config.system_context_policy_json[
+                'allowed_workflow_create_definition_ids'],
+        )
+        self.assertEqual(4, config.config_version)
+        self.assertEqual(
+            [self.definition.id, 99],
+            config.system_context_policy_json['codex_orchestrator'][
+                'allowed_next_flows'],
+        )
+
+        started = self.client.post(
+            '/api/v1/workflow-runs',
+            json={'workflow_definition_id': self.definition.id},
+            headers=self.headers('editor'))
+        self.assertEqual(201, started.status_code, started.get_json())
 
         response = self.client.patch(
             f'/api/v1/workflow-definitions/{self.definition.id}',
@@ -131,12 +176,44 @@ class WorkflowEditorAclApiTest(unittest.TestCase):
             headers=self.headers('executor'))
         self.assertEqual(403, response.status_code)
 
+    def test_adding_executor_syncs_sidecar_without_granting_edit(self):
+        response = self.client.post(
+            f'/api/v1/workflow-definitions/{self.definition.id}/executors',
+            json={'claw_ids': [self.executor.id], 'user_ids': []},
+            headers=self.headers('owner'))
+        self.assertEqual(200, response.status_code, response.get_json())
+
+        config = ClawSidecarConfig.query.get(self.executor.id)
+        self.assertEqual(
+            [self.definition.id, 99],
+            config.system_context_policy_json[
+                'allowed_workflow_create_definition_ids'],
+        )
+        self.assertEqual(6, config.config_version)
+        self.assertTrue(response.get_json()['can_execute'])
+
+        denied = self.client.patch(
+            f'/api/v1/workflow-definitions/{self.definition.id}',
+            json={'description': 'executor cannot edit'},
+            headers=self.headers('executor'))
+        self.assertEqual(403, denied.status_code)
+
     def test_frontend_exposes_separate_editor_controls(self):
         template = (Path(__file__).resolve().parents[1] / 'web' / 'templates' /
                     'workflows.html').read_text(encoding='utf-8')
         self.assertIn('manageDefinitionEditors', template)
         self.assertIn('d.can_edit', template)
         self.assertIn('/editors', template)
+        self.assertIn('管理编辑者（可编辑+执行）', template)
+        self.assertIn('添加仅执行者', template)
+        self.assertIn('workflowTemplateLabel', template)
+        self.assertIn('模板：${esc(workflowTemplateLabel(run))}', template)
+        self.assertIn('id="wf-catalog-filter"', template)
+        self.assertIn("params.catalog_kind = selectedWorkflowCatalogKind", template)
+        self.assertIn('<b>Evidence</b>', template)
+        self.assertIn('<b>Report</b>', template)
+        self.assertIn('<b>Delivery / Review</b>', template)
+        self.assertIn('workflowCatalogChip(run)', template)
 
 
 if __name__ == '__main__': unittest.main()

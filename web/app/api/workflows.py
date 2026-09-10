@@ -21,6 +21,7 @@ from app.api.auth_utils import get_current_claw, get_current_user, is_admin_user
 from app.models import (
     AgentPostAssignment,
     AuditLog,
+    ClawSidecarConfig,
     ClawTodo,
     ClawMessage,
     ExamSession,
@@ -90,6 +91,8 @@ from app.services.workflows import (
     composite_workflow_terminal_status,
     validate_worker_result_status,
     validate_workflow_finalizer_result,
+    workflow_catalog_metadata,
+    workflow_outcome_requirements,
     workflow_step_display_state,
 )
 from app.services.workflow_result_ingestion import (
@@ -435,6 +438,55 @@ def _definition_editor_acl(definition):
     return normalize_editor_acl(definition.editor_acl_json or {})
 
 
+def _sync_workflow_create_policy(definition, claw_ids):
+    """Mirror Flow Agent grants into the Codex Sidecar policy ceiling.
+
+    Flow ACL remains the authority.  This persisted list is the second,
+    fail-closed Worker ceiling, so adding an editor/executor must raise it in
+    the same transaction or the UI grant would not become usable.
+    """
+    normalized_ids = sorted({
+        int(value) for value in (claw_ids or [])
+        if str(value).isdigit() and int(value) > 0
+    })
+    if not normalized_ids:
+        return []
+    synced = []
+    configs = ClawSidecarConfig.query.filter(
+        ClawSidecarConfig.claw_id.in_(normalized_ids)).all()
+    for config in configs:
+        policy = dict(config.system_context_policy_json or {})
+        allowed = {
+            int(value)
+            for value in (policy.get(
+                'allowed_workflow_create_definition_ids') or [])
+            if str(value).isdigit() and int(value) > 0
+        }
+        changed = definition.id not in allowed
+        allowed.add(definition.id)
+        policy['allowed_workflow_create_definition_ids'] = sorted(allowed)
+        orchestrator = policy.get('codex_orchestrator')
+        if isinstance(orchestrator, dict):
+            orchestrator = dict(orchestrator)
+            allowed_next = {
+                int(value)
+                for value in (orchestrator.get('allowed_next_flows') or [])
+                if str(value).isdigit() and int(value) > 0
+            }
+            if definition.id not in allowed_next:
+                changed = True
+            allowed_next.add(definition.id)
+            orchestrator['allowed_next_flows'] = sorted(allowed_next)
+            policy['codex_orchestrator'] = orchestrator
+        if not changed:
+            continue
+        config.system_context_policy_json = policy
+        config.config_version = (config.config_version or 0) + 1
+        config.updated_by = 'Workflow permission sync'
+        synced.append(config.claw_id)
+    return synced
+
+
 def _is_legacy_owner(definition, actor):
     return bool(
         actor and
@@ -458,6 +510,7 @@ def _can_execute_definition(definition):
         actor['type'],
         actor['id'],
         is_admin=is_admin_user(),
+        editor_acl=_definition_editor_acl(definition),
     )
 
 
@@ -498,6 +551,12 @@ def _can_edit_definition(definition):
 
 def _definition_payload(definition, brief=False):
     data = definition.to_dict(brief=brief)
+    definition_json = (
+        definition.definition_json
+        if isinstance(definition.definition_json, dict) else {})
+    data['workflow_catalog'] = workflow_catalog_metadata(definition_json)
+    data['outcome_requirements'] = workflow_outcome_requirements(
+        definition_json)
     data['can_execute'] = _can_execute_definition(definition)
     data['can_edit'] = _can_edit_definition(definition)
     data['can_manage'] = _can_manage_definition(definition)
@@ -638,6 +697,42 @@ def _run_payload(run, with_steps=False):
         None,
     )
     context = run.context_json if isinstance(run.context_json, dict) else {}
+    catalog = context.get('workflow_catalog_snapshot') if isinstance(
+        context.get('workflow_catalog_snapshot'), dict) else None
+    if catalog is None:
+        catalog = workflow_catalog_metadata(
+            run.definition.definition_json
+            if run.definition and isinstance(
+                run.definition.definition_json, dict) else {})
+    requirements = context.get('outcome_requirements_snapshot') if isinstance(
+        context.get('outcome_requirements_snapshot'), dict) else None
+    if requirements is None:
+        requirements = workflow_outcome_requirements(
+            run.definition.definition_json
+            if run.definition and isinstance(
+                run.definition.definition_json, dict) else {})
+    data['workflow_catalog'] = catalog
+    data['outcome_requirements'] = requirements
+    definition = data.get('definition') if isinstance(
+        data.get('definition'), dict) else {}
+    snapshot = context.get('workflow_definition_snapshot') if isinstance(
+        context.get('workflow_definition_snapshot'), dict) else {}
+    workflow_name = str(
+        getattr(run.definition, 'name', '')
+        or definition.get('name')
+        or definition.get('workflow_name')
+        or '').strip()
+    data['workflow_name'] = workflow_name
+    data['definition_name'] = workflow_name
+    raw_definition_version = (
+        snapshot.get('version')
+        or getattr(run.definition, 'version', 0)
+        or definition.get('version')
+        or 1)
+    try:
+        data['workflow_definition_version'] = int(raw_definition_version)
+    except (TypeError, ValueError):
+        data['workflow_definition_version'] = 1
     data['current_step_status'] = current_step.status if current_step else None
     data['result_summary'] = (
         context.get('result_summary')
@@ -655,7 +750,11 @@ def _run_payload(run, with_steps=False):
     data['evidence_manifest'] = manifest.to_dict() if manifest else None
     data['evidence_manifest_status'] = (
         run.evidence_ingest_status
-        or ('EVIDENCE_INGEST_INCOMPLETE' if run.finished_at and not manifest else ''))
+        or ('EVIDENCE_INGEST_INCOMPLETE'
+            if run.finished_at and not manifest and requirements.get('evidence')
+            else 'EVIDENCE_NOT_REQUIRED'
+            if run.finished_at and not requirements.get('evidence')
+            else ''))
     data['finding_count'] = len(manifest.finding_ids_json or []) if manifest else 0
     return data
 
@@ -752,11 +851,18 @@ def _workflow_run_query_from_request():
             return None, _workflow_api_error(
                 'INVALID_DATETIME_FILTER', str(exc), details={'field': field})
         q = q.filter(column > parsed)
+    catalog_kind = str(request.args.get('catalog_kind') or '').strip().lower()
+    if catalog_kind and catalog_kind not in {'business', 'probe', 'legacy'}:
+        return None, _workflow_api_error(
+            'INVALID_WORKFLOW_CATALOG_KIND',
+            'catalog_kind must be business, probe or legacy')
     visible_definition_ids = [
         definition.id
         for definition in WorkflowDefinition.query.filter(
             WorkflowDefinition.status != 'deleted').all()
         if _definition_visible(definition)
+        and (not catalog_kind or workflow_catalog_metadata(
+            definition.definition_json or {}).get('kind') == catalog_kind)
     ]
     q = q.filter(WorkflowRun.definition_id.in_(visible_definition_ids))
     return q.order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc()), None
@@ -1108,6 +1214,34 @@ def _sync_run_outcomes(run, result=None, step=None, report=None, ingestion=None)
             for item in bound) and len(bound) == len(report_ids) else 'FAILED')
     elif merged.get('report') == 'PUBLISHED':
         merged['report'] = 'FAILED'  # A URL or Agent claim is not a standard binding.
+    if run.status in ('succeeded', 'failed', 'blocked', 'cancelled'):
+        context = run.context_json if isinstance(run.context_json, dict) else {}
+        requirements = context.get('outcome_requirements_snapshot') if isinstance(
+            context.get('outcome_requirements_snapshot'), dict) else None
+        if requirements is None:
+            requirements = workflow_outcome_requirements(
+                run.definition.definition_json
+                if run.definition and isinstance(
+                    run.definition.definition_json, dict) else {})
+        catalog = context.get('workflow_catalog_snapshot') if isinstance(
+            context.get('workflow_catalog_snapshot'), dict) else None
+        if catalog is None:
+            catalog = workflow_catalog_metadata(
+                run.definition.definition_json
+                if run.definition and isinstance(
+                    run.definition.definition_json, dict) else {})
+        if not requirements.get('evidence') and not manifest:
+            merged['evidence'] = 'NOT_REQUIRED'
+        if not requirements.get('report') and not reports:
+            merged['report'] = 'NOT_APPLICABLE'
+        if not requirements.get('notification') and not deliveries:
+            merged['notification'] = 'NOT_REQUIRED'
+        if not requirements.get('review') and not merged.get('review'):
+            merged['review'] = 'NOT_ASSIGNED'
+        if (catalog.get('kind') in {'probe', 'legacy'}
+                and not requirements.get('business')
+                and not merged.get('business')):
+            merged['business'] = 'NOT_EXECUTED'
     run.outcomes_json = merged
     legacy_business = {
         'PASSED': 'COMPLETED',
@@ -1121,7 +1255,16 @@ def _sync_run_outcomes(run, result=None, step=None, report=None, ingestion=None)
         'BLOCKED': 'AUTOMATION_ENV_BLOCKED',
         'FAILED': 'AUTOMATION_ENV_BLOCKED',
     }.get(merged.get('automation'))
-    if legacy_business:
+    explicit_business = str(
+        _nested_output_value(
+            _workflow_outputs_context(run), 'business_conclusion') or ''
+    ).strip().upper()
+    if explicit_business == 'COMPLETED_WITH_BUGS' and merged.get(
+            'business') == 'FAILED':
+        # Preserve the evidence-backed distinction between a completed test
+        # that found a product defect and an execution/infrastructure failure.
+        run.business_conclusion = 'COMPLETED_WITH_BUGS'
+    elif legacy_business:
         run.business_conclusion = legacy_business
     if legacy_automation:
         run.automation_conclusion = legacy_automation
@@ -1216,6 +1359,21 @@ def _record_notification_delivery(run, step, payload):
     claw = get_current_claw()
     if not claw or payload.get('claw_id') != claw.id:
         raise ValueError('notification_delivery must identify the reporting Worker')
+    config = step.step_config_json if isinstance(
+        step.step_config_json, dict) else {}
+    owner_role = str(config.get('notification_owner_role') or '').strip()
+    assignment = (
+        (run.context_json or {}).get('assignment_snapshot')
+        if isinstance(run.context_json, dict) else {})
+    if owner_role and isinstance(assignment, dict):
+        try:
+            owner_claw_id = int(assignment.get(f'{owner_role}_claw_id'))
+        except (TypeError, ValueError):
+            owner_claw_id = None
+        if not owner_claw_id or owner_claw_id != claw.id:
+            raise ValueError(
+                'notification_delivery does not belong to the frozen '
+                f'{owner_role} notification owner')
     if (payload.get('run_id') != run.id or payload.get('step_id') != step.step_id
             or payload.get('attempt_no') != (step.attempt_no or 1)):
         raise ValueError('notification_delivery Run/Step/attempt mismatch')
@@ -1253,6 +1411,27 @@ def _record_notification_delivery(run, step, payload):
                     or not isinstance(receipt.get('received_at'), str)
                     or not receipt['received_at']):
                 raise ValueError('notification_delivery sent requires Hub log or authenticated Worker transport receipt')
+    delivery_key = str(payload.get('delivery_key') or (
+        f'workflow:{run.id}:report:{payload.get("report_id")}:wecom:owner'
+    )).strip()[:240]
+    for existing in WorkflowArtifact.query.filter_by(
+            run_id=run.id,
+            artifact_type='workflow_notification_delivery').all():
+        previous = existing.metadata_json or {}
+        if previous.get('delivery_key') != delivery_key:
+            continue
+        if (existing.step_id == step.step_id
+                and previous.get('attempt_no') == (step.attempt_no or 1)):
+            continue
+        if (previous.get('message_sha256') != digest
+                or previous.get('report_id') != payload.get('report_id')):
+            raise ValueError(
+                'notification_delivery dedupe identity conflicts with an '
+                'existing delivery')
+        # One logical report/target delivery is shared by all roles. Returning
+        # the existing receipt prevents executor and reviewer nodes from both
+        # creating the same external side effect.
+        return existing
     artifact = WorkflowArtifact.query.filter_by(
         run_id=run.id, step_id=step.step_id,
         name='notification-attempt:%s' % (step.attempt_no or 1),
@@ -1260,6 +1439,8 @@ def _record_notification_delivery(run, step, payload):
     document = {name: payload.get(name) for name in (
         'claw_id', 'run_id', 'step_id', 'attempt_no', 'notification_id',
         'message_sha256', 'report_id', 'state', 'wecom_log_id')}
+    document['delivery_key'] = delivery_key
+    document['notification_owner_role'] = owner_role
     if state == 'sent':
         document['receipt_origin'] = 'hub' if log else 'authenticated_worker'
         document['delivery_receipt'] = ({
@@ -1268,7 +1449,8 @@ def _record_notification_delivery(run, step, payload):
         } if not log else {'wecom_log_id': log.id})
     if artifact:
         previous = artifact.metadata_json or {}
-        for name in ('claw_id', 'attempt_no', 'notification_id', 'message_sha256', 'report_id'):
+        for name in ('claw_id', 'attempt_no', 'notification_id',
+                     'message_sha256', 'report_id', 'delivery_key'):
             if previous.get(name) != document[name]:
                 raise ValueError('notification_delivery immutable identity conflicts')
         if previous.get('state') == 'sent':
@@ -2522,6 +2704,10 @@ def _recompute_run_status(run, actor='system'):
     has_blocked = any(s.status == 'blocked' for s in steps)
     has_failed = any(s.status == 'failed' for s in steps)
     if (has_blocked or has_failed) and not has_continuation_work:
+        # Outcome defaults are terminal-state aware.  Set the conservative
+        # orchestration result first, then allow composite mode to refine it
+        # from the six independent outcome dimensions.
+        run.status = 'failed' if has_failed else 'blocked'
         outcomes = _sync_run_outcomes(run)
         run.status = (
             composite_workflow_terminal_status(
@@ -2530,7 +2716,7 @@ def _recompute_run_status(run, actor='system'):
                 has_failed=has_failed,
             )
             if _composite_outcomes_enabled(run)
-            else 'failed' if has_failed else 'blocked'
+            else run.status
         )
         run.finished_at = run.finished_at or datetime.now()
         problem = next((
@@ -2663,10 +2849,18 @@ def list_workflow_definitions():
         query = query.filter(WorkflowDefinition.project_id == project_id)
     rows = query.order_by(WorkflowDefinition.updated_at.desc()).all()
     favorite_only = request.args.get('favorite') in ('1', 'true', 'True')
+    catalog_kind = str(request.args.get('catalog_kind') or '').strip().lower()
+    if catalog_kind and catalog_kind not in {'business', 'probe', 'legacy'}:
+        return _workflow_api_error(
+            'INVALID_WORKFLOW_CATALOG_KIND',
+            'catalog_kind must be business, probe or legacy')
     favorite_ids = _actor_favorite_definition_ids() if favorite_only else None
     visible = []
     for row in rows:
         if favorite_only and row.id not in favorite_ids:
+            continue
+        if (catalog_kind and workflow_catalog_metadata(
+                row.definition_json or {}).get('kind') != catalog_kind):
             continue
         if _definition_visible(row):
             visible.append(_definition_payload(row, brief=True))
@@ -2824,6 +3018,9 @@ def create_workflow_definition():
         visibility_scope=visibility_scope,
     )
     db.session.add(row)
+    db.session.flush()
+    if actor['type'] == 'claw':
+        _sync_workflow_create_policy(row, [actor['id']])
     db.session.commit()
     return jsonify(_definition_payload(row)), 201
 
@@ -2957,6 +3154,7 @@ def add_workflow_definition_executor(definition_id):
         acl['claw_ids'] = sorted(set((acl.get('claw_ids') or []) + claw_ids))
         acl['user_ids'] = sorted(set((acl.get('user_ids') or []) + user_ids))
         row.executor_acl_json = acl
+        _sync_workflow_create_policy(row, claw_ids)
         db.session.commit()
         return jsonify(_definition_payload(row))
 
@@ -2984,6 +3182,8 @@ def add_workflow_definition_executor(definition_id):
     key = 'claw_ids' if actor_type == 'claw' else 'user_ids'
     acl[key] = sorted(set((acl.get(key) or []) + [actor_id]))
     row.executor_acl_json = acl
+    if actor_type == 'claw':
+        _sync_workflow_create_policy(row, [actor_id])
     db.session.commit()
     return jsonify(_definition_payload(row))
 
@@ -3036,6 +3236,8 @@ def replace_workflow_definition_editors(definition_id):
         'user_ids': user_ids,
     })
     definition.editor_acl_json = after
+    synced_claw_ids = _sync_workflow_create_policy(
+        definition, after.get('claw_ids') or [])
     definition_json = copy.deepcopy(definition.definition_json or {})
     definition.version = max(
         int(definition.version or 0),
@@ -3054,6 +3256,7 @@ def replace_workflow_definition_editors(definition_id):
             'before': before,
             'after': after,
             'version': definition.version,
+            'sidecar_policy_synced_claw_ids': synced_claw_ids,
         }, ensure_ascii=False, sort_keys=True),
     ))
     db.session.commit()
@@ -3374,6 +3577,9 @@ def create_workflow_run():
             ).get('template_revision')
             or ''),
     }
+    context['workflow_catalog_snapshot'] = workflow_catalog_metadata(normalized)
+    context['outcome_requirements_snapshot'] = workflow_outcome_requirements(
+        normalized)
     if assignment:
         context['assignment_snapshot'] = {
             'schema': assignment['schema'],
@@ -4281,6 +4487,11 @@ def retry_workflow_step(run_id, step_id):
     ).first_or_404()
     _expire_step_blocked_todos(run_id, step_id)
     step.status = 'pending'
+    step.summary = ''
+    step.metrics_json = {}
+    step.evidence_json = {}
+    step.logs_json = {}
+    step.outputs_json = {}
     step.blocker_json = {}
     step.gate_result_json = {}
     step.contract_result_json = {}
@@ -4293,6 +4504,8 @@ def retry_workflow_step(run_id, step_id):
     step.health_checked_at = None
     _reset_step_progress(step)
     _clear_step_claim(step)
+    step.dispatched_at = None
+    step.started_at = None
     step.finished_at = None
     run.status = 'pending'
     run.finished_at = None
@@ -4324,6 +4537,11 @@ def resume_workflow_run(run_id):
             if reset:
                 _expire_step_blocked_todos(run.id, step.step_id)
                 step.status = 'pending'
+                step.summary = ''
+                step.metrics_json = {}
+                step.evidence_json = {}
+                step.logs_json = {}
+                step.outputs_json = {}
                 step.blocker_json = {}
                 step.gate_result_json = {}
                 step.contract_result_json = {}
@@ -4336,6 +4554,8 @@ def resume_workflow_run(run_id):
                 step.health_checked_at = None
                 _reset_step_progress(step)
                 _clear_step_claim(step)
+                step.dispatched_at = None
+                step.started_at = None
                 step.finished_at = None
     run.status = 'pending'
     run.finished_at = None
@@ -4361,6 +4581,72 @@ def _workflow_restart_step_snapshot(step):
             if isinstance(step.contract_result_json, dict) else ''),
         'outputs_sha256': digest(step.outputs_json),
         'evidence_sha256': digest(step.evidence_json),
+    }
+
+
+def _workflow_definition_snapshot_fingerprint(definition):
+    definition_json = copy.deepcopy(
+        definition.definition_json if definition is not None else {})
+    encoded = json.dumps(
+        definition_json,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+    ).encode('utf-8')
+    context = (
+        definition_json.get('context')
+        if isinstance(definition_json.get('context'), dict) else {})
+    return {
+        'workflow_definition_id': (
+            definition.id if definition is not None else None),
+        'version': int(
+            (definition.version if definition is not None else 0)
+            or definition_json.get('version') or 1),
+        'sha256': hashlib.sha256(encoded).hexdigest(),
+        'template_revision': str(
+            definition_json.get('template_revision')
+            or context.get('template_revision') or ''),
+    }
+
+
+def _workflow_restart_snapshot_conflict(run):
+    context = run.context_json if isinstance(run.context_json, dict) else {}
+    stored = context.get('workflow_definition_snapshot')
+    live = _workflow_definition_snapshot_fingerprint(run.definition)
+    stale_fields = []
+    if not isinstance(stored, dict):
+        stale_fields.append('snapshot_missing')
+        stored = {}
+    try:
+        stored_version = int(stored.get('version'))
+    except (TypeError, ValueError):
+        stored_version = None
+    if stored_version != live['version']:
+        stale_fields.append('version')
+    stored_sha = str(stored.get('sha256') or '').strip().lower()
+    if not stored_sha or stored_sha != live['sha256']:
+        stale_fields.append('sha256')
+    if not stale_fields:
+        return None
+    return {
+        'error': (
+            'Run 使用的不可变 Definition 快照已落后于线上 Definition，'
+            '不能原地重启；必须基于最新 Definition 创建替代 Run。'),
+        'code': 'STALE_DEFINITION_SNAPSHOT',
+        'run_id': run.id,
+        'workflow_definition_id': run.definition_id,
+        'stale_fields': stale_fields,
+        'run_snapshot': {
+            'workflow_definition_id': stored.get(
+                'workflow_definition_id', stored.get('id')),
+            'version': stored_version,
+            'sha256': stored_sha,
+            'template_revision': str(
+                stored.get('template_revision') or ''),
+        },
+        'live_definition': live,
+        'replacement_required': True,
+        'create_run_api': '/api/v1/workflow-runs',
     }
 
 
@@ -4443,6 +4729,18 @@ def restart_workflow_run(run_id):
             'code': 'WORKFLOW_RUN_NOT_RESTARTABLE',
             'status': run.status,
         }), 409
+    snapshot_conflict = _workflow_restart_snapshot_conflict(run)
+    if snapshot_conflict is not None:
+        _workflow_idempotency_store(idem_record, 409, snapshot_conflict)
+        db.session.add(AuditLog(
+            action='restart_rejected', resource_type='workflow_run',
+            resource_id=run.id, resource_name=run.run_name,
+            operator=_actor_name(), ip_address=request.remote_addr,
+            detail=json.dumps(snapshot_conflict, ensure_ascii=False,
+                              sort_keys=True),
+        ))
+        db.session.commit()
+        return jsonify(snapshot_conflict), 409
     data = request.get_json(silent=True) or {}
     actor = _actor_name()
     now = datetime.now()

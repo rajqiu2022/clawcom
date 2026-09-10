@@ -14,6 +14,13 @@ from app.api.auth_utils import (
     user_project_ids,
 )
 from app.models import AutomationCapability
+from app.models import (
+    AutomationCaseCandidate,
+    AutomationCaseCandidateEvent,
+    CapabilityGap,
+    CapabilityGapEvent,
+)
+from app.services.entity_relations import best_effort_upsert_relations
 
 
 STATUSES = {'planned', 'available', 'degraded', 'unavailable', 'retired'}
@@ -82,6 +89,141 @@ def _health_checked_at(value):
             tzinfo=None)
     except ValueError as exc:
         raise ValueError('health_checked_at must be an ISO-8601 datetime') from exc
+
+
+def _available_capability_snapshot(project_id):
+    """Return healthy versioned capability tokens and their source rows."""
+    rows = AutomationCapability.query.filter_by(
+        project_id=project_id, status='available').all()
+    tokens = set()
+    sources = []
+    for row in rows:
+        # A catalog declaration alone must not close a Gap.  Automatic
+        # requalification requires a concrete implementation version and an
+        # observed health check from the capability producer.
+        if not row.implementation_version or not row.health_checked_at:
+            continue
+        row_tokens = {
+            row.capability_key,
+            *(row.operations_json or []),
+            *(row.observables_json or []),
+            *(row.reset_hooks_json or []),
+        }
+        tokens.update(str(item).strip() for item in row_tokens if str(item).strip())
+        sources.append({
+            'capability_id': row.id,
+            'key': row.capability_key,
+            'catalog_version': row.version,
+            'implementation_version': row.implementation_version,
+            'health_checked_at': str(row.health_checked_at),
+        })
+    return tokens, sources
+
+
+def _auto_resolve_gaps_and_requeue(project_id, actor):
+    """Atomically close satisfied Gaps and return candidates to canary."""
+    tokens, sources = _available_capability_snapshot(project_id)
+    if not tokens:
+        return {'resolved_gap_ids': [], 'requeued_candidate_ids': []}
+    resolved = []
+    requeued = []
+    relations = []
+    now = datetime.now()
+    gaps = (CapabilityGap.query.filter(
+        CapabilityGap.project_id == project_id,
+        CapabilityGap.status.in_(('open', 'in_progress')),
+    ).with_for_update().all())
+    for gap in gaps:
+        required = set()
+        for values in (
+                gap.missing_capabilities_json,
+                gap.required_operations_json,
+                gap.required_observables_json,
+                gap.required_reset_hooks_json):
+            required.update(
+                str(item).strip() for item in (values or [])
+                if str(item).strip())
+        if not required or not required.issubset(tokens):
+            continue
+        gap_before = int(gap.version or 1)
+        previous_status = gap.status
+        candidate_ids = []
+        candidates = (AutomationCaseCandidate.query.filter_by(
+            capability_gap_id=gap.id,
+            state='WAITING_CAPABILITY',
+        ).with_for_update().all())
+        for candidate in candidates:
+            candidate_before = int(candidate.version or 1)
+            candidate.state = 'READY_FOR_CANARY'
+            candidate.qualification_outcome = None
+            candidate.qualification_run_id = None
+            candidate.qualification_evidence_json = {}
+            candidate.version = candidate_before + 1
+            candidate.updated_by = actor['name']
+            candidate.updated_at = now
+            db.session.add(AutomationCaseCandidateEvent(
+                candidate_id=candidate.id,
+                event_type='capability_catalog_auto_requeued',
+                from_state='WAITING_CAPABILITY',
+                to_state='READY_FOR_CANARY',
+                version_before=candidate_before,
+                version_after=candidate.version,
+                payload_json={
+                    'capability_gap_id': gap.id,
+                    'capability_sources': sources,
+                },
+                actor_type=actor['type'], actor_id=actor['id'],
+                actor_name=actor['name'], request_id=str(
+                    request.headers.get('X-Request-ID') or uuid4().hex)[:128],
+            ))
+            candidate_ids.append(candidate.id)
+            requeued.append(candidate.id)
+            relations.append({
+                'from_type': 'automation_case_candidate',
+                'from_id': str(candidate.id),
+                'relation_type': 'unblocked_by',
+                'to_type': 'capability_gap',
+                'to_id': str(gap.id),
+                'metadata': {
+                    'gap_version': gap_before + 1,
+                    'resolution': 'capability_catalog_auto_resolved',
+                },
+            })
+        gap.status = 'resolved'
+        gap.resolution_json = {
+            'summary': 'Hub capability catalog verified every required token',
+            'required_tokens': sorted(required),
+            'capability_sources': sources,
+            'auto_requeued_candidate_ids': candidate_ids,
+        }
+        gap.resolved_by = actor['name']
+        gap.resolved_at = now
+        gap.candidate_requeue_pending = False
+        gap.version = gap_before + 1
+        gap.updated_by = actor['name']
+        gap.updated_at = now
+        db.session.add(CapabilityGapEvent(
+            capability_gap_id=gap.id,
+            event_type='capability_catalog_auto_resolved',
+            from_status=previous_status,
+            to_status='resolved',
+            version_before=gap_before,
+            version_after=gap.version,
+            payload_json={
+                'required_tokens': sorted(required),
+                'capability_sources': sources,
+                'requeued_candidate_ids': candidate_ids,
+            },
+            actor_type=actor['type'], actor_id=actor['id'],
+            actor_name=actor['name'], request_id=str(
+                request.headers.get('X-Request-ID') or uuid4().hex)[:128],
+        ))
+        resolved.append(gap.id)
+    best_effort_upsert_relations(project_id, relations, actor['name'])
+    return {
+        'resolved_gap_ids': resolved,
+        'requeued_candidate_ids': requeued,
+    }
 
 
 @api_bp.route('/automation-capabilities', methods=['GET'])
@@ -180,5 +322,9 @@ def upsert_automation_capability():
     row.updated_by = actor['name']
     for field, value in values.items():
         setattr(row, field, value)
+    db.session.flush()
+    auto_requalification = _auto_resolve_gaps_and_requeue(project_id, actor)
     db.session.commit()
-    return jsonify(row.to_dict()), 201 if created else 200
+    payload = row.to_dict()
+    payload['auto_requalification'] = auto_requalification
+    return jsonify(payload), 201 if created else 200

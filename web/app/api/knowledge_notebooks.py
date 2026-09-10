@@ -177,6 +177,33 @@ def _audit(action, resource_id, resource_name, actor, detail):
     ))
 
 
+def _audit_notebook(action, notebook, actor, detail):
+    db.session.add(AuditLog(
+        action=action,
+        resource_type='knowledge_test_journal_notebook',
+        resource_id=notebook.id,
+        resource_name=notebook.title,
+        operator=actor['name'],
+        ip_address=request.remote_addr,
+        detail=json.dumps(detail, ensure_ascii=False, sort_keys=True),
+    ))
+
+
+def _remove_journal_page_references(page_ids):
+    """Remove references that do not cascade with KnowledgeEntry deletion."""
+    ids = [int(value) for value in (page_ids or []) if value]
+    if not ids:
+        return
+    Topic.query.filter(Topic.review_knowledge_id.in_(ids)).update(
+        {'review_knowledge_id': None}, synchronize_session=False)
+    KnowledgeDistribution.query.filter(
+        KnowledgeDistribution.knowledge_id.in_(ids)).delete(
+            synchronize_session=False)
+    KnowledgeFavorite.query.filter(
+        KnowledgeFavorite.knowledge_id.in_(ids)).delete(
+            synchronize_session=False)
+
+
 def _modules(value):
     values = value if isinstance(value, list) else DEFAULT_MODULES
     result = []
@@ -323,6 +350,34 @@ def get_knowledge_notebook(notebook_id):
     if not row:
         return _error('NOTEBOOK_NOT_FOUND', '纪要本不存在或无权访问', 404)
     return jsonify(row.to_dict(with_pages=True))
+
+
+@api_bp.route('/knowledge-notebooks/<int:notebook_id>', methods=['DELETE'])
+def permanently_delete_knowledge_notebook(notebook_id):
+    actor = _actor()
+    row = _notebook(notebook_id, actor)
+    if not row:
+        return _error('NOTEBOOK_NOT_FOUND', '纪要本不存在或无权访问', 404)
+    data = request.get_json(silent=True) or {}
+    if data.get('confirmed') is not True:
+        return _error(
+            'PERMANENT_DELETE_CONFIRMATION_REQUIRED',
+            '永久删除纪要本必须显式提交 confirmed=true', 400)
+    pages = list(row.pages)
+    page_ids = [page.id for page in pages]
+    revision_count = sum(len(page.revisions) for page in pages)
+    result = {
+        'deleted': True,
+        'notebook_id': row.id,
+        'title': row.title,
+        'page_count': len(page_ids),
+        'revision_count': revision_count,
+    }
+    _remove_journal_page_references(page_ids)
+    _audit_notebook('permanent_delete', row, actor, result)
+    db.session.delete(row)
+    db.session.commit()
+    return jsonify(result)
 
 
 @api_bp.route('/knowledge-notebooks/<int:notebook_id>/pages', methods=['POST'])
@@ -586,12 +641,7 @@ def permanently_delete_knowledge_journal_page(page_id):
         'notebook_id': page.notebook_id,
         'revision_count': len(page.revisions),
     }
-    Topic.query.filter_by(review_knowledge_id=page.id).update(
-        {'review_knowledge_id': None})
-    KnowledgeDistribution.query.filter_by(
-        knowledge_id=page.id).delete(synchronize_session=False)
-    KnowledgeFavorite.query.filter_by(
-        knowledge_id=page.id).delete(synchronize_session=False)
+    _remove_journal_page_references([page.id])
     _audit('permanent_delete', page.id, page.title, actor, page_info)
     db.session.delete(page)
     db.session.commit()

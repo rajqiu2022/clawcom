@@ -87,6 +87,10 @@ const API = {
     },
     getKnowledgeNotebook(id) { return this.get(`/knowledge-notebooks/${id}`); },
     createKnowledgeNotebook(data) { return this.post('/knowledge-notebooks', data); },
+    permanentlyDeleteKnowledgeNotebook(id) {
+        return this.request('DELETE', `/knowledge-notebooks/${id}`,
+            {confirmed:true});
+    },
     createKnowledgeNotebookPage(id, data, idempotencyKey) {
         return this.request('POST', `/knowledge-notebooks/${id}/pages`, data,
             {'Idempotency-Key': idempotencyKey});

@@ -12,14 +12,36 @@ Memos 客户端 — 写入外部 Memos 服务（Claw 零碎笔记层）
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
+import tempfile
+import threading
+import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Hub production is Linux
+    fcntl = None
+
+
+def _read_snapshot_ttl() -> float:
+    try:
+        configured = float(os.environ.get('MEMOS_LIST_CACHE_TTL_SECONDS', '300'))
+    except (TypeError, ValueError):
+        configured = 300.0
+    return max(15.0, min(configured, 3600.0))
+
+
+_MEMOS_SNAPSHOT_TTL_SECONDS = _read_snapshot_ttl()
+_memos_snapshot_lock = threading.Lock()
 
 KNOWLEDGE_TAGS = {
     'bug-experience': '缺陷经验',
@@ -155,7 +177,12 @@ def _request(
     }
     if json_body is not None:
         headers['Content-Type'] = 'application/json'
-    resp = requests.request(method, url, headers=headers, json=json_body, timeout=timeout)
+    try:
+        resp = requests.request(
+            method, url, headers=headers, json=json_body, timeout=timeout,
+        )
+    except requests.RequestException as e:
+        raise RuntimeError(f'Memos 不可达 ({base}): {e}') from e
     if resp.status_code >= 400:
         raise RuntimeError(
             f'Memos API {method} {path} → HTTP {resp.status_code}: {resp.text[:500]}'
@@ -207,6 +234,118 @@ def list_memos_raw(page_size: int = 50, page_token: str = '') -> dict:
     return _request('GET', '/api/v1/memos', params=params)
 
 
+def _snapshot_cache_path() -> str:
+    return os.environ.get(
+        'MEMOS_LIST_CACHE_PATH',
+        os.path.join(tempfile.gettempdir(), 'openclaw-memos-list-cache.json'),
+    )
+
+
+def _read_memos_snapshot(path: str, now: float) -> Optional[List[dict]]:
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+        generated_at = float(payload.get('generated_at') or 0)
+        memos = payload.get('memos')
+        if now - generated_at <= _MEMOS_SNAPSHOT_TTL_SECONDS and isinstance(memos, list):
+            return [dict(memo) for memo in memos if isinstance(memo, dict)]
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _fetch_all_memos() -> List[dict]:
+    memos: List[dict] = []
+    page_token = ''
+    seen_tokens = set()
+    while True:
+        batch = list_memos_raw(page_size=200, page_token=page_token)
+        memos.extend(memo for memo in (batch.get('memos') or []) if isinstance(memo, dict))
+        next_token = batch.get('nextPageToken') or ''
+        if not next_token or next_token in seen_tokens or not batch.get('memos'):
+            break
+        seen_tokens.add(next_token)
+        page_token = next_token
+    return memos
+
+
+def _write_memos_snapshot(path: str, memos: List[dict], generated_at: float) -> None:
+    parent = os.path.dirname(path) or tempfile.gettempdir()
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix='.memos-cache-', suffix='.json', dir=parent)
+    try:
+        if hasattr(os, 'fchmod'):
+            os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(
+                {'generated_at': generated_at, 'memos': memos},
+                handle,
+                ensure_ascii=False,
+                separators=(',', ':'),
+            )
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _all_memos_cached() -> List[dict]:
+    """Return one cross-gunicorn snapshot instead of rescanning per claw."""
+    path = _snapshot_cache_path()
+    now = time.time()
+    cached = _read_memos_snapshot(path, now)
+    if cached is not None:
+        return cached
+
+    lock_path = f'{path}.lock'
+    os.makedirs(os.path.dirname(lock_path) or tempfile.gettempdir(), mode=0o700, exist_ok=True)
+    with _memos_snapshot_lock:
+        with open(lock_path, 'a+', encoding='utf-8') as lock_handle:
+            try:
+                os.chmod(lock_path, 0o600)
+            except OSError:
+                pass
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            try:
+                now = time.time()
+                cached = _read_memos_snapshot(path, now)
+                if cached is not None:
+                    return cached
+                memos = _fetch_all_memos()
+                _write_memos_snapshot(path, memos, now)
+                return [dict(memo) for memo in memos]
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def invalidate_memos_snapshot() -> None:
+    """Invalidate the shared read cache after a Hub-authored Memos mutation."""
+    path = _snapshot_cache_path()
+    lock_path = f'{path}.lock'
+    os.makedirs(os.path.dirname(lock_path) or tempfile.gettempdir(), mode=0o700, exist_ok=True)
+    with _memos_snapshot_lock:
+        with open(lock_path, 'a+', encoding='utf-8') as lock_handle:
+            if fcntl is not None:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            try:
+                try:
+                    os.unlink(path)
+                except FileNotFoundError:
+                    pass
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
 def search_memos(
     tag=None,
     keyword=None,
@@ -234,28 +373,22 @@ def search_memos(
             openclaw_needle = f'#openclaw/{t}'
 
     collected: List[dict] = []
-    page_token = ''
-    while len(collected) < limit:
-        batch = list_memos_raw(page_size=min(limit * 2, 100), page_token=page_token)
-        for m in batch.get('memos') or []:
-            # 本部署 ListMemos 不按状态过滤，已归档也会返回 → 客户端跳过 ARCHIVED。
-            if (m.get('rowStatus') or 'ACTIVE') == 'ARCHIVED':
+    for m in _all_memos_cached():
+        # 本部署 ListMemos 不按状态过滤，已归档也会返回 → 客户端跳过 ARCHIVED。
+        if (m.get('rowStatus') or 'ACTIVE') == 'ARCHIVED':
+            continue
+        content = m.get('content') or ''
+        if claw_needle and claw_needle not in content:
+            continue
+        if openclaw_prefix_only:
+            if '#openclaw/' not in content:
                 continue
-            content = m.get('content') or ''
-            if claw_needle and claw_needle not in content:
-                continue
-            if openclaw_prefix_only:
-                if '#openclaw/' not in content:
-                    continue
-            elif openclaw_needle and openclaw_needle not in content:
-                continue
-            if keyword and keyword not in content:
-                continue
-            collected.append(_normalize_memo(m))
-            if len(collected) >= limit:
-                break
-        page_token = batch.get('nextPageToken') or ''
-        if not page_token or not batch.get('memos'):
+        elif openclaw_needle and openclaw_needle not in content:
+            continue
+        if keyword and keyword not in content:
+            continue
+        collected.append(_normalize_memo(m))
+        if len(collected) >= limit:
             break
     return collected
 
@@ -282,6 +415,7 @@ def create_memo(content: str, visibility: Optional[str] = None) -> dict:
         'visibility': vis,
     }
     created = _request('POST', '/api/v1/memos', json_body=body)
+    invalidate_memos_snapshot()
     return _normalize_memo(created)
 
 
@@ -300,6 +434,7 @@ def update_memo(memo_name: str, content: str, visibility: Optional[str] = None) 
         json_body=body,
         params={'updateMask': 'content,visibility'},
     )
+    invalidate_memos_snapshot()
     return _normalize_memo(updated)
 
 
@@ -315,6 +450,7 @@ def archive_memo(memo_name: str) -> Optional[dict]:
         json_body={'rowStatus': 'ARCHIVED'},
         params={'updateMask': 'row_status'},
     )
+    invalidate_memos_snapshot()
     return _normalize_memo(updated)
 
 

@@ -132,10 +132,12 @@ def _codex_workflow_mission_rule(missions: Iterable[Any]) -> dict[str, Any] | No
             '通过 hub_api 发起写操作时只需提供稳定 operation_id，不需要 verify；'
             '只校验主 Agent 身份、项目范围、幂等和 Child Run 预算。不得传 executor、'
             'target、selected 或 worker 覆盖字段。一个 Child Run 完成后读取其结果：若 '
-            'blocked/failed 的原因已经修复且仍需执行同一 Flow，必须优先 POST 该 Run '
-            '返回的 restart_api 原地完整重启，并携带稳定 Idempotency-Key，不得再次 '
-            'dispatch 同一 Definition 制造新 Run；只有首次启动或决定切换到不同 Flow '
-            '时才调用 dispatch。随后再自主决定继续、换 Flow 或结束 Mission。'
+            'blocked/failed 的原因已经修复且仍需执行同一 Flow，优先 POST 该 Run '
+            '返回的 restart_api 原地完整重启，并携带稳定 Idempotency-Key。若 Hub 返回 '
+            'STALE_DEFINITION_SNAPSHOT，说明不可变 Run 快照已落后；此时必须用同一 '
+            'Definition 创建一个受预算和幂等保护的替代 Run，不能继续 restart 旧 Run。'
+            '只有首次启动、快照过期替代或决定切换到不同 Flow 时才调用 dispatch。'
+            '随后再自主决定继续、换 Flow 或结束 Mission。'
         ),
         'applied': True,
         'updated_at': None,
@@ -172,8 +174,15 @@ def allowed_workflow_create_definition_ids(
             _as_text(getattr(definition, 'created_by', '')) == claw_name
         )
         acl = getattr(definition, 'executor_acl_json', None) or {}
+        editor_acl = getattr(definition, 'editor_acl_json', None) or {}
         acl_claw_ids = set()
         for item in acl.get('claw_ids', []) if isinstance(acl, dict) else []:
+            try:
+                acl_claw_ids.add(int(item))
+            except (TypeError, ValueError):
+                continue
+        for item in (editor_acl.get('claw_ids', [])
+                     if isinstance(editor_acl, dict) else []):
             try:
                 acl_claw_ids.add(int(item))
             except (TypeError, ValueError):

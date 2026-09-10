@@ -227,9 +227,19 @@
 .kn-archive-title { font-weight:650; color:var(--text-primary); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .kn-archive-meta { margin-top:5px; color:var(--text-muted); font-size:.74rem; line-height:1.5; }
 .kn-archive-actions { display:flex; align-items:center; gap:7px; }
-.kn-wiki-notebook { padding:10px 12px; border-bottom:1px solid var(--border); cursor:pointer; }
+.kn-wiki-notebook-group { border-bottom:1px solid var(--border); }
+.kn-wiki-notebook { padding:10px 12px; cursor:pointer; }
 .kn-wiki-notebook:hover,.kn-wiki-notebook.active { background:var(--bg-hover); box-shadow:inset 3px 0 0 var(--accent); }
 .kn-wiki-notebook small { display:block; margin-top:3px; color:var(--text-muted); }
+.kn-wiki-notebook-row { display:flex; align-items:flex-start; gap:8px; }
+.kn-wiki-notebook-chevron { flex:0 0 auto; width:14px; margin-top:2px; color:var(--text-muted); transition:transform .16s ease; }
+.kn-wiki-notebook.active .kn-wiki-notebook-chevron { transform:rotate(90deg); color:var(--accent); }
+.kn-wiki-notebook-copy { min-width:0; flex:1; }
+.kn-wiki-notebook-delete { opacity:0; flex:0 0 auto; width:25px; height:25px; padding:0; border-radius:6px; }
+.kn-wiki-notebook:hover .kn-wiki-notebook-delete,
+.kn-wiki-notebook.active .kn-wiki-notebook-delete,
+.kn-wiki-notebook-delete:focus-visible { opacity:1; }
+.kn-wiki-notebook-pages { padding:3px 0 9px 14px; background:color-mix(in srgb,var(--bg-secondary) 76%,transparent); box-shadow:inset 3px 0 0 color-mix(in srgb,var(--accent) 38%,transparent); }
 .kn-wiki-module { padding:10px 12px 4px; color:var(--text-muted); font-size:.72rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
 .kn-wiki-page-link { display:flex; gap:7px; align-items:flex-start; padding:7px 12px 7px 20px; color:var(--text-secondary); font-size:.82rem; cursor:pointer; border-left:2px solid transparent; }
 .kn-wiki-page-link:hover,.kn-wiki-page-link.active { color:var(--text-primary); background:var(--bg-hover); border-left-color:var(--accent); }
@@ -280,9 +290,8 @@
     <div class="kn-wiki-shell">
         <aside class="kn-wiki-side">
             <div class="kn-wiki-pane-head"><strong>纪要本与模块</strong><button class="btn btn-sm btn-primary" onclick="createJournalNotebook()">＋纪要本</button></div>
-            <div id="journal-notebook-list"></div>
             <div class="kn-wiki-state-tabs"><button class="kn-wiki-state-tab active" data-journal-status="normal" onclick="setJournalPageStatus('normal')">正常</button><button class="kn-wiki-state-tab" data-journal-status="archived" onclick="openJournalArchiveModal()">归档</button></div>
-            <div id="journal-module-tree"></div>
+            <div id="journal-notebook-list"></div>
         </aside>
         <section class="kn-wiki-main">
             <div class="kn-wiki-toolbar">
@@ -1019,7 +1028,6 @@ async function loadJournalNotebooks() {
     if (!projectId) {
         journalNotebooks = []; journalNotebook = null; journalPage = null;
         $('#journal-notebook-list').innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:.8rem">请先在页面右上角选择项目</div>';
-        $('#journal-module-tree').innerHTML = '';
         $('#journal-add-page').style.display = 'none';
         journalEmpty('选择一个项目查看版本纪要');
         return;
@@ -1030,7 +1038,6 @@ async function loadJournalNotebooks() {
         renderJournalNotebookList();
         if (!journalNotebooks.length) {
             journalNotebook = null; journalPage = null;
-            $('#journal-module-tree').innerHTML = '';
             $('#journal-add-page').style.display = 'none';
             journalEmpty('新建纪要本后即可按模块记录测试过程');
         } else {
@@ -1042,8 +1049,47 @@ async function loadJournalNotebooks() {
 
 function renderJournalNotebookList() {
     $('#journal-notebook-list').innerHTML = journalNotebooks.length
-        ? journalNotebooks.map(row => { const archived=(row.pages||[]).filter(page=>page.archived_at).length; return `<div class="kn-wiki-notebook ${journalNotebook && journalNotebook.id===row.id?'active':''}" onclick="selectJournalNotebook(${row.id})"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.version_name || '未标注版本')} · 正常 ${row.pages.length-archived} · 归档 ${archived} · r${row.version}</small></div>`; }).join('')
+        ? journalNotebooks.map(row => {
+            const pages=row.pages||[];
+            const archived=pages.filter(page=>page.archived_at).length;
+            const active=!!(journalNotebook && journalNotebook.id===row.id);
+            const tree=active ? `<div class="kn-wiki-notebook-pages">${journalNotebookPagesHtml(row)}</div>` : '';
+            return `<div class="kn-wiki-notebook-group"><div class="kn-wiki-notebook ${active?'active':''}" role="button" tabindex="0" aria-expanded="${active}" onclick="selectJournalNotebook(${row.id})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectJournalNotebook(${row.id})}"><div class="kn-wiki-notebook-row"><span class="kn-wiki-notebook-chevron">›</span><div class="kn-wiki-notebook-copy"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.version_name || '未标注版本')} · 正常 ${pages.length-archived} · 归档 ${archived} · r${row.version}</small></div><button class="btn btn-sm btn-danger kn-wiki-notebook-delete" title="删除纪要本" aria-label="删除纪要本 ${escapeHtml(row.title)}" onkeydown="event.stopPropagation()" onclick="deleteJournalNotebook(event,${row.id})">×</button></div></div>${tree}</div>`;
+        }).join('')
         : '<div style="padding:14px;color:var(--text-muted);font-size:.8rem">当前项目还没有版本纪要本</div>';
+}
+
+function journalNotebookPagesHtml(notebook) {
+    const pages = notebook.pages || [];
+    return (notebook.modules || []).map(moduleName => {
+        const rows = pages.filter(page => page.module_name === moduleName &&
+            (journalPageStatus === 'archived' ? !!page.archived_at : !page.archived_at));
+        if (!rows.length) return '';
+        return `<div class="kn-wiki-module">${escapeHtml(moduleName)} · ${rows.length}</div>` +
+            rows.map(page => `<div class="kn-wiki-page-link ${journalPage&&journalPage.id===page.id?'active':''}" onclick="openJournalPage(${page.id})"><span>›</span><span>${escapeHtml(page.title)}</span></div>`).join('');
+    }).join('') || `<div style="padding:10px 12px;color:var(--text-muted);font-size:.74rem">${journalPageStatus === 'archived' ? '暂无归档页面' : '暂无页面'}</div>`;
+}
+
+async function deleteJournalNotebook(event, notebookId) {
+    event.stopPropagation();
+    const target = journalNotebooks.find(row => row.id === notebookId);
+    if (!target) return;
+    const pageCount = (target.pages || []).length;
+    const impact = pageCount
+        ? `其中 ${pageCount} 个页面及其全部历史版本也会永久删除。`
+        : '该纪要本当前没有页面。';
+    if (!await customConfirm(`永久删除纪要本“${target.title}”？${impact}`)) return;
+    if (!await customConfirm(`再次确认：删除后无法恢复，确定删除“${target.title}”？`)) return;
+    try {
+        await API.permanentlyDeleteKnowledgeNotebook(target.id);
+        if (journalNotebook && journalNotebook.id === target.id) {
+            journalNotebook = null;
+            journalPage = null;
+            history.replaceState({}, '', '/knowledge');
+        }
+        await loadJournalNotebooks();
+        showToast(`纪要本已删除${pageCount ? `，同时删除 ${pageCount} 个页面` : ''}`, 'success');
+    } catch (err) { showToast('纪要本删除失败: ' + err.message, 'error'); }
 }
 
 async function selectJournalNotebook(id, skipReloadList=false) {
@@ -1069,14 +1115,7 @@ async function selectJournalNotebook(id, skipReloadList=false) {
 }
 
 function renderJournalModuleTree() {
-    if (!journalNotebook) return;
-    const pages = journalNotebook.pages || [];
-    $('#journal-module-tree').innerHTML = (journalNotebook.modules || []).map(moduleName => {
-        const rows = pages.filter(page => page.module_name === moduleName &&
-            (journalPageStatus === 'archived' ? !!page.archived_at : !page.archived_at));
-        return `<div class="kn-wiki-module">${escapeHtml(moduleName)} · ${rows.length}</div>` +
-            (rows.length ? rows.map(page => `<div class="kn-wiki-page-link ${journalPage&&journalPage.id===page.id?'active':''}" onclick="openJournalPage(${page.id})"><span>›</span><span>${escapeHtml(page.title)}</span></div>`).join('') : '<div style="padding:3px 20px 8px;color:var(--text-muted);font-size:.72rem">暂无页面</div>');
-    }).join('');
+    renderJournalNotebookList();
 }
 
 function journalPagesForCurrentStatus() {

@@ -196,7 +196,9 @@ class WorkflowRunAssignmentBindingTest(unittest.TestCase):
         })
         self.assertEqual('FAILED', outcomes['business'])
         self.assertEqual('PARTIAL', outcomes['automation'])
-        self.assertEqual('COMPLETE', outcomes['evidence'])
+        # Evidence completeness is not a sticky success: a later scoped gap
+        # must remain visible even when another case was complete.
+        self.assertEqual('ANALYSIS_INCOMPLETE', outcomes['evidence'])
         self.assertEqual('PUBLISHED', outcomes['report'])
         self.assertEqual('SENT', outcomes['notification'])
         self.assertEqual('COMPLETED', outcomes['review'])

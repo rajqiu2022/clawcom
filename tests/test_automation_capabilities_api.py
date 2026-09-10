@@ -37,7 +37,15 @@ from flask import Flask  # noqa: E402
 
 from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
-from app.models import AutomationCapability, Project, User  # noqa: E402
+from app.models import (  # noqa: E402
+    AutomationCapability,
+    AutomationCaseCandidate,
+    CapabilityGap,
+    CapabilityGapEvent,
+    EntityRelation,
+    Project,
+    User,
+)
 
 
 class AutomationCapabilitiesApiTest(unittest.TestCase):
@@ -106,6 +114,93 @@ class AutomationCapabilitiesApiTest(unittest.TestCase):
             conflict.get_json()['code'],
             'AUTOMATION_CAPABILITY_VERSION_CONFLICT')
         self.assertEqual(AutomationCapability.query.count(), 1)
+
+    def test_healthy_versioned_capability_auto_resolves_gap_and_requeues(self):
+        gap = CapabilityGap(
+            project_id=self.project.id,
+            gap_key='conditional-driving',
+            title='Conditional driving missing',
+            missing_capabilities_json=['drive.enter_endless'],
+            required_observables_json=['ui.gameplay_ready'],
+            status='in_progress',
+            candidate_requeue_pending=True,
+            version=4,
+        )
+        db.session.add(gap)
+        db.session.flush()
+        candidate = AutomationCaseCandidate(
+            project_id=self.project.id,
+            title='Endless smoke',
+            state='WAITING_CAPABILITY',
+            capability_gap_id=gap.id,
+            qualification_outcome='AUTOMATION_CAPABILITY_GAP',
+            qualification_run_id=572,
+            qualification_evidence_json={'missing': True},
+            dedupe_key='endless-smoke-gap',
+            version=2,
+        )
+        db.session.add(candidate)
+        db.session.commit()
+
+        response = self.client.post('/api/v1/automation-capabilities', json={
+            'project_id': self.project.id,
+            'key': 'racinggo.conditional_driving',
+            'name': 'Conditional driving',
+            'operations': ['drive.enter_endless'],
+            'observables': ['ui.gameplay_ready'],
+            'status': 'available',
+            'implementation_version': 'deepflow-release-667417',
+            'health_checked_at': '2026-09-10T12:00:00+08:00',
+        })
+
+        self.assertEqual(201, response.status_code, response.get_data(as_text=True))
+        self.assertEqual([gap.id], response.get_json()[
+            'auto_requalification']['resolved_gap_ids'])
+        self.assertEqual([candidate.id], response.get_json()[
+            'auto_requalification']['requeued_candidate_ids'])
+        db.session.refresh(gap)
+        db.session.refresh(candidate)
+        self.assertEqual('resolved', gap.status)
+        self.assertFalse(gap.candidate_requeue_pending)
+        self.assertEqual('READY_FOR_CANARY', candidate.state)
+        self.assertIsNone(candidate.qualification_run_id)
+        self.assertEqual({}, candidate.qualification_evidence_json)
+        self.assertEqual(1, CapabilityGapEvent.query.filter_by(
+            capability_gap_id=gap.id,
+            event_type='capability_catalog_auto_resolved').count())
+        relation = EntityRelation.query.filter_by(
+            project_id=self.project.id,
+            from_type='automation_case_candidate',
+            from_id=str(candidate.id),
+            relation_type='unblocked_by',
+            to_type='capability_gap',
+            to_id=str(gap.id),
+        ).one()
+        self.assertEqual(
+            'capability_catalog_auto_resolved',
+            relation.metadata_json['resolution'])
+
+    def test_unhealthy_or_unversioned_capability_does_not_close_gap(self):
+        gap = CapabilityGap(
+            project_id=self.project.id,
+            gap_key='bridge-snapshot',
+            title='Bridge snapshot missing',
+            missing_capabilities_json=['bridge.snapshot'],
+            status='open',
+        )
+        db.session.add(gap)
+        db.session.commit()
+        response = self.client.post('/api/v1/automation-capabilities', json={
+            'project_id': self.project.id,
+            'key': 'bridge.snapshot',
+            'name': 'Bridge snapshot',
+            'status': 'available',
+        })
+        self.assertEqual(201, response.status_code)
+        db.session.refresh(gap)
+        self.assertEqual('open', gap.status)
+        self.assertEqual([], response.get_json()[
+            'auto_requalification']['resolved_gap_ids'])
 
 
 if __name__ == '__main__':

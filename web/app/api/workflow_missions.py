@@ -25,7 +25,11 @@ from app.services.workflow_library_snapshots import (
     freeze_workflow_run_library_snapshot,
     resolve_workflow_library_id,
 )
-from app.services.workflows import build_workflow_start_context
+from app.services.workflows import (
+    build_workflow_start_context,
+    workflow_catalog_metadata,
+    workflow_outcome_requirements,
+)
 
 
 _EXECUTOR_OVERRIDE_FIELDS = frozenset({
@@ -521,6 +525,22 @@ def dispatch_workflow_mission(mission_id):
         'allow_destructive_actions': bool(
             mission.allow_destructive_actions),
     }
+    from app.api.workflows import (
+        _workflow_definition_snapshot_fingerprint,
+        _workflow_execution_input_snapshot,
+    )
+    context['workflow_definition_snapshot'] = (
+        _workflow_definition_snapshot_fingerprint(definition))
+    context['workflow_catalog_snapshot'] = workflow_catalog_metadata(
+        definition.definition_json or {})
+    context['outcome_requirements_snapshot'] = workflow_outcome_requirements(
+        definition.definition_json or {})
+    context['execution_input_snapshot'] = _workflow_execution_input_snapshot(
+        context['workflow_definition_snapshot'],
+        start_vars,
+        raw_context,
+        (definition.definition_json or {}).get('context'),
+    )
     run = WorkflowRun(
         definition_id=definition.id,
         run_name=(str(data.get('run_name') or '').strip()
