@@ -4,6 +4,7 @@ import base64
 import json
 from datetime import datetime, timezone, timedelta
 from app import db
+from sqlalchemy.dialects.mysql import LONGTEXT
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # 使用北京时间（UTC+8）代替 UTC
@@ -953,7 +954,7 @@ class AgentTask(db.Model):
     task_type = db.Column(db.String(50), nullable=False)
     command = db.Column(db.Text)
     target_path = db.Column(db.Text)
-    payload = db.Column(db.Text)
+    payload = db.Column(db.Text().with_variant(LONGTEXT(), 'mysql'))
     task_data = db.Column(db.Text)
     status = db.Column(db.String(20), default='pending', index=True)
     result = db.Column(db.Text)

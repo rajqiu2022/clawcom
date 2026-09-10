@@ -1266,6 +1266,18 @@ def create_app(config_name=None):
                         logger.info(f'requirement_consistency_issues 表创建跳过: {e}')
 
                     # ===== B+ 方案：OpenClaw ↔ Hub 通信稳定化 =====
+                    # Agent Workflow payload may contain UTF-8 workflow context.
+                    # MySQL TEXT silently truncates near 64 KiB and leaves invalid
+                    # JSON, so existing deployments must be widened in place.
+                    try:
+                        conn.execute(text(
+                            "ALTER TABLE agent_tasks "
+                            "MODIFY COLUMN payload LONGTEXT DEFAULT NULL"
+                        ))
+                        logger.info('agent_tasks.payload 已扩展为 LONGTEXT')
+                    except Exception as e:
+                        logger.info(f'agent_tasks.payload 扩展跳过: {e}')
+
                     # 1) openclaw_instances 加 owner_wecom_userid（owner 的企微 ID）
                     try:
                         conn.execute(text(

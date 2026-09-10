@@ -788,6 +788,38 @@ def _workflow_run_create_payload(run, compact=False, idempotent_replay=False):
     }
 
 
+def _workflow_step_result_payload(run, step, compact=False):
+    """Return a bounded commit receipt to authenticated Worker callers."""
+    if not compact:
+        return _run_payload(run, with_steps=True)
+    context = run.context_json if isinstance(run.context_json, dict) else {}
+    definition_snapshot = (
+        context.get('workflow_definition_snapshot')
+        if isinstance(context.get('workflow_definition_snapshot'), dict)
+        else {})
+    definition_version = definition_snapshot.get('version')
+    if definition_version is None and run.definition:
+        definition_version = run.definition.version
+    return {
+        'schema': 'hub.workflow_step_result_receipt@1',
+        'ok': True,
+        'result_accepted': True,
+        'id': run.id,
+        'run_id': run.id,
+        'workflow_run_id': run.id,
+        'status': run.status,
+        'current_step_id': run.current_step_id or '',
+        'definition_version': definition_version,
+        'workflow_definition_version': definition_version,
+        'step': {
+            'step_id': step.step_id,
+            'status': step.status,
+            'attempt_no': int(step.attempt_no or 1),
+        },
+        'readback_url': '/api/v1/workflow-runs/%s' % run.id,
+    }
+
+
 def _parse_workflow_datetime(value, field_name):
     text = str(value or '').strip()
     if not text:
@@ -1349,6 +1381,45 @@ def _workflow_report_payload(data):
     return report if isinstance(report, dict) else {}
 
 
+def _recover_bound_workflow_report_artifact(run, report_id):
+    """Backfill a report link from an already accepted producer result."""
+    report = TestReport.query.get(report_id)
+    if (not report or report.is_deleted or report.project_id != run.project_id
+            or report.status not in ('published', 'revised')):
+        return None
+    content_sha256 = hashlib.sha256(
+        (report.content or '').encode('utf-8')).hexdigest()
+    for producer in run.steps or []:
+        outputs = (
+            producer.outputs_json
+            if isinstance(producer.outputs_json, dict) else {})
+        manifest = outputs.get('workflow_report_manifest')
+        if not isinstance(manifest, dict):
+            continue
+        expected = {
+            'report_id': report.id,
+            'run_id': run.id,
+            'step_id': producer.step_id,
+            'attempt_no': producer.attempt_no or 1,
+            'report_type': report.report_type,
+            'source_ref_type': report.source_ref_type,
+            'source_ref_id': report.source_ref_id,
+            'content_sha256': content_sha256,
+        }
+        if (type(manifest.get('schema_version')) is not int
+                or manifest.get('schema_version') != 1
+                or any(type(manifest.get(key)) is not type(value)
+                       or manifest.get(key) != value
+                       for key, value in expected.items())):
+            continue
+        artifact = _link_workflow_report_artifact(run, producer, report)
+        artifact.metadata_json = dict(
+            artifact.metadata_json or {}, publisher_manifest=expected)
+        db.session.flush()
+        return artifact
+    return None
+
+
 def _record_notification_delivery(run, step, payload):
     """Store the authenticated Worker's existing outbox receipt, not a second queue."""
     if not isinstance(payload, dict):
@@ -1386,6 +1457,9 @@ def _record_notification_delivery(run, step, payload):
     report_artifact = WorkflowArtifact.query.filter_by(
         run_id=run.id, artifact_type='workflow_report',
         test_report_id=payload.get('report_id')).first()
+    if not report_artifact:
+        report_artifact = _recover_bound_workflow_report_artifact(
+            run, payload.get('report_id'))
     report = TestReport.query.get(payload.get('report_id')) if report_artifact else None
     if (not report or report.is_deleted or report.project_id != run.project_id
             or report.status not in ('published', 'revised')):
@@ -4271,7 +4345,8 @@ def report_workflow_step_result(run_id, step_id):
         run.finished_at = None
         run.current_step_id = step.step_id
         run.blocker_json = {}
-        body = _run_payload(run, with_steps=True)
+        body = _workflow_step_result_payload(
+            run, step, compact=bool(claw))
         _workflow_idempotency_store(idem_record, 200, body)
         db.session.commit()
         return jsonify(body)
@@ -4426,7 +4501,8 @@ def report_workflow_step_result(run_id, step_id):
         ingestion=ingestion,
     )
     _recompute_run_status(run, _actor_name())
-    body = _run_payload(run, with_steps=True)
+    body = _workflow_step_result_payload(
+        run, step, compact=bool(claw))
     _workflow_idempotency_store(idem_record, 200, body)
     db.session.commit()
     return jsonify(body)
@@ -4485,6 +4561,14 @@ def retry_workflow_step(run_id, step_id):
         run_id=run_id,
         step_id=step_id,
     ).first_or_404()
+    if step.status not in ('blocked', 'failed'):
+        return jsonify({
+            'error': '只有 blocked/failed Step 可以重试',
+            'code': 'WORKFLOW_STEP_NOT_RETRYABLE',
+            'status': step.status,
+        }), 409
+    _expire_workflow_agent_tasks_for_step(
+        run_id, step_id, reason='workflow_step_retried')
     _expire_step_blocked_todos(run_id, step_id)
     step.status = 'pending'
     step.summary = ''
@@ -4535,6 +4619,8 @@ def resume_workflow_run(run_id):
             if step.step_id == from_step:
                 reset = True
             if reset:
+                _expire_workflow_agent_tasks_for_step(
+                    run.id, step.step_id, reason='workflow_run_resumed')
                 _expire_step_blocked_todos(run.id, step.step_id)
                 step.status = 'pending'
                 step.summary = ''

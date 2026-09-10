@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -671,6 +672,32 @@ class WorkflowServiceTest(unittest.TestCase):
         self.assertEqual(payload['outputs']['editor_report']['report_id'], 123)
         self.assertIn('/api/v1/workflow-runs/7/steps/analyze_report/result',
                       payload['result_api'])
+
+    def test_build_agent_task_payload_only_includes_referenced_outputs(self):
+        payload = workflows.build_workflow_agent_task_payload(
+            run={'id': 570, 'workflow_definition_version': 16, 'context': {}},
+            step={
+                'step_id': 'notify_owner_report_conclusion',
+                'config': {
+                    'depends_on': ['publish_discovery_report'],
+                    'prompt': (
+                        'Notify manifest '
+                        '{steps.publish_discovery_manifest.outputs.manifest_id}'
+                    ),
+                },
+            },
+            outputs={
+                'discover_modules_and_risks': {'large': 'x' * (128 * 1024)},
+                'publish_discovery_manifest': {'manifest_id': 3},
+                'publish_discovery_report': {'hub_report_id': 600},
+            },
+        )
+
+        self.assertEqual(
+            {'publish_discovery_manifest', 'publish_discovery_report'},
+            set(payload['outputs']),
+        )
+        self.assertLess(len(json.dumps(payload)), 16 * 1024)
 
     def test_build_agent_task_payload_includes_outbox_delivery_contract(self):
         policy = {
