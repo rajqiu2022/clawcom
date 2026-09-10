@@ -2,6 +2,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 _WEB = Path(__file__).resolve().parents[1] / 'web'
@@ -37,6 +38,7 @@ from flask import Flask  # noqa: E402
 
 from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
+from app.api import workflows as workflows_api  # noqa: E402
 from app.models import (  # noqa: E402
     AuditLog,
     ClawTodo,
@@ -323,6 +325,84 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
         self.assertEqual(1, AuditLog.query.filter_by(
             resource_type='workflow_run', resource_id=run_id,
             action='restart_rejected').count())
+
+    def test_fatal_runtime_result_skips_business_chain_and_runs_cleanup(self):
+        definition_json = {
+            'key': 'fatal-dependency-flow',
+            'name': 'Fatal dependency flow',
+            'steps': [
+                {
+                    'id': 'runtime', 'name': 'Runtime',
+                    'type': 'worker_task', 'depends_on': [],
+                    'inputs': {'advance_policy': 'advance_on_any_result'},
+                },
+                {
+                    'id': 'precheck', 'name': 'Precheck',
+                    'type': 'agent_task', 'depends_on': ['runtime'],
+                    'inputs': {'advance_policy': 'advance_on_any_result'},
+                },
+                {
+                    'id': 'business', 'name': 'Business',
+                    'type': 'agent_task', 'depends_on': ['precheck'],
+                },
+                {
+                    'id': 'cleanup', 'name': 'Cleanup',
+                    'type': 'worker_task',
+                    'depends_on': ['runtime', 'business'],
+                    'run_even_if_upstream_blocked': True,
+                },
+            ],
+        }
+        self.definition.definition_json = definition_json
+        run = WorkflowRun(
+            definition_id=self.definition.id,
+            project_id=self.project.id,
+            run_name='Fatal runtime canary',
+            status='running',
+            context_json={},
+        )
+        db.session.add(run)
+        db.session.flush()
+        for position, config in enumerate(definition_json['steps']):
+            step = WorkflowRunStep(
+                run_id=run.id,
+                step_id=config['id'],
+                position=position,
+                name=config['name'],
+                step_type=config['type'],
+                status='pending',
+                depends_on_json=config.get('depends_on') or [],
+                step_config_json=config,
+            )
+            db.session.add(step)
+        db.session.flush()
+        runtime = WorkflowRunStep.query.filter_by(
+            run_id=run.id, step_id='runtime').one()
+        runtime.status = 'blocked'
+        runtime.summary = 'Runner 未启动'
+        runtime.blocker_json = {
+            'code': 'RUNNER_NOT_STARTED',
+            'message': 'DeepFlow journal operation key is invalid',
+        }
+        runtime.outputs_json = {
+            'runner_execution': {'state': 'not_started'},
+        }
+
+        with patch.object(workflows_api, '_dispatch_step_message') as dispatch:
+            workflows_api._recompute_run_status(run, actor='test')
+
+        rows = {row.step_id: row for row in WorkflowRunStep.query.filter_by(
+            run_id=run.id).all()}
+        self.assertEqual(rows['precheck'].status, 'skipped')
+        self.assertEqual(rows['business'].status, 'skipped')
+        self.assertEqual(
+            rows['precheck'].branch_result_json[
+                'dependency_failure_propagation']['code'],
+            'UPSTREAM_DEPENDENCY_BLOCKED')
+        self.assertEqual(rows['cleanup'].status, 'running')
+        self.assertEqual(run.status, 'running')
+        self.assertEqual(run.current_step_id, 'cleanup')
+        dispatch.assert_called_once_with(rows['cleanup'])
 
     def test_step_retry_clears_previous_attempt_display_state(self):
         self.definition.definition_json = {

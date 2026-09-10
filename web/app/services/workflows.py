@@ -50,6 +50,7 @@ GATE_ON_FAIL_POLICIES = STEP_STATUSES | {'warn'}
 
 TERMINAL_STEP_STATUSES = {'passed', 'skipped'}
 TERMINAL_RESULT_STEP_STATUSES = TERMINAL_STEP_STATUSES | {'blocked', 'failed'}
+PROPAGATED_UPSTREAM_BLOCKED = 'upstream_blocked'
 WORKER_RESULT_STATUSES = {'passed', 'failed', 'blocked', 'skipped'}
 WORKFLOW_OUTCOME_VALUES = {
     'business': {'PASSED', 'FAILED', 'INCONCLUSIVE', 'NOT_EXECUTED'},
@@ -1106,6 +1107,14 @@ def normalize_step(step, idx):
     if 'run_even_if_upstream_blocked' in step:
         normalized['run_even_if_upstream_blocked'] = (
             step.get('run_even_if_upstream_blocked') is True)
+    if 'dependency_failure_policy' in step:
+        dependency_policy = str(
+            step.get('dependency_failure_policy') or '').strip().lower()
+        if dependency_policy not in ('fatal', 'continue'):
+            raise ValueError(
+                f'steps[{idx}].dependency_failure_policy: '
+                'expected fatal/continue')
+        normalized['dependency_failure_policy'] = dependency_policy
     if 'assignment_role' in step:
         assignment_role = str(step.get('assignment_role') or '').strip()
         if assignment_role not in ('executor', 'reviewer'):
@@ -1845,7 +1854,7 @@ def initial_step_status(step):
     return 'waiting_approval' if step.get('approval_required') else 'pending'
 
 
-def ready_step_ids(definition, step_states):
+def ready_step_ids(definition, step_states, strict_result_step_ids=None):
     """Return pending steps whose dependency-result policies are satisfied.
 
     Normal edges remain fail-closed and only accept ``passed``/``skipped``.
@@ -1857,16 +1866,53 @@ def ready_step_ids(definition, step_states):
     step_by_id = {
         step.get('id'): step for step in steps if isinstance(step, dict)
     }
+    strict_result_step_ids = set(strict_result_step_ids or ())
     ready = []
     for step in steps:
         if step_states.get(step['id'], 'pending') != 'pending':
             continue
         deps = step.get('depends_on') or []
         if all(_workflow_dependency_satisfied(
-                step_by_id.get(dep) or {}, step, step_states.get(dep))
+                step_by_id.get(dep) or {}, step, step_states.get(dep),
+                require_downstream_opt_in=(dep in strict_result_step_ids))
                for dep in deps):
             ready.append(step['id'])
     return ready
+
+
+def blocked_dependency_ids(definition, step_states, strict_result_step_ids=None):
+    """Return pending steps made unreachable by terminal dependency failures.
+
+    A fatal or propagated upstream result requires the downstream step to opt in
+    explicitly. This lets Hub skip an unsafe business chain while still running
+    cleanup and failure-report finalizers that declare
+    ``run_even_if_upstream_blocked``.
+    """
+    steps = definition.get('steps') or []
+    step_by_id = {
+        step.get('id'): step for step in steps if isinstance(step, dict)
+    }
+    strict_result_step_ids = set(strict_result_step_ids or ())
+    blocked = {}
+    for step in steps:
+        step_id = step.get('id')
+        if not step_id or step_states.get(step_id, 'pending') != 'pending':
+            continue
+        failed_dependencies = []
+        for dependency_id in step.get('depends_on') or []:
+            status = step_states.get(dependency_id)
+            if status not in (
+                    'blocked', 'failed', PROPAGATED_UPSTREAM_BLOCKED):
+                continue
+            if not _workflow_dependency_satisfied(
+                    step_by_id.get(dependency_id) or {}, step, status,
+                    require_downstream_opt_in=(
+                        dependency_id in strict_result_step_ids
+                        or status == PROPAGATED_UPSTREAM_BLOCKED)):
+                failed_dependencies.append(dependency_id)
+        if failed_dependencies:
+            blocked[step_id] = failed_dependencies
+    return blocked
 
 
 def _workflow_policy_inputs(step):
@@ -1900,11 +1946,17 @@ def step_runs_if_upstream_blocked(step):
         'run_even_if_upstream_blocked') is True
 
 
-def _workflow_dependency_satisfied(upstream, downstream, upstream_status):
+def _workflow_dependency_satisfied(
+        upstream, downstream, upstream_status,
+        require_downstream_opt_in=False):
+    if upstream_status == PROPAGATED_UPSTREAM_BLOCKED:
+        return step_runs_if_upstream_blocked(downstream)
     if upstream_status in TERMINAL_STEP_STATUSES:
         return True
     if upstream_status not in TERMINAL_RESULT_STEP_STATUSES:
         return False
+    if require_downstream_opt_in:
+        return step_runs_if_upstream_blocked(downstream)
     return (
         step_advances_on_any_result(upstream)
         or step_runs_if_upstream_blocked(downstream)
@@ -2161,7 +2213,18 @@ def _find_output_value(outputs, key):
     return found
 
 
-def evaluate_notification_authorization(outputs, report_readback=False):
+def _notification_policy_snapshot(notification_policy):
+    policy = notification_policy if isinstance(notification_policy, dict) else {}
+    return {
+        'strict_silent': policy.get('strict_silent') is True,
+        'notification_required': policy.get('notification_required') is True,
+        'no_external_notification': policy.get('no_external_notification') is True,
+        'version': str(policy.get('version') or '').strip(),
+    }
+
+
+def evaluate_notification_authorization(
+        outputs, report_readback=False, notification_policy=None):
     """Platform hard gate for brokered Workflow group notifications."""
     outputs = outputs if isinstance(outputs, dict) else {}
     checks = {
@@ -2174,24 +2237,38 @@ def evaluate_notification_authorization(outputs, report_readback=False):
         'share_url': bool(str(_find_output_value(outputs, 'share_url') or '').strip()),
         'report_readback': bool(report_readback),
     }
-    allowed = all(checks.values())
+    policy = _notification_policy_snapshot(notification_policy)
+    strict_silent = (
+        policy['strict_silent']
+        and not policy['notification_required']
+    )
+    allowed = all(checks.values()) and not strict_silent
+    skip_reason_code = (
+        (policy['version'] or 'notification_policy_strict_silent')
+        if strict_silent else 'business_pass_or_automation_only'
+    )
     return {
         'allowed': allowed,
         'checks': checks,
+        'notification_policy': policy,
+        'strict_silent': strict_silent,
         'notification_skipped': not allowed,
         'wecom_sent': False,
-        'skip_reason': '' if allowed else 'business_pass_or_automation_only',
+        'skip_reason': '' if allowed else skip_reason_code,
+        'skip_reason_code': '' if allowed else skip_reason_code,
     }
 
 
-def validate_notification_result_contract(result, authorization, sent_audit=False):
+def validate_notification_result_contract(
+        result, authorization, sent_audit=False, notification_policy=None):
     """Reject notification claims that were not authorized and audited by Hub."""
     result = result if isinstance(result, dict) else {}
     authorization = authorization if isinstance(authorization, dict) else {}
     metrics = result.get('metrics') if isinstance(result.get('metrics'), dict) else {}
     outputs = result.get('outputs') if isinstance(result.get('outputs'), dict) else {}
     claim_keys = {
-        'notification_skipped', 'wecom_sent', 'skip_reason', 'wecom_log_id',
+        'notification_skipped', 'wecom_sent', 'skip_reason',
+        'skip_reason_code', 'skip_reason_detail', 'wecom_log_id',
     }
     has_claim = any(
         _contract_path_exists(section, key)
@@ -2220,7 +2297,27 @@ def validate_notification_result_contract(result, authorization, sent_audit=Fals
         for section in (outputs, metrics)
         if _find_output_value(section, 'skip_reason') is not None
     ), '')
+    explicit_reason_code = next((
+        str(_find_output_value(section, 'skip_reason_code') or '').strip()
+        for section in (outputs, metrics)
+        if _find_output_value(section, 'skip_reason_code') is not None
+    ), '')
+    explicit_reason_detail = next((
+        str(_find_output_value(section, 'skip_reason_detail') or '').strip()
+        for section in (outputs, metrics)
+        if _find_output_value(section, 'skip_reason_detail') is not None
+    ), '')
     allowed = authorization.get('allowed') is True
+    policy = _notification_policy_snapshot(
+        notification_policy or authorization.get('notification_policy'))
+    strict_silent = (
+        authorization.get('strict_silent') is True
+        or (policy['strict_silent'] and not policy['notification_required'])
+    )
+    expected_reason_code = (
+        (policy['version'] or 'notification_policy_strict_silent')
+        if strict_silent else 'business_pass_or_automation_only'
+    )
     violations = []
     if claimed_sent and not allowed:
         violations.append('notification_not_authorized')
@@ -2230,8 +2327,17 @@ def validate_notification_result_contract(result, authorization, sent_audit=Fals
         violations.append('authorized_notification_not_sent')
     if not allowed and claimed_skipped is not True:
         violations.append('notification_skipped_must_be_true')
-    if not allowed and skip_reason != 'business_pass_or_automation_only':
-        violations.append('skip_reason_invalid')
+    if not allowed:
+        if strict_silent:
+            # The frozen policy is the authorization fact. Human-readable text
+            # may evolve without turning a legitimate no-send into a blocker.
+            # A structured code, when supplied, must still match that policy.
+            if explicit_reason_code and explicit_reason_code != expected_reason_code:
+                violations.append('skip_reason_invalid')
+        elif skip_reason != expected_reason_code:
+            violations.append('skip_reason_invalid')
+
+    reason_detail = explicit_reason_detail or skip_reason
 
     return {
         'valid': not violations,
@@ -2243,6 +2349,9 @@ def validate_notification_result_contract(result, authorization, sent_audit=Fals
         'claimed_sent': claimed_sent,
         'claimed_skipped': claimed_skipped,
         'skip_reason': skip_reason,
+        'skip_reason_code': expected_reason_code if not allowed else '',
+        'skip_reason_detail': reason_detail if not allowed else '',
+        'strict_silent': strict_silent,
         'violations': violations,
     }
 

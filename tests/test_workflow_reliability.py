@@ -149,6 +149,80 @@ class WorkflowReliabilityTest(unittest.TestCase):
         artifact = WorkflowArtifact.query.filter_by(artifact_type='workflow_report').one()
         self.assertEqual(artifact.metadata_json['publisher_manifest']['report_id'], report.id)
 
+    def test_worker_output_report_fields_bind_standard_artifact(self):
+        report = self._report()
+        manifest = self._manifest(report)
+
+        response = self._post('agent_step', 'result', {
+            'status': 'passed',
+            'outputs': {
+                'hub_report_id': report.id,
+                'test_report_id': report.id,
+                'workflow_report_manifest': manifest,
+            },
+        })
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        artifact = WorkflowArtifact.query.filter_by(
+            run_id=self.run.id,
+            step_id=self.agent_step.step_id,
+            artifact_type='workflow_report',
+            test_report_id=report.id,
+        ).one()
+        self.assertEqual(
+            artifact.metadata_json['publisher_manifest']['content_sha256'],
+            manifest['content_sha256'])
+
+    def test_conflicting_top_level_and_output_report_fields_are_rejected(self):
+        report = self._report()
+
+        response = self._post('agent_step', 'result', {
+            'status': 'passed',
+            'test_report_id': report.id,
+            'workflow_report_manifest': self._manifest(report),
+            'outputs': {'test_report_id': report.id + 1},
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('冲突', response.get_json()['error'])
+        self.assertEqual(WorkflowArtifact.query.count(), 0)
+
+    def test_strict_silent_result_keeps_policy_reason_and_passes_contract(self):
+        self.agent_step.step_config_json = {
+            'outputs': [
+                'notification_required', 'notification_skipped',
+                'skip_reason', 'wecom_sent',
+            ],
+            'inputs': {'notification_policy': {
+                'strict_silent': True,
+                'notification_required': False,
+                'no_external_notification': True,
+                'version': 'runner-silent-acceptance-v1',
+            }},
+        }
+        db.session.commit()
+
+        response = self._post('agent_step', 'result', {
+            'status': 'passed',
+            'outputs': {
+                'notification_required': False,
+                'notification_skipped': True,
+                'wecom_sent': False,
+                'skip_reason': (
+                    'runner-silent-acceptance-v1：外部通知、Owner 消息和群消息均禁用'),
+            },
+        })
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.agent_step.status, 'passed')
+        notification = self.agent_step.contract_result_json['notification']
+        self.assertTrue(notification['valid'])
+        self.assertEqual(
+            self.agent_step.outputs_json['skip_reason_code'],
+            'runner-silent-acceptance-v1')
+        self.assertIn(
+            '外部通知', self.agent_step.outputs_json['skip_reason_detail'])
+
     def test_publisher_changed_content_rejects_stale_manifest(self):
         report = self._report()
         manifest = self._manifest(report)

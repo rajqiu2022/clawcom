@@ -602,6 +602,87 @@ class WorkflowServiceTest(unittest.TestCase):
         self.assertEqual(workflows.ready_step_ids(
             definition, {'cleanup': 'blocked', 'analysis': 'pending'}), [])
 
+    def test_fatal_upstream_requires_downstream_opt_in_even_with_advance_policy(self):
+        definition = workflows.normalize_workflow_definition({
+            'key': 'fatal_runtime_then_report',
+            'name': 'Fatal runtime then report',
+            'steps': [
+                {
+                    'id': 'runtime_bootstrap',
+                    'name': 'Runtime bootstrap',
+                    'inputs': {'advance_policy': 'advance_on_any_result'},
+                },
+                {
+                    'id': 'business',
+                    'name': 'Business',
+                    'depends_on': ['runtime_bootstrap'],
+                },
+                {
+                    'id': 'cleanup',
+                    'name': 'Cleanup',
+                    'depends_on': ['runtime_bootstrap'],
+                    'run_even_if_upstream_blocked': True,
+                },
+            ],
+        })
+        states = {
+            'runtime_bootstrap': 'blocked',
+            'business': 'pending',
+            'cleanup': 'pending',
+        }
+
+        self.assertEqual(
+            workflows.blocked_dependency_ids(
+                definition, states,
+                strict_result_step_ids={'runtime_bootstrap'}),
+            {'business': ['runtime_bootstrap']},
+        )
+        self.assertEqual(
+            workflows.ready_step_ids(
+                definition, states,
+                strict_result_step_ids={'runtime_bootstrap'}),
+            ['cleanup'],
+        )
+
+    def test_propagated_upstream_skip_does_not_release_business_chain(self):
+        definition = workflows.normalize_workflow_definition({
+            'key': 'propagated_runtime_failure',
+            'name': 'Propagated runtime failure',
+            'steps': [
+                {'id': 'runtime', 'name': 'Runtime'},
+                {
+                    'id': 'precheck',
+                    'name': 'Precheck',
+                    'depends_on': ['runtime'],
+                    'inputs': {'advance_policy': 'advance_on_any_result'},
+                },
+                {
+                    'id': 'business',
+                    'name': 'Business',
+                    'depends_on': ['precheck'],
+                },
+                {
+                    'id': 'report',
+                    'name': 'Report',
+                    'depends_on': ['precheck'],
+                    'run_even_if_upstream_blocked': True,
+                },
+            ],
+        })
+        states = {
+            'runtime': 'blocked',
+            'precheck': workflows.PROPAGATED_UPSTREAM_BLOCKED,
+            'business': 'pending',
+            'report': 'pending',
+        }
+
+        self.assertEqual(
+            workflows.blocked_dependency_ids(definition, states),
+            {'business': ['precheck']},
+        )
+        self.assertEqual(
+            workflows.ready_step_ids(definition, states), ['report'])
+
     def test_normalize_step_preserves_top_level_result_policies(self):
         step = workflows.normalize_step({
             'id': 'analysis',
@@ -609,11 +690,13 @@ class WorkflowServiceTest(unittest.TestCase):
             'advance_policy': 'advance_on_any_result',
             'advance_on_any_result': True,
             'run_even_if_upstream_blocked': True,
+            'dependency_failure_policy': 'fatal',
         }, 0)
 
         self.assertEqual(step['advance_policy'], 'advance_on_any_result')
         self.assertTrue(step['advance_on_any_result'])
         self.assertTrue(step['run_even_if_upstream_blocked'])
+        self.assertEqual(step['dependency_failure_policy'], 'fatal')
 
     def test_update_definition_patch_preserves_key_and_replaces_steps(self):
         existing = workflows.normalize_workflow_definition({
@@ -966,6 +1049,61 @@ class WorkflowServiceTest(unittest.TestCase):
         self.assertTrue(allowed['allowed'])
         self.assertFalse(denied['allowed'])
         self.assertEqual(denied['skip_reason'], 'business_pass_or_automation_only')
+
+    def test_strict_silent_policy_accepts_descriptive_reason_without_authorizing_send(self):
+        policy = {
+            'strict_silent': True,
+            'notification_required': False,
+            'no_external_notification': True,
+            'version': 'runner-silent-acceptance-v1',
+        }
+        authorization = workflows.evaluate_notification_authorization(
+            {
+                'business_failure_confirmed': True,
+                'notification_required': True,
+                'report_required': True,
+                'hub_report_id': 606,
+                'share_url': '/r/report',
+            },
+            report_readback=True,
+            notification_policy=policy,
+        )
+        result = {'outputs': {
+            'notification_required': False,
+            'notification_skipped': True,
+            'wecom_sent': False,
+            'skip_reason': (
+                'runner-silent-acceptance-v1：外部通知、Owner 消息和群消息均禁用'),
+        }}
+
+        contract = workflows.validate_notification_result_contract(
+            result, authorization, sent_audit=False,
+            notification_policy=policy)
+
+        self.assertFalse(authorization['allowed'])
+        self.assertTrue(contract['valid'])
+        self.assertEqual(
+            contract['skip_reason_code'], 'runner-silent-acceptance-v1')
+        self.assertIn('外部通知', contract['skip_reason_detail'])
+
+    def test_strict_silent_policy_still_rejects_a_send_claim(self):
+        policy = {
+            'strict_silent': True,
+            'notification_required': False,
+            'version': 'runner-silent-acceptance-v1',
+        }
+        authorization = workflows.evaluate_notification_authorization(
+            {}, notification_policy=policy)
+        contract = workflows.validate_notification_result_contract({
+            'outputs': {
+                'notification_skipped': False,
+                'wecom_sent': True,
+                'skip_reason_code': 'runner-silent-acceptance-v1',
+            },
+        }, authorization, sent_audit=True, notification_policy=policy)
+
+        self.assertFalse(contract['valid'])
+        self.assertIn('notification_not_authorized', contract['violations'])
 
     def test_gate_supports_comparing_two_metric_paths(self):
         step = {'id': 'push_and_build', 'gates': [

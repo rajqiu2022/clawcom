@@ -77,6 +77,7 @@ from app.services.workflows import (
     collect_declared_step_outputs,
     validate_step_result_contract,
     merge_workflow_definition_update,
+    blocked_dependency_ids,
     normalize_step_lease_seconds,
     normalize_executor_acl,
     normalize_editor_acl,
@@ -94,6 +95,7 @@ from app.services.workflows import (
     workflow_catalog_metadata,
     workflow_outcome_requirements,
     workflow_step_display_state,
+    PROPAGATED_UPSTREAM_BLOCKED,
 )
 from app.services.workflow_result_ingestion import (
     cleanup_workflow_result_records,
@@ -1381,6 +1383,71 @@ def _workflow_report_payload(data):
     return report if isinstance(report, dict) else {}
 
 
+def _workflow_report_binding_fields(data):
+    """Resolve report transport fields from both supported Worker shapes.
+
+    Current Workers project Publisher fields to the top level before submit.
+    Older accepted results, including Run #580, stored the same signed facts
+    only under ``outputs``. Treat both as transport aliases, but fail closed on
+    any disagreement.
+    """
+    data = data if isinstance(data, dict) else {}
+    outputs = data.get('outputs') if isinstance(data.get('outputs'), dict) else {}
+    report_payload = _workflow_report_payload(data)
+    raw_ids = []
+    for container, keys in (
+            (data, ('test_report_id', 'workflow_report_id')),
+            (report_payload, ('id', 'test_report_id')),
+            (outputs, ('test_report_id', 'workflow_report_id', 'hub_report_id'))):
+        for key in keys:
+            value = container.get(key)
+            if value in (None, ''):
+                continue
+            if isinstance(value, bool):
+                return None, None, 'test_report_id 必须是整数'
+            try:
+                report_id = int(value)
+            except (TypeError, ValueError):
+                return None, None, 'test_report_id 必须是整数'
+            if report_id <= 0:
+                return None, None, 'test_report_id 必须是正整数'
+            raw_ids.append(report_id)
+    if len(set(raw_ids)) > 1:
+        return None, None, '顶层与 outputs 中的 test_report_id 冲突'
+
+    manifests = [
+        value for value in (
+            data.get('workflow_report_manifest'),
+            outputs.get('workflow_report_manifest'),
+        ) if value is not None
+    ]
+    if len(manifests) > 1 and any(
+            value != manifests[0] for value in manifests[1:]):
+        return None, None, '顶层与 outputs 中的 workflow_report_manifest 冲突'
+    return (raw_ids[0] if raw_ids else None,
+            manifests[0] if manifests else None, '')
+
+
+def _workflow_step_notification_policy(step):
+    """Read the immutable notification policy from the Run step snapshot."""
+    config = step.step_config_json if isinstance(
+        step.step_config_json, dict) else {}
+    inputs = config.get('inputs') if isinstance(config.get('inputs'), dict) else {}
+    configured = (
+        config.get('notification_policy')
+        if isinstance(config.get('notification_policy'), dict)
+        else inputs.get('notification_policy'))
+    policy = dict(configured) if isinstance(configured, dict) else {}
+    for key in (
+            'strict_silent', 'notification_required',
+            'no_external_notification', 'version'):
+        if key in config and key not in policy:
+            policy[key] = config[key]
+        elif key in inputs and key not in policy:
+            policy[key] = inputs[key]
+    return policy
+
+
 def _recover_bound_workflow_report_artifact(run, report_id):
     """Backfill a report link from an already accepted producer result."""
     report = TestReport.query.get(report_id)
@@ -1580,22 +1647,19 @@ def _report_submitter_fields():
 def _resolve_workflow_report(run, step, data):
     """Create or bind a workflow report for a step result, if requested."""
     report_payload = _workflow_report_payload(data)
-    raw_report_id = (
-        data.get('test_report_id') or data.get('workflow_report_id') or
-        report_payload.get('id') or report_payload.get('test_report_id')
-    )
+    raw_report_id, submitted_manifest, binding_error = (
+        _workflow_report_binding_fields(data))
+    if binding_error:
+        return None, binding_error
     report = None
     if raw_report_id not in (None, ''):
-        try:
-            report = TestReport.query.get(int(raw_report_id))
-        except (TypeError, ValueError):
-            return None, 'test_report_id 必须是整数'
+        report = TestReport.query.get(raw_report_id)
         if not report or report.is_deleted:
             return None, 'Workflow 报告不存在'
         if report.project_id != run.project_id:
             return None, 'Workflow 报告必须属于当前 Run 项目'
         if report.report_type != 'workflow':
-            manifest = data.get('workflow_report_manifest')
+            manifest = submitted_manifest
             if (not isinstance(manifest, dict) or type(manifest.get('schema_version')) is not int
                     or manifest['schema_version'] != 1):
                 return None, 'Publisher 报告需要 workflow_report_manifest v1'
@@ -2726,11 +2790,119 @@ def _run_definition_snapshot(run, steps):
     return {'steps': snapshot_steps}
 
 
+_FATAL_WORKFLOW_DEPENDENCY_CODES = {
+    'RUNNER_NOT_STARTED',
+    'RUNNER_START_FAILED',
+    'UPSTREAM_RUNTIME_NOT_READY',
+    'WORKFLOW_START_BINDING_REQUIRED',
+    'TRUSTED_START_BINDING_REQUIRED',
+    'WORKER_BINDING_REQUIRED',
+    'RUNTIME_NOT_READY',
+}
+
+
+def _step_has_fatal_dependency_result(step):
+    """Identify infrastructure results that make business descendants unsafe."""
+    if step.status not in ('blocked', 'failed'):
+        return False
+    config = step.step_config_json if isinstance(
+        step.step_config_json, dict) else {}
+    inputs = config.get('inputs') if isinstance(config.get('inputs'), dict) else {}
+    policy = str(
+        config.get('dependency_failure_policy')
+        or inputs.get('dependency_failure_policy') or '').strip().lower()
+    if policy == 'continue':
+        return False
+    if policy == 'fatal':
+        return True
+
+    blocker = step.blocker_json if isinstance(step.blocker_json, dict) else {}
+    contract = step.contract_result_json if isinstance(
+        step.contract_result_json, dict) else {}
+    outputs = step.outputs_json if isinstance(step.outputs_json, dict) else {}
+    evidence = step.evidence_json if isinstance(step.evidence_json, dict) else {}
+    stack = [blocker, contract, outputs, evidence]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, list):
+            stack.extend(value)
+            continue
+        if not isinstance(value, dict):
+            continue
+        for key in ('code', 'blocker_code', 'error_code'):
+            code = str(value.get(key) or '').strip().upper()
+            if code in _FATAL_WORKFLOW_DEPENDENCY_CODES:
+                return True
+        runner_execution = value.get('runner_execution')
+        if isinstance(runner_execution, dict):
+            state = str(
+                runner_execution.get('state')
+                or runner_execution.get('status') or '').strip().lower()
+            if state in ('not_started', 'start_failed', 'unavailable'):
+                return True
+        stack.extend(value.values())
+    return False
+
+
+def _propagate_fatal_workflow_dependencies(run, steps, definition, state):
+    """Skip unsafe descendants while retaining explicit cleanup/report paths."""
+    strict_result_ids = {
+        step.step_id for step in steps
+        if _step_has_fatal_dependency_result(step)
+    }
+    for step in steps:
+        branch = (
+            step.branch_result_json
+            if isinstance(step.branch_result_json, dict) else {})
+        if isinstance(branch.get('dependency_failure_propagation'), dict):
+            state[step.step_id] = PROPAGATED_UPSTREAM_BLOCKED
+
+    step_by_id = {step.step_id: step for step in steps}
+    while True:
+        blocked = blocked_dependency_ids(
+            definition, state,
+            strict_result_step_ids=strict_result_ids)
+        if not blocked:
+            break
+        now = datetime.now()
+        for step_id, dependency_ids in blocked.items():
+            step = step_by_id.get(step_id)
+            if not step or step.status != 'pending':
+                continue
+            propagation = {
+                'code': 'UPSTREAM_DEPENDENCY_BLOCKED',
+                'upstream_step_ids': list(dependency_ids),
+            }
+            step.status = 'skipped'
+            step.summary = '上游必要步骤未通过，未启动本节点'
+            step.outputs_json = {
+                'execution_skipped': True,
+                'skip_reason_code': 'UPSTREAM_DEPENDENCY_BLOCKED',
+                'upstream_step_ids': list(dependency_ids),
+            }
+            step.branch_result_json = {
+                'dependency_failure_propagation': propagation,
+            }
+            step.finished_at = now
+            step.updated_by = 'workflow-dependency-gate'
+            step.health_status = 'idle'
+            step.health_checked_at = now
+            step.progress_at = now
+            step.progress_by = 'workflow-dependency-gate'
+            step.progress_phase = 'skipped'
+            step.progress_message = step.summary
+            step.progress_percent = 100
+            state[step_id] = PROPAGATED_UPSTREAM_BLOCKED
+    return strict_result_ids
+
+
 def _recompute_run_status(run, actor='system'):
     """Advance pending steps whose dependencies are satisfied."""
     steps = WorkflowRunStep.query.filter_by(run_id=run.id).all()
     state = {s.step_id: s.status for s in steps}
     definition = _run_definition_snapshot(run, steps)
+    strict_result_ids = _propagate_fatal_workflow_dependencies(
+        run, steps, definition, state)
 
     for notification_step in steps:
         if (notification_step.step_type != 'notification'
@@ -2766,7 +2938,9 @@ def _recompute_run_status(run, actor='system'):
         _recompute_run_status(run, actor)
         return
 
-    ready_ids = ready_step_ids(definition, state)
+    ready_ids = ready_step_ids(
+        definition, state,
+        strict_result_step_ids=strict_result_ids)
     # A blocked/failed node is terminal for the Run only after explicitly
     # permitted downstream work has drained. This lets safety cleanup retain
     # its real failure result while analysis/reporting still collects evidence.
@@ -4388,13 +4562,28 @@ def report_workflow_step_result(run_id, step_id):
         run, step, dict(step.outputs_json or {}, **(step.metrics_json or {})))
     notification_report = _verified_notification_report(
         run, notification_outputs)
+    notification_policy = _workflow_step_notification_policy(step)
     notification_authorization = evaluate_notification_authorization(
-        notification_outputs, report_readback=bool(notification_report))
+        notification_outputs,
+        report_readback=bool(notification_report),
+        notification_policy=notification_policy)
     notification_contract = validate_notification_result_contract({
         'metrics': step.metrics_json or {},
         'outputs': step.outputs_json or {},
     }, notification_authorization, sent_audit=_notification_send_audited(
-        run.id, step.step_id))
+        run.id, step.step_id), notification_policy=notification_policy)
+    if (notification_authorization.get('strict_silent')
+            and not notification_authorization.get('allowed')):
+        canonical_outputs = dict(step.outputs_json or {})
+        canonical_outputs.setdefault(
+            'skip_reason_code',
+            notification_contract.get('skip_reason_code') or
+            notification_authorization.get('skip_reason_code'))
+        if notification_contract.get('skip_reason_detail'):
+            canonical_outputs.setdefault(
+                'skip_reason_detail',
+                notification_contract['skip_reason_detail'])
+        step.outputs_json = canonical_outputs
     contract['notification'] = notification_contract
     if not notification_contract['valid']:
         contract.update({
