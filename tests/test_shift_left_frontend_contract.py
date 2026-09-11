@@ -5,11 +5,19 @@ from pathlib import Path
 class ShiftLeftFrontendContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        templates = Path(__file__).resolve().parents[1] / 'web' / 'templates'
+        web = Path(__file__).resolve().parents[1] / 'web'
+        templates = web / 'templates'
         cls.reports = (templates / 'test_reports.html').read_text(encoding='utf-8')
         cls.topic = (templates / 'topic_detail.html').read_text(encoding='utf-8')
         cls.handoff = (templates / 'developer_ai_collaborate.html').read_text(
             encoding='utf-8')
+        cls.api_js = (web / 'static' / 'js' / 'api.js').read_text(
+            encoding='utf-8')
+
+    def test_report_project_id_filter_has_loaded_global_helper(self):
+        self.assertIn('initProjectIdFilter(fp, PROJECTS', self.reports)
+        self.assertIn('function initProjectIdFilter(', self.api_js)
+        self.assertIn('function _saveProjectChoice(', self.api_js)
 
     def test_report_and_case_review_entries_are_feature_gated(self):
         self.assertIn('SHIFT_LEFT_ENABLED && d.can_edit', self.reports)

@@ -276,6 +276,68 @@ function initProjectFilter(selectEl, onChange) {
     }
 }
 
+/**
+ * ID 值项目筛选初始化。
+ *
+ * 旧页面的项目下拉 value 是项目名，initProjectFilter 可直接复用；
+ * 测试报告等新页面使用 project_id，需在共享的项目名偏好与 ID 之间转换。
+ */
+function initProjectIdFilter(selectEl, projects, onChange) {
+    if (!selectEl) return;
+    const rows = Array.isArray(projects) ? projects : [];
+
+    const optionExists = value => Array.from(selectEl.options).some(
+        option => String(option.value) === String(value));
+    const projectFor = value => rows.find(project => (
+        String(project.id) === String(value)
+        || String(project.name || '') === String(value || '')));
+    const applyValue = value => {
+        const project = projectFor(value);
+        const projectId = project ? String(project.id) : String(value || '');
+        if (!projectId || !optionExists(projectId)) return false;
+        selectEl.value = projectId;
+        if (onChange) onChange();
+        return true;
+    };
+    const apply = () => {
+        if (typeof currentUser === 'undefined' || !currentUser) return;
+        const role = currentUser.role || 'user';
+        const managedNames = currentUser.managed_project_names || [];
+        if (role !== 'super_admin' && managedNames.length === 1) {
+            const project = projectFor(managedNames[0]);
+            if (project && applyValue(project.id)) {
+                _saveProjectChoice(project.name, project.id);
+                return;
+            }
+        }
+        applyValue(localStorage.getItem(_PROJECT_STORAGE_KEY));
+    };
+
+    selectEl.addEventListener('change', () => {
+        const project = projectFor(selectEl.value);
+        _saveProjectChoice(
+            project ? project.name : '',
+            project ? project.id : selectEl.value);
+    });
+
+    if (typeof currentUser !== 'undefined' && currentUser) {
+        apply();
+    } else {
+        let tries = 0;
+        const timer = setInterval(() => {
+            tries++;
+            if ((typeof currentUser !== 'undefined' && currentUser) || tries > 20) {
+                clearInterval(timer);
+                apply();
+            }
+        }, 100);
+    }
+}
+
+function _saveProjectChoice(projectName, projectId) {
+    _saveChoice(projectName || projectId || '');
+}
+
 function _restoreLastChoice(selectEl, onChange) {
     const saved = localStorage.getItem(_PROJECT_STORAGE_KEY);
     if (saved) {
