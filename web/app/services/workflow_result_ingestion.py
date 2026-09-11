@@ -116,16 +116,45 @@ def _coverage_from_artifacts(artifacts, has_findings=False):
     }
 
 
-def _not_applicable_is_complete(run):
+def _evidence_profile(run):
     definition = getattr(run, 'definition', None)
     payload = getattr(definition, 'definition_json', None)
     context = payload.get('context') if isinstance(payload, dict) else {}
     profile = (
         context.get('evidence_profile')
         if isinstance(context, dict) else {})
+    return profile if isinstance(profile, dict) else {}
+
+
+def _not_applicable_is_complete(run):
+    profile = _evidence_profile(run)
     return bool(
-        isinstance(profile, dict)
-        and profile.get('not_applicable_is_complete') is True)
+        profile.get('not_applicable_is_complete') is True)
+
+
+def _apply_profile_coverage_defaults(run, coverage, explicit_coverage=None):
+    """Materialize Definition-declared runtime coverage defaults.
+
+    Evidence profiles use ``not_applicable_by_default`` for channels that do
+    not belong to a non-runtime workflow (for example rule learning). Derived
+    coverage reports absent artifact channels as ``missing``; without this
+    translation those synthetic misses override the Definition and make a
+    complete analysis run impossible. An explicitly submitted channel remains
+    authoritative, including an explicit ``missing`` value.
+    """
+    result = dict(coverage or {})
+    explicit_keys = set(
+        explicit_coverage if isinstance(explicit_coverage, dict) else {})
+    runtime_channels = _evidence_profile(run).get('runtime_channels') or {}
+    if not isinstance(runtime_channels, dict):
+        return result
+    for raw_key, default in runtime_channels.items():
+        key = str(raw_key or '').strip().lower()
+        if (key and default == 'not_applicable_by_default'
+                and key not in explicit_keys
+                and result.get(key, 'missing') == 'missing'):
+            result[key] = 'not_applicable'
+    return result
 
 
 def _analysis_run(run, actor):
@@ -287,7 +316,8 @@ def ingest_workflow_result(run, step, data, actor='workflow'):
         seen_artifacts.add(key)
         deduped_artifacts.append(artifact)
     artifacts = deduped_artifacts
-    coverage = manifest_payload.get('coverage')
+    explicit_coverage = manifest_payload.get('coverage')
+    coverage = explicit_coverage
     if not isinstance(coverage, dict):
         coverage = _coverage_from_artifacts(artifacts, bool(findings))
     if manifest:
@@ -298,6 +328,8 @@ def ingest_workflow_result(run, step, data, actor='workflow'):
         }
         for key, value in previous_coverage.items():
             coverage.setdefault(key, value)
+    coverage = _apply_profile_coverage_defaults(
+        run, coverage, explicit_coverage=explicit_coverage)
     required_evidence = manifest_payload.get('required_evidence')
     if required_evidence is None and manifest:
         required_evidence = manifest.required_evidence_json

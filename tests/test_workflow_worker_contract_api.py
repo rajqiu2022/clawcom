@@ -43,6 +43,7 @@ from sqlalchemy import event  # noqa: E402
 from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
 from app.api import workflows as workflows_api  # noqa: E402
+from app.services.workflow_result_ingestion import ingest_workflow_result  # noqa: E402
 from app.models import (AgentTask, OpenClawInstance, Project, SystemConfig, TestReport as ReportModel, User,  # noqa: E402
                         WecomSendLog, WorkflowDefinition, ShiftLeftFinding,
                         WorkflowEvidenceManifest,
@@ -1029,6 +1030,58 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
             finding_key='flow12-port-config').first()
         self.assertIsNotNone(finding)
         self.assertEqual(finding.associations_json['evidence_manifest_id'], manifest.id)
+
+    def test_ingestion_applies_runtime_not_applicable_profile_defaults(self):
+        self.definition.definition_json = {
+            'context': {'evidence_profile': {
+                'not_applicable_is_complete': True,
+                'runtime_channels': {
+                    'case_result': 'not_applicable_by_default',
+                    'ui_snapshot': 'not_applicable_by_default',
+                    'console': 'not_applicable_by_default',
+                    'screenshots': 'not_applicable_by_default',
+                },
+            }},
+            'steps': [],
+        }
+        db.session.commit()
+        custom_coverage = {
+            'resolved_bug_snapshot': 'complete',
+            'finding_feedback': 'complete',
+            'rule_candidates': 'complete',
+            'replay_result': 'complete',
+        }
+
+        result = ingest_workflow_result(self.run, self.agent_step, {
+            'evidence_manifest': {
+                'coverage': custom_coverage,
+                'required_evidence': list(custom_coverage),
+                'artifacts': [],
+            },
+        })
+
+        self.assertEqual(result['completeness_status'], 'complete')
+        manifest = WorkflowEvidenceManifest.query.filter_by(
+            workflow_run_id=self.run.id).one()
+        self.assertEqual(manifest.completeness_status, 'complete')
+        for channel in ('case_result', 'ui_snapshot', 'console', 'screenshots'):
+            self.assertEqual(manifest.coverage_json[channel], 'not_applicable')
+        self.assertEqual(manifest.missing_required_json, [])
+
+        # A worker can still explicitly require and report a runtime channel
+        # missing. The profile only supplies defaults; it cannot hide a real
+        # evidence gap.
+        result = ingest_workflow_result(self.run, self.agent_step, {
+            'evidence_manifest': {
+                'coverage': dict(custom_coverage, console='missing'),
+                'required_evidence': list(custom_coverage),
+                'artifacts': [],
+            },
+        })
+        self.assertEqual(result['completeness_status'], 'incomplete')
+        self.assertIn(
+            {'type': 'console', 'status': 'missing'},
+            manifest.missing_required_json)
 
     def _notification_fixture(self, business_failure_confirmed):
         report = ReportModel(
