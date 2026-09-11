@@ -162,10 +162,15 @@ def main() -> int:
         backfill_path = f"{stage}/backfill_notebook_recency.py"
         remote_write(
             sftp, backfill_path, NOTEBOOK_RECENCY_BACKFILL.encode("utf-8"))
+        backfill_eval = (
+            "exec(compile(open(%r, encoding='utf-8').read(), %r, 'exec'))"
+            % (backfill_path, backfill_path)
+        )
         _, backfill_output, _ = exec_remote(
             client,
             f"cd {shlex.quote(REMOTE_ROOT)} && "
-            f"SKIP_AUTO_MIGRATE=1 venv/bin/python {shlex.quote(backfill_path)}",
+            f"SKIP_AUTO_MIGRATE=1 venv/bin/python -c "
+            f"{shlex.quote(backfill_eval)}",
             timeout=180,
         )
         print(backfill_output.strip())
