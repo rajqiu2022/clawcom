@@ -607,8 +607,10 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
         latest = self.client.get(
             '/api/v1/workflow-runs/latest?'
             'correlation_id=racinggo-dev2-abc123')
-        scoped_latest = self.client.get(
-            f'/api/v1/workflow-definitions/{self.definition.id}/runs/latest')
+        with patch.object(
+                workflows_api, '_refresh_workflow_step_health') as refresh:
+            scoped_latest = self.client.get(
+                f'/api/v1/workflow-definitions/{self.definition.id}/runs/latest')
 
         self.assertEqual(listed.status_code, 200, listed.get_data(as_text=True))
         page = listed.get_json()
@@ -623,6 +625,9 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
         self.assertEqual(latest.get_json()['id'], created['id'])
         self.assertEqual(scoped_latest.status_code, 200)
         self.assertEqual(scoped_latest.get_json()['id'], created['id'])
+        refresh.assert_called_once()
+        self.assertEqual(created['id'], refresh.call_args.kwargs['run'].id)
+        self.assertTrue(refresh.call_args.kwargs['commit'])
         self.assertEqual(
             scoped_latest.get_json()['selection'], {
                 'mode': 'latest_for_definition',

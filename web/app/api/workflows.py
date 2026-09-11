@@ -3578,7 +3578,6 @@ def get_latest_workflow_definition_run(definition_id):
     definition = WorkflowDefinition.query.get_or_404(definition_id)
     if not _definition_visible(definition):
         return jsonify({'error': 'workflow definition 不存在'}), 404
-    _refresh_workflow_step_health(commit=True)
     q = WorkflowRun.query.filter_by(definition_id=definition_id)
     statuses = [
         value.strip()
@@ -3604,6 +3603,9 @@ def get_latest_workflow_definition_run(definition_id):
             'No workflow run exists for this definition',
             status=404,
             details={'workflow_definition_id': definition_id})
+    # A scoped read must never reconcile unrelated active Runs. Refresh only
+    # the selected Run so polling one Flow cannot dispatch work for another.
+    _refresh_workflow_step_health(run=run, commit=True)
     payload = _run_payload(run, with_steps=False)
     payload['selection'] = {
         'mode': 'latest_for_definition',
