@@ -214,6 +214,13 @@ def _modules(value):
     return result or list(DEFAULT_MODULES)
 
 
+def _touch_notebook(page, changed_at=None):
+    """Keep notebook recency aligned with mutations to any child page."""
+    notebook = page.notebook if page else None
+    if notebook:
+        notebook.updated_at = changed_at or datetime.now()
+
+
 def _create_revision(page, actor, title, content, summary,
                      expected_revision, idempotency_key,
                      rollback_from=None):
@@ -271,7 +278,9 @@ def _create_revision(page, actor, title, content, summary,
     page.content = content
     page.current_revision = next_revision
     page.lock_version = int(page.lock_version or 0) + 1
-    page.updated_at = datetime.now()
+    changed_at = datetime.now()
+    page.updated_at = changed_at
+    _touch_notebook(page, changed_at)
     return revision, None
 
 
@@ -599,8 +608,10 @@ def archive_knowledge_journal_page(page_id):
         return _error('PAGE_NOT_FOUND', '纪要页面不存在或无权访问', 404)
     if page.archived_at:
         return jsonify(page.to_dict())
-    page.archived_at = datetime.now()
+    changed_at = datetime.now()
+    page.archived_at = changed_at
     page.lock_version = int(page.lock_version or 0) + 1
+    _touch_notebook(page, changed_at)
     _audit('archive', page.id, page.title, actor, {
         'notebook_id': page.notebook_id,
         'current_revision': page.current_revision})
@@ -618,6 +629,7 @@ def restore_knowledge_journal_page(page_id):
         return jsonify(page.to_dict())
     page.archived_at = None
     page.lock_version = int(page.lock_version or 0) + 1
+    _touch_notebook(page)
     _audit('restore', page.id, page.title, actor, {
         'notebook_id': page.notebook_id,
         'current_revision': page.current_revision})
@@ -643,6 +655,7 @@ def permanently_delete_knowledge_journal_page(page_id):
     }
     _remove_journal_page_references([page.id])
     _audit('permanent_delete', page.id, page.title, actor, page_info)
+    _touch_notebook(page)
     db.session.delete(page)
     db.session.commit()
     return jsonify(dict({'deleted': True}, **page_info))

@@ -44,7 +44,7 @@ from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
 from app.api import workflows as workflows_api  # noqa: E402
 from app.services.workflow_result_ingestion import ingest_workflow_result  # noqa: E402
-from app.models import (AgentTask, OpenClawInstance, Project, SystemConfig, TestReport as ReportModel, User,  # noqa: E402
+from app.models import (AgentTask, ClawMessage, ClawTodo, OpenClawInstance, Project, SystemConfig, TestReport as ReportModel, User,  # noqa: E402
                         WecomSendLog, WorkflowDefinition, ShiftLeftFinding,
                         WorkflowEvidenceManifest,
                         WorkflowRun, WorkflowRunStep, hash_token)
@@ -163,6 +163,73 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
     def _worker_step(self):
         return WorkflowRunStep.query.filter_by(
             run_id=self.run.id, step_id='worker_step').first()
+
+    def test_direct_runner_uses_ten_check_startup_grace(self):
+        self.agent_step.step_config_json = {
+            'direct_execution_lease': {
+                'schema': 1,
+                'required': True,
+                'scope': 'runner_operation',
+                'lease_seconds': 180,
+            },
+        }
+        self.agent_step.heartbeat_at = datetime.now() - timedelta(seconds=100)
+        db.session.commit()
+
+        with patch.object(
+                workflows_api, '_dispatch_heartbeat_fallback_task') as dispatch:
+            workflows_api._refresh_workflow_step_health(self.run)
+
+        self.assertEqual(
+            workflows_api._step_health_max_missed(self.agent_step), 10)
+        self.assertEqual(
+            workflows_api._step_health_max_missed(self.worker_step), 3)
+        self.assertEqual(self.agent_step.missed_heartbeat_count, 3)
+        dispatch.assert_not_called()
+
+    def test_silent_probe_never_creates_fallback_agent_work(self):
+        self.agent_step.status = 'blocked'
+        for config in (
+                {'notification_policy': {'strict_silent': True}},
+                {'inputs': {'notification_policy': {
+                    'no_external_notification': True,
+                }}}):
+            self.agent_step.step_config_json = config
+            self.assertFalse(workflows_api._dispatch_heartbeat_fallback_task(
+                self.run, self.agent_step))
+
+        self.assertEqual(AgentTask.query.count(), 0)
+        self.assertEqual(ClawMessage.query.count(), 0)
+        self.assertEqual(ClawTodo.query.count(), 0)
+
+    def test_silent_direct_runner_records_suppression_without_false_reminder(self):
+        self.agent_step.step_config_json = {
+            'direct_execution_lease': {
+                'schema': 1,
+                'required': True,
+                'scope': 'runner_operation',
+                'lease_seconds': 180,
+            },
+            'inputs': {
+                'notification_policy': {
+                    'strict_silent': True,
+                    'no_external_notification': True,
+                },
+            },
+        }
+        self.agent_step.heartbeat_at = datetime.now() - timedelta(seconds=301)
+        db.session.commit()
+
+        workflows_api._refresh_workflow_step_health(self.run)
+
+        self.assertEqual(
+            self.agent_step.progress_phase, 'no_response_suppressed')
+        self.assertIn('静默策略已抑制', self.agent_step.progress_message)
+        self.assertTrue(
+            self.agent_step.progress_json['hub_reminders']['fallback_suppressed'])
+        self.assertEqual(AgentTask.query.count(), 0)
+        self.assertEqual(ClawMessage.query.count(), 0)
+        self.assertEqual(ClawTodo.query.count(), 0)
 
     def test_terminal_block_without_business_evidence_is_not_completed(self):
         self.run.status = 'blocked'

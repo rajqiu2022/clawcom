@@ -1817,19 +1817,36 @@ def _step_runtime_inputs(step):
 def _step_no_response_reminder_threshold(step):
     """Allow an Agent time to select and invoke a fenced Runner tool."""
     inputs = _step_runtime_inputs(step)
-    return 10 if inputs.get('deepflow_runner_tool') is True else 3
+    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+    is_runner = (
+        inputs.get('deepflow_runner_tool') is True
+        or direct_execution_lease(step.step_type, config) is not None
+    )
+    return 10 if is_runner else 3
+
+
+def _step_health_max_missed(step):
+    """Give explicitly leased Runner operations their five-minute startup grace."""
+    return _step_no_response_reminder_threshold(step)
+
+
+def _heartbeat_fallback_suppressed(step):
+    """Keep silent probes from producing Agent tasks, messages, or todos."""
+    policy = _workflow_step_notification_policy(step)
+    return bool(
+        policy.get('strict_silent') is True
+        or policy.get('no_external_notification') is True
+    )
 
 
 def _step_no_response_fallback_enabled(step):
     """Silent acceptance runs keep diagnostics in Hub without spawning Agents."""
-    inputs = _step_runtime_inputs(step)
-    return not (
-        inputs.get('strict_silent') is True
-        or inputs.get('no_external_notification') is True
-    )
+    return not _heartbeat_fallback_suppressed(step)
 
 
 def _dispatch_heartbeat_fallback_task(run, step):
+    if _heartbeat_fallback_suppressed(step):
+        return False
     definition = run.definition if run else None
     if not definition or definition.owner_type != 'claw' or not definition.owner_id:
         if step.status == 'blocked':
@@ -1970,12 +1987,13 @@ def _refresh_workflow_step_health(run=None, commit=False):
     touched_runs = {}
     for step in q.populate_existing().with_for_update().all():
         auto_block = _step_auto_block_on_heartbeat_loss(step)
+        max_missed = _step_health_max_missed(step)
         health = compute_step_health(
             step.status,
             _step_health_signal_at(step),
             now,
             interval_sec=30,
-            max_missed=3,
+            max_missed=max_missed,
             progress_at=step.progress_at,
             progress_timeout_sec=300,
             auto_fail_on_missed=(auto_block and not (
@@ -1991,7 +2009,7 @@ def _refresh_workflow_step_health(run=None, commit=False):
             _clear_step_claim(step)
             step.blocker_json = {
                 'type': 'workflow_step_heartbeat_lost',
-                'message': 'Workflow 节点连续 3 次未收到心跳，已判定执行失败',
+                'message': 'Workflow 节点连续 %d 次未收到心跳，已判定执行失败' % max_missed,
                 'last_heartbeat_at': str(step.heartbeat_at) if step.heartbeat_at else None,
                 'heartbeat_by': step.heartbeat_by or '',
                 'missed_heartbeat_count': step.missed_heartbeat_count or 0,
@@ -2000,15 +2018,21 @@ def _refresh_workflow_step_health(run=None, commit=False):
             _dispatch_heartbeat_fallback_task(step.run, step)
             if step.run:
                 touched_runs[step.run.id] = step.run
-        elif ((health.get('missed_count') or 0)
-              >= _step_no_response_reminder_threshold(step)):
+        elif (health.get('missed_count') or 0) >= max_missed:
             progress = step.progress_json if isinstance(step.progress_json, dict) else {}
             reminders = progress.get('hub_reminders') if isinstance(progress.get('hub_reminders'), dict) else {}
             if not reminders.get('no_response_at'):
-                step.progress_phase = 'no_response_reminded'
-                step.progress_message = 'Hub 已提醒模板创建者：节点已派发但执行方长时间未响应'
                 reminders['no_response_at'] = str(now)
                 reminders['missed_heartbeat_count'] = health.get('missed_count') or 0
+                if _heartbeat_fallback_suppressed(step):
+                    step.progress_phase = 'no_response_suppressed'
+                    step.progress_message = (
+                        '节点已派发但执行方长时间未响应；'
+                        '静默策略已抑制 fallback Agent 提醒')
+                    reminders['fallback_suppressed'] = True
+                else:
+                    step.progress_phase = 'no_response_reminded'
+                    step.progress_message = 'Hub 已提醒模板创建者：节点已派发但执行方长时间未响应'
                 progress['hub_reminders'] = reminders
                 step.progress_json = progress
                 if _step_no_response_fallback_enabled(step):

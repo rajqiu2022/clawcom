@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -154,6 +155,54 @@ class KnowledgeNotebooksApiTest(unittest.TestCase):
         self.assertEqual(first.get_json()['id'], replay.get_json()['id'])
         self.assertEqual(KnowledgeEntry.query.filter_by(
             entry_type='test_journal').count(), 1)
+
+    def test_page_lifecycle_keeps_notebook_recency_current(self):
+        self._login(self.owner)
+        notebook = self.client.post('/api/v1/knowledge-notebooks', json={
+            'project_id': self.project.id, 'title': '持续更新的纪要',
+        }).get_json()
+        notebook_id = notebook['id']
+        old = datetime(2000, 1, 1)
+        row = db.session.get(KnowledgeNotebook, notebook_id)
+        row.updated_at = old
+        db.session.commit()
+
+        created = self.client.post(
+            f'/api/v1/knowledge-notebooks/{notebook_id}/pages',
+            json={'title': '联调记录', 'module_name': '环境与自动化问题',
+                  'content': '# 联调记录'},
+            headers={'Idempotency-Key': 'recency-create'})
+        self.assertEqual(created.status_code, 201, created.get_data(as_text=True))
+        page_id = created.get_json()['id']
+        self.assertGreater(
+            db.session.get(KnowledgeNotebook, notebook_id).updated_at, old)
+
+        operations = (
+            ('revision', lambda: self.client.post(
+                f'/api/v1/knowledge/{page_id}/revisions', json={
+                    'expected_revision': 1,
+                    'title': '联调记录',
+                    'content': '# 联调记录\n\n已更新',
+                }, headers={'Idempotency-Key': 'recency-revision'})),
+            ('archive', lambda: self.client.post(
+                f'/api/v1/knowledge/{page_id}/archive')),
+            ('restore', lambda: self.client.post(
+                f'/api/v1/knowledge/{page_id}/restore')),
+            ('delete', lambda: self.client.delete(
+                f'/api/v1/knowledge/{page_id}/permanent',
+                json={'confirmed': True})),
+        )
+        for name, operation in operations:
+            row = db.session.get(KnowledgeNotebook, notebook_id)
+            row.updated_at = old
+            db.session.commit()
+            response = operation()
+            self.assertIn(
+                response.status_code, (200, 201),
+                f'{name}: {response.get_data(as_text=True)}')
+            self.assertGreater(
+                db.session.get(KnowledgeNotebook, notebook_id).updated_at,
+                old, name)
 
     def test_revision_conflict_idempotency_compare_and_rollback(self):
         _, page_id = self._create_notebook_and_page()
