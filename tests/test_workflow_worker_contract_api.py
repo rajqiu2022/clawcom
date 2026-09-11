@@ -204,6 +204,32 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
 
         self.assertEqual(self.run.business_conclusion, '')
 
+    def test_running_run_does_not_infer_automation_error_from_pending_evidence(self):
+        self.run.status = 'running'
+        self.run.automation_conclusion = ''
+        self.run.evidence_ingest_status = 'EVIDENCE_INGEST_INCOMPLETE'
+        self.worker_step.status = 'running'
+        self.worker_step.outputs_json = {}
+        db.session.commit()
+
+        workflows_api._sync_run_conclusions(self.run)
+
+        self.assertEqual(self.run.automation_conclusion, '')
+
+    def test_terminal_run_still_reports_incomplete_evidence(self):
+        self.run.status = 'succeeded'
+        self.run.automation_conclusion = ''
+        self.run.evidence_ingest_status = 'EVIDENCE_INGEST_INCOMPLETE'
+        self.worker_step.status = 'passed'
+        self.worker_step.outputs_json = {}
+        db.session.commit()
+
+        workflows_api._sync_run_conclusions(self.run)
+
+        self.assertEqual(
+            self.run.automation_conclusion,
+            'COMPLETED_WITH_AUTOMATION_ERROR')
+
     def test_blocked_cleanup_dispatches_opted_in_analysis_then_remains_blocked(self):
         self.definition.definition_json = {
             'key': 'cleanup-analysis',
@@ -894,6 +920,38 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(
             'IDEMPOTENCY_KEY_REUSED', conflict.get_json()['code'])
+
+    def test_valid_heartbeat_clears_stale_no_response_display(self):
+        self.worker_step.step_config_json = {
+            'direct_execution_lease': {
+                'schema': 1,
+                'required': True,
+                'scope': 'runner_operation',
+                'lease_seconds': 180,
+            },
+        }
+        self.worker_step.progress_phase = 'no_response_reminded'
+        self.worker_step.progress_message = 'Hub 已提醒模板创建者：节点已派发但执行方长时间未响应'
+        self.worker_step.progress_json = {
+            'hub_reminders': {'no_response_at': '2026-09-11 17:00:00'},
+        }
+        db.session.commit()
+        claimed = self._post('worker_step', 'claim', {
+            'worker_id': 'direct-worker-a',
+            'claim_scope': 'runner_operation',
+        })
+        token = claimed.get_json()['step']['claim_fencing_token']
+
+        response = self._post('worker_step', 'heartbeat', {
+            'worker_id': 'direct-worker-a',
+            'fencing_token': token,
+        })
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        step = self._worker_step()
+        self.assertEqual(step.progress_phase, 'running')
+        self.assertEqual(step.progress_message, '执行器已恢复心跳，节点继续执行')
+        self.assertIn('hub_reminders', step.progress_json)
 
     def test_claim_protected_write_routes_lock_step_before_validation(self):
         helper_source = inspect.getsource(

@@ -1167,7 +1167,8 @@ def _sync_run_conclusions(run):
           and not business_passed):
         run.automation_conclusion = 'AUTOMATION_ENV_BLOCKED'
     elif (has_contract_invalid or has_automation_error
-          or run.evidence_ingest_status == 'EVIDENCE_INGEST_INCOMPLETE'):
+          or (run.status in ('succeeded', 'failed', 'blocked', 'cancelled')
+              and run.evidence_ingest_status == 'EVIDENCE_INGEST_INCOMPLETE')):
         run.automation_conclusion = 'COMPLETED_WITH_AUTOMATION_ERROR'
     elif run.status in ('succeeded', 'failed', 'blocked', 'cancelled'):
         run.automation_conclusion = run.automation_conclusion or 'COMPLETED'
@@ -4330,7 +4331,13 @@ def heartbeat_workflow_step(run_id, step_id):
     step.missed_heartbeat_count = 0
     step.health_status = 'healthy'
     step.health_checked_at = now
-    _apply_step_progress(step, data, worker_id, now)
+    progress_updated = _apply_step_progress(step, data, worker_id, now)
+    if not progress_updated and step.progress_phase == 'no_response_reminded':
+        # A valid fenced heartbeat proves that the executor has recovered.
+        # Keep the reminder timestamp in progress_json for audit, but do not
+        # continue presenting a stale "no response" phase to operators.
+        step.progress_phase = 'running'
+        step.progress_message = '执行器已恢复心跳，节点继续执行'
     if workflow_step_claim_required(
             step.step_type, step.step_config_json or {}):
         _renew_step_claim(step, now)
