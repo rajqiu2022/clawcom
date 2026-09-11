@@ -165,6 +165,49 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
         self.assertEqual(second.status_code, 201)
         self.assertNotEqual(first.get_json()['id'], second.get_json()['id'])
 
+    def test_missing_required_start_vars_returns_422_without_creating_run(self):
+        definition = dict(self.definition.definition_json or {})
+        definition['start_vars_schema'] = {
+            'hub_url': {'type': 'string', 'required': True},
+            'library_id': {'type': 'integer', 'default': 20},
+        }
+        self.definition.definition_json = definition
+        db.session.commit()
+
+        rejected = self.client.post('/api/v1/workflow-runs', json={
+            'workflow_definition_id': self.definition.id,
+            'start_vars': {},
+        })
+
+        self.assertEqual(422, rejected.status_code, rejected.get_data(as_text=True))
+        self.assertEqual(
+            'WORKFLOW_START_BINDING_REQUIRED', rejected.get_json()['code'])
+        self.assertEqual(
+            ['hub_url'], rejected.get_json()['details']['missing_start_vars'])
+        self.assertEqual(0, WorkflowRun.query.count())
+
+    def test_start_var_defaults_are_frozen_into_run_context(self):
+        definition = dict(self.definition.definition_json or {})
+        definition['start_vars_schema'] = {
+            'type': 'object',
+            'required': ['hub_url'],
+            'properties': {
+                'hub_url': {'type': 'string'},
+                'library_id': {'type': 'integer', 'default': 20},
+            },
+        }
+        self.definition.definition_json = definition
+        db.session.commit()
+
+        created = self.client.post('/api/v1/workflow-runs', json={
+            'workflow_definition_id': self.definition.id,
+            'start_vars': {'hub_url': 'https://clawteam.woa.com'},
+        })
+
+        self.assertEqual(201, created.status_code, created.get_data(as_text=True))
+        run = WorkflowRun.query.one()
+        self.assertEqual(20, run.context_json['start_vars']['library_id'])
+
     def test_blocked_run_restarts_in_place_idempotently_from_first_step(self):
         self.definition.definition_json = {
             'key': 'control-plane-flow',
@@ -564,6 +607,8 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
         latest = self.client.get(
             '/api/v1/workflow-runs/latest?'
             'correlation_id=racinggo-dev2-abc123')
+        scoped_latest = self.client.get(
+            f'/api/v1/workflow-definitions/{self.definition.id}/runs/latest')
 
         self.assertEqual(listed.status_code, 200, listed.get_data(as_text=True))
         page = listed.get_json()
@@ -576,6 +621,18 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
         self.assertEqual(len(item['output_refs']), 1)
         self.assertEqual(latest.status_code, 200)
         self.assertEqual(latest.get_json()['id'], created['id'])
+        self.assertEqual(scoped_latest.status_code, 200)
+        self.assertEqual(scoped_latest.get_json()['id'], created['id'])
+        self.assertEqual(
+            scoped_latest.get_json()['selection'], {
+                'mode': 'latest_for_definition',
+                'workflow_definition_id': self.definition.id,
+            })
+        definition_payload = self.client.get(
+            f'/api/v1/workflow-definitions/{self.definition.id}').get_json()
+        self.assertEqual(
+            definition_payload['latest_run_url'],
+            f'/api/v1/workflow-definitions/{self.definition.id}/runs/latest')
 
     def test_definition_api_round_trips_start_schema_and_rejects_bad_gate_path(self):
         good = {

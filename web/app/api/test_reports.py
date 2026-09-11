@@ -7,6 +7,7 @@
   GET    /api/v1/test-reports/<id>                          详情（含 content）
   PUT    /api/v1/test-reports/<id>                          更新
   DELETE /api/v1/test-reports/<id>                          软删
+  GET    /api/v1/test-reports/<id>/share                    回读分享状态
   POST   /api/v1/test-reports/<id>/share                    生成/启用分享
   DELETE /api/v1/test-reports/<id>/share                    撤销分享
   POST   /api/v1/test-reports/<id>/attachments              上传附件（multipart，10MB 上限）
@@ -54,6 +55,7 @@ from app.models import (
     TestIteration,
     User,
     OpenClawInstance,
+    WorkflowRun,
     _now,
 )
 from app.api import api_bp
@@ -211,6 +213,70 @@ def _can_edit(caller: dict | None, report: TestReport) -> bool:
     if _is_owner_user(caller, report):
         return True
     return False
+
+
+def _requested_workflow_run_id() -> int | None:
+    raw = request.args.get('workflow_run_id')
+    if raw in (None, '') and request.method != 'GET':
+        body = request.get_json(silent=True)
+        if isinstance(body, dict):
+            raw = body.get('workflow_run_id')
+    return _parse_int(raw)
+
+
+def _workflow_share_run(caller: dict | None, report: TestReport):
+    """Return the exact bound Run when an assigned Claw may manage sharing.
+
+    This is deliberately narrower than project membership: the caller must
+    name the Run, the report must be bound to it, and the authenticated Claw
+    must be the frozen Worker/executor/reviewer for that Run.
+    """
+    if not caller or caller.get('type') != 'openclaw':
+        return None
+    run_id = _requested_workflow_run_id()
+    if not run_id:
+        return None
+    artifact = WorkflowArtifact.query.filter_by(
+        run_id=run_id,
+        artifact_type='workflow_report',
+        test_report_id=report.id,
+    ).first()
+    if not artifact:
+        return None
+    run = WorkflowRun.query.get(run_id)
+    if not run or run.project_id != report.project_id:
+        return None
+    caller_claw_id = int(caller.get('claw_id') or 0)
+    allowed_claw_ids = set()
+    context = run.context_json if isinstance(run.context_json, dict) else {}
+    assignment = (
+        context.get('assignment_snapshot')
+        if isinstance(context.get('assignment_snapshot'), dict) else {})
+    workflow_start = (
+        context.get('workflow_start')
+        if isinstance(context.get('workflow_start'), dict) else {})
+    for raw in (
+            assignment.get('worker_claw_id'),
+            assignment.get('executor_claw_id'),
+            assignment.get('reviewer_claw_id'),
+            workflow_start.get('worker_claw_id')):
+        parsed = _parse_int(raw)
+        if parsed:
+            allowed_claw_ids.add(parsed)
+    for step in run.steps or []:
+        parsed = _parse_int(step.target_claw_id)
+        if parsed:
+            allowed_claw_ids.add(parsed)
+    return run if caller_claw_id in allowed_claw_ids else None
+
+
+def _can_manage_share(caller: dict | None, report: TestReport):
+    workflow_run = _workflow_share_run(caller, report)
+    if workflow_run:
+        return True, workflow_run
+    if _can_edit(caller, report):
+        return True, None
+    return False, None
 
 
 _SAME_PROJECT_VIEWABLE_STATUSES = ('draft', 'revised')
@@ -924,40 +990,91 @@ def delete_test_report(report_id):
 # ============================================================
 # 分享外链
 # ============================================================
-@api_bp.route('/test-reports/<int:report_id>/share', methods=['POST'])
-def enable_share(report_id):
+def _share_contract(report, *, reused=False, workflow_run_id=None):
+    hub = (os.environ.get('HUB_WEB_URL')
+           or os.environ.get('HUB_PUBLIC_URL')
+           or 'https://clawteam.woa.com:18800').rstrip('/')
+    active = bool(report.is_shared and report.share_token)
+    return {
+        'schema': 'hub.test_report_share@1',
+        'report_id': report.id,
+        'workflow_run_id': workflow_run_id,
+        'is_shared': active,
+        'reused': bool(reused),
+        'share_token': report.share_token if active else None,
+        'share_url': f'{hub}/r/{report.share_token}' if active else '',
+        'public_readback_url': (
+            f'/api/v1/test-reports/shared/{report.share_token}'
+            if active else ''),
+        'share_readback_url': f'/api/v1/test-reports/{report.id}/share',
+        'attachment_policy': 'authenticated_only',
+        'shared_at': str(report.shared_at) if report.shared_at else None,
+    }
+
+
+@api_bp.route('/test-reports/<int:report_id>/share', methods=['GET'])
+def get_share(report_id):
+    """Authenticated readback for a report's current sharing state."""
     caller = _get_caller()
     if not caller:
         return jsonify({'error': '未认证'}), 401
     report = TestReport.query.get_or_404(report_id)
     if report.is_deleted:
         return jsonify({'error': '报告已删除'}), 404
-    if not _can_edit(caller, report):
+    allowed, workflow_run = _can_manage_share(caller, report)
+    if not allowed:
+        return jsonify({'error': '无权读取分享状态'}), 403
+    return jsonify(_share_contract(
+        report,
+        reused=bool(report.is_shared and report.share_token),
+        workflow_run_id=workflow_run.id if workflow_run else None,
+    ))
+
+
+@api_bp.route('/test-reports/<int:report_id>/share', methods=['POST'])
+def enable_share(report_id):
+    caller = _get_caller()
+    if not caller:
+        return jsonify({'error': '未认证'}), 401
+    # Serialize concurrent publisher retries so every successful caller gets
+    # the same still-valid token instead of racing two token generations.
+    report = (TestReport.query
+              .filter(TestReport.id == report_id)
+              .with_for_update()
+              .first_or_404())
+    if report.is_deleted:
+        return jsonify({'error': '报告已删除'}), 404
+    allowed, workflow_run = _can_manage_share(caller, report)
+    if not allowed:
         return jsonify({'error': '无权操作分享'}), 403
 
     # 支持 ?refresh=1 强制生成新 token（旧 token 失效）
     refresh = request.args.get('refresh') == '1'
+    # A bound Workflow participant may enable/reuse the link, but token
+    # rotation remains an author/admin action because it invalidates a
+    # previously delivered external URL.
+    if refresh and not _can_edit(caller, report):
+        return jsonify({'error': '只有报告作者或管理员可以刷新分享链接'}), 403
+    reused = bool(report.is_shared and report.share_token and not refresh)
     if refresh:
         report.share_token = None
     if not report.share_token:
         report.generate_share_token()
+    was_shared = bool(report.is_shared)
     report.is_shared = True
-    report.shared_at = _now()
+    if refresh or not was_shared or not report.shared_at:
+        report.shared_at = _now()
     try:
         db.session.commit()
     except SQLAlchemyError as e:
         db.session.rollback()
         return jsonify({'error': f'保存失败: {e}'}), 500
 
-    hub = (os.environ.get('HUB_WEB_URL')
-           or os.environ.get('HUB_PUBLIC_URL')
-           or 'https://clawteam.woa.com:18800').rstrip('/')
-    return jsonify({
-        'is_shared': True,
-        'share_token': report.share_token,
-        'share_url': f'{hub}/r/{report.share_token}',
-        'shared_at': str(report.shared_at),
-    })
+    return jsonify(_share_contract(
+        report,
+        reused=reused,
+        workflow_run_id=workflow_run.id if workflow_run else None,
+    ))
 
 
 @api_bp.route('/test-reports/<int:report_id>/share', methods=['DELETE'])

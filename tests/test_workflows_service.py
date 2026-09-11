@@ -485,6 +485,46 @@ class WorkflowServiceTest(unittest.TestCase):
         })
         self.assertEqual(updated['start_vars_schema'], schema)
 
+    def test_start_vars_apply_defaults_and_validate_both_schema_formats(self):
+        legacy = {
+            'start_vars_schema': {
+                'hub_url': {'type': 'string', 'required': True},
+                'reviewer_claw_id': {
+                    'type': 'integer', 'required': True, 'default': 7},
+                'worker_claw_id': {'type': 'integer', 'required': True},
+            },
+        }
+        resolved = workflows.resolve_workflow_start_vars(
+            legacy,
+            {'hub_url': 'https://clawteam.woa.com'},
+            {'worker_claw_id': 11},
+        )
+        self.assertEqual(7, resolved['reviewer_claw_id'])
+        self.assertEqual(11, resolved['worker_claw_id'])
+
+        json_schema = {
+            'start_vars_schema': {
+                'type': 'object',
+                'required': ['hub_url'],
+                'properties': {
+                    'hub_url': {'type': 'string'},
+                    'library_id': {'type': 'integer', 'default': 20},
+                },
+            },
+        }
+        resolved = workflows.resolve_workflow_start_vars(
+            json_schema, {'hub_url': 'https://clawteam.woa.com'})
+        self.assertEqual(20, resolved['library_id'])
+
+        with self.assertRaisesRegex(
+                workflows.WorkflowStartVarsValidationError,
+                'hub_url') as raised:
+            workflows.resolve_workflow_start_vars(json_schema, {})
+        self.assertEqual(
+            'WORKFLOW_START_BINDING_REQUIRED', raised.exception.code)
+        self.assertEqual(
+            ['hub_url'], raised.exception.details['missing_start_vars'])
+
     def test_normalize_step_validates_gate_metric_paths_against_schema(self):
         definition = workflows.normalize_workflow_definition({
             'key': 'metric_flow',

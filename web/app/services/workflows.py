@@ -1499,6 +1499,95 @@ def normalize_start_vars(value):
     return dict(value) if isinstance(value, dict) else {}
 
 
+class WorkflowStartVarsValidationError(ValueError):
+    """Structured start-variable validation failure for API callers."""
+
+    def __init__(self, code, message, details=None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+
+
+def _workflow_start_var_specs(definition):
+    """Return one field-spec map for legacy and JSON-Schema documents."""
+    definition = definition if isinstance(definition, dict) else {}
+    schema = definition.get('start_vars_schema')
+    if schema in (None, {}):
+        return {}
+    if not isinstance(schema, dict):
+        raise WorkflowStartVarsValidationError(
+            'WORKFLOW_START_SCHEMA_INVALID',
+            'Workflow start_vars_schema must be an object')
+
+    # Hub historically used ``{field: {type, required, default}}``. Newer
+    # producers may send ordinary JSON Schema. Support both without rewriting
+    # the immutable Definition snapshot.
+    if 'properties' in schema or schema.get('type') == 'object':
+        properties = schema.get('properties') or {}
+        if not isinstance(properties, dict):
+            raise WorkflowStartVarsValidationError(
+                'WORKFLOW_START_SCHEMA_INVALID',
+                'Workflow start_vars_schema.properties must be an object')
+        required = schema.get('required') or []
+        if not isinstance(required, list) or any(
+                not isinstance(name, str) for name in required):
+            raise WorkflowStartVarsValidationError(
+                'WORKFLOW_START_SCHEMA_INVALID',
+                'Workflow start_vars_schema.required must be a string array')
+        specs = copy.deepcopy(properties)
+        for name in required:
+            spec = specs.setdefault(name, {})
+            if not isinstance(spec, dict):
+                raise WorkflowStartVarsValidationError(
+                    'WORKFLOW_START_SCHEMA_INVALID',
+                    'Workflow start variable specs must be objects',
+                    {'field': name})
+            spec['required'] = True
+        return specs
+
+    specs = copy.deepcopy(schema)
+    for name, spec in specs.items():
+        if not isinstance(name, str) or not name or not isinstance(spec, dict):
+            raise WorkflowStartVarsValidationError(
+                'WORKFLOW_START_SCHEMA_INVALID',
+                'Workflow start variable specs must be named objects',
+                {'field': str(name)})
+    return specs
+
+
+def resolve_workflow_start_vars(definition, start_vars=None,
+                                trusted_values=None,
+                                defer_required_fields=None):
+    """Apply declared defaults and fail before a Run exists on missing input.
+
+    ``trusted_values`` are Hub-derived bindings such as the authenticated
+    physical Worker. They only fill fields explicitly declared by the schema;
+    arbitrary caller context can never become a trusted binding this way.
+    """
+    variables = normalize_start_vars(start_vars)
+    specs = _workflow_start_var_specs(definition)
+    trusted = trusted_values if isinstance(trusted_values, dict) else {}
+    deferred = set(defer_required_fields or ())
+    for name, value in trusted.items():
+        if name in specs and value not in (None, ''):
+            variables[name] = copy.deepcopy(value)
+    for name, spec in specs.items():
+        if name not in variables and 'default' in spec:
+            variables[name] = copy.deepcopy(spec['default'])
+    missing = sorted(
+        name for name, spec in specs.items()
+        if spec.get('required') is True
+        and name not in deferred
+        and variables.get(name) in (None, '')
+    )
+    if missing:
+        raise WorkflowStartVarsValidationError(
+            'WORKFLOW_START_BINDING_REQUIRED',
+            'Missing required Workflow start variables: %s' % ','.join(missing),
+            {'missing_start_vars': missing})
+    return variables
+
+
 def _dig_path(data, path):
     current = data if isinstance(data, dict) else {}
     for part in str(path or '').split('.'):
@@ -1555,9 +1644,7 @@ def resolve_workflow_run_assignment(
     """
     definition = definition if isinstance(definition, dict) else {}
     variables = normalize_start_vars(start_vars)
-    schema = (
-        definition.get('start_vars_schema')
-        if isinstance(definition.get('start_vars_schema'), dict) else {})
+    schema = _workflow_start_var_specs(definition)
     steps = [
         step for step in (definition.get('steps') or [])
         if isinstance(step, dict)]

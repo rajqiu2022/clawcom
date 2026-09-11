@@ -85,6 +85,7 @@ from app.services.workflows import (
     normalize_workflow_definition,
     ready_step_ids,
     resolve_workflow_run_assignment,
+    resolve_workflow_start_vars,
     resolve_start_var_claw_ids,
     resolve_workflow_step_claw_ids,
     materialize_workflow_run_assignment,
@@ -96,6 +97,7 @@ from app.services.workflows import (
     workflow_outcome_requirements,
     workflow_step_display_state,
     PROPAGATED_UPSTREAM_BLOCKED,
+    WorkflowStartVarsValidationError,
 )
 from app.services.workflow_result_ingestion import (
     cleanup_workflow_result_records,
@@ -565,6 +567,8 @@ def _definition_payload(definition, brief=False):
     data['can_delete'] = data['can_manage'] and definition.owner_type != 'system'
     data['can_change_visibility'] = data['can_manage'] and definition.owner_type != 'system'
     data['is_favorite'] = definition.id in _actor_favorite_definition_ids()
+    data['latest_run_url'] = (
+        '/api/v1/workflow-definitions/%s/runs/latest' % definition.id)
     return data
 
 
@@ -3564,6 +3568,50 @@ def get_latest_workflow_run():
     return jsonify(_run_payload(run, with_steps=False))
 
 
+@api_bp.route(
+    '/workflow-definitions/<int:definition_id>/runs/latest', methods=['GET'])
+def get_latest_workflow_definition_run(definition_id):
+    """Return the newest Run for one explicit Flow, never a global fallback."""
+    err = _require_actor()
+    if err:
+        return err
+    definition = WorkflowDefinition.query.get_or_404(definition_id)
+    if not _definition_visible(definition):
+        return jsonify({'error': 'workflow definition 不存在'}), 404
+    _refresh_workflow_step_health(commit=True)
+    q = WorkflowRun.query.filter_by(definition_id=definition_id)
+    statuses = [
+        value.strip()
+        for value in str(request.args.get('status') or '').split(',')
+        if value.strip()
+    ]
+    if statuses:
+        invalid = sorted(set(statuses) - {
+            'pending', 'running', 'retrying', 'waiting_approval',
+            'blocked', 'failed', 'succeeded', 'cancelled',
+        })
+        if invalid:
+            return _workflow_api_error(
+                'INVALID_WORKFLOW_RUN_STATUS',
+                'Unknown workflow run status',
+                details={'invalid_statuses': invalid})
+        q = q.filter(WorkflowRun.status.in_(statuses))
+    run = q.order_by(
+        WorkflowRun.created_at.desc(), WorkflowRun.id.desc()).first()
+    if not run:
+        return _workflow_api_error(
+            'WORKFLOW_RUN_NOT_FOUND',
+            'No workflow run exists for this definition',
+            status=404,
+            details={'workflow_definition_id': definition_id})
+    payload = _run_payload(run, with_steps=False)
+    payload['selection'] = {
+        'mode': 'latest_for_definition',
+        'workflow_definition_id': definition_id,
+    }
+    return jsonify(payload)
+
+
 @api_bp.route('/workflow-runs', methods=['POST'])
 def create_workflow_run():
     err = _require_actor()
@@ -3718,6 +3766,34 @@ def create_workflow_run():
         if isinstance(data.get('start_parameters'), dict)
         else {}
     )
+    try:
+        trusted_start_vars = {}
+        if worker_claw_id:
+            trusted_start_vars = {
+                'worker_claw_id': worker_claw_id,
+                'executor_claw_id': worker_claw_id,
+                'executor_claw_ids': [worker_claw_id],
+            }
+        start_vars = resolve_workflow_start_vars(
+            normalized,
+            start_vars,
+            trusted_start_vars,
+            defer_required_fields={
+                'worker_claw_id',
+                'executor_claw_id',
+                'executor_claw_ids',
+                'reviewer_claw_id',
+            },
+        )
+    except WorkflowStartVarsValidationError as exc:
+        return _workflow_api_error(
+            exc.code,
+            str(exc),
+            status=422,
+            details=dict(
+                {'workflow_definition_id': definition.id},
+                **exc.details),
+        )
     try:
         assignment = resolve_workflow_run_assignment(
             normalized,
