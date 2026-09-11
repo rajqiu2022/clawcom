@@ -38,3 +38,10 @@ def test_deployer_preserves_remote_additions_and_applies_all_runtime_fixes() -> 
         merged = merge_python(remote, base, local)
         deploy._verify_markers(path, merged)
         assert "REMOTE_DEPLOYMENT_SENTINEL = True" in merged
+
+
+def test_deployer_backfills_existing_notebook_recency() -> None:
+    assert "app/api/knowledge_notebooks.py" in deploy.FILES
+    source = deploy.NOTEBOOK_RECENCY_BACKFILL
+    assert "func.max(KnowledgeEntry.updated_at)" in source
+    assert "notebook.updated_at = latest_page_at" in source

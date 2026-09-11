@@ -19,14 +19,23 @@ BASE_COMMIT = "3e4e0f2"
 REMOTE_ROOT = "/opt/openclaw-web"
 FILES = (
     "app/api/workflows.py",
+    "app/api/knowledge_notebooks.py",
     "app/services/workflow_result_ingestion.py",
 )
 REQUIRED_MARKERS = {
     "app/api/workflows.py": (
         "def _step_no_response_reminder_threshold(step):",
+        "def _step_health_max_missed(step):",
+        "def _heartbeat_fallback_suppressed(step):",
         "def _step_no_response_fallback_enabled(step):",
-        ">= _step_no_response_reminder_threshold(step)",
+        "max_missed=max_missed",
+        ">= max_missed",
         "progress_updated = _apply_step_progress(step, data, worker_id, now)",
+    ),
+    "app/api/knowledge_notebooks.py": (
+        "def _touch_notebook(page, changed_at=None):",
+        "_touch_notebook(page, changed_at)",
+        "_touch_notebook(page)",
     ),
     "app/services/workflow_result_ingestion.py": (
         "def _evidence_profile(run):",
@@ -34,6 +43,29 @@ REQUIRED_MARKERS = {
         "coverage = _apply_profile_coverage_defaults(",
     ),
 }
+
+NOTEBOOK_RECENCY_BACKFILL = r'''
+import os
+os.environ['SKIP_AUTO_MIGRATE'] = '1'
+from sqlalchemy import func
+from app import create_app, db
+from app.models import KnowledgeEntry, KnowledgeNotebook
+
+app = create_app('production')
+with app.app_context():
+    changed = 0
+    for notebook in KnowledgeNotebook.query.all():
+        latest_page_at = db.session.query(func.max(KnowledgeEntry.updated_at)).filter(
+            KnowledgeEntry.notebook_id == notebook.id,
+            KnowledgeEntry.entry_type == 'test_journal',
+        ).scalar()
+        if latest_page_at and (
+                notebook.updated_at is None or latest_page_at > notebook.updated_at):
+            notebook.updated_at = latest_page_at
+            changed += 1
+    db.session.commit()
+    print('NOTEBOOK_RECENCY_BACKFILL_OK', changed)
+'''
 
 
 def _sha256(data: bytes) -> str:
@@ -127,6 +159,16 @@ def main() -> int:
             f"{REMOTE_ROOT}/venv/bin/python -m py_compile {live_python}",
             timeout=180,
         )
+        backfill_path = f"{stage}/backfill_notebook_recency.py"
+        remote_write(
+            sftp, backfill_path, NOTEBOOK_RECENCY_BACKFILL.encode("utf-8"))
+        _, backfill_output, _ = exec_remote(
+            client,
+            f"cd {shlex.quote(REMOTE_ROOT)} && "
+            f"SKIP_AUTO_MIGRATE=1 venv/bin/python {shlex.quote(backfill_path)}",
+            timeout=180,
+        )
+        print(backfill_output.strip())
         exec_remote(client, "systemctl restart openclaw-web", timeout=120)
         _, active, _ = exec_remote(client, "systemctl is-active openclaw-web", timeout=60)
         code, http_code, http_error = exec_remote(
