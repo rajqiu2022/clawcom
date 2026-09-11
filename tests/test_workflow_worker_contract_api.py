@@ -446,6 +446,36 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
         self.assertEqual(
             [item['step_id'] for item in listed.get_json()], ['worker_step'])
 
+    def test_runner_tool_has_claim_grace_and_silent_fallback_is_disabled(self):
+        self.worker_step.step_config_json = {
+            'auto_block_on_no_response': False,
+            'heartbeat_auto_block': False,
+            'inputs': {
+                'deepflow_runner_tool': True,
+                'strict_silent': True,
+                'no_external_notification': True,
+            },
+        }
+
+        self.assertEqual(
+            workflows_api._step_no_response_reminder_threshold(
+                self.worker_step),
+            10)
+        self.assertFalse(
+            workflows_api._step_no_response_fallback_enabled(
+                self.worker_step))
+
+    def test_regular_step_keeps_standard_no_response_fallback(self):
+        self.worker_step.step_config_json = {'inputs': {}}
+
+        self.assertEqual(
+            workflows_api._step_no_response_reminder_threshold(
+                self.worker_step),
+            3)
+        self.assertTrue(
+            workflows_api._step_no_response_fallback_enabled(
+                self.worker_step))
+
     def test_bound_worker_can_read_private_run_without_management_access(self):
         owner = User(username='private-flow-owner', role='super_admin')
         owner.set_password('secret')

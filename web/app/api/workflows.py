@@ -1809,6 +1809,26 @@ def _step_auto_block_on_heartbeat_loss(step):
     )
 
 
+def _step_runtime_inputs(step):
+    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+    return config.get('inputs') if isinstance(config.get('inputs'), dict) else {}
+
+
+def _step_no_response_reminder_threshold(step):
+    """Allow an Agent time to select and invoke a fenced Runner tool."""
+    inputs = _step_runtime_inputs(step)
+    return 10 if inputs.get('deepflow_runner_tool') is True else 3
+
+
+def _step_no_response_fallback_enabled(step):
+    """Silent acceptance runs keep diagnostics in Hub without spawning Agents."""
+    inputs = _step_runtime_inputs(step)
+    return not (
+        inputs.get('strict_silent') is True
+        or inputs.get('no_external_notification') is True
+    )
+
+
 def _dispatch_heartbeat_fallback_task(run, step):
     definition = run.definition if run else None
     if not definition or definition.owner_type != 'claw' or not definition.owner_id:
@@ -1980,7 +2000,8 @@ def _refresh_workflow_step_health(run=None, commit=False):
             _dispatch_heartbeat_fallback_task(step.run, step)
             if step.run:
                 touched_runs[step.run.id] = step.run
-        elif (health.get('missed_count') or 0) >= 3:
+        elif ((health.get('missed_count') or 0)
+              >= _step_no_response_reminder_threshold(step)):
             progress = step.progress_json if isinstance(step.progress_json, dict) else {}
             reminders = progress.get('hub_reminders') if isinstance(progress.get('hub_reminders'), dict) else {}
             if not reminders.get('no_response_at'):
@@ -1990,7 +2011,8 @@ def _refresh_workflow_step_health(run=None, commit=False):
                 reminders['missed_heartbeat_count'] = health.get('missed_count') or 0
                 progress['hub_reminders'] = reminders
                 step.progress_json = progress
-                _dispatch_heartbeat_fallback_task(step.run, step)
+                if _step_no_response_fallback_enabled(step):
+                    _dispatch_heartbeat_fallback_task(step.run, step)
             # Silence starts bounded reconciliation; it is not proof that an
             # operation stopped, so retry_max cannot authorize replay here.
             signal_at = _step_health_signal_at(step)
