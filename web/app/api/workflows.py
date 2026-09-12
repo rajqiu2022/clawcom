@@ -4698,11 +4698,39 @@ def report_workflow_step_result(run_id, step_id):
         notification_outputs,
         report_readback=bool(notification_report),
         notification_policy=notification_policy)
-    notification_contract = validate_notification_result_contract({
-        'metrics': step.metrics_json or {},
-        'outputs': step.outputs_json or {},
-    }, notification_authorization, sent_audit=_notification_send_audited(
-        run.id, step.step_id), notification_policy=notification_policy)
+    delivery_mode = (step.step_config_json or {}).get(
+        'notification_delivery_mode')
+    delivery_state = (
+        delivery.metadata_json.get('state')
+        if delivery_mode == 'outbox' and delivery is not None
+        else None
+    )
+    if delivery_mode == 'outbox' and delivery_state == 'pending':
+        # Two-phase outbox contract: accepting this fenced Step result is what
+        # authorizes the Worker to activate its durable notification. Requiring
+        # wecom_sent/audit here creates an impossible ACK-before-accept cycle.
+        notification_contract = {
+            'valid': notification_authorization.get('allowed') is True,
+            'code': (
+                'NOTIFICATION_OUTBOX_PREPARED'
+                if notification_authorization.get('allowed') is True
+                else 'NOTIFICATION_OUTBOX_NOT_AUTHORIZED'
+            ),
+            'checked': True,
+            'authorized': notification_authorization.get('allowed') is True,
+            'delivery_state': 'pending',
+            'sent_audit': False,
+            'violations': (
+                [] if notification_authorization.get('allowed') is True
+                else ['notification_not_authorized']
+            ),
+        }
+    else:
+        notification_contract = validate_notification_result_contract({
+            'metrics': step.metrics_json or {},
+            'outputs': step.outputs_json or {},
+        }, notification_authorization, sent_audit=_notification_send_audited(
+            run.id, step.step_id), notification_policy=notification_policy)
     if (notification_authorization.get('strict_silent')
             and not notification_authorization.get('allowed')):
         canonical_outputs = dict(step.outputs_json or {})

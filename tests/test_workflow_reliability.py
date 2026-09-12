@@ -263,6 +263,76 @@ class WorkflowReliabilityTest(unittest.TestCase):
         self.assertIn('artifact_valid', step['gates'][0]['expression'])
         self.assertEqual(len(step['notification_delivery_gates']), 2)
 
+    def test_outbox_normalization_never_requires_delivery_ack_fields(self):
+        step = normalize_step({
+            'id': 'notify',
+            'type': 'agent_task',
+            'notification_delivery_mode': 'outbox',
+            'outputs': ['notification_receipt', 'wecom_sent', 'wecom_errcode'],
+        }, 0)
+        self.assertEqual(step['required_outputs'], ['notification_receipt'])
+
+    def test_outbox_prepare_accepts_explicit_owner_report_notification(self):
+        report = self._report()
+        report.is_shared = True
+        report.generate_share_token()
+        db.session.commit()
+        self.agent_step.step_config_json = normalize_step({
+            'id': 'agent_step',
+            'type': 'agent_task',
+            'notification_delivery_mode': 'outbox',
+            'notification_owner_role': 'reviewer',
+            'inputs': {
+                'notification_policy': {
+                    'notification_required': True,
+                    'no_external_notification': False,
+                    'strict_silent': False,
+                    'target': 'owner',
+                    'version': 'flow36-owner-report-v2',
+                },
+            },
+            'outputs': [
+                'notification_required', 'report_required', 'hub_report_id',
+                'share_url', 'notification_receipt', 'wecom_sent',
+                'wecom_errcode',
+            ],
+            'contract_on_fail': 'warn',
+        }, 0)
+        self.run.context_json = {'assignment_snapshot': {
+            'reviewer_claw_id': self.claw.id,
+        }}
+        db.session.commit()
+        delivery = {
+            'claw_id': self.claw.id,
+            'run_id': self.run.id,
+            'step_id': 'agent_step',
+            'attempt_no': self.agent_step.attempt_no or 1,
+            'notification_id': 'flow36-owner-report',
+            'message_sha256': 'c' * 64,
+            'report_id': report.id,
+            'state': 'pending',
+        }
+        response = self._post('agent_step', 'result', {
+            'status': 'passed',
+            'test_report_id': report.id,
+            'workflow_report_manifest': self._manifest(report),
+            'outputs': {
+                'notification_required': True,
+                'report_required': True,
+                'hub_report_id': report.id,
+                'share_url': '/r/%s' % report.share_token,
+                'notification_receipt': {'status': 'prepared'},
+                'wecom_sent': False,
+                'wecom_errcode': None,
+            },
+            'notification_delivery': delivery,
+        })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.agent_step.status, 'passed')
+        notification = self.agent_step.contract_result_json['notification']
+        self.assertTrue(notification['valid'])
+        self.assertEqual(notification['code'], 'NOTIFICATION_OUTBOX_PREPARED')
+
     def test_outbox_pending_is_not_sent_and_updates_after_run_terminal(self):
         report = self._report()
         self.agent_step.step_config_json = {'notification_delivery_mode': 'outbox'}
