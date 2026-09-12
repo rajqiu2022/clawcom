@@ -1056,10 +1056,22 @@ def normalize_step(step, idx):
         if key in step:
             normalized[key] = _as_list(step.get(key))
     if normalized.get('notification_delivery_mode') == 'outbox':
-        for key in ('required_metrics', 'required_outputs'):
-            if key in normalized:
-                normalized[key] = [field for field in normalized[key]
-                                   if field not in ('wecom_sent', 'wecom_errcode')]
+        # The first result only prepares the durable outbox. Delivery fields
+        # are supplied later by the authenticated notification-delivery ACK,
+        # so they can never be mandatory in the fenced Step result. When a
+        # Definition omits required_outputs the validator otherwise falls back
+        # to every declared output and accidentally makes wecom_errcode part of
+        # the prepare-phase contract.
+        normalized['required_outputs'] = [
+            field for field in normalized.get(
+                'required_outputs', normalized.get('outputs', []))
+            if field not in ('wecom_sent', 'wecom_errcode')
+        ]
+        if 'required_metrics' in normalized:
+            normalized['required_metrics'] = [
+                field for field in normalized['required_metrics']
+                if field not in ('wecom_sent', 'wecom_errcode')
+            ]
     if 'allow_empty_contract_fields' in step:
         allow_empty = step.get('allow_empty_contract_fields')
         if not isinstance(allow_empty, dict):
@@ -2306,6 +2318,7 @@ def _notification_policy_snapshot(notification_policy):
         'strict_silent': policy.get('strict_silent') is True,
         'notification_required': policy.get('notification_required') is True,
         'no_external_notification': policy.get('no_external_notification') is True,
+        'target': str(policy.get('target') or '').strip(),
         'version': str(policy.get('version') or '').strip(),
     }
 
@@ -2329,7 +2342,26 @@ def evaluate_notification_authorization(
         policy['strict_silent']
         and not policy['notification_required']
     )
-    allowed = all(checks.values()) and not strict_silent
+    # A frozen Hub policy may explicitly require an owner report notification
+    # even when the result is an analysis conclusion rather than a confirmed
+    # business defect. Definitions without that explicit policy keep the
+    # legacy business-failure hard gate.
+    report_checks = all(
+        checks[name] for name in (
+            'notification_required', 'report_required', 'hub_report_id',
+            'share_url', 'report_readback',
+        )
+    )
+    explicitly_required = (
+        policy['notification_required']
+        and policy['target'] == 'owner'
+        and not policy['no_external_notification']
+    )
+    allowed = (
+        report_checks
+        and (checks['business_failure_confirmed'] or explicitly_required)
+        and not strict_silent
+    )
     skip_reason_code = (
         (policy['version'] or 'notification_policy_strict_silent')
         if strict_silent else 'business_pass_or_automation_only'

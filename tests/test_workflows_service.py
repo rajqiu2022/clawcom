@@ -1090,6 +1090,28 @@ class WorkflowServiceTest(unittest.TestCase):
         self.assertFalse(denied['allowed'])
         self.assertEqual(denied['skip_reason'], 'business_pass_or_automation_only')
 
+    def test_explicit_owner_report_policy_authorizes_analysis_notification(self):
+        outputs = {'review': {
+            'business_failure_confirmed': False,
+            'notification_required': True,
+            'report_required': True,
+            'hub_report_id': 620,
+            'share_url': '/r/report',
+        }}
+        allowed = workflows.evaluate_notification_authorization(
+            outputs,
+            report_readback=True,
+            notification_policy={
+                'notification_required': True,
+                'no_external_notification': False,
+                'strict_silent': False,
+                'target': 'owner',
+                'version': 'flow36-owner-report-v2',
+            },
+        )
+        self.assertTrue(allowed['allowed'])
+        self.assertFalse(allowed['checks']['business_failure_confirmed'])
+
     def test_strict_silent_policy_accepts_descriptive_reason_without_authorizing_send(self):
         policy = {
             'strict_silent': True,
