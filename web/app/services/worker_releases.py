@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import zipfile
 from urllib.parse import urlsplit
 
 from flask import current_app
@@ -22,6 +23,7 @@ from app.models import WorkerRelease
 _SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
 _COMMIT_RE = re.compile(r'^[0-9a-f]{40}$')
 PLATFORM = 'linux-x86_64'
+SUPPORTED_PLATFORMS = ('linux-x86_64', 'windows-x86_64')
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_PACKAGE_FILES = 5000
 MAX_PACKAGE_FILE_BYTES = 64 * 1024 * 1024
@@ -37,6 +39,7 @@ class VerifiedWorkerRelease:
     committed_at: str
     channel: str
     signature_status: str
+    platform: str
     release_manifest_sha256: str
     platform_manifest_sha256: str
     package_manifest_sha256: str
@@ -150,8 +153,73 @@ def _verify_linux_archive(path: Path, package_sha256: str,
             raise ValueError(f'Worker package 文件校验失败：{name}')
 
 
+def _verify_windows_archive(path: Path, package_sha256: str,
+                            source_commit: str) -> None:
+    expected_manifest_name = 'claw-worker/release/package-manifest.json'
+    with zipfile.ZipFile(path, 'r') as archive:
+        members = archive.infolist()
+        if (len(members) > MAX_PACKAGE_FILES + 1
+                or any(item.file_size < 0 or item.file_size > MAX_PACKAGE_FILE_BYTES
+                       for item in members)
+                or sum(item.file_size for item in members) > MAX_PACKAGE_TOTAL_BYTES):
+            raise ValueError('Worker Windows 归档超过安全大小限制')
+        names = [item.filename for item in members]
+        if (len(names) != len(set(names))
+                or expected_manifest_name not in names
+                or any(item.is_dir() for item in members)):
+            raise ValueError('Worker Windows 归档成员非法')
+        payload = {}
+        package_bytes = None
+        for item in members:
+            pure = PurePosixPath(item.filename)
+            unix_mode = (item.external_attr >> 16) & 0o170000
+            if (pure.is_absolute() or '..' in pure.parts
+                    or (unix_mode and unix_mode != 0o100000)):
+                raise ValueError('Worker Windows 归档包含不安全成员')
+            content = archive.read(item)
+            if item.filename == expected_manifest_name:
+                if len(content) > 4 * 1024 * 1024:
+                    raise ValueError('Worker package Manifest 过大')
+                package_bytes = content
+            else:
+                payload[item.filename] = content
+    if package_bytes is None or _sha256_bytes(package_bytes) != package_sha256:
+        raise ValueError('Worker package Manifest SHA-256 不匹配')
+    package = _json_object(package_bytes, 'package-manifest.json')
+    if (package.get('source', {}).get('commit') != source_commit
+            or package.get('target', {}).get('platform') != 'windows-x86_64'
+            or package.get('target', {}).get('install_entry') != 'Setup.ps1'):
+        raise ValueError('Worker package 来源或安装入口不匹配')
+    files = package.get('files')
+    if not isinstance(files, list):
+        raise ValueError('Worker package 文件清单非法')
+    expected = {}
+    for item in files:
+        if not isinstance(item, dict):
+            raise ValueError('Worker package 文件项非法')
+        relative = str(item.get('path') or '')
+        pure = PurePosixPath(relative)
+        archive_name = f'claw-worker/{relative}'
+        if (not relative or pure.is_absolute() or '..' in pure.parts
+                or archive_name in expected
+                or not isinstance(item.get('size'), int)
+                or not _SHA256_RE.fullmatch(str(item.get('sha256') or ''))):
+            raise ValueError('Worker package 文件项非法')
+        expected[archive_name] = item
+    if set(expected) != set(payload):
+        raise ValueError('Worker package payload 与 Manifest 不一致')
+    for name, item in expected.items():
+        content = payload[name]
+        if (len(content) != item['size']
+                or _sha256_bytes(content) != item['sha256']):
+            raise ValueError(f'Worker package 文件校验失败：{name}')
+
+
 def verify_catalog_release(release_root: str | Path,
-                           release_id: str | None = None) -> VerifiedWorkerRelease:
+                           release_id: str | None = None,
+                           platform: str = PLATFORM) -> VerifiedWorkerRelease:
+    if platform not in SUPPORTED_PLATFORMS:
+        raise ValueError('Worker release platform 仅支持 linux-x86_64 / windows-x86_64')
     root = Path(release_root).resolve(strict=True)
     index_path = _safe_child(root, 'index.json', 'Worker release index')
     index_digest = _digest_file_value(
@@ -186,9 +254,9 @@ def verify_catalog_release(release_root: str | Path,
             or release.get('signature_status') not in ('unsigned', 'verified')):
         raise ValueError('Worker release 身份或审批合同非法')
     artifacts = [item for item in release.get('artifacts', [])
-                 if isinstance(item, dict) and item.get('platform') == PLATFORM]
+                 if isinstance(item, dict) and item.get('platform') == platform]
     if len(artifacts) != 1:
-        raise ValueError('Worker Linux x86_64 artifact 不存在或不唯一')
+        raise ValueError(f'Worker {platform} artifact 不存在或不唯一')
     entry = artifacts[0]
     artifact_sha = str(entry.get('artifact_sha256') or '').lower()
     platform_sha = str(entry.get('manifest_sha256') or '').lower()
@@ -197,8 +265,9 @@ def verify_catalog_release(release_root: str | Path,
             or not _SHA256_RE.fullmatch(platform_sha)
             or not isinstance(size, int) or size <= 0
             or size > MAX_ARTIFACT_BYTES
-            or entry.get('install_entry') != 'scripts/install-linux.sh'):
-        raise ValueError('Worker Linux artifact 元数据非法')
+            or entry.get('install_entry') != (
+                'scripts/install-linux.sh' if platform == PLATFORM else 'Setup.ps1')):
+        raise ValueError(f'Worker {platform} artifact 元数据非法')
     artifact_path = _safe_child(release_path.parent, entry.get('artifact'),
                                 'Worker Linux artifact')
     platform_path = _safe_child(release_path.parent, entry.get('manifest'),
@@ -207,17 +276,20 @@ def verify_catalog_release(release_root: str | Path,
         raise ValueError('Worker Linux artifact 大小或 SHA-256 不匹配')
     if _sha256_file(platform_path) != platform_sha:
         raise ValueError('Worker Linux platform Manifest SHA-256 不匹配')
-    platform_manifest = _json_object(platform_path.read_bytes(), 'Linux manifest.json')
+    platform_manifest = _json_object(platform_path.read_bytes(), 'platform manifest.json')
     package_sha = str(platform_manifest.get('package_manifest', {}).get('sha256') or '')
     if (platform_manifest.get('release_id') != selected_id
             or platform_manifest.get('source_commit') != commit
-            or platform_manifest.get('platform') != PLATFORM
+            or platform_manifest.get('platform') != platform
             or platform_manifest.get('artifact', {}).get('file') != artifact_path.name
             or platform_manifest.get('artifact', {}).get('sha256') != artifact_sha
             or platform_manifest.get('artifact', {}).get('size') != size
             or not _SHA256_RE.fullmatch(package_sha)):
-        raise ValueError('Worker Linux platform Manifest 绑定非法')
-    _verify_linux_archive(artifact_path, package_sha, commit)
+        raise ValueError('Worker platform Manifest 绑定非法')
+    if platform == PLATFORM:
+        _verify_linux_archive(artifact_path, package_sha, commit)
+    else:
+        _verify_windows_archive(artifact_path, package_sha, commit)
     return VerifiedWorkerRelease(
         release_id=selected_id,
         source_repository=str(source.get('repository') or ''),
@@ -226,6 +298,7 @@ def verify_catalog_release(release_root: str | Path,
         committed_at=str(source.get('committed_at') or ''),
         channel=str(release.get('channel') or ''),
         signature_status=str(release.get('signature_status') or ''),
+        platform=platform,
         release_manifest_sha256=manifest_sha,
         platform_manifest_sha256=platform_sha,
         package_manifest_sha256=package_sha,
@@ -309,10 +382,11 @@ def _release_store_root() -> Path:
     return root.resolve(strict=True)
 
 
-def import_latest_candidate(actor: str) -> tuple[WorkerRelease, bool]:
+def import_latest_candidate(actor: str, platform: str = PLATFORM) -> tuple[WorkerRelease, bool]:
     repository = _repository_root()
-    candidate = verify_catalog_release(repository / 'dist' / 'worker-releases')
-    destination = _release_store_root() / candidate.release_id / PLATFORM
+    candidate = verify_catalog_release(
+        repository / 'dist' / 'worker-releases', platform=platform)
+    destination = _release_store_root() / candidate.release_id / platform
     destination.mkdir(parents=True, exist_ok=True)
     final_artifact = destination / candidate.artifact_filename
     if final_artifact.exists():
@@ -332,10 +406,10 @@ def import_latest_candidate(actor: str) -> tuple[WorkerRelease, bool]:
             if os.path.exists(temporary):
                 os.unlink(temporary)
     record = WorkerRelease.query.filter_by(
-        release_id=candidate.release_id, platform=PLATFORM).first()
+        release_id=candidate.release_id, platform=platform).first()
     created = record is None
     if record is None:
-        record = WorkerRelease(release_id=candidate.release_id, platform=PLATFORM)
+        record = WorkerRelease(release_id=candidate.release_id, platform=platform)
         db.session.add(record)
     immutable = {
         'source_repository': candidate.source_repository,

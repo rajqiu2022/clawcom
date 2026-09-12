@@ -13,6 +13,7 @@ from app.api.openclaws import _actor_display_name, _get_user
 from app.models import AuditLog, WorkerRelease
 from app.services.worker_releases import (
     import_latest_candidate,
+    SUPPORTED_PLATFORMS,
     verify_record_artifact,
 )
 
@@ -53,8 +54,12 @@ def refresh_worker_releases():
     if not user:
         return jsonify({'error': '仅超级管理员可刷新 Worker 发布版本'}), 403
     actor = _actor_display_name(user)
+    data = request.get_json(silent=True) or {}
+    platform = str(data.get('platform') or 'linux-x86_64').strip().lower()
+    if platform not in SUPPORTED_PLATFORMS:
+        return jsonify({'error': 'platform 仅支持 linux-x86_64 / windows-x86_64'}), 400
     try:
-        record, created = import_latest_candidate(actor)
+        record, created = import_latest_candidate(actor, platform=platform)
         _audit('import', record, actor, {
             'created': created,
             'source_commit': record.source_commit,

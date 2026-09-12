@@ -53,9 +53,16 @@ class WorkerReleaseContractTest(unittest.TestCase):
     @unittest.skipUnless(WORKER_CATALOG.is_dir(), 'local Worker release catalog unavailable')
     def test_latest_worker_catalog_is_importable(self):
         release = verify_catalog_release(WORKER_CATALOG)
-        self.assertEqual('linux-x86_64', 'linux-x86_64')
+        self.assertEqual('linux-x86_64', release.platform)
         self.assertRegex(release.source_commit, r'^[0-9a-f]{40}$')
         self.assertRegex(release.artifact_sha256, r'^[0-9a-f]{64}$')
+        self.assertTrue(release.artifact_path.is_file())
+
+    @unittest.skipUnless(WORKER_CATALOG.is_dir(), 'local Worker release catalog unavailable')
+    def test_latest_windows_worker_catalog_is_importable(self):
+        release = verify_catalog_release(
+            WORKER_CATALOG, platform='windows-x86_64')
+        self.assertEqual('windows-x86_64', release.platform)
         self.assertTrue(release.artifact_path.is_file())
 
     @unittest.skipUnless(WORKER_CATALOG.is_dir(), 'local Worker release catalog unavailable')
@@ -125,6 +132,20 @@ class WorkerReleaseImportTest(unittest.TestCase):
         self.assertEqual(1, WorkerRelease.query.count())
         self.assertNotIn('artifact_path', first.to_dict())
         self.assertTrue(Path(first.artifact_path).is_file())
+
+    def test_import_windows_release_is_platform_scoped(self):
+        environment = {
+            'WORKER_RELEASE_REPOSITORY_PATH': str(WORKER_CATALOG.parents[1]),
+            'WORKER_RELEASE_STORE_ROOT': str(Path(self.temp.name) / 'store'),
+        }
+        with patch.dict('os.environ', environment, clear=False):
+            linux, _ = import_latest_candidate('admin')
+            windows, created = import_latest_candidate(
+                'admin', platform='windows-x86_64')
+        self.assertTrue(created)
+        self.assertEqual(linux.release_id, windows.release_id)
+        self.assertEqual('windows-x86_64', windows.platform)
+        self.assertEqual(2, WorkerRelease.query.count())
 
 
 if __name__ == '__main__':
