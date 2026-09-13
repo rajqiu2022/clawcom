@@ -259,6 +259,89 @@ def _gap_relations(gap):
     return relations
 
 
+def _gap_candidate_ids(data):
+    """Read explicit and evidence-backed candidate links from a Gap write."""
+    raw = data.get('candidate_ids')
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ValueError('candidate_ids must be an array')
+    evidence = data.get('evidence') if isinstance(data.get('evidence'), dict) else {}
+    values = list(raw)
+    if evidence.get('candidate_id') not in (None, ''):
+        values.append(evidence['candidate_id'])
+    result = []
+    for value in values:
+        try:
+            candidate_id = int(value)
+        except (TypeError, ValueError):
+            raise ValueError('candidate_ids must contain positive integers') from None
+        if candidate_id <= 0:
+            raise ValueError('candidate_ids must contain positive integers')
+        if candidate_id not in result:
+            result.append(candidate_id)
+    return result
+
+
+def _validate_gap_candidates(project_id, candidate_ids, gap, values):
+    if not candidate_ids:
+        return []
+    candidates = (AutomationCaseCandidate.query.filter(
+        AutomationCaseCandidate.id.in_(candidate_ids)).with_for_update().all())
+    by_id = {row.id: row for row in candidates}
+    missing = [candidate_id for candidate_id in candidate_ids
+               if candidate_id not in by_id]
+    if missing:
+        raise LookupError(missing)
+    gap_tokens = set(values.get('missing_capabilities_json') or []) | set(
+        values.get('required_operations_json') or [])
+    for candidate_id in candidate_ids:
+        candidate = by_id[candidate_id]
+        if int(candidate.project_id) != int(project_id):
+            raise PermissionError(candidate_id)
+        if candidate.state != 'WAITING_CAPABILITY':
+            raise RuntimeError(
+                'candidate %s must be WAITING_CAPABILITY' % candidate_id)
+        if (candidate.capability_gap_id
+                and (gap is None or candidate.capability_gap_id != gap.id)):
+            raise RuntimeError(
+                'candidate %s is already linked to capability gap %s' %
+                (candidate_id, candidate.capability_gap_id))
+        required = set(candidate.required_capabilities_json or [])
+        if not required or not required.issubset(gap_tokens):
+            raise RuntimeError(
+                'candidate %s capabilities do not match this gap' % candidate_id)
+    return [by_id[candidate_id] for candidate_id in candidate_ids]
+
+
+def _link_gap_candidates(gap, candidates, actor):
+    relations = []
+    for candidate in candidates:
+        if candidate.capability_gap_id == gap.id:
+            continue
+        version_before = int(candidate.version or 1)
+        candidate.capability_gap_id = gap.id
+        candidate.version = version_before + 1
+        candidate.updated_by = actor['name']
+        candidate.updated_at = _now()
+        _event(
+            candidate, 'capability_gap_linked', actor,
+            candidate.state, candidate.state,
+            version_before, candidate.version,
+            payload={'capability_gap_id': gap.id},
+        )
+        relations.append({
+            'from_type': 'automation_case_candidate',
+            'from_id': str(candidate.id),
+            'relation_type': 'blocked_by',
+            'to_type': 'capability_gap',
+            'to_id': str(gap.id),
+            'metadata': {'source': 'capability_gap_upsert'},
+        })
+    if relations:
+        best_effort_upsert_relations(gap.project_id, relations, actor['name'])
+
+
 def _candidate_payload(candidate, with_events=False):
     payload = candidate.to_dict()
     payload['source_lineage'] = payload['source_refs']
@@ -819,8 +902,22 @@ def upsert_capability_gap():
         return replay
     try:
         values = normalize_gap_payload(data, project_id, existing=gap)
+        candidate_ids = _gap_candidate_ids(data)
+        candidates = _validate_gap_candidates(
+            project_id, candidate_ids, gap, values)
     except ValueError as exc:
         return _error('CAPABILITY_GAP_VALIDATION_FAILED', str(exc))
+    except LookupError as exc:
+        return _error(
+            'CAPABILITY_GAP_CANDIDATE_NOT_FOUND',
+            'One or more candidates were not found', 404,
+            {'candidate_ids': list(exc.args[0])})
+    except PermissionError:
+        return _error(
+            'CAPABILITY_GAP_CANDIDATE_NOT_FOUND',
+            'One or more candidates were not found', 404)
+    except RuntimeError as exc:
+        return _error('CAPABILITY_GAP_CANDIDATE_CONFLICT', str(exc), 409)
 
     created = gap is None
     if created:
@@ -856,6 +953,7 @@ def upsert_capability_gap():
         gap.updated_by = actor['name']
         gap.updated_at = _now()
         db.session.flush()
+    _link_gap_candidates(gap, candidates, actor)
     best_effort_upsert_relations(
         gap.project_id, _gap_relations(gap), actor['name'])
     response = _gap_payload(gap)

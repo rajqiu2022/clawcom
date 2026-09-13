@@ -179,6 +179,72 @@ class CapabilityGapLifecycleApiTest(unittest.TestCase):
         self.assertIsNotNone(relation)
         self.assertEqual(relation.to_id, 'TAPD-STORY-9001')
 
+    def test_gap_upsert_atomically_links_evidence_candidate(self):
+        candidate = AutomationCaseCandidate(
+            project_id=self.project.id,
+            title='Generated waiting candidate',
+            module_key='story.progress',
+            case_draft_json={'steps': ['complete story']},
+            required_capabilities_json=['read_reward_state'],
+            state='WAITING_CAPABILITY',
+            dedupe_key='generated-waiting-candidate',
+            version=2,
+            created_by=self.admin.username,
+            updated_by=self.admin.username,
+        )
+        db.session.add(candidate)
+        db.session.commit()
+
+        response = self._upsert_gap(
+            key='gap-upsert-candidate-link',
+            evidence={
+                'qualification_run_id': self.qualification_run.id,
+                'candidate_id': candidate.id,
+            },
+        )
+
+        self.assertEqual(201, response.status_code, response.get_data(as_text=True))
+        db.session.refresh(candidate)
+        gap = CapabilityGap.query.one()
+        self.assertEqual(gap.id, candidate.capability_gap_id)
+        self.assertEqual(3, candidate.version)
+        self.assertEqual([candidate.id], response.get_json()['candidate_ids'])
+        self.assertEqual(
+            1, AutomationCaseCandidateEvent.query.filter_by(
+                candidate_id=candidate.id,
+                event_type='capability_gap_linked').count())
+        self.assertIsNotNone(EntityRelation.query.filter_by(
+            from_type='automation_case_candidate',
+            from_id=str(candidate.id),
+            relation_type='blocked_by',
+            to_type='capability_gap',
+            to_id=str(gap.id),
+        ).first())
+
+    def test_gap_upsert_rejects_candidate_with_unmatched_capabilities(self):
+        candidate = AutomationCaseCandidate(
+            project_id=self.project.id,
+            title='Unrelated waiting candidate',
+            required_capabilities_json=['unrelated_capability'],
+            state='WAITING_CAPABILITY',
+            dedupe_key='unrelated-waiting-candidate',
+            version=1,
+        )
+        db.session.add(candidate)
+        db.session.commit()
+
+        response = self._upsert_gap(
+            key='gap-upsert-unmatched-candidate',
+            evidence={'candidate_id': candidate.id},
+        )
+
+        self.assertEqual(409, response.status_code, response.get_data(as_text=True))
+        self.assertEqual(
+            'CAPABILITY_GAP_CANDIDATE_CONFLICT', response.get_json()['code'])
+        self.assertEqual(0, CapabilityGap.query.count())
+        db.session.refresh(candidate)
+        self.assertIsNone(candidate.capability_gap_id)
+
     def test_resolve_marks_pending_then_atomic_requeue_is_idempotent(self):
         candidate = self._waiting_candidate('one')
         gap_id = candidate['capability_gap_id']

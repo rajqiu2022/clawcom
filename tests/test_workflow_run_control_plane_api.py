@@ -474,10 +474,17 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
         step.blocker_json = {'message': 'actual blocker'}
         run.status = 'blocked'
         run.blocker_json = {'message': 'actual blocker'}
+        run.business_conclusion = 'INCONCLUSIVE'
+        run.automation_conclusion = 'AUTOMATION_ENV_BLOCKED'
+        run.outcomes_json = {
+            'business': 'INCONCLUSIVE',
+            'automation': 'BLOCKED',
+        }
         db.session.commit()
 
-        retried = self.client.post(
-            f'/api/v1/workflow-runs/{run_id}/steps/{step.step_id}/retry')
+        with patch.object(workflows_api, '_dispatch_step_message'):
+            retried = self.client.post(
+                f'/api/v1/workflow-runs/{run_id}/steps/{step.step_id}/retry')
         self.assertEqual(200, retried.status_code, retried.get_data(as_text=True))
         refreshed = db.session.get(WorkflowRunStep, step.id)
         self.assertEqual(previous_attempt + 1, refreshed.attempt_no)
@@ -488,6 +495,48 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
         self.assertEqual({}, refreshed.outputs_json)
         self.assertNotEqual(
             {'message': 'actual blocker'}, refreshed.blocker_json)
+        refreshed_run = db.session.get(WorkflowRun, run_id)
+        self.assertEqual('', refreshed_run.business_conclusion)
+        self.assertEqual('', refreshed_run.automation_conclusion)
+        self.assertNotEqual(
+            'BLOCKED', (refreshed_run.outcomes_json or {}).get('automation'))
+
+        refreshed.status = 'passed'
+        workflows_api._recompute_run_status(refreshed_run, actor='test')
+
+        self.assertEqual('succeeded', refreshed_run.status)
+        self.assertEqual('COMPLETED', refreshed_run.automation_conclusion)
+
+    def test_resume_recomputes_run_outcomes_without_stale_blocked_attempt(self):
+        created = self.client.post(
+            '/api/v1/workflow-runs', json=self._run_body('clean-resume'))
+        self.assertEqual(201, created.status_code, created.get_data(as_text=True))
+        run_id = created.get_json()['id']
+        run = db.session.get(WorkflowRun, run_id)
+        step = WorkflowRunStep.query.filter_by(run_id=run_id).first()
+        step.status = 'blocked'
+        step.outputs_json = {'automation_outcome': 'BLOCKED'}
+        run.status = 'blocked'
+        run.business_conclusion = 'INCONCLUSIVE'
+        run.automation_conclusion = 'AUTOMATION_ENV_BLOCKED'
+        run.outcomes_json = {
+            'business': 'INCONCLUSIVE',
+            'automation': 'BLOCKED',
+        }
+        db.session.commit()
+
+        with patch.object(workflows_api, '_dispatch_step_message'):
+            resumed = self.client.post(
+                f'/api/v1/workflow-runs/{run_id}/resume',
+                json={'from_step_id': step.step_id},
+            )
+
+        self.assertEqual(200, resumed.status_code, resumed.get_data(as_text=True))
+        refreshed_run = db.session.get(WorkflowRun, run_id)
+        self.assertEqual('', refreshed_run.business_conclusion)
+        self.assertEqual('', refreshed_run.automation_conclusion)
+        self.assertNotEqual(
+            'BLOCKED', (refreshed_run.outcomes_json or {}).get('automation'))
 
     def test_definition_can_require_an_explicit_single_worker_binding(self):
         definition_json = dict(self.definition.definition_json or {})

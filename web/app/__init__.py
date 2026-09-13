@@ -1278,6 +1278,30 @@ def create_app(config_name=None):
                     except Exception as e:
                         logger.info(f'agent_tasks.payload 扩展跳过: {e}')
 
+                    # 早期生产库把 AgentTask.status 建成四值 ENUM，Worker
+                    # 回写新合同的 blocked 时会被 MySQL 非严格模式静默转成
+                    # 空字符串。先扩成 VARCHAR，再只按 terminal_reason 证据
+                    # 修复已发生的确定性脏数据。
+                    try:
+                        if 'mysql' in db_url:
+                            status_type = conn.execute(text("""
+                                SELECT DATA_TYPE
+                                FROM information_schema.COLUMNS
+                                WHERE TABLE_SCHEMA = DATABASE()
+                                  AND TABLE_NAME = 'agent_tasks'
+                                  AND COLUMN_NAME = 'status'
+                                LIMIT 1
+                            """)).scalar()
+                            if str(status_type or '').lower() != 'varchar':
+                                conn.execute(text(
+                                    "ALTER TABLE agent_tasks "
+                                    "MODIFY COLUMN status VARCHAR(20) NULL DEFAULT 'pending'"
+                                ))
+                                logger.info(
+                                    'agent_tasks.status 已从旧 ENUM 扩展为 VARCHAR(20)')
+                    except Exception as e:
+                        logger.info(f'agent_tasks.status 扩展跳过: {e}')
+
                     # 普通 AgentTask 租约 / fencing / 有限重试合同。
                     # 每列独立迁移，兼容已部分升级的生产库；重复列错误安全跳过。
                     agent_task_columns = (
@@ -1306,6 +1330,14 @@ def create_app(config_name=None):
                             logger.info(
                                 'agent_tasks.%s 迁移跳过: %s',
                                 column_name, e)
+                    try:
+                        conn.execute(text(
+                            "UPDATE agent_tasks SET status = 'blocked' "
+                            "WHERE (status IS NULL OR status = '') "
+                            "AND terminal_reason = 'blocked'"
+                        ))
+                    except Exception as e:
+                        logger.info(f'agent_tasks blocked 状态回填跳过: {e}')
                     try:
                         conn.execute(text(
                             "CREATE INDEX ix_agent_tasks_lease_expires_at "

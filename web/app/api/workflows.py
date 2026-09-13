@@ -1171,7 +1171,22 @@ def _sync_run_conclusions(run):
               and run.evidence_ingest_status == 'EVIDENCE_INGEST_INCOMPLETE')):
         run.automation_conclusion = 'COMPLETED_WITH_AUTOMATION_ERROR'
     elif run.status in ('succeeded', 'failed', 'blocked', 'cancelled'):
-        run.automation_conclusion = run.automation_conclusion or 'COMPLETED'
+        # The conclusion is derived from the active Step attempts.  Keeping a
+        # previous terminal value here makes a repaired retry look blocked
+        # even after every current attempt passed.
+        run.automation_conclusion = 'COMPLETED'
+
+
+def _clear_run_derived_outcomes_for_reexecution(run):
+    """Drop attempt-derived Run verdicts before retry/resume recomputation.
+
+    Every still-active Step is merged back by ``_sync_run_outcomes`` when the
+    Run becomes terminal.  Starting from an empty aggregate prevents a more
+    severe result from an obsolete attempt winning the severity merge.
+    """
+    run.business_conclusion = ''
+    run.automation_conclusion = ''
+    run.outcomes_json = {}
 
 
 def _composite_outcomes_enabled(run):
@@ -4945,6 +4960,7 @@ def retry_workflow_step(run_id, step_id):
     run.status = 'pending'
     run.finished_at = None
     run.blocker_json = {}
+    _clear_run_derived_outcomes_for_reexecution(run)
     _recompute_run_status(run, _actor_name())
     db.session.commit()
     return jsonify(run.to_dict(with_steps=True))
@@ -4997,6 +5013,7 @@ def resume_workflow_run(run_id):
     run.status = 'pending'
     run.finished_at = None
     run.blocker_json = {}
+    _clear_run_derived_outcomes_for_reexecution(run)
     _recompute_run_status(run, _actor_name())
     db.session.commit()
     return jsonify(run.to_dict(with_steps=True))
