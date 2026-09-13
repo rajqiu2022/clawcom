@@ -11,6 +11,7 @@
 <div class="tab-bar">
     <div class="tab-item active" data-tab="info" onclick="switchTab('info')">基本信息</div>
     <div class="tab-item" data-tab="todos" onclick="switchTab('todos')">待办管理</div>
+    <div class="tab-item" id="agenttasks-tab" data-tab="agenttasks" onclick="switchTab('agenttasks')" style="display:none">Agent 任务</div>
     <div class="tab-item" data-tab="skills" onclick="switchTab('skills')">Skills 配置</div>
     <div class="tab-item" data-tab="reports" onclick="switchTab('reports')">工作日报</div>
     <div class="tab-item" data-tab="config" onclick="switchTab('config')">工作规范</div>
@@ -116,6 +117,41 @@
         <!-- 每日任务面板 -->
         <div id="todo-panel-daily" style="display:none">
             <div id="todo-daily-list"></div>
+        </div>
+    </div>
+</div>
+
+<!-- 普通 AgentTask 控制面（管理员） -->
+<div class="tab-content" id="tab-agenttasks" style="display:none">
+    <div class="card">
+        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+            <div>
+                <h3 class="card-title">Agent 任务</h3>
+                <div style="font-size:.8rem;color:var(--text-muted);margin-top:4px">
+                    普通 AgentTask 的租约、心跳、尝试与终态；Workflow 节点任务仍由 Workflow 页面管理。
+                </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+                <select class="form-input" id="agenttask-status-filter" style="width:128px" onchange="loadAgentTasks()">
+                    <option value="">全部状态</option>
+                    <option value="pending">pending</option>
+                    <option value="running">running</option>
+                    <option value="blocked">blocked</option>
+                    <option value="failed">failed</option>
+                    <option value="completed">completed</option>
+                    <option value="cancelled">cancelled</option>
+                </select>
+                <button class="btn btn-sm" onclick="loadAgentTasks()">刷新</button>
+            </div>
+        </div>
+        <div id="agenttask-summary" style="font-size:.8rem;color:var(--text-muted);margin:10px 0"></div>
+        <div style="overflow-x:auto">
+            <table class="agenttask-table">
+                <thead><tr>
+                    <th>任务</th><th>状态</th><th>租约 / 心跳</th><th>尝试 / 重试</th><th>终态 / 进度</th><th>操作</th>
+                </tr></thead>
+                <tbody id="agenttask-list"><tr><td colspan="6"><div class="loading"><span class="spinner"></span></div></td></tr></tbody>
+            </table>
         </div>
     </div>
 </div>
@@ -358,6 +394,12 @@
 }
 #report-detail-body .report-section .empty { color: var(--text-muted); font-size: 0.85rem; padding: 4px 0; }
 #report-detail-body .report-section ol > li { margin-bottom: 6px; }
+.agenttask-table { width:100%; border-collapse:collapse; min-width:980px; font-size:.8rem; }
+.agenttask-table th, .agenttask-table td { padding:9px 10px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top; }
+.agenttask-table th { color:var(--text-muted); font-weight:600; white-space:nowrap; }
+.agenttask-table code { font-size:.75rem; overflow-wrap:anywhere; }
+.agenttask-meta { color:var(--text-muted); line-height:1.65; }
+.agenttask-progress { max-width:320px; white-space:pre-wrap; overflow-wrap:anywhere; }
 </style>
 <script>
 const CLAW_ID = {{ claw_id }};
@@ -477,6 +519,11 @@ function applyPermUI() {
             el.disabled = true;
         });
     }
+    const agentTasksTab = document.getElementById('agenttasks-tab');
+    if (agentTasksTab) {
+        const role = (meData && meData.role) || 'guest';
+        agentTasksTab.style.display = ['super_admin', 'admin'].includes(role) ? '' : 'none';
+    }
 }
 
 function applyRoleOptions() {
@@ -504,6 +551,7 @@ function switchTab(tab) {
     $(`#tab-${tab}`).style.display = 'block';
 
     if (tab === 'todos') loadTodos();
+    if (tab === 'agenttasks') loadAgentTasks();
     if (tab === 'skills') loadSkills();
     if (tab === 'reports') loadReports();
     if (tab === 'config') loadInstalledRules();
@@ -1401,6 +1449,88 @@ async function toggleTodo(todoId, isDone) {
         }
         loadTodos();
     } catch(e) { showToast(`操作失败：${e.message}`,'error'); }
+}
+
+function _agentTaskAge(seconds) {
+    if (seconds === null || seconds === undefined) return '-';
+    const value = Number(seconds) || 0;
+    if (value < 60) return `${value}s`;
+    if (value < 3600) return `${Math.floor(value / 60)}m`;
+    if (value < 86400) return `${Math.floor(value / 3600)}h`;
+    return `${Math.floor(value / 86400)}d`;
+}
+
+function _agentTaskText(value) {
+    if (value === null || value === undefined || value === '') return '-';
+    return escapeHtmlReport(typeof value === 'string' ? value : JSON.stringify(value));
+}
+
+async function _agentTaskRequest(path, data = null) {
+    const options = { method: data === null ? 'GET' : 'POST', headers: {'Content-Type': 'application/json'} };
+    if (data !== null) options.body = JSON.stringify(data);
+    const response = await fetch(`/api/openclaws/${CLAW_ID}${path}`, options);
+    const body = await response.json();
+    if (!response.ok) {
+        const error = new Error(body.error || `HTTP ${response.status}`);
+        error.code = body.code || '';
+        throw error;
+    }
+    return body;
+}
+
+async function loadAgentTasks() {
+    const tbody = document.getElementById('agenttask-list');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="6"><div class="loading"><span class="spinner"></span></div></td></tr>';
+    const status = document.getElementById('agenttask-status-filter').value;
+    try {
+        const tasks = await _agentTaskRequest(`/tasks?limit=100${status ? `&status=${encodeURIComponent(status)}` : ''}`);
+        const ordinary = tasks.filter(task => task.task_type !== 'workflow_agent_task');
+        document.getElementById('agenttask-summary').textContent =
+            `普通任务 ${ordinary.length} 条 · Workflow AgentTask ${tasks.length - ordinary.length} 条（仅展示，不在此操作）`;
+        if (!tasks.length) {
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:28px">暂无任务</td></tr>';
+            return;
+        }
+        tbody.innerHTML = tasks.map(task => {
+            const ordinaryTask = task.task_type !== 'workflow_agent_task';
+            const terminal = ['completed', 'failed', 'blocked', 'cancelled'].includes(task.status);
+            const progress = task.progress ? JSON.stringify(task.progress) : '-';
+            const encodedTaskId = encodeURIComponent(task.task_id);
+            const actions = ordinaryTask
+                ? `${['pending', 'running'].includes(task.status) ? `<button class="btn btn-sm btn-danger" onclick="cancelAgentTask(decodeURIComponent('${encodedTaskId}'))">取消</button>` : ''}
+                   ${terminal ? `<button class="btn btn-sm" onclick="retryAgentTask(decodeURIComponent('${encodedTaskId}'))">重试</button>` : ''}`
+                : '<span class="agenttask-meta">Workflow 管理</span>';
+            return `<tr>
+                <td><code>${_agentTaskText(task.task_id)}</code><div class="agenttask-meta">${_agentTaskText(task.task_type)} · 年龄 ${_agentTaskAge(task.task_age_seconds)}</div></td>
+                <td><strong>${_agentTaskText(task.status)}</strong>${task.lease_expired ? '<div style="color:var(--red)">租约已过期</div>' : ''}</td>
+                <td class="agenttask-meta">到期：${_agentTaskText(task.lease_expires_at)}<br>心跳：${_agentTaskText(task.last_heartbeat_at)}<br>距今：${_agentTaskAge(task.heartbeat_age_seconds)}</td>
+                <td class="agenttask-meta">attempt ${Number(task.attempt_no || 0)} · fence ${Number(task.fencing_token || 0)}<br>retry ${Number(task.retry_count || 0)} / ${Number(task.retry_max || 0)} · version ${Number(task.version || 0)}</td>
+                <td><div>${_agentTaskText(task.terminal_reason)}</div><div class="agenttask-meta agenttask-progress">${_agentTaskText(progress)}</div></td>
+                <td><div style="display:flex;gap:6px;flex-wrap:wrap">${actions || '-'}</div></td>
+            </tr>`;
+        }).join('');
+    } catch (error) {
+        tbody.innerHTML = `<tr><td colspan="6" style="color:var(--red);padding:20px">加载失败：${escapeHtmlReport(error.message)}</td></tr>`;
+    }
+}
+
+async function cancelAgentTask(taskId) {
+    if (!await customConfirm('确认取消该 AgentTask？旧执行者后续回执会被 fencing 拒绝。')) return;
+    try {
+        await _agentTaskRequest(`/tasks/${encodeURIComponent(taskId)}/cancel`, {reason: 'admin_cancelled_from_management_page'});
+        showToast('AgentTask 已取消', 'success');
+        await loadAgentTasks();
+    } catch (error) { showToast('取消失败：' + error.message, 'error'); }
+}
+
+async function retryAgentTask(taskId) {
+    if (!await customConfirm('确认重新排队该 AgentTask？系统会生成新的 attempt 和 fencing token。')) return;
+    try {
+        await _agentTaskRequest(`/tasks/${encodeURIComponent(taskId)}/retry`, {});
+        showToast('AgentTask 已重新排队', 'success');
+        await loadAgentTasks();
+    } catch (error) { showToast('重试失败：' + error.message, 'error'); }
 }
 
 async function showCreateTodo() {

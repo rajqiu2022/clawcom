@@ -305,6 +305,21 @@ def _watcher_loop(app):
                         wf_n = 0
                         logger.warning(f'[timeout_watcher] 过期 workflow 任务扫描异常: {e}')
 
+                    # 普通 AgentTask 使用独立租约/fencing 状态机。旧版任务没有
+                    # lease 时也会在有限宽限期后终态，避免跨小时占用 running。
+                    try:
+                        from app.services.agent_tasks import (
+                            expire_stale_ordinary_tasks,
+                        )
+                        ordinary_n = expire_stale_ordinary_tasks()
+                        if ordinary_n:
+                            logger.info(
+                                '[timeout_watcher] 普通 AgentTask '
+                                '租约/合同收敛 %s 条', ordinary_n)
+                    except Exception as e:
+                        logger.warning(
+                            '[timeout_watcher] 普通 AgentTask 扫描异常: %s', e)
+
                     # 读运行开关（存 system_config，DB 改完立即生效，不用重启）
                     todo_on = _get_switch(db, SWITCH_TODO_FALLBACK, default_on=False)
                     msg_on = _get_switch(db, SWITCH_MESSAGE_ALERT, default_on=False)

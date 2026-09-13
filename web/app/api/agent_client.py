@@ -17,7 +17,7 @@ import os
 from datetime import datetime, date, timedelta
 from flask import request, jsonify, Response, stream_with_context, Blueprint, current_app
 from app import db
-from app.models import (AgentPostAssignment, AgentTask, OpenClawInstance,
+from app.models import (AgentPostAssignment, AgentTask, AuditLog, OpenClawInstance,
                         ClawMessage, ClawTodo, ClawTodoLog,
                         WorkflowDefinition, _now)
 from app.services.todo_schedule import (
@@ -26,6 +26,16 @@ from app.services.todo_schedule import (
     cst_now_naive,
     todo_schedule_state,
 )
+from app.services.agent_tasks import (
+    AgentTaskContractError,
+    claim_pending_tasks,
+    complete_task,
+    heartbeat_task,
+    normalize_retry_max,
+    task_payload as parse_task_payload,
+    validate_deployment_contract,
+)
+from app.api.auth_utils import get_current_user, is_admin_user
 from functools import wraps
 import json
 import time
@@ -71,6 +81,10 @@ def _is_missing(v):
     if isinstance(v, str) and not v.strip():
         return True
     return False
+
+
+def _agent_task_error(exc):
+    return jsonify({'code': exc.code, 'error': exc.message}), exc.status
 import threading
 
 logger = logging.getLogger(__name__)
@@ -574,15 +588,16 @@ def claw_sse_events(claw_id, claw=None):
                             _rc.close()
                         last_status_update = now
 
-                    tasks = AgentTask.query.filter(
+                    workflow_tasks = AgentTask.query.filter(
                         AgentTask.claw_id == claw_id,
-                        AgentTask.status == 'pending'
+                        AgentTask.status == 'pending',
+                        AgentTask.task_type == 'workflow_agent_task',
                     ).order_by(AgentTask.created_at.asc()).limit(10).all()
 
-                    # 发送待处理任务
-                    task_events = []
-                    for task in tasks:
-                        # F3：workflow 任务先校验 run/step 仍活跃，否则失效、不投递
+                    # Workflow AgentTask 保留 Run/Step 专用 claim；普通
+                    # AgentTask 使用带 lease/token/fencing 的原子 claim。
+                    deliver = []
+                    for task in workflow_tasks:
                         if not _workflow_task_deliverable(task):
                             task.status = 'failed'
                             task.error = 'workflow_run_or_step_inactive'
@@ -592,7 +607,18 @@ def claw_sse_events(claw_id, claw=None):
                         task.status = 'running'
                         task.assigned_at = datetime.now()
                         db.session.commit()
-                        task_events.append(f"event: task\ndata: {json.dumps(task.to_dict())}\n\n")
+                        deliver.append((task, False))
+                    remaining = max(0, 10 - len(deliver))
+                    if remaining:
+                        for task in claim_pending_tasks(claw_id, limit=remaining):
+                            deliver.append((task, True))
+                    deliver.sort(key=lambda item: (
+                        item[0].created_at or datetime.min, item[0].id))
+                    task_events = [
+                        f"event: task\ndata: "
+                        f"{json.dumps(task.to_dict(include_claim=include_claim))}\n\n"
+                        for task, include_claim in deliver[:10]
+                    ]
                     events_to_yield.extend(task_events)
 
                     # 聊天室事件使用独立事件名。普通聊天室消息不会创建 notify_agent
@@ -720,6 +746,18 @@ def claw_task_report(claw_id, claw=None):
     task = AgentTask.query.filter_by(task_id=data['task_id'], claw_id=claw_id).first()
     if not task:
         return jsonify({'error': '任务不存在'}), 404
+
+    if task.task_type != 'workflow_agent_task':
+        try:
+            disposition = complete_task(task, data)
+        except AgentTaskContractError as exc:
+            return _agent_task_error(exc)
+        if disposition == 'retried':
+            notify_claw(claw_id)
+        return jsonify({
+            'status': disposition,
+            'task': task.to_dict(),
+        })
 
     task.status = data.get('status', 'completed')
     task.result = data.get('result')
@@ -1449,6 +1487,20 @@ def dispatch_task_to_claw(claw_id):
     if not data or not data.get('task_type'):
         return jsonify({'error': 'task_type 为必填项'}), 400
 
+    raw_payload = data.get('payload', {})
+    if not isinstance(raw_payload, dict):
+        return jsonify({
+            'code': 'AGENT_TASK_PAYLOAD_INVALID',
+            'error': 'payload 必须是对象',
+        }), 400
+    try:
+        payload = validate_deployment_contract(
+            raw_payload, target_claw_id=claw_id)
+        retry_max = normalize_retry_max(
+            data.get('retry_max', payload.get('retry_max', 0)))
+    except AgentTaskContractError as exc:
+        return _agent_task_error(exc)
+
     # 生成唯一任务ID
     import secrets
     task_id = f"task_{int(time.time())}_{secrets.token_hex(8)}"
@@ -1459,8 +1511,9 @@ def dispatch_task_to_claw(claw_id):
         task_type=data['task_type'],
         command=data.get('command'),
         target_path=data.get('target_path'),
-        payload=json.dumps(data.get('payload', {})),
+        payload=json.dumps(payload, ensure_ascii=False, sort_keys=True),
         status='pending',
+        retry_max=retry_max,
     )
     db.session.add(task)
     db.session.commit()
@@ -1500,6 +1553,135 @@ def get_claw_task(claw_id, task_id):
     return jsonify(task.to_dict())
 
 
+@agent_bp.route('/<int:claw_id>/tasks/<task_id>/heartbeat', methods=['POST'])
+@require_claw_token
+def heartbeat_claw_task(claw_id, task_id, claw=None):
+    """Renew one ordinary AgentTask lease and deduplicate progress facts."""
+    task = AgentTask.query.filter_by(
+        claw_id=claw_id, task_id=task_id).first()
+    if not task:
+        return jsonify({'error': '任务不存在'}), 404
+    if task.task_type == 'workflow_agent_task':
+        return jsonify({
+            'code': 'WORKFLOW_TASK_HEARTBEAT_SEPARATE',
+            'error': 'Workflow AgentTask 必须使用 Workflow Step heartbeat',
+        }), 409
+    data = request.get_json(silent=True) or {}
+    try:
+        duplicate = heartbeat_task(task, data)
+    except AgentTaskContractError as exc:
+        return _agent_task_error(exc)
+    return jsonify({
+        'status': 'ok',
+        'duplicate_progress': duplicate,
+        'task': task.to_dict(),
+    })
+
+
+def _agent_task_admin():
+    if not is_admin_user():
+        return None
+    return get_current_user()
+
+
+def _agent_task_audit(action, task, actor, detail):
+    db.session.add(AuditLog(
+        action=action,
+        resource_type='agent_task',
+        resource_id=task.id,
+        resource_name=task.task_id,
+        operator=(
+            getattr(actor, 'display_name', None)
+            or getattr(actor, 'username', None)
+            or 'admin'),
+        ip_address=request.remote_addr,
+        detail=json.dumps(detail, ensure_ascii=False, sort_keys=True),
+    ))
+
+
+@agent_bp.route('/<int:claw_id>/tasks/<task_id>/cancel', methods=['POST'])
+def cancel_claw_task(claw_id, task_id):
+    """Administratively cancel a generic AgentTask with fencing invalidation."""
+    actor = _agent_task_admin()
+    if not actor:
+        return jsonify({'error': '仅管理员可取消 AgentTask'}), 403
+    task = AgentTask.query.filter_by(
+        claw_id=claw_id, task_id=task_id).first_or_404()
+    if task.task_type == 'workflow_agent_task':
+        return jsonify({
+            'code': 'WORKFLOW_TASK_CANCEL_SEPARATE',
+            'error': 'Workflow AgentTask 必须使用 Workflow Step cancel',
+        }), 409
+    if task.status not in ('pending', 'running'):
+        return jsonify({
+            'code': 'AGENT_TASK_TERMINAL',
+            'error': 'AgentTask 已是终态',
+        }), 409
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求体必须是对象'}), 400
+    reason = str(data.get('reason') or 'admin_cancelled').strip()[:2000]
+    before = task.status
+    task.status = 'cancelled'
+    task.error = reason
+    task.terminal_reason = 'admin_cancelled'
+    task.completed_at = _now()
+    task.claim_token = None
+    task.lease_expires_at = None
+    task.fencing_token = int(task.fencing_token or 0) + 1
+    task.version = int(task.version or 0) + 1
+    _agent_task_audit('cancel', task, actor, {
+        'before': before, 'reason': reason})
+    db.session.commit()
+    return jsonify({'status': 'cancelled', 'task': task.to_dict()})
+
+
+@agent_bp.route('/<int:claw_id>/tasks/<task_id>/retry', methods=['POST'])
+def retry_claw_task(claw_id, task_id):
+    """Administratively requeue a terminal generic AgentTask."""
+    actor = _agent_task_admin()
+    if not actor:
+        return jsonify({'error': '仅管理员可重试 AgentTask'}), 403
+    task = AgentTask.query.filter_by(
+        claw_id=claw_id, task_id=task_id).first_or_404()
+    if task.task_type == 'workflow_agent_task':
+        return jsonify({
+            'code': 'WORKFLOW_TASK_RETRY_SEPARATE',
+            'error': 'Workflow AgentTask 必须使用 Workflow Step retry',
+        }), 409
+    if task.status not in ('completed', 'failed', 'blocked', 'cancelled'):
+        return jsonify({
+            'code': 'AGENT_TASK_NOT_TERMINAL',
+            'error': '仅终态 AgentTask 可人工重试',
+        }), 409
+    payload = parse_task_payload(task)
+    try:
+        validate_deployment_contract(payload, target_claw_id=claw_id)
+    except AgentTaskContractError as exc:
+        message = getattr(exc, 'message', str(exc))
+        return jsonify({
+            'code': 'INVALID_DEPLOYMENT_CONTRACT',
+            'error': message,
+        }), 422
+    before = task.status
+    task.status = 'pending'
+    task.result = None
+    task.error = None
+    task.terminal_reason = ''
+    task.completed_at = None
+    task.assigned_at = None
+    task.last_heartbeat_at = None
+    task.lease_expires_at = None
+    task.claim_token = None
+    task.retry_count = 0
+    task.fencing_token = int(task.fencing_token or 0) + 1
+    task.version = int(task.version or 0) + 1
+    _agent_task_audit('retry', task, actor, {'before': before})
+    db.session.commit()
+    notify_claw(claw_id)
+    return jsonify({'status': 'pending', 'task': task.to_dict()})
+
+
 # ==================== 轮询模式接口 ====================
 
 @agent_bp.route('/<int:claw_id>/pending-tasks', methods=['GET'])
@@ -1519,14 +1701,15 @@ def get_pending_tasks_poll(claw_id, claw=None):
     }
     """
     # 获取待处理任务
-    tasks = AgentTask.query.filter(
+    workflow_tasks = AgentTask.query.filter(
         AgentTask.claw_id == claw_id,
-        AgentTask.status == 'pending'
+        AgentTask.status == 'pending',
+        AgentTask.task_type == 'workflow_agent_task',
     ).order_by(AgentTask.created_at.asc()).limit(10).all()
 
-    # 标记为 running（F3：workflow 任务先校验 run/step 仍活跃，否则失效不投递）
+    # Workflow task 继续使用 Run/Step 专用 claim；普通任务走原子租约。
     deliver = []
-    for task in tasks:
+    for task in workflow_tasks:
         if not _workflow_task_deliverable(task):
             task.status = 'failed'
             task.error = 'workflow_run_or_step_inactive'
@@ -1534,12 +1717,21 @@ def get_pending_tasks_poll(claw_id, claw=None):
             continue
         task.status = 'running'
         task.assigned_at = datetime.now()
-        deliver.append(task)
+        deliver.append((task, False))
     db.session.commit()
+    remaining = max(0, 10 - len(deliver))
+    if remaining:
+        for task in claim_pending_tasks(claw_id, limit=remaining):
+            deliver.append((task, True))
+    deliver.sort(key=lambda item: (
+        item[0].created_at or datetime.min, item[0].id))
 
     return jsonify({
         'has_tasks': len(deliver) > 0,
-        'tasks': [t.to_dict() for t in deliver],
+        'tasks': [
+            task.to_dict(include_claim=include_claim)
+            for task, include_claim in deliver[:10]
+        ],
         'server_time': cst_iso(),
         'timezone': TODO_TIMEZONE,
     })
@@ -1566,6 +1758,18 @@ def poll_task_result(claw_id, claw=None):
     task = AgentTask.query.filter_by(task_id=data['task_id'], claw_id=claw_id).first()
     if not task:
         return jsonify({'error': '任务不存在'}), 404
+
+    if task.task_type != 'workflow_agent_task':
+        try:
+            disposition = complete_task(task, data)
+        except AgentTaskContractError as exc:
+            return _agent_task_error(exc)
+        if disposition == 'retried':
+            notify_claw(claw_id)
+        return jsonify({
+            'status': disposition,
+            'task': task.to_dict(),
+        })
 
     task.status = data.get('status', 'completed')
     task.result = data.get('result')

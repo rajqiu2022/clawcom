@@ -1278,6 +1278,43 @@ def create_app(config_name=None):
                     except Exception as e:
                         logger.info(f'agent_tasks.payload 扩展跳过: {e}')
 
+                    # 普通 AgentTask 租约 / fencing / 有限重试合同。
+                    # 每列独立迁移，兼容已部分升级的生产库；重复列错误安全跳过。
+                    agent_task_columns = (
+                        ('attempt_no', "INT NOT NULL DEFAULT 0"),
+                        ('claim_token', "VARCHAR(64) DEFAULT NULL"),
+                        ('fencing_token', "INT NOT NULL DEFAULT 0"),
+                        ('lease_expires_at', "DATETIME DEFAULT NULL"),
+                        ('last_heartbeat_at', "DATETIME DEFAULT NULL"),
+                        ('version', "INT NOT NULL DEFAULT 0"),
+                        ('retry_count', "INT NOT NULL DEFAULT 0"),
+                        ('retry_max', "INT NOT NULL DEFAULT 0"),
+                        ('terminal_reason', "VARCHAR(128) DEFAULT ''"),
+                        ('progress_digest', "VARCHAR(64) DEFAULT ''"),
+                        ('progress_json', "TEXT DEFAULT NULL"),
+                        ('progress_at', "DATETIME DEFAULT NULL"),
+                    )
+                    for column_name, column_ddl in agent_task_columns:
+                        try:
+                            conn.execute(text(
+                                "ALTER TABLE agent_tasks ADD COLUMN %s %s" %
+                                (column_name, column_ddl)
+                            ))
+                            logger.info(
+                                'agent_tasks.%s 已添加', column_name)
+                        except Exception as e:
+                            logger.info(
+                                'agent_tasks.%s 迁移跳过: %s',
+                                column_name, e)
+                    try:
+                        conn.execute(text(
+                            "CREATE INDEX ix_agent_tasks_lease_expires_at "
+                            "ON agent_tasks (lease_expires_at)"
+                        ))
+                        logger.info('agent_tasks lease 索引已添加')
+                    except Exception as e:
+                        logger.info(f'agent_tasks lease 索引迁移跳过: {e}')
+
                     # 1) openclaw_instances 加 owner_wecom_userid（owner 的企微 ID）
                     try:
                         conn.execute(text(

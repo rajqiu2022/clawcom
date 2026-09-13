@@ -959,18 +959,37 @@ class AgentTask(db.Model):
     status = db.Column(db.String(20), default='pending', index=True)
     result = db.Column(db.Text)
     error = db.Column(db.Text)
+    attempt_no = db.Column(db.Integer, nullable=False, default=0)
+    claim_token = db.Column(db.String(64))
+    fencing_token = db.Column(db.Integer, nullable=False, default=0)
+    lease_expires_at = db.Column(db.DateTime, index=True)
+    last_heartbeat_at = db.Column(db.DateTime)
+    version = db.Column(db.Integer, nullable=False, default=0)
+    retry_count = db.Column(db.Integer, nullable=False, default=0)
+    retry_max = db.Column(db.Integer, nullable=False, default=0)
+    terminal_reason = db.Column(db.String(128), default='')
+    progress_digest = db.Column(db.String(64), default='')
+    progress_json = db.Column(db.Text)
+    progress_at = db.Column(db.DateTime)
     created_at = db.Column(db.DateTime, default=_now)
     assigned_at = db.Column(db.DateTime)
     completed_at = db.Column(db.DateTime)
 
     claw = db.relationship('OpenClawInstance', backref='tasks')
 
-    def to_dict(self, with_context=False):
+    def to_dict(self, with_context=False, include_claim=False):
         import json
         try:
             payload = json.loads(self.payload) if self.payload else None
         except Exception:
             payload = self.payload
+        now = _now()
+        task_age = (
+            max(0, int((now - self.created_at).total_seconds()))
+            if self.created_at else None)
+        heartbeat_age = (
+            max(0, int((now - self.last_heartbeat_at).total_seconds()))
+            if self.last_heartbeat_at else None)
         data = {
             'id': self.id,
             'task_id': self.task_id,
@@ -983,13 +1002,39 @@ class AgentTask(db.Model):
             'status': self.status,
             'result': self.result,
             'error': self.error,
+            'attempt_no': int(self.attempt_no or 0),
+            'fencing_token': int(self.fencing_token or 0),
+            'lease_expires_at': (
+                str(self.lease_expires_at) if self.lease_expires_at else None),
+            'last_heartbeat_at': (
+                str(self.last_heartbeat_at) if self.last_heartbeat_at else None),
+            'version': int(self.version or 0),
+            'retry_count': int(self.retry_count or 0),
+            'retry_max': int(self.retry_max or 0),
+            'terminal_reason': self.terminal_reason or '',
+            'progress': self._progress_payload(),
+            'progress_at': str(self.progress_at) if self.progress_at else None,
+            'task_age_seconds': task_age,
+            'heartbeat_age_seconds': heartbeat_age,
+            'lease_expired': bool(
+                self.lease_expires_at and self.lease_expires_at <= now),
             'created_at': str(self.created_at) if self.created_at else None,
             'assigned_at': str(self.assigned_at) if self.assigned_at else None,
             'completed_at': str(self.completed_at) if self.completed_at else None,
         }
+        if include_claim and self.claim_token:
+            data['claim_token'] = self.claim_token
         if with_context:
             data['task_context'] = self._build_task_context(payload)
         return data
+
+    def _progress_payload(self):
+        if not self.progress_json:
+            return None
+        try:
+            return json.loads(self.progress_json)
+        except Exception:
+            return None
 
     def _build_task_context(self, payload):
         try:
