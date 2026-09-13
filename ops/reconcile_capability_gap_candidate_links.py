@@ -14,9 +14,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WEB = ROOT / 'web'
-if str(WEB) not in sys.path:
-    sys.path.insert(0, str(WEB))
+APP_ROOT = ROOT if (ROOT / 'app').is_dir() else ROOT / 'web'
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
 
 from app import create_app, db  # noqa: E402
 from app.models import (  # noqa: E402
