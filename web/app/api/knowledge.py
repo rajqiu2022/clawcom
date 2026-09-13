@@ -409,7 +409,7 @@ def batch_import_knowledge():
 @api_bp.route('/knowledge/<int:entry_id>', methods=['GET'])
 def get_knowledge(entry_id):
     """获取单条知识详情"""
-    entry = db.get_or_404(KnowledgeEntry, entry_id)
+    entry = KnowledgeEntry.query.get_or_404(entry_id)
     if not _journal_entry_visible(entry):
         return jsonify({'error': '知识条目不存在'}), 404
     return jsonify(_entry_payload(entry))
@@ -436,7 +436,7 @@ def export_shared_knowledge(token):
 @api_bp.route('/knowledge/<int:entry_id>/export.md', methods=['GET'])
 def export_knowledge(entry_id):
     """下载单条知识的 Markdown 文件。"""
-    entry = db.get_or_404(KnowledgeEntry, entry_id)
+    entry = KnowledgeEntry.query.get_or_404(entry_id)
     if not _journal_entry_visible(entry):
         return jsonify({'error': '知识条目不存在'}), 404
     return _markdown_response(entry)
@@ -445,7 +445,7 @@ def export_knowledge(entry_id):
 @api_bp.route('/knowledge/<int:entry_id>/favorite', methods=['POST'])
 def favorite_knowledge(entry_id):
     """收藏知识；重复调用保持幂等。"""
-    entry = db.get_or_404(KnowledgeEntry, entry_id)
+    entry = KnowledgeEntry.query.get_or_404(entry_id)
     if not _journal_entry_visible(entry):
         return jsonify({'error': '知识条目不存在'}), 404
     try:
@@ -477,7 +477,7 @@ def favorite_knowledge(entry_id):
 @api_bp.route('/knowledge/<int:entry_id>/favorite', methods=['DELETE'])
 def unfavorite_knowledge(entry_id):
     """取消当前用户或 Agent 对知识的收藏。"""
-    db.get_or_404(KnowledgeEntry, entry_id)
+    KnowledgeEntry.query.get_or_404(entry_id)
     try:
         owner = _favorite_owner()
     except ValueError as exc:
@@ -497,7 +497,7 @@ def unfavorite_knowledge(entry_id):
 @api_bp.route('/knowledge/<int:entry_id>/share', methods=['POST'])
 def share_knowledge(entry_id):
     """启用或刷新匿名分享链接。"""
-    entry = db.get_or_404(KnowledgeEntry, entry_id)
+    entry = KnowledgeEntry.query.get_or_404(entry_id)
     if entry.entry_type == 'test_journal':
         return jsonify({
             'error': '版本测试纪要当前仅允许项目内协作，不生成匿名外链',
@@ -520,7 +520,7 @@ def share_knowledge(entry_id):
 @api_bp.route('/knowledge/<int:entry_id>/share', methods=['DELETE'])
 def unshare_knowledge(entry_id):
     """撤销匿名分享并使旧 token 立即失效。"""
-    entry = db.get_or_404(KnowledgeEntry, entry_id)
+    entry = KnowledgeEntry.query.get_or_404(entry_id)
     if not _may_manage_share(entry):
         return jsonify({'error': '仅创建者、Agent owner 或管理员可管理分享'}), 403
     entry.revoke_share()

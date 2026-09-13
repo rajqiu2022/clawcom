@@ -181,7 +181,7 @@ def require_claw_token(f):
 
     @wraps(f)
     def decorated(claw_id, *args, **kwargs):
-        claw = db.get_or_404(OpenClawInstance, claw_id)
+        claw = OpenClawInstance.query.get_or_404(claw_id)
         token = _get_bearer_token()
         if not token:
             return jsonify({'error': '缺少认证 Token'}), 401
