@@ -454,6 +454,72 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
         )
         self.assertEqual(accepted.status_code, 200, accepted.get_data(as_text=True))
 
+    def test_claw_editor_can_start_flow_for_its_bound_worker(self):
+        definition = WorkflowDefinition(
+            workflow_key='editor-delegated-worker',
+            name='Editor Delegated Worker',
+            project_id=self.definition.project_id,
+            definition_json={
+                'key': 'editor-delegated-worker',
+                'name': 'Editor Delegated Worker',
+                'context': {'executor_operation_policy': {
+                    'mode': 'workflow_run_executor',
+                    'require_worker_binding': True,
+                }},
+                'steps': [{
+                    'id': 'execute',
+                    'name': 'Execute',
+                    'type': 'agent_task',
+                    'runner': 'agent.demo',
+                    'target_claw_id': self.other_claw.id,
+                }],
+            },
+            owner_type='claw',
+            owner_id=self.other_claw.id,
+            executor_acl_json={'claw_ids': []},
+            editor_acl_json={'claw_ids': [self.claw.id]},
+        )
+        db.session.add(definition)
+        db.session.commit()
+
+        response = self.client.post('/api/v1/workflow-runs', json={
+            'workflow_definition_id': definition.id,
+            'worker_claw_id': self.other_claw.id,
+        }, headers=self._headers())
+
+        self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+        run = db.session.get(WorkflowRun, response.get_json()['run_id'])
+        self.assertEqual(
+            run.context_json['workflow_start']['worker_claw_id'],
+            self.other_claw.id,
+        )
+        task = AgentTask.query.filter_by(
+            task_type='workflow_agent_task').one()
+        self.assertEqual(task.claw_id, self.other_claw.id)
+
+    def test_claw_executor_cannot_bind_flow_to_another_worker(self):
+        definition = WorkflowDefinition(
+            workflow_key='executor-no-delegation',
+            name='Executor No Delegation',
+            project_id=self.definition.project_id,
+            definition_json={'steps': []},
+            owner_type='claw',
+            owner_id=self.other_claw.id,
+            executor_acl_json={'claw_ids': [self.claw.id]},
+            editor_acl_json={'claw_ids': []},
+        )
+        db.session.add(definition)
+        db.session.commit()
+
+        response = self.client.post('/api/v1/workflow-runs', json={
+            'workflow_definition_id': definition.id,
+            'worker_claw_id': self.other_claw.id,
+        }, headers=self._headers())
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.get_json()['code'], 'WORKER_BINDING_MISMATCH')
+
     def test_worker_task_list_excludes_agent_tasks(self):
         listed = self.client.get(
             '/api/v1/workflow-runs/worker/tasks',

@@ -3769,16 +3769,19 @@ def create_workflow_run():
                 return _workflow_api_error(
                     'INVALID_WORKER_CLAW_ID',
                     'worker_claw_id must be an integer')
-            if requested_worker_claw_id != caller_claw.id:
+            if (requested_worker_claw_id != caller_claw.id
+                    and not _can_edit_definition(definition)):
                 return _workflow_api_error(
                     'WORKER_BINDING_MISMATCH',
-                    'A Claw-started Flow must bind to the initiating Worker',
+                    'Only a Flow editor may start it for another bound Worker',
                     status=403,
                     details={
                         'initiating_claw_id': caller_claw.id,
                         'requested_worker_claw_id': requested_worker_claw_id,
                     })
-        worker_claw_id = caller_claw.id
+            worker_claw_id = requested_worker_claw_id
+        else:
+            worker_claw_id = caller_claw.id
     elif raw_worker_claw_id not in (None, ''):
         try:
             worker_claw_id = int(raw_worker_claw_id)
