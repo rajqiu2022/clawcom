@@ -101,6 +101,7 @@
             <button class="dashboard-subtab" id="todo-subtab-history" onclick="switchTodoSubTab('history')">📋 近3天记录</button>
             <button class="dashboard-subtab" id="todo-subtab-daily" onclick="switchTodoSubTab('daily')">🔁 每日任务 <span id="detail-daily-badge" class="tag tag-blue" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
             <button class="dashboard-subtab" id="todo-subtab-submitted" onclick="switchTodoSubTab('submitted')">📝 待审核 <span id="detail-submitted-badge" class="tag tag-yellow" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">0</span></button>
+            <button class="dashboard-subtab" id="todo-subtab-registration" onclick="switchTodoSubTab('registration')">🦞 注册验收 <span id="detail-registration-badge" class="tag tag-red" style="font-size:0.65rem;padding:0 4px;margin-left:2px;display:none">!</span></button>
         </div>
         <!-- 今日待办面板 -->
         <div id="todo-panel-today">
@@ -117,6 +118,10 @@
         <!-- 每日任务面板 -->
         <div id="todo-panel-daily" style="display:none">
             <div id="todo-daily-list"></div>
+        </div>
+        <!-- 注册验收面板 -->
+        <div id="todo-panel-registration" style="display:none">
+            <div id="todo-registration-panel"></div>
         </div>
     </div>
 </div>
@@ -495,6 +500,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 let clawData = null;
 let canEditClaw = false;  // 当前用户是否有权编辑此 claw
+let canReviewTodo = false;  // 当前用户是否有权审核待办（super_admin / admin）
 let meData = null;
 
 async function loadPermissions() {
@@ -502,8 +508,10 @@ async function loadPermissions() {
         meData = await API.request('GET', '/auth/me');
         const role = meData.role || 'guest';
         canEditClaw = role === 'super_admin' || role === 'admin' || (role === 'user' && meData.bound_claw_id === CLAW_ID);
+        canReviewTodo = role === 'super_admin' || role === 'admin';
     } catch(e) {
         canEditClaw = false;
+        canReviewTodo = false;
     }
     applyPermUI();
 }
@@ -550,7 +558,11 @@ function switchTab(tab) {
     $$('.tab-content').forEach(c => c.style.display = 'none');
     $(`#tab-${tab}`).style.display = 'block';
 
-    if (tab === 'todos') loadTodos();
+    if (tab === 'todos') {
+        loadTodos();
+        const regPanel = document.getElementById('todo-panel-registration');
+        if (regPanel && regPanel.style.display !== 'none') loadRegistrationGate();
+    }
     if (tab === 'agenttasks') loadAgentTasks();
     if (tab === 'skills') loadSkills();
     if (tab === 'reports') loadReports();
@@ -631,6 +643,7 @@ async function loadClaw() {
         const delBtn = document.getElementById('btn-delete-claw');
         if (delBtn) delBtn.style.display = clawData.can_own ? '' : 'none';
         applyPermUI();
+        renderRegistrationGate(clawData.registration_gate);
     } catch (err) {
         showToast('加载失败: ' + err.message, 'error');
     }
@@ -1350,6 +1363,101 @@ function switchTodoSubTab(sub) {
     document.getElementById('todo-panel-submitted').style.display = sub === 'submitted' ? '' : 'none';
     document.getElementById('todo-panel-history').style.display = sub === 'history' ? '' : 'none';
     document.getElementById('todo-panel-daily').style.display = sub === 'daily' ? '' : 'none';
+    document.getElementById('todo-panel-registration').style.display = sub === 'registration' ? '' : 'none';
+    if (sub === 'registration') loadRegistrationGate();
+}
+
+const REG_STATUS_LABELS = {
+    pending: { text: '待完成', cls: 'tag-blue' },
+    submitted: { text: '已提交', cls: 'tag-yellow' },
+    approved: { text: '已通过', cls: 'tag-green' },
+    completed: { text: '已完成', cls: 'tag-green' },
+    skipped: { text: '已跳过', cls: '' },
+    retry_failed: { text: '失败', cls: '' },
+};
+
+function renderRegistrationGate(gate) {
+    const panel = document.getElementById('todo-registration-panel');
+    const badge = document.getElementById('detail-registration-badge');
+    if (!panel) return;
+    if (!gate || !gate.required_targets || !gate.required_targets.length) {
+        panel.innerHTML = '<div class="empty-state"><div class="empty-state-text">该 OpenClaw 无注册验收任务</div></div>';
+        if (badge) badge.style.display = 'none';
+        return;
+    }
+    if (badge) {
+        if (gate.awaiting_dragonking_review) {
+            badge.style.display = '';
+            badge.textContent = '!';
+        } else {
+            badge.style.display = 'none';
+        }
+    }
+    const statusRows = gate.required_targets.map(vt => {
+        const st = gate.target_status[vt] || 'pending';
+        const label = REG_STATUS_LABELS[st] || { text: st, cls: '' };
+        const title = (gate.target_titles && gate.target_titles[vt]) || vt;
+        return `<tr>
+            <td style="padding:8px 12px;border-bottom:1px solid var(--border)">${title}</td>
+            <td style="padding:8px 12px;border-bottom:1px solid var(--border);font-family:monospace;font-size:0.78rem;color:var(--text-muted)">${vt}</td>
+            <td style="padding:8px 12px;border-bottom:1px solid var(--border)"><span class="tag ${label.cls}" style="font-size:0.72rem">${label.text}</span></td>
+        </tr>`;
+    }).join('');
+    const passedBanner = gate.passed
+        ? `<div style="padding:12px 16px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);border-radius:8px;margin-bottom:16px;color:var(--green);font-weight:600">✅ 注册验收已全部通过</div>`
+        : `<div style="padding:12px 16px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;margin-bottom:16px">
+            <div style="font-weight:600;color:var(--red)">⏳ 注册验收未完成</div>
+            <div style="font-size:0.82rem;color:var(--text-secondary);margin-top:4px">待完成项：${(gate.pending_required_targets || []).join('、') || '无'}</div>
+        </div>`;
+    const dkId = gate.dragonking_todo_id;
+    const dkTitle = gate.dragonking_todo_title || '等待龙虾王审核';
+    const dkStatus = gate.dragonking_status || 'pending';
+    const reviewCard = gate.awaiting_dragonking_review && dkId ? `
+        <div style="padding:16px;border:2px solid var(--red);border-radius:8px;margin-bottom:16px;background:rgba(239,68,68,.04)">
+            <div style="font-weight:700;font-size:1rem;margin-bottom:8px">🦞 ${dkTitle}</div>
+            <div style="font-size:0.84rem;color:var(--text-secondary);margin-bottom:12px">
+                前置验收项均已通过，等待龙虾王审核。${dkStatus === 'pending' ? '该任务尚未提交，审核时将自动代提交。' : '当前状态：' + (REG_STATUS_LABELS[dkStatus]?.text || dkStatus)}
+            </div>
+            ${canReviewTodo ? `<button class="btn btn-primary" onclick="approveRegistration(${dkId})">✅ 审核通过（代提交）</button>` : '<div style="font-size:0.82rem;color:var(--text-muted)">仅管理员可审核</div>'}
+        </div>` : '';
+    panel.innerHTML = passedBanner + reviewCard + `
+        <table style="width:100%;border-collapse:collapse;font-size:0.88rem">
+            <thead><tr style="background:var(--bg-secondary)">
+                <th style="padding:8px 12px;text-align:left">任务</th>
+                <th style="padding:8px 12px;text-align:left">验收标识</th>
+                <th style="padding:8px 12px;text-align:left">状态</th>
+            </tr></thead>
+            <tbody>${statusRows}</tbody>
+        </table>`;
+}
+
+async function loadRegistrationGate() {
+    try {
+        if (!clawData) clawData = await API.getClaw(CLAW_ID);
+        renderRegistrationGate(clawData.registration_gate);
+    } catch (e) {
+        showToast('加载注册验收状态失败: ' + e.message, 'error');
+    }
+}
+
+async function approveRegistration(todoId) {
+    if (!await customConfirm('确认代提交并通过龙虾王注册验收？通过后注册流程即完成。')) return;
+    try {
+        const resp = await fetch(`/api/v1/openclaws/${CLAW_ID}/todos/${todoId}/approve-registration`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+        });
+        if (!resp.ok) {
+            let msg = '审核失败';
+            try { const data = await resp.json(); if (data && data.error) msg = data.error; } catch (_) {}
+            throw new Error(msg);
+        }
+        const data = await resp.json();
+        showToast('注册验收已通过', 'success');
+        clawData = await API.getClaw(CLAW_ID);
+        if (data.registration_gate) clawData.registration_gate = data.registration_gate;
+        renderRegistrationGate(clawData.registration_gate);
+        loadTodos();
+    } catch (e) { showToast('审核失败: ' + e.message, 'error'); }
 }
 
 function showDetailTodoModal(type, index) {
@@ -1638,6 +1746,15 @@ $('#todo-form').addEventListener('submit', async e => {
     } catch(e) { showToast('保存失败','error'); }
 });
 
-loadPermissions().then(() => loadClaw());
+loadPermissions().then(async () => {
+    await loadClaw();
+    const params = new URLSearchParams(location.search);
+    const tab = params.get('tab');
+    const subtab = params.get('subtab');
+    if (tab) {
+        switchTab(tab);
+        if (tab === 'todos' && subtab) switchTodoSubTab(subtab);
+    }
+});
 </script>
 {% endblock %}

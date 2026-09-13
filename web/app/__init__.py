@@ -1315,6 +1315,24 @@ def create_app(config_name=None):
                     except Exception as e:
                         logger.info(f'agent_tasks lease 索引迁移跳过: {e}')
 
+                    # WorkflowRun 已支持关联 AgentGoal；旧生产库需要先补列，
+                    # 否则 ORM 在读取任意 workflow_runs 行时会因未知列失败。
+                    try:
+                        conn.execute(text(
+                            "ALTER TABLE workflow_runs "
+                            "ADD COLUMN goal_id INTEGER DEFAULT NULL"
+                        ))
+                        logger.info('workflow_runs.goal_id 已添加')
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute(text(
+                            "CREATE INDEX ix_workflow_runs_goal_id "
+                            "ON workflow_runs (goal_id)"
+                        ))
+                    except Exception:
+                        pass
+
                     # 1) openclaw_instances 加 owner_wecom_userid（owner 的企微 ID）
                     try:
                         conn.execute(text(
