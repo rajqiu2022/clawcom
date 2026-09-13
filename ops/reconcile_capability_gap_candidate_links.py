@@ -66,7 +66,7 @@ def plan_links(project_id=None):
     return planned, skipped
 
 
-def apply_links(planned, actor):
+def apply_links(planned, actor, actor_id=0):
     for item in planned:
         candidate = db.session.get(
             AutomationCaseCandidate, item['candidate_id'])
@@ -83,6 +83,7 @@ def apply_links(planned, actor):
             version_after=candidate.version,
             payload_json={'capability_gap_id': item['gap_id']},
             actor_type='system',
+            actor_id=actor_id,
             actor_name=actor,
             request_id='capability-gap-link-reconciliation',
         ))
@@ -94,12 +95,15 @@ def main():
     parser.add_argument('--project-id', type=int)
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--actor', default='hub-capability-reconciliation')
+    parser.add_argument(
+        '--actor-id', type=int, default=0,
+        help='Numeric audit actor id; 0 is the reserved system actor')
     args = parser.parse_args()
     app = create_app()
     with app.app_context():
         planned, skipped = plan_links(args.project_id)
         if args.apply and planned:
-            apply_links(planned, args.actor)
+            apply_links(planned, args.actor, args.actor_id)
         print(json.dumps({
             'mode': 'apply' if args.apply else 'dry-run',
             'planned': planned,
