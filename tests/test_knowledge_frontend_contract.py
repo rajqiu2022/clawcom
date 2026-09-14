@@ -120,6 +120,20 @@ class KnowledgeFrontendContractTest(unittest.TestCase):
         self.assertIn('permanentlyDeleteKnowledgeNotebook', function)
         self.assertIn("{confirmed:true}", api)
 
+    def test_notebook_delete_uses_trash_icon_and_accessible_tip(self):
+        template = (ROOT / 'web' / 'templates' / 'knowledge.html').read_text(
+            encoding='utf-8')
+        button_start = template.index(
+            '<button type="button" class="kn-wiki-notebook-delete"')
+        button_end = template.index('</button>', button_start)
+        button = template[button_start:button_end]
+        self.assertIn('data-tip="永久删除纪要本"', button)
+        self.assertIn('aria-label="删除纪要本 ', button)
+        self.assertIn('<svg viewBox="0 0 24 24"', button)
+        self.assertNotIn('>×', button)
+        self.assertIn('.kn-wiki-notebook-delete::after', template)
+        self.assertIn('.kn-wiki-notebook-delete:focus-visible::after', template)
+
     def test_notebook_navigation_nests_pages_like_a_wiki_tree(self):
         text = (ROOT / 'web' / 'templates' / 'knowledge.html').read_text(
             encoding='utf-8')

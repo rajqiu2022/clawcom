@@ -235,7 +235,11 @@
 .kn-wiki-notebook-chevron { flex:0 0 auto; width:14px; margin-top:2px; color:var(--text-muted); transition:transform .16s ease; }
 .kn-wiki-notebook.active .kn-wiki-notebook-chevron { transform:rotate(90deg); color:var(--accent); }
 .kn-wiki-notebook-copy { min-width:0; flex:1; }
-.kn-wiki-notebook-delete { opacity:0; flex:0 0 auto; width:25px; height:25px; padding:0; border-radius:6px; }
+.kn-wiki-notebook-delete { position:relative; opacity:0; flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--text-muted); cursor:pointer; transition:opacity .16s ease,color .16s ease,background .16s ease,border-color .16s ease; }
+.kn-wiki-notebook-delete svg { width:15px; height:15px; pointer-events:none; }
+.kn-wiki-notebook-delete:hover,.kn-wiki-notebook-delete:focus-visible { color:var(--red); background:var(--red-soft); border-color:var(--red-dim); outline:none; }
+.kn-wiki-notebook-delete::after { content:attr(data-tip); position:absolute; top:calc(100% + 7px); right:0; z-index:20; width:max-content; max-width:180px; padding:6px 9px; border:1px solid var(--border); border-radius:6px; background:var(--bg-card); color:var(--text-primary); box-shadow:0 6px 18px rgba(0,0,0,.28); font-size:.72rem; font-weight:500; line-height:1.35; white-space:nowrap; opacity:0; visibility:hidden; transform:translateY(-3px); pointer-events:none; transition:opacity .14s ease,transform .14s ease,visibility .14s ease; }
+.kn-wiki-notebook-delete:hover::after,.kn-wiki-notebook-delete:focus-visible::after { opacity:1; visibility:visible; transform:translateY(0); }
 .kn-wiki-notebook:hover .kn-wiki-notebook-delete,
 .kn-wiki-notebook.active .kn-wiki-notebook-delete,
 .kn-wiki-notebook-delete:focus-visible { opacity:1; }
@@ -1054,7 +1058,7 @@ function renderJournalNotebookList() {
             const archived=pages.filter(page=>page.archived_at).length;
             const active=!!(journalNotebook && journalNotebook.id===row.id);
             const tree=active ? `<div class="kn-wiki-notebook-pages">${journalNotebookPagesHtml(row)}</div>` : '';
-            return `<div class="kn-wiki-notebook-group"><div class="kn-wiki-notebook ${active?'active':''}" role="button" tabindex="0" aria-expanded="${active}" onclick="selectJournalNotebook(${row.id})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectJournalNotebook(${row.id})}"><div class="kn-wiki-notebook-row"><span class="kn-wiki-notebook-chevron">›</span><div class="kn-wiki-notebook-copy"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.version_name || '未标注版本')} · 正常 ${pages.length-archived} · 归档 ${archived} · r${row.version}</small></div><button class="btn btn-sm btn-danger kn-wiki-notebook-delete" title="删除纪要本" aria-label="删除纪要本 ${escapeHtml(row.title)}" onkeydown="event.stopPropagation()" onclick="deleteJournalNotebook(event,${row.id})">×</button></div></div>${tree}</div>`;
+            return `<div class="kn-wiki-notebook-group"><div class="kn-wiki-notebook ${active?'active':''}" role="button" tabindex="0" aria-expanded="${active}" onclick="selectJournalNotebook(${row.id})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectJournalNotebook(${row.id})}"><div class="kn-wiki-notebook-row"><span class="kn-wiki-notebook-chevron">›</span><div class="kn-wiki-notebook-copy"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.version_name || '未标注版本')} · 正常 ${pages.length-archived} · 归档 ${archived} · r${row.version}</small></div><button type="button" class="kn-wiki-notebook-delete" data-tip="永久删除纪要本" aria-label="删除纪要本 ${escapeHtml(row.title)}" onkeydown="event.stopPropagation()" onclick="deleteJournalNotebook(event,${row.id})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"></path><path d="M9 7V4h6v3"></path><path d="M18 7l-1 13H7L6 7"></path><path d="M10 11v5M14 11v5"></path></svg></button></div></div>${tree}</div>`;
         }).join('')
         : '<div style="padding:14px;color:var(--text-muted);font-size:.8rem">当前项目还没有版本纪要本</div>';
 }
