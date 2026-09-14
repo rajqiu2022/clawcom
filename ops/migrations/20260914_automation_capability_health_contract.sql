@@ -6,7 +6,8 @@ ALTER TABLE automation_capabilities
   ADD COLUMN IF NOT EXISTS release_id VARCHAR(255) NOT NULL DEFAULT '',
   ADD COLUMN IF NOT EXISTS source_commit VARCHAR(64) NOT NULL DEFAULT '',
   ADD COLUMN IF NOT EXISTS manifest_sha256 VARCHAR(64) NOT NULL DEFAULT '',
-  ADD COLUMN IF NOT EXISTS verification_json JSON NULL,
+  -- Production MariaDB 10.1 stores SQLAlchemy JSON columns as LONGTEXT.
+  ADD COLUMN IF NOT EXISTS verification_json LONGTEXT NULL,
   ADD COLUMN IF NOT EXISTS health_expires_at DATETIME NULL;
 
 CREATE INDEX IF NOT EXISTS ix_automation_capability_implementation_status
@@ -26,7 +27,7 @@ CREATE TABLE IF NOT EXISTS automation_capability_events (
   to_status VARCHAR(32) NULL,
   version_before INT NULL,
   version_after INT NULL,
-  payload_json JSON NULL,
+  payload_json LONGTEXT NULL,
   actor_type VARCHAR(24) NOT NULL,
   actor_id INT NOT NULL,
   actor_name VARCHAR(160) NOT NULL DEFAULT '',
