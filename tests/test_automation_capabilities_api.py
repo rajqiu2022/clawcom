@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -39,10 +40,13 @@ from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
 from app.models import (  # noqa: E402
     AutomationCapability,
+    AutomationCapabilityEvent,
     AutomationCaseCandidate,
+    AutomationCaseCandidateEvent,
     CapabilityGap,
     CapabilityGapEvent,
     EntityRelation,
+    OpenClawInstance,
     Project,
     User,
 )
@@ -66,6 +70,11 @@ class AutomationCapabilitiesApiTest(unittest.TestCase):
         self.admin = User(username='capability_owner', role='super_admin')
         self.admin.set_password('secret')
         db.session.add_all([self.project, self.admin])
+        db.session.flush()
+        self.worker = OpenClawInstance(
+            name='RacingGO Worker', claw_tag='claw-capability-worker',
+            owner='capability_owner', project_id=self.project.id)
+        db.session.add(self.worker)
         db.session.commit()
         self.client = self.app.test_client()
         with self.client.session_transaction() as session:
@@ -76,20 +85,47 @@ class AutomationCapabilitiesApiTest(unittest.TestCase):
         db.drop_all()
         self.ctx.pop()
 
-    def test_catalog_create_list_update_and_version_conflict(self):
+    def _available_body(self, key, name, **overrides):
+        checked = datetime.now().replace(microsecond=0)
         body = {
             'project_id': self.project.id,
-            'key': 'vehicle.upgrade_once',
-            'name': 'Upgrade vehicle once',
-            'operations': ['open_vehicle_upgrade', 'upgrade_once'],
-            'observables': ['vehicle_level', 'currency_balance'],
-            'reset_hooks': ['restore_test_account'],
+            'key': key,
+            'name': name,
+            'operations': [],
+            'observables': [],
+            'reset_hooks': [],
             'platforms': ['unity_editor'],
             'status': 'available',
-            'implementation_version': '3',
-            'health_checked_at': '2026-08-13T10:30:00+08:00',
+            'implementation_status': 'implemented',
+            'verification_status': 'verified',
+            'implementation_version': 'deepflow-v1',
+            'producer_claw_id': self.worker.id,
+            'release_id': 'deepflow-release-v1',
+            'source_commit': 'a' * 40,
+            'manifest_sha256': 'b' * 64,
+            'health_checked_at': checked.isoformat(),
+            'health_expires_at': (checked + timedelta(hours=1)).isoformat(),
+            'verification': {
+                'release_check': {'status': 'passed'},
+                'contract_check': {'status': 'passed'},
+                'health_probe': {'status': 'passed'},
+                'evidence_refs': [{'type': 'workflow_run', 'id': 700}],
+            },
         }
-        created = self.client.post('/api/v1/automation-capabilities', json=body)
+        body.update(overrides)
+        return body
+
+    def test_catalog_create_list_update_and_version_conflict(self):
+        body = self._available_body(
+            'vehicle.upgrade_once', 'Upgrade vehicle once',
+            operations=['open_vehicle_upgrade', 'upgrade_once'],
+            observables=['vehicle_level', 'currency_balance'],
+            reset_hooks=['restore_test_account'],
+            implementation_version='3',
+        )
+        created = self.client.post(
+            '/api/v1/automation-capabilities', json=body,
+            headers={'Idempotency-Key': 'capability-create-1'})
         self.assertEqual(created.status_code, 201, created.get_data(as_text=True))
         self.assertEqual(created.get_json()['version'], 1)
 
@@ -103,12 +139,16 @@ class AutomationCapabilitiesApiTest(unittest.TestCase):
         self.assertEqual(listed.get_json()['items'][0]['key'], body['key'])
 
         update = dict(body, expected_version=1, status='degraded')
-        updated = self.client.post('/api/v1/automation-capabilities', json=update)
+        updated = self.client.post(
+            '/api/v1/automation-capabilities', json=update,
+            headers={'Idempotency-Key': 'capability-update-1'})
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(updated.get_json()['version'], 2)
         self.assertEqual(updated.get_json()['status'], 'degraded')
 
-        conflict = self.client.post('/api/v1/automation-capabilities', json=update)
+        conflict = self.client.post(
+            '/api/v1/automation-capabilities', json=update,
+            headers={'Idempotency-Key': 'capability-update-conflict'})
         self.assertEqual(conflict.status_code, 409)
         self.assertEqual(
             conflict.get_json()['code'],
@@ -139,30 +179,40 @@ class AutomationCapabilitiesApiTest(unittest.TestCase):
             dedupe_key='endless-smoke-gap',
             version=2,
         )
-        db.session.add(candidate)
+        second_candidate = AutomationCaseCandidate(
+            project_id=self.project.id,
+            title='Endless reconnect smoke',
+            state='WAITING_CAPABILITY',
+            capability_gap_id=gap.id,
+            qualification_outcome='AUTOMATION_CAPABILITY_GAP',
+            qualification_run_id=573,
+            qualification_evidence_json={'missing': True},
+            dedupe_key='endless-reconnect-smoke-gap',
+            version=1,
+        )
+        db.session.add_all([candidate, second_candidate])
         db.session.commit()
 
-        response = self.client.post('/api/v1/automation-capabilities', json={
-            'project_id': self.project.id,
-            'key': 'racinggo.conditional_driving',
-            'name': 'Conditional driving',
-            'operations': ['drive.enter_endless'],
-            'observables': ['ui.gameplay_ready'],
-            'status': 'available',
-            'implementation_version': 'deepflow-release-667417',
-            'health_checked_at': '2026-09-10T12:00:00+08:00',
-        })
+        response = self.client.post(
+            '/api/v1/automation-capabilities', json=self._available_body(
+            'racinggo.conditional_driving', 'Conditional driving',
+            operations=['drive.enter_endless'],
+            observables=['ui.gameplay_ready'],
+            implementation_version='deepflow-release-667417',
+        ), headers={'Idempotency-Key': 'conditional-driving-create'})
 
         self.assertEqual(201, response.status_code, response.get_data(as_text=True))
         self.assertEqual([gap.id], response.get_json()[
             'auto_requalification']['resolved_gap_ids'])
-        self.assertEqual([candidate.id], response.get_json()[
+        self.assertEqual([candidate.id, second_candidate.id], response.get_json()[
             'auto_requalification']['requeued_candidate_ids'])
         db.session.refresh(gap)
         db.session.refresh(candidate)
+        db.session.refresh(second_candidate)
         self.assertEqual('resolved', gap.status)
         self.assertFalse(gap.candidate_requeue_pending)
         self.assertEqual('READY_FOR_CANARY', candidate.state)
+        self.assertEqual('READY_FOR_CANARY', second_candidate.state)
         self.assertIsNone(candidate.qualification_run_id)
         self.assertEqual({}, candidate.qualification_evidence_json)
         self.assertEqual(1, CapabilityGapEvent.query.filter_by(
@@ -179,6 +229,28 @@ class AutomationCapabilitiesApiTest(unittest.TestCase):
         self.assertEqual(
             'capability_catalog_auto_resolved',
             relation.metadata_json['resolution'])
+        capability_relation = EntityRelation.query.filter_by(
+            project_id=self.project.id,
+            from_type='automation_capability',
+            relation_type='satisfies',
+            to_type='capability_gap',
+            to_id=str(gap.id),
+        ).one()
+        self.assertTrue(capability_relation.metadata_json['active'])
+        self.assertEqual(
+            ['drive.enter_endless', 'ui.gameplay_ready'],
+            capability_relation.metadata_json['matched_tokens'])
+        replay = self.client.post(
+            '/api/v1/automation-capabilities', json=self._available_body(
+                'racinggo.conditional_driving', 'Conditional driving',
+                operations=['drive.enter_endless'],
+                observables=['ui.gameplay_ready'],
+                implementation_version='deepflow-release-667417',
+            ), headers={'Idempotency-Key': 'conditional-driving-create'})
+        self.assertEqual(200, replay.status_code)
+        self.assertTrue(replay.get_json()['idempotent_replay'])
+        self.assertEqual(2, AutomationCaseCandidateEvent.query.filter_by(
+            event_type='capability_catalog_auto_requeued').count())
 
     def test_unhealthy_or_unversioned_capability_does_not_close_gap(self):
         gap = CapabilityGap(
@@ -194,8 +266,213 @@ class AutomationCapabilitiesApiTest(unittest.TestCase):
             'project_id': self.project.id,
             'key': 'bridge.snapshot',
             'name': 'Bridge snapshot',
+            'status': 'planned',
+            'implementation_status': 'declared',
+            'verification_status': 'unverified',
+        }, headers={'Idempotency-Key': 'bridge-planned'})
+        self.assertEqual(201, response.status_code)
+        db.session.refresh(gap)
+        self.assertEqual('open', gap.status)
+        self.assertEqual([], response.get_json()[
+            'auto_requalification']['resolved_gap_ids'])
+
+    def test_available_requires_verified_release_health_and_evidence(self):
+        response = self.client.post('/api/v1/automation-capabilities', json={
+            'project_id': self.project.id,
+            'key': 'bridge.snapshot',
+            'name': 'Bridge snapshot',
             'status': 'available',
-        })
+        }, headers={'Idempotency-Key': 'invalid-available'})
+        self.assertEqual(400, response.status_code)
+        self.assertEqual(
+            'AUTOMATION_CAPABILITY_INVALID', response.get_json()['code'])
+        self.assertEqual(0, AutomationCapability.query.count())
+
+    def test_incompatible_contract_cannot_unlock_gap(self):
+        gap = CapabilityGap(
+            project_id=self.project.id, gap_key='incompatible-bridge-gap',
+            title='Bridge contract missing',
+            missing_capabilities_json=['bridge.snapshot'], status='open')
+        db.session.add(gap)
+        db.session.commit()
+        body = self._available_body('bridge.snapshot', 'Bridge snapshot')
+        body['verification']['contract_check'] = {
+            'status': 'failed', 'reason': 'operation_contract_version_mismatch'}
+        response = self.client.post(
+            '/api/v1/automation-capabilities', json=body,
+            headers={'Idempotency-Key': 'bridge-incompatible-contract'})
+        self.assertEqual(400, response.status_code)
+        self.assertIn('verification.contract_check', response.get_json()['message'])
+        db.session.refresh(gap)
+        self.assertEqual('open', gap.status)
+        self.assertEqual(0, AutomationCapability.query.count())
+
+    def test_publication_idempotency_replays_once_and_rejects_key_reuse(self):
+        body = self._available_body('bridge.snapshot', 'Bridge snapshot')
+        first = self.client.post(
+            '/api/v1/automation-capabilities', json=body,
+            headers={'Idempotency-Key': 'bridge-idempotent'})
+        replay = self.client.post(
+            '/api/v1/automation-capabilities', json=body,
+            headers={'Idempotency-Key': 'bridge-idempotent'})
+        reused = self.client.post(
+            '/api/v1/automation-capabilities',
+            json=dict(body, name='Different payload'),
+            headers={'Idempotency-Key': 'bridge-idempotent'})
+        self.assertEqual(201, first.status_code)
+        self.assertEqual(200, replay.status_code)
+        self.assertTrue(replay.get_json()['idempotent_replay'])
+        self.assertEqual(1, replay.get_json()['version'])
+        self.assertEqual(409, reused.status_code)
+        self.assertEqual(1, AutomationCapabilityEvent.query.filter_by(
+            capability_id=first.get_json()['id']).count())
+
+    def test_degradation_reopens_gap_and_requires_canary_again(self):
+        gap = CapabilityGap(
+            project_id=self.project.id, gap_key='bridge-gap',
+            title='Bridge snapshot missing',
+            missing_capabilities_json=['bridge.snapshot'], status='open')
+        db.session.add(gap)
+        db.session.flush()
+        candidate = AutomationCaseCandidate(
+            project_id=self.project.id, title='Bridge smoke',
+            state='WAITING_CAPABILITY', capability_gap_id=gap.id,
+            required_capabilities_json=['bridge.snapshot'],
+            dedupe_key='bridge-smoke', version=1)
+        db.session.add(candidate)
+        db.session.commit()
+        body = self._available_body('bridge.snapshot', 'Bridge snapshot')
+        created = self.client.post(
+            '/api/v1/automation-capabilities', json=body,
+            headers={'Idempotency-Key': 'bridge-up'})
+        self.assertEqual(201, created.status_code)
+        self.assertEqual('READY_FOR_CANARY', candidate.state)
+
+        candidate.state = 'QUALIFIED'
+        candidate.qualification_outcome = 'QUALIFIED'
+        candidate.qualification_run_id = 701
+        candidate.qualification_evidence_json = {'manifest': 'kept-in-event'}
+        db.session.commit()
+        down = dict(body, expected_version=1, status='degraded')
+        degraded = self.client.post(
+            '/api/v1/automation-capabilities', json=down,
+            headers={'Idempotency-Key': 'bridge-down'})
+        self.assertEqual(200, degraded.status_code)
+        db.session.refresh(gap)
+        db.session.refresh(candidate)
+        self.assertEqual('open', gap.status)
+        self.assertEqual('WAITING_CAPABILITY', candidate.state)
+        self.assertIn(gap.id, degraded.get_json()[
+            'auto_requalification']['reopened_gap_ids'])
+        event = AutomationCaseCandidateEvent.query.filter_by(
+            candidate_id=candidate.id,
+            event_type='capability_catalog_invalidated').one()
+        self.assertEqual(
+            {'manifest': 'kept-in-event'},
+            event.payload_json['previous_qualification']['evidence'])
+        capability_relation = EntityRelation.query.filter_by(
+            project_id=self.project.id,
+            from_type='automation_capability',
+            relation_type='satisfies',
+            to_type='capability_gap',
+            to_id=str(gap.id),
+        ).one()
+        self.assertFalse(capability_relation.metadata_json['active'])
+        self.assertTrue(capability_relation.metadata_json['invalidated_at'])
+
+    def test_expired_health_lease_is_reconciled_on_read(self):
+        body = self._available_body('ui.snapshot', 'UI snapshot')
+        created = self.client.post(
+            '/api/v1/automation-capabilities', json=body,
+            headers={'Idempotency-Key': 'ui-snapshot-up'})
+        self.assertEqual(201, created.status_code)
+        row = db.session.get(AutomationCapability, created.get_json()['id'])
+        row.health_expires_at = datetime.now() - timedelta(seconds=1)
+        db.session.commit()
+        listed = self.client.get(
+            '/api/v1/automation-capabilities',
+            query_string={'project_id': self.project.id})
+        self.assertEqual(200, listed.status_code)
+        db.session.refresh(row)
+        self.assertEqual('unavailable', row.status)
+        self.assertEqual('failed', row.verification_status)
+        self.assertEqual(
+            [row.id], listed.get_json()['diagnostics'][
+                'expired_capability_ids'])
+
+    def test_health_renewal_is_stable_but_release_change_requalifies(self):
+        gap = CapabilityGap(
+            project_id=self.project.id, gap_key='login-gap',
+            title='Login unavailable',
+            missing_capabilities_json=['login.execute'], status='open')
+        db.session.add(gap)
+        db.session.flush()
+        candidate = AutomationCaseCandidate(
+            project_id=self.project.id, title='Login smoke',
+            state='WAITING_CAPABILITY', capability_gap_id=gap.id,
+            required_capabilities_json=['login.execute'],
+            dedupe_key='login-smoke', version=1)
+        db.session.add(candidate)
+        db.session.commit()
+        body = self._available_body(
+            'login.execute', 'Login', operations=['login.execute'])
+        created = self.client.post(
+            '/api/v1/automation-capabilities', json=body,
+            headers={'Idempotency-Key': 'login-v1'})
+        self.assertEqual(201, created.status_code)
+        candidate.state = 'QUALIFIED'
+        candidate.qualification_outcome = 'QUALIFIED'
+        candidate.qualification_run_id = 710
+        candidate.qualification_evidence_json = {'run': 710}
+        db.session.commit()
+
+        checked = datetime.now().replace(microsecond=0)
+        renewed_body = dict(
+            body, expected_version=1,
+            health_checked_at=checked.isoformat(),
+            health_expires_at=(checked + timedelta(hours=2)).isoformat())
+        renewed = self.client.post(
+            '/api/v1/automation-capabilities', json=renewed_body,
+            headers={'Idempotency-Key': 'login-health-renewal'})
+        self.assertEqual(200, renewed.status_code)
+        self.assertEqual([], renewed.get_json()[
+            'auto_requalification']['requalified_gap_ids'])
+        self.assertEqual('QUALIFIED', candidate.state)
+
+        changed_body = dict(
+            renewed_body, expected_version=2,
+            implementation_version='deepflow-v2',
+            release_id='deepflow-release-v2',
+            source_commit='c' * 40,
+            manifest_sha256='d' * 64)
+        changed = self.client.post(
+            '/api/v1/automation-capabilities', json=changed_body,
+            headers={'Idempotency-Key': 'login-v2'})
+        self.assertEqual(200, changed.status_code)
+        db.session.refresh(gap)
+        db.session.refresh(candidate)
+        self.assertEqual('resolved', gap.status)
+        self.assertEqual('READY_FOR_CANARY', candidate.state)
+        self.assertEqual([gap.id], changed.get_json()[
+            'auto_requalification']['requalified_gap_ids'])
+        self.assertEqual(1, AutomationCaseCandidateEvent.query.filter_by(
+            candidate_id=candidate.id,
+            event_type='capability_catalog_requalification_required').count())
+
+    def test_platform_mismatch_does_not_resolve_gap(self):
+        gap = CapabilityGap(
+            project_id=self.project.id, gap_key='android-login-gap',
+            title='Android login unavailable',
+            missing_capabilities_json=['login.execute'],
+            evidence_json={'platform': 'android'}, status='open')
+        db.session.add(gap)
+        db.session.commit()
+        body = self._available_body(
+            'login.execute', 'Unity login', operations=['login.execute'],
+            platforms=['unity_editor'])
+        response = self.client.post(
+            '/api/v1/automation-capabilities', json=body,
+            headers={'Idempotency-Key': 'unity-login-only'})
         self.assertEqual(201, response.status_code)
         db.session.refresh(gap)
         self.assertEqual('open', gap.status)

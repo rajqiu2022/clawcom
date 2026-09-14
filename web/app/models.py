@@ -2632,9 +2632,20 @@ class AutomationCapability(db.Model):
     reset_hooks_json = db.Column(db.JSON)
     platforms_json = db.Column(db.JSON)
     status = db.Column(
-        db.String(32), nullable=False, default='available', index=True)
+        db.String(32), nullable=False, default='planned', index=True)
+    implementation_status = db.Column(
+        db.String(32), nullable=False, default='declared', index=True)
+    verification_status = db.Column(
+        db.String(32), nullable=False, default='unverified', index=True)
     implementation_version = db.Column(db.String(80), default='')
+    producer_claw_id = db.Column(
+        db.Integer, db.ForeignKey('openclaw_instances.id'), index=True)
+    release_id = db.Column(db.String(255), default='')
+    source_commit = db.Column(db.String(64), default='')
+    manifest_sha256 = db.Column(db.String(64), default='')
+    verification_json = db.Column(db.JSON)
     health_checked_at = db.Column(db.DateTime, index=True)
+    health_expires_at = db.Column(db.DateTime, index=True)
     version = db.Column(db.Integer, nullable=False, default=1)
     created_by = db.Column(db.String(160), default='system')
     updated_by = db.Column(db.String(160), default='system')
@@ -2661,14 +2672,75 @@ class AutomationCapability(db.Model):
             'reset_hooks': self.reset_hooks_json or [],
             'platforms': self.platforms_json or [],
             'status': self.status,
+            'implementation_status': self.implementation_status or 'declared',
+            'verification_status': self.verification_status or 'unverified',
             'implementation_version': self.implementation_version or '',
+            'producer_claw_id': self.producer_claw_id,
+            'release_id': self.release_id or '',
+            'source_commit': self.source_commit or '',
+            'manifest_sha256': self.manifest_sha256 or '',
+            'verification': self.verification_json or {},
             'health_checked_at': (
                 str(self.health_checked_at) if self.health_checked_at else None),
+            'health_expires_at': (
+                str(self.health_expires_at) if self.health_expires_at else None),
             'version': self.version,
             'created_by': self.created_by or 'system',
             'updated_by': self.updated_by or 'system',
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
+
+
+class AutomationCapabilityEvent(db.Model):
+    """Append-only, idempotent capability publication and health history."""
+    __tablename__ = 'automation_capability_events'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    capability_id = db.Column(
+        db.Integer, db.ForeignKey('automation_capabilities.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    event_type = db.Column(db.String(48), nullable=False, index=True)
+    from_status = db.Column(db.String(32))
+    to_status = db.Column(db.String(32))
+    version_before = db.Column(db.Integer)
+    version_after = db.Column(db.Integer)
+    payload_json = db.Column(db.JSON)
+    actor_type = db.Column(db.String(24), nullable=False)
+    actor_id = db.Column(db.Integer, nullable=False)
+    actor_name = db.Column(db.String(160), default='')
+    request_id = db.Column(db.String(128), index=True)
+    idempotency_key = db.Column(db.String(128))
+    request_hash = db.Column(db.String(64))
+    created_at = db.Column(db.DateTime, default=_now, index=True)
+
+    capability = db.relationship(
+        'AutomationCapability', backref=db.backref(
+            'events', cascade='all, delete-orphan',
+            order_by='AutomationCapabilityEvent.id'))
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'capability_id', 'actor_type', 'actor_id', 'idempotency_key',
+            name='uq_capability_event_actor_idempotency'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'capability_id': self.capability_id,
+            'event_type': self.event_type,
+            'from_status': self.from_status,
+            'to_status': self.to_status,
+            'version_before': self.version_before,
+            'version_after': self.version_after,
+            'payload': self.payload_json or {},
+            'actor_type': self.actor_type,
+            'actor_id': self.actor_id,
+            'actor_name': self.actor_name or '',
+            'request_id': self.request_id,
+            'idempotency_key': self.idempotency_key,
+            'created_at': str(self.created_at) if self.created_at else None,
         }
 
 

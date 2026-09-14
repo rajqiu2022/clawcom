@@ -23,6 +23,7 @@ ENTITY_TYPES = {
     'testcase',
     'testcase_library_revision',
     'capability_gap',
+    'automation_capability',
     'bug',
     'learned_rule',
     'test_report',
