@@ -618,7 +618,9 @@ async function createCaseReviewDeveloperAiLink(subjectType = 'case_review') {
             });
             const data = await response.json();
             if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-            const hub = (window.HUB_WEB_URL || window.HUB_PUBLIC_URL || location.origin).replace(/\/+$/, '');
+            // 外部协作邀请不能使用带企业 SSO 的 HUB_WEB_URL；生产
+            // HUB_PUBLIC_URL 指向 http://clawteam.woa.com:18800。
+            const hub = (window.HUB_PUBLIC_URL || location.origin).replace(/\/+$/, '');
             const link = `${hub}${data.invitation_path || '/developer-ai/collaborate'}#invite=${encodeURIComponent(data.invitation_code)}&exchange=${encodeURIComponent(data.exchange_url)}&subject=${encodeURIComponent(`/topics/${TOPIC_ID}`)}`;
             overlay.querySelector('.modal').innerHTML = `
                 <h3 class="modal-title">协作链接已生成</h3>

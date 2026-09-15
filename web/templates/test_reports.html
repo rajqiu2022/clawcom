@@ -293,7 +293,9 @@ function showConfirm(msg) {
 }
 // =============================================
 
-const HUB = (window.HUB_WEB_URL || window.HUB_PUBLIC_URL || location.origin).replace(/\/+$/, '');
+// 外部协作链接必须走 Agent/外部参与者可直连的 HTTP 18800 入口。
+// HUB_WEB_URL 是带企业 SSO 的 HTTPS 页面入口，不能用于匿名邀请。
+const HUB = (window.HUB_PUBLIC_URL || location.origin).replace(/\/+$/, '');
 const SHIFT_LEFT_ENABLED = {{ 'true' if shift_left_enabled else 'false' }};
 let META = { types: [], risk_levels: [], statuses: [], max_attachment_size: 10485760 };
 let PROJECTS = [];

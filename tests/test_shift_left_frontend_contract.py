@@ -41,6 +41,15 @@ class ShiftLeftFrontendContractTest(unittest.TestCase):
         self.assertIn('link.href = path', self.handoff)
         self.assertIn("subject=${encodeURIComponent(`/topics/${TOPIC_ID}`)}", self.topic)
 
+    def test_external_invites_use_agent_reachable_http_public_url(self):
+        expected = 'window.HUB_PUBLIC_URL || location.origin'
+        self.assertIn(expected, self.reports)
+        self.assertIn(expected, self.topic)
+        self.assertNotIn(
+            'window.HUB_WEB_URL || window.HUB_PUBLIC_URL', self.reports)
+        self.assertNotIn(
+            'window.HUB_WEB_URL || window.HUB_PUBLIC_URL', self.topic)
+
     def test_case_review_link_routes_by_hub_permission(self):
         self.assertIn("resolvedSubject.type !== 'case_review'", self.handoff)
         self.assertIn('credentials:\'same-origin\'', self.handoff)
