@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <title>外部用例评审 · Hub</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    <style>
+        :root{color-scheme:dark;--bg:#08110f;--panel:#0e1917;--panel2:#13211e;--line:#284039;--text:#ecf8f4;--muted:#8eaaa1;--accent:#38d7a2;--accent2:#1e8f70;--danger:#fb7185;--warning:#fbbf24}
+        *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 10% -10%,#174c3d 0,transparent 34%),var(--bg);color:var(--text);font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif}
+        button,input,textarea{font:inherit}.shell{width:min(1420px,calc(100% - 32px));margin:auto;padding:26px 0 70px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:24px}.brand{display:flex;align-items:center;gap:12px;font-weight:800}.brand-mark{width:34px;height:34px;border-radius:11px;background:linear-gradient(135deg,var(--accent),#6ee7c5);color:#062019;display:grid;place-items:center}.secure{font:700 11px/1.2 ui-monospace,monospace;letter-spacing:.13em;color:var(--accent);text-transform:uppercase}.hero{padding:28px;border:1px solid var(--line);border-radius:22px;background:linear-gradient(135deg,rgba(19,33,30,.96),rgba(9,19,17,.95));box-shadow:0 24px 70px rgba(0,0,0,.22)}h1{font-size:clamp(25px,4vw,42px);line-height:1.15;letter-spacing:-.025em;margin:10px 0}.meta,.scope-chips{display:flex;gap:9px;flex-wrap:wrap;color:var(--muted);font-size:13px}.chip{display:inline-flex;align-items:center;padding:5px 10px;border:1px solid var(--line);border-radius:999px;background:rgba(255,255,255,.025)}
+        .notice{margin-top:15px;color:#b7cfc7;font-size:13px;line-height:1.65}.workspace{margin-top:20px;border:1px solid var(--line);border-radius:20px;background:rgba(14,25,23,.96);overflow:hidden}.tabs{display:flex;gap:4px;padding:12px 14px 0;border-bottom:1px solid var(--line);overflow:auto}.tab{border:0;background:transparent;color:var(--muted);padding:11px 16px;border-bottom:2px solid transparent;cursor:pointer;white-space:nowrap;font-weight:700}.tab.active{color:var(--accent);border-color:var(--accent)}.panel{display:none;padding:22px}.panel.active{display:block}.section-title{font-size:15px;margin:0 0 12px;color:#d8ebe5}.markdown{line-height:1.75;color:#d8e8e3;overflow-wrap:anywhere}.markdown h1,.markdown h2,.markdown h3{margin:22px 0 10px}.markdown h1{font-size:24px}.markdown h2{font-size:20px}.markdown h3{font-size:17px}.markdown pre{padding:14px;background:#07100e;border:1px solid var(--line);border-radius:10px;overflow:auto}.markdown code{background:#07100e;padding:2px 5px;border-radius:4px}.markdown table{border-collapse:collapse;max-width:100%}.markdown th,.markdown td{border:1px solid var(--line);padding:7px 10px}.markdown a{color:var(--accent)}.round{padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--panel2);margin-top:14px}.round-head{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.badge{font-size:12px;padding:3px 8px;border-radius:999px;background:rgba(56,215,162,.1);color:var(--accent)}
+        .mindmap-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.btn{border:1px solid var(--line);border-radius:10px;padding:9px 13px;background:var(--panel2);color:var(--text);cursor:pointer;font-weight:700}.btn:hover{border-color:var(--accent2)}.btn.primary{background:var(--accent);border-color:var(--accent);color:#05231b}.btn.danger{color:var(--danger)}.mindmap-shell{height:620px;border:1px solid var(--line);border-radius:14px;background:#0b1513;overflow:hidden}.mindmap-shell:fullscreen{height:100vh;border:0;border-radius:0;padding:18px;background:#07100e}.mindmap-shell:fullscreen #mirror-mindmap{height:calc(100vh - 62px)}#mirror-mindmap{height:100%}#mirror-mindmap .cmm-wrap{height:calc(100% - 45px)}
+        .review-grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:18px}.review-list{display:flex;flex-direction:column;gap:12px}.review-card{border:1px solid var(--line);border-radius:14px;padding:15px;background:var(--panel2)}.review-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}.review-author{font-weight:800}.review-time{color:var(--muted);font-size:12px;margin-left:auto}.review-actions{display:flex;gap:6px;margin-top:12px}.review-actions .btn{padding:6px 9px;font-size:12px}.form{position:sticky;top:18px;border:1px solid var(--line);border-radius:14px;padding:16px;background:var(--panel2)}label{display:block;color:#c9ddd6;font-size:12px;font-weight:700;margin:12px 0 6px}.input{width:100%;border:1px solid var(--line);border-radius:9px;padding:10px 11px;background:#091310;color:var(--text);outline:none}.input:focus{border-color:var(--accent)}textarea.input{min-height:150px;resize:vertical;line-height:1.55}.form-row{display:grid;grid-template-columns:1fr 100px;gap:10px}.empty{padding:44px 18px;text-align:center;color:var(--muted)}.loading{min-height:60vh;display:grid;place-items:center;color:var(--muted)}.error{width:min(700px,calc(100% - 32px));margin:80px auto;padding:24px;border:1px solid rgba(251,113,133,.35);border-radius:16px;background:rgba(251,113,133,.07);color:#fecdd3;line-height:1.7}.toast{position:fixed;right:20px;bottom:20px;z-index:100;padding:11px 15px;border-radius:10px;background:#dffcf2;color:#083b2d;font-weight:700;box-shadow:0 10px 34px rgba(0,0,0,.3)}
+        @media(max-width:860px){.review-grid{grid-template-columns:1fr}.form{position:static}.mindmap-shell{height:70vh}.hero{padding:21px}.panel{padding:16px}.shell{width:min(100% - 20px,1420px)}}
+    </style>
+</head>
+<body>
+<div id="loading" class="loading">正在验证邀请并加载评审内容…</div>
+<div id="error" class="error" hidden></div>
+<main id="app" class="shell" hidden>
+    <header class="topbar"><div class="brand"><span class="brand-mark">H</span><span>Hub 外部评审</span></div><span class="secure">Scoped access · only this review</span></header>
+    <section class="hero">
+        <div class="secure">Case review mirror</div>
+        <h1 id="review-title">用例评审</h1>
+        <div class="meta" id="review-meta"></div>
+        <div class="scope-chips" id="review-scope" style="margin-top:12px"></div>
+        <div class="notice">当前页面只展示本次评审范围、用例内容与评审记录，不提供全量用例库入口，也不能访问 Hub 其他数据。</div>
+    </section>
+    <section class="workspace">
+        <nav class="tabs">
+            <button class="tab active" data-tab="overview">评审说明</button>
+            <button class="tab" data-tab="mindmap">用例脑图</button>
+            <button class="tab" data-tab="reviews">评审记录 <span id="review-count"></span></button>
+        </nav>
+        <section class="panel active" data-panel="overview">
+            <h2 class="section-title">评审概要</h2><div class="markdown" id="topic-content"></div>
+            <div id="rounds"></div>
+        </section>
+        <section class="panel" data-panel="mindmap">
+            <div class="mindmap-toolbar"><div><strong>本次评审用例</strong><div style="font-size:12px;color:var(--muted);margin-top:3px">点击用例可展开前提、步骤与预期；拖动空白区域可浏览。</div></div><button class="btn" id="fullscreen-btn">全屏查看</button></div>
+            <div class="mindmap-shell" id="mindmap-shell"><div id="mirror-mindmap"><div class="empty">切换到此页后加载脑图…</div></div></div>
+        </section>
+        <section class="panel" data-panel="reviews">
+            <div class="review-grid"><div><h2 class="section-title">已提交的评审记录</h2><div class="review-list" id="reviews"></div></div>
+                <form class="form" id="review-form"><h2 class="section-title">提交评审意见</h2><div class="form-row"><div><label for="identity">显示身份</label><input class="input" id="identity" maxlength="100" required placeholder="例如：外部研发 / Codex"></div><div><label for="score">评分</label><input class="input" id="score" type="number" min="1" max="10" placeholder="1-10"></div></div><label for="content">评审意见（Markdown）</label><textarea class="input" id="content" maxlength="20000" required placeholder="请写明覆盖性、可执行性、预期结果、优先级和一致性方面的发现…"></textarea><button class="btn primary" style="width:100%;margin-top:12px" type="submit">提交评审记录</button></form>
+            </div>
+        </section>
+    </section>
+</main>
+<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/case_mindmap.js') }}?v={{ cache_bust }}"></script>
+<script>
+const fragment = new URLSearchParams(location.hash.slice(1));
+const invitation = fragment.get('invite') || '';
+const reviewHint = Number(fragment.get('review') || 0);
+const exchangePath = fragment.get('exchange') || '/api/v1/collaboration-sessions/exchange';
+let accessToken = '', contextData = null, mindmapView = null, mindmapLoaded = false;
+const $ = id => document.getElementById(id);
+const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+function markdown(value){try{return DOMPurify.sanitize(marked.parse(String(value||''),{breaks:true,gfm:true}))}catch(_){return esc(value).replace(/\n/g,'<br>')}}
+function tokenKey(topicId){return `hub-case-review-mirror:${topicId}`}
+function toast(message){const el=document.createElement('div');el.className='toast';el.textContent=message;document.body.appendChild(el);setTimeout(()=>el.remove(),2200)}
+function fail(message){$('loading').hidden=true;$('app').hidden=true;$('error').hidden=false;$('error').innerHTML=`<strong>暂时无法打开评审</strong><br>${esc(message)}<br><small>请确认邀请仍在有效期内，或让发起人重新生成链接。</small>`}
+async function rawJson(url, options={}){const response=await fetch(url,options);let data={};try{data=await response.json()}catch(_){}if(!response.ok)throw new Error(data.error||`HTTP ${response.status}`);return data}
+async function api(url, options={}){options.headers=Object.assign({},options.headers||{},{Authorization:`Bearer ${accessToken}`});return rawJson(url,options)}
+async function previewInvite(){return rawJson('/api/v1/collaboration-sessions/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({invitation_code:invitation})})}
+async function canOpenHub(topicId){try{const response=await fetch(`/api/v1/topics/${topicId}`,{credentials:'same-origin'});return response.ok}catch(_){return false}}
+async function exchangeInvite(){return rawJson(exchangePath,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({invitation_code:invitation})})}
+async function resolveAccess(){
+    if(invitation){
+        const preview=await previewInvite();
+        if(preview.subject?.type!=='case_review')throw new Error('该邀请不是用例评审邀请');
+        const topicId=Number(preview.subject.id);
+        if(await canOpenHub(topicId)){location.replace(preview.web_path);return null}
+        const saved=sessionStorage.getItem(tokenKey(topicId));
+        if(saved){try{const parsed=JSON.parse(saved);accessToken=parsed.access_token||'';const ctx=await api(`/api/v1/shift-left/case-reviews/${topicId}/context`);return {topicId,context:ctx}}catch(_){sessionStorage.removeItem(tokenKey(topicId))}}
+        const issued=await exchangeInvite();
+        accessToken=issued.access_token||'';
+        const bootstrap=issued.bootstrap||{};
+        if(bootstrap.schema_version!=='case-review-bootstrap.v1')throw new Error('邀请任务类型不匹配');
+        sessionStorage.setItem(tokenKey(topicId),JSON.stringify({access_token:accessToken,expires_at:issued.expires_at}));
+        history.replaceState(null,'',`${location.pathname}#review=${topicId}`);
+        return {topicId,context:await api(bootstrap.endpoints?.context||`/api/v1/shift-left/case-reviews/${topicId}/context`)};
+    }
+    if(reviewHint){
+        const saved=sessionStorage.getItem(tokenKey(reviewHint));
+        if(!saved)throw new Error('本浏览器中的临时访问凭据已丢失，请重新打开原邀请链接');
+        accessToken=JSON.parse(saved).access_token||'';
+        return {topicId:reviewHint,context:await api(`/api/v1/shift-left/case-reviews/${reviewHint}/context`)};
+    }
+    throw new Error('链接中没有有效的用例评审邀请');
+}
+function statusLabel(value){return ({reviewing:'评审中',closed:'已关闭',pending:'待评审',approved:'已通过',rejected:'已打回'})[value]||value||'未知'}
+function renderContext(){
+    const c=contextData,t=c.topic||{},summary=c.review_summary||{},scope=c.scope||{};
+    $('review-title').textContent=`#${summary.topic_id||t.id} ${summary.title||t.title||'用例评审'}`;
+    $('review-meta').innerHTML=`<span class="chip">${esc(c.project?.name||'未关联项目')}</span><span class="chip">${esc(statusLabel(summary.status))}</span><span class="chip">${Number(summary.round_count||0)} 轮</span><span class="chip">${Number(summary.submitted_review_count||0)} 条评审</span>`;
+    const scopes=[];(scope.module_paths||[]).forEach(p=>scopes.push(`目录：${p||'(未分类)'}`));if((scope.case_ids||[]).length)scopes.push(`指定用例：${scope.case_ids.length} 条`);if(!scopes.length)scopes.push('范围：本次邀请授权的全部用例');$('review-scope').innerHTML=scopes.map(x=>`<span class="chip">${esc(x)}</span>`).join('');
+    $('topic-content').innerHTML=markdown(t.content||'暂无评审说明');
+    $('rounds').innerHTML=(c.rounds||[]).map(r=>`<article class="round"><div class="round-head"><strong>第 ${r.round_number} 轮</strong><span class="badge">${esc(statusLabel(r.status))}</span><span style="font-size:12px;color:var(--muted)">${esc((r.submitted_at||'').slice(0,16))}</span></div>${r.description?`<div class="markdown">${markdown(r.description)}</div>`:''}${r.case_content?`<details><summary style="cursor:pointer;color:var(--accent)">查看本轮提交说明</summary><div class="markdown">${markdown('```yaml\n'+r.case_content+'\n```')}</div></details>`:''}</article>`).join('')||'<div class="empty">暂无评审轮次</div>';
+}
+async function loadMindmap(){if(mindmapLoaded)return;mindmapLoaded=true;const host=$('mirror-mindmap');host.innerHTML='<div class="empty">正在加载用例脑图…</div>';try{const data=await api(contextData.links.mindmap);host.innerHTML='';mindmapView=CaseMindmap.render(host,data,{canMark:!!data.can_mark,markHint:data.can_mark?'':'当前邀请仅可查看',onMarkChange:saveMark,onLoadChildren:loadCaseChildren})}catch(e){mindmapLoaded=false;host.innerHTML=`<div class="empty">脑图加载失败：${esc(e.message)}</div>`}}
+async function loadCaseChildren(node,done){try{if(node.node_type!==CaseMindmap.NODE_CASE){done([],null);return}const c=await api(`/api/v1/shift-left/case-reviews/${contextData.review_summary.topic_id}/cases/${node.case_id}`);const kids=CaseMindmap.caseDetailChildren(node.id,c);done(kids,kids.length?null:'该用例没有填写前提、步骤或预期')}catch(e){done(null,e.message)}}
+async function saveMark(nodeId,mark){try{await api(contextData.links.marks,{method:'PUT',headers:{'Content-Type':'application/json','Idempotency-Key':`mirror-mark-${Date.now()}-${Math.random()}`},body:JSON.stringify({marks:[{node_id:nodeId,mark}]})});toast('标记已保存')}catch(e){toast('标记失败：'+e.message);mindmapLoaded=false;loadMindmap()}}
+function reviewCard(row){const editable=row.owned_by_me&&row.can_modify;return `<article class="review-card"><div class="review-head"><span class="review-author">${esc(row.author_name||'外部评审人')}</span>${row.score!=null?`<span class="badge">${row.score}/10</span>`:''}${row.source_type==='developer_ai'?'<span class="badge">Developer AI</span>':''}<span class="review-time">${esc((row.created_at||'').slice(0,16))}${row.is_edited?' · 已修改':''}</span></div><div class="markdown">${markdown(row.content)}</div>${editable?`<div class="review-actions"><button class="btn" data-edit="${row.id}">修改我的记录</button><button class="btn danger" data-delete="${row.id}">删除我的记录</button></div>`:''}</article>`}
+async function loadReviews(){const data=await api(`${contextData.links.reviews}?page_size=200`);const rows=data.items||[];$('review-count').textContent=rows.length?`(${rows.length})`:'';$('reviews').innerHTML=rows.map(reviewCard).join('')||'<div class="empty">暂无评审记录</div>';$('reviews').querySelectorAll('[data-edit]').forEach(btn=>btn.onclick=()=>editReview(Number(btn.dataset.edit),rows));$('reviews').querySelectorAll('[data-delete]').forEach(btn=>btn.onclick=()=>deleteReview(Number(btn.dataset.delete)))}
+async function editReview(id,rows){const row=rows.find(x=>x.id===id);if(!row)return;const content=prompt('修改评审意见',row.content||'');if(content===null)return;const score=prompt('修改评分（1-10，留空取消评分）',row.score==null?'':row.score);try{await api(`${contextData.links.reviews}/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json','Idempotency-Key':`mirror-review-edit-${id}-${Date.now()}`},body:JSON.stringify({content,score:score===''?null:Number(score)})});toast('评审记录已修改');await loadReviews()}catch(e){toast('修改失败：'+e.message)}}
+async function deleteReview(id){if(!confirm('确认删除自己提交的这条评审记录？'))return;try{await api(`${contextData.links.reviews}/${id}`,{method:'DELETE',headers:{'Idempotency-Key':`mirror-review-delete-${id}-${Date.now()}`}});toast('评审记录已删除');await loadReviews()}catch(e){toast('删除失败：'+e.message)}}
+document.querySelectorAll('.tab').forEach(btn=>btn.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('active',x===btn));document.querySelectorAll('.panel').forEach(x=>x.classList.toggle('active',x.dataset.panel===btn.dataset.tab));if(btn.dataset.tab==='mindmap')loadMindmap();if(btn.dataset.tab==='reviews')loadReviews()});
+$('fullscreen-btn').onclick=async()=>{const shell=$('mindmap-shell');if(!document.fullscreenElement)await shell.requestFullscreen();else await document.exitFullscreen()};document.addEventListener('fullscreenchange',()=>{$('fullscreen-btn').textContent=document.fullscreenElement?'退出全屏':'全屏查看';if(mindmapView)requestAnimationFrame(()=>mindmapView.render())});
+$('review-form').onsubmit=async event=>{event.preventDefault();const identity=$('identity').value.trim(),content=$('content').value.trim(),score=$('score').value;if(!identity||!content)return;const button=event.submitter;button.disabled=true;try{await api(contextData.links.reviews,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':`mirror-review-create-${Date.now()}-${Math.random()}`},body:JSON.stringify({identity,content,score:score?Number(score):null,round_id:contextData.open_round_id})});$('content').value='';toast('评审记录已提交');await loadReviews()}catch(e){toast('提交失败：'+e.message)}finally{button.disabled=false}};
+(async()=>{try{const resolved=await resolveAccess();if(!resolved)return;contextData=resolved.context;renderContext();await loadReviews();$('loading').hidden=true;$('app').hidden=false}catch(e){fail(e.message)}})();
+</script>
+</body>
+</html>

@@ -44,8 +44,8 @@
                 <p>机器调用协议：</p>
                 <pre id="curl-command"></pre>
                 <div id="subject-link-wrap" style="display:none;margin-top:14px">
-                    <a class="subject-link" id="subject-link" target="_blank" rel="noopener">打开课题/评审内容 ↗</a>
-                    <div style="margin-top:6px;color:var(--muted);font-size:12px">Owner 登录 Hub 后可直接查看页面；外部 Agent 继续使用任务包中的 API。</div>
+                    <a class="subject-link" id="subject-link">打开课题/评审内容 →</a>
+                    <div style="margin-top:6px;color:var(--muted);font-size:12px">有 Hub 权限时进入完整系统；没有权限的用例评审参与者将进入仅展示本次评审内容的安全镜像页。</div>
                 </div>
                 <div class="actions">
                     <button class="primary" id="exchange-btn">兑换临时访问凭据</button>
@@ -73,22 +73,24 @@ const invitation = params.get('invite') || '';
 const exchangePath = params.get('exchange') || '/api/v1/collaboration-sessions/exchange';
 const subjectPath = params.get('subject') || '';
 const state = document.getElementById('state');
-function showSubjectLink(path, title = '') {
+let resolvedSubject = null;
+function showSubjectLink(path, title = '', subject = null) {
     if (!/^\/topics\/\d+$/.test(path || '')) return;
     const link = document.getElementById('subject-link');
-    link.href = `https://${location.hostname}${path}`;
-    link.textContent = title ? `打开「${title}」 ↗` : '打开课题/评审内容 ↗';
+    link.href = path;
+    if (subject) resolvedSubject = subject;
+    link.textContent = title ? `打开「${title}」 →` : '打开课题/评审内容 →';
     document.getElementById('subject-link-wrap').style.display = '';
 }
 async function previewSubject() {
-    if (subjectPath) { showSubjectLink(subjectPath); return; }
     try {
         const response = await fetch('/api/v1/collaboration-sessions/preview', {
             method:'POST', headers:{'Content-Type':'application/json'},
             body:JSON.stringify({invitation_code:invitation}),
         });
         const data = await response.json();
-        if (response.ok) showSubjectLink(data.web_path, data.subject?.title || '');
+        if (response.ok) showSubjectLink(
+            data.web_path, data.subject?.title || '', data.subject || null);
     } catch (_) { /* Preview failure must not block direct token exchange. */ }
 }
 const command = `curl -X POST "${location.origin}${exchangePath}" -H "Content-Type: application/json" -d '${JSON.stringify({invitation_code: invitation})}'`;
@@ -105,6 +107,23 @@ document.getElementById('copy-btn')?.addEventListener('click', async () => {
     await navigator.clipboard.writeText(command);
     state.textContent = '兑换命令已复制';
 });
+document.getElementById('subject-link')?.addEventListener('click', async event => {
+    const path = event.currentTarget.getAttribute('href') || subjectPath;
+    if (!resolvedSubject || resolvedSubject.type !== 'case_review') return;
+    event.preventDefault();
+    state.textContent = '正在确认 Hub 访问权限';
+    try {
+        const response = await fetch(`/api/v1/topics/${resolvedSubject.id}`, {
+            credentials:'same-origin', headers:{'Accept':'application/json'},
+        });
+        if (response.ok) {
+            location.assign(path);
+            return;
+        }
+    } catch (_) { /* No Hub access: continue into the scoped mirror. */ }
+    state.textContent = '正在打开外部评审页';
+    location.assign(`/developer-ai/case-review${location.hash}`);
+});
 document.getElementById('exchange-btn')?.addEventListener('click', async event => {
     event.currentTarget.disabled = true;
     state.textContent = '正在兑换';
@@ -113,7 +132,8 @@ document.getElementById('exchange-btn')?.addEventListener('click', async event =
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
         const taskPackage = data.bootstrap || data;
-        showSubjectLink(taskPackage.web_path || subjectPath);
+        showSubjectLink(
+            taskPackage.web_path || subjectPath, '', taskPackage.subject || null);
         const packageText = JSON.stringify(taskPackage, null, 2);
         const isTopicDiscussion = taskPackage.schema_version === 'topic-discussion-bootstrap.v1';
         const aiPrompt = isTopicDiscussion

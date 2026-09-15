@@ -493,6 +493,11 @@ class ShiftLeftApiTest(unittest.TestCase):
         self.assertIn(
             f'/case-reviews/{self.review_topic.id}/reviews',
             bootstrap['endpoints']['reviews'])
+        self.assertIn(
+            f'/case-reviews/{self.review_topic.id}/mindmap',
+            bootstrap['endpoints']['mindmap'])
+        self.assertEqual(bootstrap['mirror_path'],
+                         '/developer-ai/case-review')
         self.assertIn('review_contract', bootstrap)
         self.assertNotIn('case_review:decision', bootstrap['scopes'])
         auth = {'Authorization': f'Bearer {token}'}
@@ -511,6 +516,26 @@ class ShiftLeftApiTest(unittest.TestCase):
         self.assertEqual(cases.status_code, 200, cases.get_data(as_text=True))
         self.assertEqual(cases.get_json()['total'], 1)
         self.assertEqual(cases.get_json()['items'][0]['id'], self.review_case.id)
+
+        mindmap = self.client.get(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}/mindmap',
+            headers=auth)
+        self.assertEqual(mindmap.status_code, 200,
+                         mindmap.get_data(as_text=True))
+        self.assertEqual(mindmap.get_json()['total_case_count'], 1)
+        self.assertTrue(mindmap.get_json()['can_mark'])
+
+        case_detail = self.client.get(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}'
+            f'/cases/{self.review_case.id}', headers=auth)
+        self.assertEqual(case_detail.status_code, 200,
+                         case_detail.get_data(as_text=True))
+        self.assertEqual(case_detail.get_json()['case_id'], 'RG-001')
+        out_of_scope = self.client.get(
+            f'/api/v1/shift-left/case-reviews/{self.review_topic.id}'
+            f'/cases/{self.outside_case.id}', headers=auth)
+        self.assertEqual(out_of_scope.status_code, 404,
+                         out_of_scope.get_data(as_text=True))
 
         wrong_subject = self.client.get(
             f'/api/v1/shift-left/case-reviews/{self.other_review_topic.id}/context',

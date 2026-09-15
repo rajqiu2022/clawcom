@@ -1689,11 +1689,32 @@ def get_case_review_context(topic_id):
         'mark_legend': {key: dict(value) for key, value in MARKS.items()},
         'links': {
             'cases': '/api/v1/shift-left/case-reviews/%d/cases' % topic.id,
+            'mindmap': '/api/v1/shift-left/case-reviews/%d/mindmap' % topic.id,
             'reviews': '/api/v1/shift-left/case-reviews/%d/reviews' % topic.id,
             'comments': '/api/v1/shift-left/case-reviews/%d/comments' % topic.id,
             'marks': '/api/v1/shift-left/case-reviews/%d/marks' % topic.id,
         },
     })
+
+
+def _scoped_case_review_query(library, paths, case_ids):
+    """Return the canonical review-scope query used by list and mirror APIs."""
+    query = (TestCase.query.filter_by(library_id=library.id)
+             .filter(db.or_(TestCase.is_placeholder.is_(False),
+                            TestCase.is_placeholder.is_(None))))
+    if case_ids:
+        return query.filter(TestCase.id.in_(case_ids))
+    if paths:
+        predicates = []
+        for root in paths:
+            if root:
+                predicates.extend((TestCase.module_path == root,
+                                   TestCase.module_path.like(root + '/%')))
+            else:
+                predicates.extend((TestCase.module_path == '',
+                                   TestCase.module_path.is_(None)))
+        return query.filter(db.or_(*predicates))
+    return query
 
 
 @api_bp.route('/shift-left/case-reviews/<int:topic_id>/cases', methods=['GET'])
@@ -1713,26 +1734,84 @@ def list_case_review_cases(topic_id):
         page_size = min(max(int(request.args.get('page_size', 100)), 1), 200)
     except (TypeError, ValueError):
         return _error('page/page_size 必须是整数', 400, 'INVALID_PAGINATION')
-    query = (TestCase.query.filter_by(library_id=library.id)
-             .filter(db.or_(TestCase.is_placeholder.is_(False),
-                            TestCase.is_placeholder.is_(None))))
-    if case_ids:
-        query = query.filter(TestCase.id.in_(case_ids))
-    elif paths:
-        predicates = []
-        for root in paths:
-            if root:
-                predicates.extend((TestCase.module_path == root,
-                                   TestCase.module_path.like(root + '/%')))
-            else:
-                predicates.extend((TestCase.module_path == '',
-                                   TestCase.module_path.is_(None)))
-        query = query.filter(db.or_(*predicates))
+    query = _scoped_case_review_query(library, paths, case_ids)
     total = query.count()
     rows = (query.order_by(TestCase.module_path.asc(), TestCase.id.asc())
             .offset((page - 1) * page_size).limit(page_size).all())
     return jsonify({'items': [row.to_dict() for row in rows], 'total': total,
                     'page': page, 'page_size': page_size})
+
+
+@api_bp.route('/shift-left/case-reviews/<int:topic_id>/mindmap',
+              methods=['GET'])
+def get_external_case_review_mindmap(topic_id):
+    """Scoped mindmap for the external browser mirror."""
+    disabled = _disabled_response()
+    if disabled:
+        return disabled
+    actor = _actor()
+    topic, _project, denied = _case_review_or_error(topic_id, actor)
+    if denied:
+        return denied
+    library, paths, case_ids = _case_review_scope(topic)
+    if not library:
+        return _error('关联的用例库不存在', 404, 'CASE_LIBRARY_NOT_FOUND')
+    try:
+        max_nodes = int(request.args.get('max_nodes', 2000))
+    except (TypeError, ValueError):
+        return _error('max_nodes 必须是整数', 400, 'INVALID_MAX_NODES')
+    max_nodes = max(50, min(max_nodes, 5000))
+    cases = (_scoped_case_review_query(library, paths, case_ids)
+             .order_by(TestCase.module_path.asc(), TestCase.id.asc()).all())
+    marks = {
+        row.node_id: row.mark
+        for row in CaseReviewNodeMark.query.filter_by(topic_id=topic.id).all()
+    }
+    from app.services.case_mindmap import build_directory_mindmap
+    # Focus a single directory. Multiple paths and explicit case selections
+    # retain their full paths under one review root.
+    root_path = paths[0] if len(paths) == 1 and not case_ids else ''
+    root_text = (root_path.split('/')[-1] if root_path
+                 else (topic.title or library.name or '用例评审'))
+    mindmap = build_directory_mindmap(
+        root_text, cases, root_module_path=root_path, marks=marks,
+        max_nodes=max_nodes)
+    mindmap.update({
+        'topic_id': topic.id,
+        'scope_type': ('cases' if case_ids else ('modules' if paths else 'library')),
+        'scope_module_paths': paths,
+        'can_mark': bool(actor['collaboration'].has_scope('case_review:mark')),
+    })
+    return jsonify(mindmap)
+
+
+@api_bp.route('/shift-left/case-reviews/<int:topic_id>/cases/<int:case_id>',
+              methods=['GET'])
+def get_external_case_review_case(topic_id, case_id):
+    """Return one in-scope case for lazy expansion inside the mirror."""
+    disabled = _disabled_response()
+    if disabled:
+        return disabled
+    actor = _actor()
+    topic, _project, denied = _case_review_or_error(topic_id, actor)
+    if denied:
+        return denied
+    library, paths, case_ids = _case_review_scope(topic)
+    if not library:
+        return _error('关联的用例库不存在', 404, 'CASE_LIBRARY_NOT_FOUND')
+    case = db.session.get(TestCase, case_id)
+    if (not case or case.library_id != library.id
+            or not _case_in_review_scope(case, paths, case_ids)):
+        return _error('用例不存在或不在本次评审范围内', 404,
+                      'CASE_REVIEW_CASE_NOT_FOUND')
+    return jsonify({
+        'id': case.id,
+        'case_id': case.case_id,
+        'title': case.title,
+        'priority': case.priority,
+        'module_path': case.module_path or '',
+        'content': case.content or {},
+    })
 
 
 def _case_review_record_payload(row, actor, topic):
@@ -2144,6 +2223,7 @@ def _case_review_bootstrap(row, access_token):
         'api_base_url': api_base,
         'subject': {'type': 'case_review', 'id': topic_id},
         'web_path': '/topics/%d' % topic_id,
+        'mirror_path': '/developer-ai/case-review',
         'web_url': _owner_web_url('/topics/%d' % topic_id),
         'agent_identity': None,
         'identity_mode': 'per_submission',
@@ -2162,6 +2242,8 @@ def _case_review_bootstrap(row, access_token):
         'endpoints': {
             'context': context_url,
             'cases': '%s/api/v1/shift-left/case-reviews/%d/cases' % (
+                api_base, topic_id),
+            'mindmap': '%s/api/v1/shift-left/case-reviews/%d/mindmap' % (
                 api_base, topic_id),
             'reviews': '%s/api/v1/shift-left/case-reviews/%d/reviews' % (
                 api_base, topic_id),
@@ -2516,6 +2598,8 @@ def preview_collaboration_session():
             'title': topic.title,
         },
         'web_path': web_path,
+        'mirror_path': ('/developer-ai/case-review'
+                        if row.subject_type == 'case_review' else None),
         'web_url': _owner_web_url(web_path),
         'invitation_expires_at': str(row.invitation_expires_at),
         'token_issued': False,

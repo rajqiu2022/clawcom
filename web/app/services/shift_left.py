@@ -104,6 +104,8 @@ _COLLABORATION_PATHS = (
     (re.compile(r'^/api/v1/shift-left/findings/\d+/(review-decisions|transitions)/?$'), {'POST'}),
     (re.compile(r'^/api/v1/shift-left/case-reviews/\d+/(context|cases|marks)/?$'),
      {'GET'}),
+    (re.compile(r'^/api/v1/shift-left/case-reviews/\d+/mindmap/?$'), {'GET'}),
+    (re.compile(r'^/api/v1/shift-left/case-reviews/\d+/cases/\d+/?$'), {'GET'}),
     (re.compile(r'^/api/v1/shift-left/case-reviews/\d+/comments/?$'), {'POST'}),
     (re.compile(r'^/api/v1/shift-left/case-reviews/\d+/reviews/?$'),
      {'GET', 'POST'}),

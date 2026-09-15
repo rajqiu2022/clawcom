@@ -235,6 +235,7 @@ def check_login():
     if (request.path.startswith('/r/')
             or request.path.startswith('/test-reports/share/')
             or request.path == '/developer-ai/collaborate'
+            or request.path == '/developer-ai/case-review'
             or request.path == '/chat/join'):
         return None
 
@@ -529,6 +530,12 @@ def _shift_left_enabled():
 def developer_ai_collaborate_page():
     """Public handoff page; the one-time invitation stays in URL fragment."""
     return render_template('developer_ai_collaborate.html')
+
+
+@views_bp.route('/developer-ai/case-review')
+def developer_ai_case_review_page():
+    """Public shell; review data still requires a scoped temporary token."""
+    return render_template('developer_ai_case_review.html')
 
 
 # 匿名外链页：/r/<token>（短路径，便于分享）；/test-reports/share/<token>（备用）

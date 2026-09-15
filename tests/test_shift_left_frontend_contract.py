@@ -11,6 +11,9 @@ class ShiftLeftFrontendContractTest(unittest.TestCase):
         cls.topic = (templates / 'topic_detail.html').read_text(encoding='utf-8')
         cls.handoff = (templates / 'developer_ai_collaborate.html').read_text(
             encoding='utf-8')
+        cls.case_review_mirror = (
+            templates / 'developer_ai_case_review.html').read_text(
+            encoding='utf-8')
         cls.api_js = (web / 'static' / 'js' / 'api.js').read_text(
             encoding='utf-8')
 
@@ -35,9 +38,27 @@ class ShiftLeftFrontendContractTest(unittest.TestCase):
         self.assertIn("params.get('subject')", self.handoff)
         self.assertIn('/api/v1/collaboration-sessions/preview', self.handoff)
         self.assertIn('id="subject-link"', self.handoff)
-        self.assertIn('`https://${location.hostname}${path}`', self.handoff)
-        self.assertNotIn('link.href = `${location.origin}${path}`', self.handoff)
+        self.assertIn('link.href = path', self.handoff)
         self.assertIn("subject=${encodeURIComponent(`/topics/${TOPIC_ID}`)}", self.topic)
+
+    def test_case_review_link_routes_by_hub_permission(self):
+        self.assertIn("resolvedSubject.type !== 'case_review'", self.handoff)
+        self.assertIn('credentials:\'same-origin\'', self.handoff)
+        self.assertIn("location.assign(path)", self.handoff)
+        self.assertIn("location.assign(`/developer-ai/case-review${location.hash}`)",
+                      self.handoff)
+
+    def test_external_case_review_mirror_is_scoped_and_fullscreen(self):
+        mirror = self.case_review_mirror
+        self.assertIn('Case review mirror', mirror)
+        self.assertIn('只展示本次评审范围、用例内容与评审记录', mirror)
+        self.assertIn('id="fullscreen-btn"', mirror)
+        self.assertIn('requestFullscreen()', mirror)
+        self.assertIn('/api/v1/shift-left/case-reviews/', mirror)
+        self.assertIn('修改我的记录', mirror)
+        self.assertIn('删除我的记录', mirror)
+        self.assertNotIn('href="/testcases/', mirror)
+        self.assertNotIn('打开用例库', mirror)
 
     def test_handoff_does_not_exchange_until_explicit_click(self):
         self.assertIn("getElementById('exchange-btn')?.addEventListener('click'", self.handoff)
