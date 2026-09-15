@@ -76,6 +76,19 @@ class WorkerRuntimeValidationTest(unittest.TestCase):
         self.assertEqual(runtime['auth_mode'], 'timiai_bridge')
         self.assertEqual(runtime['provider'], 'codex')
 
+    def test_codex_macos_platform_is_supported(self):
+        for reported in ('macos', 'macos-x86_64', 'darwin'):
+            with self.subTest(reported=reported):
+                runtime = validate_worker_runtime({
+                    'kind': 'claw_worker',
+                    'provider': 'codex',
+                    'runtime_mode': 'agent_direct',
+                    'platform': reported,
+                    'auth_mode': 'subscription',
+                    'source': 'worker',
+                })
+                self.assertEqual(runtime['platform'], 'macos')
+
     def test_openclaw_is_retired_as_worker_provider(self):
         with self.assertRaisesRegex(ValueError, 'hermes / codex'):
             validate_worker_runtime({

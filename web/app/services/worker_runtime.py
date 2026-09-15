@@ -57,9 +57,11 @@ def _platform(value):
         return 'windows'
     if raw.startswith('linux'):
         return 'linux'
+    if raw.startswith('macos') or raw == 'darwin':
+        return 'macos'
     if raw == 'unknown':
         return raw
-    raise ValueError('platform 仅支持 linux / windows / unknown')
+    raise ValueError('platform 仅支持 linux / windows / macos / unknown')
 
 
 def _auth_mode(value):
