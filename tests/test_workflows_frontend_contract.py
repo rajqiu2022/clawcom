@@ -49,6 +49,15 @@ class WorkflowFrontendContractTest(unittest.TestCase):
         self.assertIn(
             'payload.worker_claw_id = executorClawIds[0]', self.template)
 
+    def test_step_outputs_are_condensed_and_open_a_formatted_modal(self):
+        self.assertIn('class="wf-output-preview-wrap"', self.template)
+        self.assertIn('renderWorkflowOutputPreview(step.outputs, step.step_id)', self.template)
+        self.assertIn('id="wf-output-modal"', self.template)
+        self.assertIn('function openWorkflowOutput(stepId)', self.template)
+        self.assertIn('highlightWorkflowJson(output.value)', self.template)
+        self.assertIn("marked.parse(text || '', {breaks:true, gfm:true})", self.template)
+        self.assertIn('DOMPurify.sanitize(rendered)', self.template)
+
 
 if __name__ == '__main__':
     unittest.main()

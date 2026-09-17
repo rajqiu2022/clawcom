@@ -2,6 +2,10 @@
 {% block title %}Workflow 编排 - OpenClaw 管理系统{% endblock %}
 {% block nav_workflows %}active{% endblock %}
 {% block page_title %}Workflow 自动化编排{% endblock %}
+{% block head %}
+<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
+<script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
+{% endblock %}
 
 {% block top_actions %}
 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -163,6 +167,52 @@
 .wf-inspector-title h3 { margin:0;font-size:1rem;line-height:1.35; }
 .wf-inspector-section { border-top:1px solid var(--border);padding-top:10px;margin-top:10px; }
 .wf-inspector-section-title { color:var(--text-muted);font-size:.76rem;font-weight:700;margin-bottom:6px; }
+.wf-output-card {
+    display:block;width:100%;padding:0;overflow:hidden;text-align:left;color:inherit;cursor:pointer;
+    border:1px solid var(--border);border-radius:12px;background:var(--bg-card);
+    transition:border-color .16s ease,box-shadow .16s ease,transform .16s ease;
+}
+.wf-output-card:hover,.wf-output-card:focus-visible {
+    border-color:var(--accent);box-shadow:0 10px 28px rgba(15,23,42,.12);transform:translateY(-1px);outline:none;
+}
+.wf-output-card-head,.wf-output-card-foot { display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px; }
+.wf-output-card-head { border-bottom:1px solid var(--border); }
+.wf-output-card-foot { border-top:1px solid var(--border);color:var(--text-muted);font-size:.72rem; }
+.wf-output-card-action { color:var(--accent);font-weight:800;white-space:nowrap; }
+.wf-output-format {
+    display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:999px;
+    padding:2px 7px;font-family:'JetBrains Mono',monospace;font-size:.66rem;font-weight:800;letter-spacing:.08em;
+}
+.wf-output-format-json { color:#0f766e;border-color:#14b8a666;background:#14b8a618; }
+.wf-output-format-markdown { color:#7c3aed;border-color:#8b5cf666;background:#8b5cf618; }
+.wf-output-preview-wrap { position:relative;max-height:156px;overflow:hidden; }
+.wf-output-preview-wrap::after { content:'';position:absolute;left:0;right:0;bottom:0;height:46px;background:linear-gradient(transparent,var(--bg-card));pointer-events:none; }
+.wf-output-preview { display:block;margin:0;padding:10px 11px 18px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font-family:'JetBrains Mono',monospace;font-size:.72rem;line-height:1.55;color:var(--text-secondary); }
+.wf-output-modal-backdrop { display:none;position:fixed;inset:0;z-index:10040;padding:24px;background:rgba(7,12,22,.76);backdrop-filter:blur(7px); }
+.wf-output-modal-backdrop.active { display:flex;align-items:center;justify-content:center; }
+.wf-output-modal {
+    width:min(1080px,96vw);height:min(820px,92vh);display:flex;flex-direction:column;overflow:hidden;
+    border:1px solid color-mix(in srgb,var(--border) 76%,var(--accent));border-radius:18px;background:var(--bg-card);
+    box-shadow:0 30px 100px rgba(0,0,0,.46);
+}
+.wf-output-modal-head { display:flex;align-items:center;gap:12px;padding:13px 16px;border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--bg-secondary) 86%,transparent); }
+.wf-output-modal-title { flex:1;min-width:0; }
+.wf-output-modal-title strong { display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.wf-output-modal-title small { display:block;margin-top:3px;color:var(--text-muted);font-size:.7rem;font-family:'JetBrains Mono',monospace; }
+.wf-output-modal-actions { display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end; }
+.wf-output-modal-body { flex:1;min-height:0;overflow:auto;padding:22px 24px;overscroll-behavior:contain; }
+.wf-output-json { margin:0;white-space:pre;min-width:max-content;font-family:'JetBrains Mono',monospace;font-size:.8rem;line-height:1.65;color:var(--text-primary);tab-size:2; }
+.wf-json-key { color:#60a5fa; }.wf-json-string { color:#34d399; }.wf-json-number { color:#f59e0b; }.wf-json-boolean { color:#c084fc; }.wf-json-null { color:#94a3b8;font-style:italic; }
+.wf-output-markdown { max-width:920px;margin:0 auto;line-height:1.75;color:var(--text-primary);overflow-wrap:anywhere; }
+.wf-output-markdown > :first-child { margin-top:0; }.wf-output-markdown > :last-child { margin-bottom:0; }
+body.wf-output-modal-open { overflow:hidden; }
+@media (max-width:720px) {
+    .wf-output-modal-backdrop { padding:8px; }
+    .wf-output-modal { width:100%;height:96vh;border-radius:13px; }
+    .wf-output-modal-head { align-items:flex-start;flex-wrap:wrap; }
+    .wf-output-modal-actions { width:100%;justify-content:flex-start; }
+    .wf-output-modal-body { padding:16px 14px; }
+}
 .wf-chip-row { display:flex;gap:6px;flex-wrap:wrap; }
 .wf-gate-list { display:flex;flex-direction:column;gap:6px; }
 .wf-gate-item { padding:7px 8px;border-radius:8px;background:var(--bg-card);border:1px solid var(--border);font-size:.78rem; }
@@ -264,6 +314,23 @@
     </div>
 </div>
 
+<div class="wf-output-modal-backdrop" id="wf-output-modal" aria-hidden="true" onclick="closeWorkflowOutput(event)">
+    <section class="wf-output-modal" role="dialog" aria-modal="true" aria-labelledby="wf-output-modal-title">
+        <header class="wf-output-modal-head">
+            <div class="wf-output-modal-title">
+                <strong id="wf-output-modal-title">节点输出</strong>
+                <small id="wf-output-modal-meta"></small>
+            </div>
+            <div class="wf-output-modal-actions">
+                <span class="wf-output-format" id="wf-output-modal-format">JSON</span>
+                <button class="btn btn-ghost btn-sm" id="wf-output-copy" type="button" onclick="copyWorkflowOutput()">复制内容</button>
+                <button class="btn btn-ghost btn-sm" type="button" onclick="closeWorkflowOutput()" aria-label="关闭输出详情">关闭</button>
+            </div>
+        </header>
+        <div class="wf-output-modal-body" id="wf-output-modal-body"></div>
+    </section>
+</div>
+
 <script>
 const SHIFT_LEFT_ENABLED = {{ 'true' if shift_left_enabled else 'false' }};
 let definitions = [];
@@ -278,6 +345,7 @@ let currentRunData = null;
 let currentRunStepId = null;
 let currentRunStepArtifacts = {};
 let currentWorkflowReportUrl = '';
+let currentWorkflowOutputText = '';
 let workflowProjects = [];
 let selectedWorkflowProjectId = '';
 let selectedWorkflowCatalogKind = '';
@@ -294,6 +362,122 @@ function esc(v) {
 function jsArg(v) {
     return JSON.stringify(String(v === null || v === undefined ? '' : v));
 }
+function workflowOutputDescriptor(value) {
+    if (typeof value === 'string') {
+        const text = value.trim();
+        if (text && (text.startsWith('{') || text.startsWith('['))) {
+            try {
+                const parsed = JSON.parse(text);
+                if (parsed !== null && typeof parsed === 'object') {
+                    return {format:'json', value:parsed, text:JSON.stringify(parsed, null, 2)};
+                }
+            } catch (e) {}
+        }
+        return {format:'markdown', value:text, text:text};
+    }
+    return {format:'json', value:value, text:JSON.stringify(value, null, 2)};
+}
+function workflowOutputHasValue(value) {
+    if (value === null || value === undefined) return false;
+    if (typeof value === 'string') return Boolean(value.trim());
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'object') return Object.keys(value).length > 0;
+    return true;
+}
+function renderWorkflowOutputPreview(value, stepId) {
+    if (!workflowOutputHasValue(value)) return '<div class="wf-meta">暂无 outputs</div>';
+    const output = workflowOutputDescriptor(value);
+    const lines = output.text.split(/\r?\n/);
+    let preview = lines.slice(0, 10).join('\n');
+    if (preview.length > 900) preview = preview.slice(0, 900) + '…';
+    const truncated = lines.length > 10 || output.text.length > preview.length;
+    const formatLabel = output.format === 'json' ? 'JSON' : 'MARKDOWN';
+    return `<button type="button" class="wf-output-card" onclick="openWorkflowOutput(${esc(jsArg(stepId))})">
+        <span class="wf-output-card-head">
+            <span class="wf-output-format wf-output-format-${output.format}">${formatLabel}</span>
+            <span class="wf-output-card-action">展开查看 ↗</span>
+        </span>
+        <span class="wf-output-preview-wrap"><span class="wf-output-preview">${esc(preview)}</span></span>
+        <span class="wf-output-card-foot"><span>${output.text.length.toLocaleString()} 字符</span><span>${truncated ? '已折叠完整内容' : '点击格式化查看'}</span></span>
+    </button>`;
+}
+function highlightWorkflowJson(value) {
+    const text = JSON.stringify(value, null, 2);
+    const tokenPattern = /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"\s*:)|("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*")|\b(true|false)\b|\b(null)\b|-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?/g;
+    let cursor = 0;
+    let html = '';
+    let match;
+    while ((match = tokenPattern.exec(text)) !== null) {
+        html += esc(text.slice(cursor, match.index));
+        let cls = 'wf-json-number';
+        if (match[1]) cls = 'wf-json-key';
+        else if (match[2]) cls = 'wf-json-string';
+        else if (match[3]) cls = 'wf-json-boolean';
+        else if (match[4]) cls = 'wf-json-null';
+        html += `<span class="${cls}">${esc(match[0])}</span>`;
+        cursor = tokenPattern.lastIndex;
+    }
+    return html + esc(text.slice(cursor));
+}
+function renderWorkflowMarkdown(text) {
+    if (!window.marked || !window.DOMPurify) return `<pre class="wf-output-json">${esc(text)}</pre>`;
+    const rendered = marked.parse(text || '', {breaks:true, gfm:true});
+    return `<article class="markdown-body wf-output-markdown">${DOMPurify.sanitize(rendered)}</article>`;
+}
+function openWorkflowOutput(stepId) {
+    const steps = (currentRunData && currentRunData.steps) || [];
+    const step = steps.find(row => row.step_id === stepId);
+    if (!step || !workflowOutputHasValue(step.outputs)) return;
+    const output = workflowOutputDescriptor(step.outputs);
+    currentWorkflowOutputText = output.text;
+    document.getElementById('wf-output-modal-title').textContent = `${step.name || step.step_id} · Outputs`;
+    document.getElementById('wf-output-modal-meta').textContent = `${step.step_id} · ${output.text.length.toLocaleString()} 字符`;
+    const badge = document.getElementById('wf-output-modal-format');
+    badge.textContent = output.format === 'json' ? 'JSON' : 'MARKDOWN';
+    badge.className = `wf-output-format wf-output-format-${output.format}`;
+    document.getElementById('wf-output-modal-body').innerHTML = output.format === 'json'
+        ? `<pre class="wf-output-json">${highlightWorkflowJson(output.value)}</pre>`
+        : renderWorkflowMarkdown(output.text);
+    const modal = document.getElementById('wf-output-modal');
+    modal.classList.add('active');
+    modal.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('wf-output-modal-open');
+    document.getElementById('wf-output-copy').focus();
+}
+function closeWorkflowOutput(event) {
+    if (event && event.target && event.target.id !== 'wf-output-modal') return;
+    const modal = document.getElementById('wf-output-modal');
+    if (!modal) return;
+    modal.classList.remove('active');
+    modal.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('wf-output-modal-open');
+}
+async function copyWorkflowOutput() {
+    if (!currentWorkflowOutputText) return;
+    const button = document.getElementById('wf-output-copy');
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(currentWorkflowOutputText);
+        } else {
+            const textarea = document.createElement('textarea');
+            textarea.value = currentWorkflowOutputText;
+            textarea.style.cssText = 'position:fixed;left:-9999px;top:0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            if (!document.execCommand('copy')) throw new Error('copy command failed');
+            textarea.remove();
+        }
+        button.textContent = '已复制';
+        setTimeout(() => { button.textContent = '复制内容'; }, 1200);
+    } catch (e) {
+        showToast('复制失败，请手动选择内容', 'error');
+    }
+}
+document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && document.getElementById('wf-output-modal')?.classList.contains('active')) {
+        closeWorkflowOutput();
+    }
+});
 function parseJsonObject(raw, label) {
     const text = (raw || '').trim();
     if (!text) return {};
@@ -1409,9 +1593,7 @@ function renderRunStepInspector(step) {
     const metrics = step.metrics && Object.keys(step.metrics).length
         ? `<pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(step.metrics, null, 2))}</pre>`
         : '<div class="wf-meta">暂无 metrics</div>';
-    const outputs = step.outputs && Object.keys(step.outputs).length
-        ? `<pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(step.outputs, null, 2))}</pre>`
-        : '<div class="wf-meta">暂无 outputs</div>';
+    const outputs = renderWorkflowOutputPreview(step.outputs, step.step_id);
     const branchResult = step.branch_result && Object.keys(step.branch_result).length
         ? `<pre style="white-space:pre-wrap;margin:0;font-size:.78rem">${esc(JSON.stringify(step.branch_result, null, 2))}</pre>`
         : '<div class="wf-meta">暂无分支结果</div>';

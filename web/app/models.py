@@ -664,7 +664,11 @@ class KnowledgeEntry(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     memos_id = db.Column(db.String(100), comment='Memos 中的 memo name')
     title = db.Column(db.String(255), nullable=False)
-    content = db.Column(db.Text, nullable=False)
+    # Knowledge articles and the latest journal snapshot can exceed MySQL
+    # TEXT's 65,535-byte ceiling.  Keep SQLite on TEXT for local/tests while
+    # using LONGTEXT in MySQL, matching revision history storage.
+    content = db.Column(
+        db.Text().with_variant(LONGTEXT(), 'mysql'), nullable=False)
     category = db.Column(db.String(50), nullable=False,
                          comment='标签分类')
     scope = db.Column(db.String(50), nullable=False, default='global')
