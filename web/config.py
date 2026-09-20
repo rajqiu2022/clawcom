@@ -17,6 +17,11 @@ class Config:
         'AGENT_TEAM_CONTRACTS_ENABLED', '0') in (
             '1', 'true', 'True', 'yes', 'on')
 
+    AGENT_TEAMS_ENABLED = os.getenv('AGENT_TEAMS_ENABLED', '0') in ('1', 'true', 'True', 'yes', 'on')
+    AGENT_TEAMS_PROJECT_IDS = os.getenv('AGENT_TEAMS_PROJECT_IDS', '')
+    RESOURCE_LEASE_RECONCILIATION_ENABLED = os.getenv(
+        'RESOURCE_LEASE_RECONCILIATION_ENABLED', '0') in ('1', 'true', 'True', 'yes', 'on')
+
     # 主题聊天室是纯增量能力，默认关闭，避免部署后改变现有点对点聊天行为。
     CHAT_ROOM_ENABLED = os.getenv('CHAT_ROOM_ENABLED', '0') in (
         '1', 'true', 'True', 'yes', 'on')

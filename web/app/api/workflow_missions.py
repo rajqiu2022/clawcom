@@ -17,10 +17,14 @@ from app import db
 from app.api import api_bp
 from app.api.auth_utils import get_current_claw, get_current_user
 from app.models import (
-    AuditLog, ClawSidecarConfig, OpenClawInstance, Project, WorkflowDefinition,
+    AgentTeam, AgentTeamMission, AuditLog, ClawSidecarConfig, MissionStage, OpenClawInstance, Project, WorkflowDefinition,
     WorkflowMission, WorkflowMissionDispatch, WorkflowRun, WorkflowRunStep,
 )
 from app.services.worker_runtime import runtime_summary
+from app.services.agent_teams import (
+    TeamError, enabled as team_enabled, integer as team_integer, load_team, mission_team,
+    require_manager, require_stage_member,
+)
 from app.services.workflow_library_snapshots import (
     append_workflow_snapshot_warning,
     freeze_workflow_run_library_snapshot,
@@ -100,6 +104,11 @@ def _can_create_for_claw(actor, claw, project_id):
 def _can_read_mission(actor, mission):
     if not actor:
         return False
+    team, _ = mission_team(mission, require_enabled=False)
+    if team and actor['type'] == 'claw':
+        return (actor['claw'].project_id == team.project_id and actor['id'] in {
+            team.primary_manager_claw_id, team.backup_manager_claw_id,
+            *[member.claw_id for member in team.members]})
     if actor['type'] == 'claw':
         return int(actor['id']) == int(mission.main_claw_id)
     user = actor['user']
@@ -168,6 +177,17 @@ def _mission_payload(mission, with_dispatches=False):
         'arbitrary_executor_override_forbidden': True,
         'per_step_approval_required': False,
     }
+    team, binding = mission_team(mission, require_enabled=False)
+    if team:
+        payload['team_id'] = team.id
+        payload['team_version'] = binding.team_version
+        payload['active_manager_claw_id'] = team.active_manager_claw_id
+        payload['manager_epoch'] = team.manager_epoch
+        payload['dispatch_contract'].update({
+            'decision_owner': 'team_manager',
+            'required_fields': ['workflow_definition_id', 'stage_key', 'manager_epoch', 'manager_session_id'],
+            'default_worker_claw_id': None,
+        })
     return payload
 
 
@@ -227,6 +247,13 @@ def create_workflow_mission():
     if not actor:
         return _error('AUTH_REQUIRED', '未认证', 401)
     data = request.get_json(silent=True) or {}
+    team = None
+    if data.get('team_id') is not None:
+        team = load_team(team_integer(data['team_id'], 'team_id'), lock=True)
+        require_manager(team, actor, data)
+        if (data.get('project_id') != team.project_id
+                or data.get('main_claw_id', actor['id']) != actor['id']):
+            raise TeamError('TEAM_SCOPE_MISMATCH', '团队 Mission 必须由当前经理在本项目创建', 400)
     try:
         project_id = int(data.get('project_id'))
         main_claw_id = int(data.get('main_claw_id') or (
@@ -263,6 +290,18 @@ def create_workflow_mission():
             'expires_in_hours')
     except ValueError as exc:
         return _error('MISSION_POLICY_INVALID', str(exc))
+    if team:
+        team_flows = set(team.policy_json['allowed_definition_ids'])
+        if data.get('allow_destructive_actions') is True or data.get('allow_external_notification') is True:
+            raise TeamError('TEAM_AUTHORITY_NOT_GRANTED', '首期团队不允许自行启用破坏性操作或外部通知', 403)
+        if allowed and not set(allowed) <= team_flows:
+            raise TeamError('TEAM_FLOW_NOT_ALLOWED', 'Mission Flow 超出团队授权', 403)
+        allowed = allowed or sorted(team_flows)
+        team_workers = {m.claw_id for m in team.members} | {
+            team.primary_manager_claw_id, team.backup_manager_claw_id}
+        if not set(allowed_workers) <= team_workers:
+            raise TeamError('TEAM_WORKER_NOT_ALLOWED', 'Mission Worker 不属于团队', 403)
+        max_child_runs = min(max_child_runs, team.policy_json['max_child_runs'])
     if main_claw_id in allowed_workers:
         allowed_workers.remove(main_claw_id)
     if allowed_workers:
@@ -339,7 +378,7 @@ def create_workflow_mission():
         main_claw_id=main_claw_id,
         objective=objective,
         status='active',
-        control_mode='agent_autonomous',
+        control_mode='team_managed' if team else 'agent_autonomous',
         allowed_definition_ids_json=allowed,
         denied_definition_ids_json=denied,
         allowed_worker_claw_ids_json=allowed_workers,
@@ -360,6 +399,16 @@ def create_workflow_mission():
     )
     db.session.add(mission)
     db.session.flush()
+    if team:
+        db.session.add(AgentTeamMission(
+            mission_id=mission.id, team_id=team.id, team_version=team.version,
+            snapshot_json={
+                'primary_manager_claw_id': team.primary_manager_claw_id,
+                'backup_manager_claw_id': team.backup_manager_claw_id,
+                'policy': copy.deepcopy(team.policy_json),
+                'members': [member.to_dict() for member in team.members],
+                'manager_epoch_at_creation': team.manager_epoch,
+            }))
     db.session.add(AuditLog(
         action='create', resource_type='workflow_mission',
         resource_id=mission.id, resource_name=mission.mission_key,
@@ -368,7 +417,8 @@ def create_workflow_mission():
             'project_id': project_id,
             'main_claw_id': main_claw_id,
             'allowed_worker_claw_ids': allowed_workers,
-            'control_mode': 'agent_autonomous',
+            'control_mode': mission.control_mode,
+            'team_id': team.id if team else None,
             'max_child_runs': max_child_runs,
         }, ensure_ascii=False, sort_keys=True),
     ))
@@ -384,7 +434,17 @@ def list_workflow_missions():
     query = WorkflowMission.query.order_by(
         WorkflowMission.updated_at.desc(), WorkflowMission.id.desc())
     if actor['type'] == 'claw':
-        query = query.filter(WorkflowMission.main_claw_id == actor['id'])
+        conditions = [WorkflowMission.main_claw_id == actor['id']]
+        if team_enabled(current_app.config.get('AGENT_TEAMS_ENABLED')):
+            # Include missions after manager failover; no per-row permission
+            # expansion to projects outside the authenticated Claw's project.
+            managed_missions = db.session.query(AgentTeamMission.mission_id).join(
+                AgentTeam, AgentTeam.id == AgentTeamMission.team_id).filter(
+                    AgentTeam.project_id == actor['claw'].project_id,
+                    db.or_(AgentTeam.primary_manager_claw_id == actor['id'],
+                           AgentTeam.backup_manager_claw_id == actor['id']))
+            conditions.append(WorkflowMission.id.in_(managed_missions))
+        query = query.filter(db.or_(*conditions))
     elif actor['user'].role not in ('super_admin', 'admin'):
         conditions = [
             db.and_(
@@ -422,11 +482,18 @@ def _finish_mission(mission_id, target_status):
     actor = _actor()
     if not actor:
         return _error('AUTH_REQUIRED', '未认证', 401)
-    mission = db.session.get(WorkflowMission, mission_id)
+    mission = WorkflowMission.query.filter_by(id=mission_id).with_for_update().first()
     if not mission:
         return _error('MISSION_NOT_FOUND', 'Mission 不存在', 404)
     if not _can_read_mission(actor, mission):
         return _error('MISSION_ACCESS_DENIED', '无权操作该 Mission', 403)
+    team, _ = mission_team(mission, lock=True)
+    if team:
+        require_manager(team, actor, request.get_json(silent=True) or {}, allow_paused=True)
+        if target_status == 'completed':
+            stages = MissionStage.query.filter_by(mission_id=mission.id).all()
+            if not stages or any(stage.state != 'completed' for stage in stages):
+                raise TeamError('TEAM_STAGES_INCOMPLETE', '全部阶段完成交付验收后才能结束 Mission')
     if mission.status != 'active':
         return _error(
             'MISSION_NOT_ACTIVE', 'Mission 已经结束', 409,
@@ -486,7 +553,7 @@ def list_workflow_mission_definitions(mission_id):
         if _mission_definition_allowed(mission, row)]
     return jsonify({
         'mission_id': mission.id,
-        'control_mode': 'agent_autonomous',
+        'control_mode': mission.control_mode,
         'items': items,
         'count': len(items),
     })
@@ -535,7 +602,23 @@ def dispatch_workflow_mission(mission_id):
                .with_for_update().first())
     if not mission:
         return _error('MISSION_NOT_FOUND', 'Mission 不存在', 404)
-    if int(actor['id']) != int(mission.main_claw_id):
+    team, binding = mission_team(mission, lock=True)
+    stage = None
+    if team:
+        require_manager(team, actor, data)
+        stage = MissionStage.query.filter_by(
+            mission_id=mission.id, stage_key=str(data.get('stage_key') or ''), stage_version=1
+        ).with_for_update().first()
+        if not stage or not binding.plan_sha256:
+            raise TeamError('TEAM_STAGE_REQUIRED', '必须先创建不可变计划并指定 stage_key', 400)
+        specialty = (stage.input_snapshot_json or {}).get('team_assignment', {}).get('specialty')
+        require_stage_member(team, binding, stage.assigned_claw_id, stage.role_key, specialty)
+        if requested_worker_id is not None and requested_worker_id != stage.assigned_claw_id:
+            raise TeamError('TEAM_STAGE_WORKER_MISMATCH', 'Worker 必须与计划阶段的角色绑定一致', 403)
+        requested_worker_id = stage.assigned_claw_id
+        if definition_id not in team.policy_json['allowed_definition_ids']:
+            raise TeamError('TEAM_FLOW_NOT_ALLOWED', 'Flow 已不在团队当前授权内', 403)
+    elif int(actor['id']) != int(mission.main_claw_id):
         return _error('MISSION_ACCESS_DENIED', '不是该 Mission 主 Agent', 403)
     worker_claw_id = requested_worker_id or int(mission.main_claw_id)
     if (worker_claw_id != int(mission.main_claw_id)
@@ -555,6 +638,8 @@ def dispatch_workflow_mission(mission_id):
         'reason': reason,
         'decision_key': decision_key,
     }
+    if team:
+        hash_payload['stage_key'] = stage.stage_key
     request_hash = _request_hash(hash_payload)
     idempotency_key = _dispatch_key(mission_id, data, request_hash)
     existing = WorkflowMissionDispatch.query.filter_by(
@@ -565,6 +650,8 @@ def dispatch_workflow_mission(mission_id):
                 'MISSION_IDEMPOTENCY_CONFLICT',
                 '同一 dispatch key 被不同决策复用', 409)
         return jsonify(_dispatch_payload(existing, True)), 200
+    if stage and (stage.workflow_run_id or stage.state != 'ready'):
+        raise TeamError('TEAM_STAGE_ALREADY_DISPATCHED', '阶段已派发或不再 ready，禁止重复运行')
     effective_status = mission.effective_status()
     if effective_status == 'expired':
         return _error('MISSION_EXPIRED', 'Mission 已过期', 409)
@@ -590,7 +677,7 @@ def dispatch_workflow_mission(mission_id):
             'MISSION_WORKER_SCOPE_INVALID',
             '所选 Worker 不存在或不属于 Mission 项目', 403,
             {'worker_claw_id': worker_claw_id})
-    if worker_claw_id != int(mission.main_claw_id):
+    if team or worker_claw_id != int(mission.main_claw_id):
         runtime = _trusted_worker_runtime(worker_claw_id)
         if not runtime:
             return _error(
@@ -621,6 +708,12 @@ def dispatch_workflow_mission(mission_id):
         'allow_destructive_actions': bool(
             mission.allow_destructive_actions),
     }
+    if team:
+        context['mission'].update({
+            'control_mode': 'team_managed', 'team_id': team.id,
+            'team_version': binding.team_version, 'manager_epoch': team.manager_epoch,
+            'dispatch_manager_claw_id': actor['id'], 'stage_key': stage.stage_key,
+        })
     from app.api.workflows import (
         _workflow_definition_snapshot_fingerprint,
         _workflow_execution_input_snapshot,
@@ -651,6 +744,9 @@ def dispatch_workflow_mission(mission_id):
     db.session.add(run)
     try:
         db.session.flush()
+        if stage:
+            stage.workflow_run_id = run.id
+            stage.version = int(stage.version or 1) + 1
         definition_json = copy.deepcopy(definition.definition_json or {})
         for position, step in enumerate(definition_json.get('steps') or []):
             initial_status = (

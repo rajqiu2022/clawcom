@@ -336,6 +336,8 @@ def claim_mission_stage(mission_id, stage_key):
         return _error('STAGE_NOT_FOUND', 'Mission Stage 不存在', 404)
     if mission.effective_status() != 'active':
         return _error('MISSION_NOT_ACTIVE', 'Mission 已结束或过期', 409)
+    if mission.control_mode == 'team_managed' and not stage.workflow_run_id:
+        return _error('TEAM_STAGE_NOT_DISPATCHED', '团队阶段必须先由有效经理派发', 409)
     input_snapshot = (
         stage.input_snapshot_json
         if isinstance(stage.input_snapshot_json, dict) else {})
@@ -474,6 +476,8 @@ def transition_mission_stage(mission_id, stage_key):
         actor, mission_id, stage_key, lock=True)
     if not mission or not stage:
         return _error('STAGE_NOT_FOUND', 'Mission Stage 不存在', 404)
+    if mission.control_mode == 'team_managed' and not stage.workflow_run_id:
+        return _error('TEAM_STAGE_NOT_DISPATCHED', '团队阶段必须先由有效经理派发', 409)
     if values['to_state'] not in _TRANSITIONS.get(stage.state, frozenset()):
         return _error(
             'INVALID_STAGE_TRANSITION',

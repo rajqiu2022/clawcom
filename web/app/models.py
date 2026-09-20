@@ -1301,6 +1301,69 @@ class WorkflowRun(db.Model):
         return data
 
 
+class AgentTeam(db.Model):
+    """Project team roles are independent of Claw roles and AgentPost."""
+    __tablename__ = 'agent_teams'
+
+    id = db.Column(db.Integer, primary_key=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=False, index=True)
+    name = db.Column(db.String(160), nullable=False)
+    objective = db.Column(db.Text, nullable=False)
+    status = db.Column(db.String(24), nullable=False, default='active')
+    primary_manager_claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'), nullable=False)
+    backup_manager_claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'))
+    active_manager_claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'))
+    manager_epoch = db.Column(db.Integer, nullable=False, default=0)
+    manager_session_id = db.Column(db.String(128), nullable=False, default='')
+    manager_lease_expires_at = db.Column(db.DateTime)
+    policy_json = db.Column(db.JSON, nullable=False)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now, nullable=False)
+    __table_args__ = (db.UniqueConstraint('project_id', 'name', name='uq_agent_team_project_name'),)
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'project_id': self.project_id, 'name': self.name,
+            'objective': self.objective, 'status': self.status, 'version': self.version,
+            'primary_manager_claw_id': self.primary_manager_claw_id,
+            'backup_manager_claw_id': self.backup_manager_claw_id,
+            'active_manager_claw_id': self.active_manager_claw_id,
+            'manager_epoch': self.manager_epoch,
+            'manager_lease_expires_at': str(self.manager_lease_expires_at) if self.manager_lease_expires_at else None,
+            'manager_lease_active': bool(self.manager_lease_expires_at and self.manager_lease_expires_at > _now()),
+            'policy': self.policy_json or {},
+            'members': [member.to_dict() for member in sorted(self.members, key=lambda row: row.id or 0)],
+            'updated_at': str(self.updated_at),
+        }
+
+
+class AgentTeamMember(db.Model):
+    __tablename__ = 'agent_team_members'
+    id = db.Column(db.Integer, primary_key=True)
+    team_id = db.Column(db.Integer, db.ForeignKey('agent_teams.id'), nullable=False, index=True)
+    claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'), nullable=False, index=True)
+    role_key = db.Column(db.String(40), nullable=False)
+    specialties_json = db.Column(db.JSON, nullable=False)
+    team = db.relationship('AgentTeam', backref=db.backref('members', cascade='all, delete-orphan'))
+    __table_args__ = (db.UniqueConstraint('team_id', 'claw_id', 'role_key', name='uq_agent_team_member_role'),)
+
+    def to_dict(self):
+        return {'claw_id': self.claw_id, 'role_key': self.role_key,
+                'specialties': self.specialties_json or []}
+
+
+class AgentTeamMission(db.Model):
+    """Immutable team policy/roster baseline; execution stays in Mission/Stage."""
+    __tablename__ = 'agent_team_missions'
+    mission_id = db.Column(db.Integer, db.ForeignKey('workflow_missions.id'), primary_key=True)
+    team_id = db.Column(db.Integer, db.ForeignKey('agent_teams.id'), nullable=False, index=True)
+    team_version = db.Column(db.Integer, nullable=False)
+    snapshot_json = db.Column(db.JSON, nullable=False)
+    plan_sha256 = db.Column(db.String(64))
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+
+
 class WorkflowMission(db.Model):
     """One run-scoped autonomy grant owned by a main Agent."""
     __tablename__ = 'workflow_missions'

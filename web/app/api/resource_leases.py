@@ -17,6 +17,7 @@ from app.services.resource_leases import (
     lease_event,
     normalize_resource_keys,
     normalize_ttl_seconds,
+    needs_stop_confirmation,
     release_lease_group,
     renew_lease_group,
 )
@@ -126,6 +127,10 @@ def _conflict_payload(rows, now):
             'retryable': True,
             'suggested_action': 'wait_then_retry_acquire',
         }
+        if row.status == 'quarantined':
+            item.update({'wait_state': 'waiting_stop_confirmation',
+                         'retry_after_seconds': None, 'retryable': False,
+                         'suggested_action': 'reconcile_owner_stop_before_retry'})
         if owner_run is not None:
             item.update({
                 'owner_run_id': owner_run.id,
@@ -189,7 +194,6 @@ def acquire_resource_leases():
     expire_stale_resource_leases(now, resource_keys)
     active = (ResourceLease.query.filter(
         ResourceLease.active_slot.in_(resource_keys),
-        ResourceLease.status == 'active',
     ).with_for_update().all())
     if active:
         conflicts = _conflict_payload(active, now)
@@ -231,6 +235,9 @@ def acquire_resource_leases():
             heartbeat_at=now,
             expires_at=expires_at,
         )
+        if needs_stop_confirmation(row):
+            # Once issued, the safety contract survives configuration rollback.
+            row.metadata_json = dict(metadata, requires_stop_confirmation=True)
         db.session.add(row)
         rows.append(row)
     try:
@@ -242,7 +249,6 @@ def acquire_resource_leases():
             return replay
         conflicts = ResourceLease.query.filter(
             ResourceLease.active_slot.in_(resource_keys),
-            ResourceLease.status == 'active',
         ).all()
         details = _conflict_payload(conflicts, datetime.now())
         return _error(
@@ -347,8 +353,57 @@ def release_resource_lease(lease_id):
             'Only the lease holder or an administrator may release it', 403)
     rows = (ResourceLease.query.filter_by(lease_group_id=lease.lease_group_id)
             .with_for_update().all())
-    reason = str((request.get_json(silent=True) or {}).get('reason') or '').strip()
+    now = datetime.now()
+    if any(row.status == 'active' and row.expires_at <= now and needs_stop_confirmation(row) for row in rows):
+        expire_stale_resource_leases(now, [row.resource_key for row in rows])
+        db.session.commit()  # keep quarantine audit even when release is rejected
+    data = request.get_json(silent=True) or {}
+    if any(row.status == 'quarantined' for row in rows):
+        return _error('RESOURCE_STOP_RECONCILIATION_REQUIRED',
+                      '隔离资源必须先核实旧执行者停止，再调用 reconcile', 409)
+    if any(row.status == 'active' and needs_stop_confirmation(row) for row in rows):
+        receipt = data.get('stop_receipt')
+        if data.get('stopped') is not True or not isinstance(receipt, str) or not receipt.strip() or len(receipt) > 2000:
+            return _error('RESOURCE_STOP_RECEIPT_REQUIRED', '必须提交整组资源停止凭据', 409)
+        for row in rows:
+            if row.status == 'active':
+                lease_event(row, 'stop_reported', actor, {'stop_receipt': receipt})
+    reason = str(data.get('reason') or '').strip()
     release_lease_group(rows, actor, reason)
+    db.session.commit()
+    return jsonify(_group_payload(rows))
+
+
+@api_bp.route('/resource-leases/<int:lease_id>/reconcile', methods=['POST'])
+def reconcile_resource_lease(lease_id):
+    actor = _actor()
+    if not actor:
+        return _error('UNAUTHENTICATED', 'Authentication is required', 401)
+    # Worker stop/fencing receipts will be wired separately; never accept an
+    # unverified agent assertion as remote process termination proof.
+    if actor['type'] != 'user' or get_current_user().role != 'super_admin':
+        return _error('RESOURCE_RECONCILE_ADMIN_REQUIRED', '首期需超级管理员核实整组资源停止', 403)
+    lease = ResourceLease.query.filter_by(id=lease_id).with_for_update().first()
+    if not lease:
+        return _error('RESOURCE_LEASE_NOT_FOUND', 'Resource lease was not found', 404)
+    rows = ResourceLease.query.filter_by(lease_group_id=lease.lease_group_id).with_for_update().all()
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return _error('RESOURCE_LEASE_VALIDATION_FAILED', 'JSON object required', 400)
+    receipt = data.get('stop_receipt')
+    if data.get('stopped') is not True or not isinstance(receipt, str) or not receipt.strip() or len(receipt) > 2000:
+        return _error('RESOURCE_STOP_RECEIPT_REQUIRED', '需 stopped=true 和整组资源核实凭据', 400)
+    if all(row.status == 'released' for row in rows):
+        return jsonify(_group_payload(rows, idempotent_replay=True))
+    if not all(row.status == 'quarantined' for row in rows):
+        return _error('RESOURCE_NOT_QUARANTINED', '仅可核实隔离中的资源组', 409)
+    now = datetime.now()
+    for row in rows:
+        row.status = 'released'
+        row.active_slot = None
+        row.released_at = now
+        row.release_reason = 'stop_reconciled'
+        lease_event(row, 'stop_reconciled', actor, {'stop_receipt': receipt})
     db.session.commit()
     return jsonify(_group_payload(rows))
 

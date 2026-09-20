@@ -588,6 +588,12 @@ def agent_eval_page():
         agent_team_contracts_enabled=enabled)
 
 
+@views_bp.route('/agent-teams')
+def agent_teams_page():
+    """Project teams: each team owns its manager and multi-agent roster."""
+    return render_template('agent_teams.html')
+
+
 @views_bp.route('/engineering')
 @views_bp.route('/engineering/baselines/<int:baseline_id>')
 @views_bp.route('/engineering/refresh/<int:batch_id>')

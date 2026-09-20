@@ -5,7 +5,8 @@ import hashlib
 import json
 
 from app import db
-from app.models import ResourceLease, ResourceLeaseEvent
+from flask import current_app
+from app.models import ResourceLease, ResourceLeaseEvent, WorkflowRun
 
 
 RESOURCE_PREFIXES = {'unity', 'bridge', 'device'}
@@ -75,7 +76,7 @@ def lease_event(lease, event_type, actor, payload=None):
 
 
 def expire_stale_resource_leases(now=None, resource_keys=None):
-    """Expire complete groups whose active TTL elapsed; return changed rows."""
+    """TTL is not proof of stop. Protected groups retain their unique slots."""
     now = now or datetime.now()
     query = ResourceLease.query.filter(
         ResourceLease.status == 'active',
@@ -92,17 +93,36 @@ def expire_stale_resource_leases(now=None, resource_keys=None):
         ResourceLease.status == 'active',
     ).with_for_update().all())
     system_actor = {'type': 'system', 'id': None, 'name': 'lease-expiry'}
+    protected_groups = {row.lease_group_id for row in rows if needs_stop_confirmation(row)}
     for row in rows:
-        row.status = 'expired'
-        row.active_slot = None
-        row.released_at = now
-        row.release_reason = 'ttl_expired'
-        lease_event(row, 'expired', system_actor, {
+        protected = row.lease_group_id in protected_groups
+        row.status = 'quarantined' if protected else 'expired'
+        if not protected:
+            row.active_slot = None
+            row.released_at = now
+        row.release_reason = 'stop_confirmation_required' if protected else 'ttl_expired'
+        lease_event(row, row.status, system_actor, {
             'expired_at': str(now),
             'previous_expires_at': str(row.expires_at),
         })
     db.session.flush()
     return rows
+
+
+def needs_stop_confirmation(lease):
+    from app.services.agent_teams import enabled
+    if enabled(current_app.config.get('RESOURCE_LEASE_RECONCILIATION_ENABLED')):
+        return True
+    if (lease.metadata_json or {}).get('requires_stop_confirmation') is True:
+        return True
+    if lease.owner_type in ('workflow_run', 'run'):
+        try:
+            run = db.session.get(WorkflowRun, int(lease.owner_id))
+        except (ValueError, TypeError):
+            run = None
+        if run and (run.context_json or {}).get('mission', {}).get('control_mode') == 'team_managed':
+            return True
+    return False
 
 
 def renew_lease_group(rows, ttl_seconds, actor, now=None):

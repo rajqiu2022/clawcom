@@ -282,6 +282,12 @@ def _actor_role_key(actor):
 
 
 def _can_target(actor, handoff, project_id):
+    if handoff.mission.control_mode == 'team_managed':
+        # Team roles never fall back to global Claw.role / AgentPost.
+        stage = db.session.get(MissionStage, handoff.target_stage_record_id)
+        return bool(actor['type'] == 'claw' and stage
+                    and stage.assigned_claw_id == actor['id']
+                    and stage.role_key == handoff.to_role)
     if _can_administer(actor, project_id):
         return True
     return bool(

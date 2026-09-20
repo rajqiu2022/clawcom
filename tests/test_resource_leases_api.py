@@ -227,6 +227,71 @@ class ResourceLeasesApiTest(unittest.TestCase):
         self.assertEqual(response.get_json()['code'], 'USE_TEST_ACCOUNT_MANAGER')
         self.assertEqual(ResourceLease.query.count(), 0)
 
+    def test_protected_expiry_quarantines_whole_group_until_admin_stop_receipt(self):
+        self.app.config['RESOURCE_LEASE_RECONCILIATION_ENABLED'] = True
+        first = self._acquire('protected', ['unity:shared', 'device:phone'], owner='old')
+        self.assertEqual(first.status_code, 201)
+        lease_id = first.get_json()['leases'][0]['id']
+        ResourceLease.query.update({'expires_at': datetime.now() - timedelta(seconds=1)})
+        db.session.commit()
+        replacement = self._acquire('new', ['device:phone'], owner='new')
+        self.assertEqual(replacement.status_code, 409)
+        conflict = replacement.get_json()['details']['conflicts'][0]
+        self.assertEqual(conflict['wait_state'], 'waiting_stop_confirmation')
+        self.assertFalse(conflict['retryable'])
+        self.assertIsNone(conflict['retry_after_seconds'])
+        self.assertTrue(all(row.active_slot and row.status == 'quarantined' for row in ResourceLease.query.all()))
+        self.assertEqual(self.client.post('/api/v1/resource-leases/{}/renew'.format(lease_id), json={}).status_code, 409)
+        self.assertEqual(self.client.post('/api/v1/resource-leases/{}/release'.format(lease_id), json={}).status_code, 409)
+        self.assertEqual(self.client.post('/api/v1/resource-leases/{}/reconcile'.format(lease_id), json={}).status_code, 400)
+        receipt = {'stopped': True, 'stop_receipt': 'ops:all-device-and-editor-processes-stopped'}
+        self.assertEqual(self.client.post('/api/v1/resource-leases/{}/reconcile'.format(lease_id), json=receipt).status_code, 200)
+        replay = self.client.post('/api/v1/resource-leases/{}/reconcile'.format(lease_id), json=receipt)
+        self.assertTrue(replay.get_json()['idempotent_replay'])
+        self.assertEqual(self._acquire('new', ['device:phone'], owner='new').status_code, 201)
+        self.assertEqual(ResourceLeaseEvent.query.filter_by(event_type='stop_reconciled').count(), 2)
+
+    def test_quarantine_survives_feature_flag_rollback(self):
+        self.app.config['RESOURCE_LEASE_RECONCILIATION_ENABLED'] = True
+        first = self._acquire('protected', ['device:phone'], owner='old')
+        ResourceLease.query.update({'expires_at': datetime.now() - timedelta(seconds=1)})
+        db.session.commit()
+        self.assertEqual(self._acquire('new', ['device:phone'], owner='new').status_code, 409)
+        self.app.config['RESOURCE_LEASE_RECONCILIATION_ENABLED'] = False
+        self.assertEqual(self._acquire('new', ['device:phone'], owner='new').status_code, 409)
+        self.assertEqual(first.status_code, 201)
+
+    def test_issued_protected_lease_stays_protected_when_flag_is_disabled_before_expiry(self):
+        self.app.config['RESOURCE_LEASE_RECONCILIATION_ENABLED'] = True
+        self.assertEqual(self._acquire('protected', ['device:phone'], owner='old').status_code, 201)
+        self.app.config['RESOURCE_LEASE_RECONCILIATION_ENABLED'] = False
+        ResourceLease.query.update({'expires_at': datetime.now() - timedelta(seconds=1)})
+        db.session.commit()
+        self.assertEqual(self._acquire('new', ['device:phone'], owner='new').status_code, 409)
+        self.assertEqual(ResourceLease.query.one().status, 'quarantined')
+
+    def test_team_run_protection_cannot_be_disabled_by_request_metadata(self):
+        self.flow_run.context_json = {'mission': {'control_mode': 'team_managed'}}
+        db.session.commit()
+        first = self._acquire('team-protected', ['device:phone'], owner=self.flow_run.id)
+        lease_id = first.get_json()['leases'][0]['id']
+        denied = self.client.post('/api/v1/resource-leases/{}/release'.format(lease_id), json={'reason': 'finished'})
+        self.assertEqual(denied.get_json()['code'], 'RESOURCE_STOP_RECEIPT_REQUIRED')
+        ResourceLease.query.update({'expires_at': datetime.now() - timedelta(seconds=1)})
+        db.session.commit()
+        self.assertEqual(self._acquire('new', ['device:phone'], owner='new').status_code, 409)
+
+    def test_expired_protected_release_cannot_bypass_quarantine_without_a_sweep(self):
+        self.app.config['RESOURCE_LEASE_RECONCILIATION_ENABLED'] = True
+        first = self._acquire('protected', ['device:phone'], owner='old')
+        lease_id = first.get_json()['leases'][0]['id']
+        ResourceLease.query.update({'expires_at': datetime.now() - timedelta(seconds=1)})
+        db.session.commit()
+        release = self.client.post('/api/v1/resource-leases/{}/release'.format(lease_id),
+                                   json={'stopped': True, 'stop_receipt': 'late-holder-report'})
+        self.assertEqual(release.get_json()['code'], 'RESOURCE_STOP_RECONCILIATION_REQUIRED')
+        self.assertEqual(ResourceLease.query.one().status, 'quarantined')
+
 
 if __name__ == '__main__':
     unittest.main()

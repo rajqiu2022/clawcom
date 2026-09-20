@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Agent 团队 - ClawTeam{% endblock %}
+{% block page_title %}Agent 团队{% endblock %}
+{% block body_class %}agent-teams-page{% endblock %}
+{% block nav_agent_teams %}active{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_teams.css') }}?v=20260920a">{% endblock %}
+{% block top_actions %}
+<div class="at-toolbar">
+    <label for="at-project">项目</label>
+    <select id="at-project" class="form-select" aria-label="选择项目"><option value="">正在加载项目…</option></select>
+    <button class="btn btn-secondary" id="at-refresh" type="button">刷新</button>
+    <button class="btn btn-primary" id="at-create" type="button" hidden>＋ 创建团队</button>
+</div>
+{% endblock %}
+{% block content %}
+<div class="at-shell">
+    <nav class="at-tabs" aria-label="自动化工作区"><a id="at-loop-link" href="/automation-closed-loop">闭环态势</a><span aria-current="page">Agent 团队</span></nav>
+    <section class="at-intro">
+        <div><div class="at-eyebrow">TEAM OPERATIONS / 团队编制</div><h2>一个项目，多支协作团队。</h2><p>每个团队各有一名在任测试经理；代码分析员和测试执行员可配置多名。团队分工独立于 Claw 原有角色。</p></div>
+        <div class="at-count"><strong id="at-total">—</strong><span>当前项目团队</span></div>
+    </section>
+    <div id="at-notice" class="at-notice" role="status" aria-live="polite" hidden></div>
+    <div class="at-layout">
+        <aside class="at-panel at-directory" aria-label="项目团队列表">
+            <header class="at-section-title"><h3>团队目录</h3><span id="at-list-count" class="at-muted">—</span></header>
+            <div id="at-list" class="at-list"><p class="at-empty">选择项目，查看独立团队。</p></div>
+            <button id="at-more" class="btn btn-secondary at-more" type="button" hidden>加载更多团队</button>
+        </aside>
+        <section id="at-detail" class="at-panel at-detail" aria-label="团队详情" aria-live="polite"><div class="at-empty at-start">团队的角色、任期和任务将在这里展示。</div></section>
+    </div>
+    <p class="at-footnote">此页面只管理团队配置、回读任务。加入团队不会自动授予 Flow 权限，也不会自动启动 Workflow。</p>
+</div>
+<dialog id="at-editor" class="at-dialog" aria-labelledby="at-editor-title">
+    <form id="at-form">
+        <header class="at-dialog-head"><div><span class="at-eyebrow">TEAM CONFIGURATION</span><h2 id="at-editor-title">创建团队</h2></div><button type="button" id="at-close" class="btn btn-ghost" aria-label="关闭团队配置">关闭</button></header>
+        <div class="at-form-body">
+            <div id="at-form-error" class="at-notice at-error" role="alert" hidden></div>
+            <p id="at-edit-warning" class="at-warning" hidden>保存后将撤销当前经理任期，经理需重新申请任期；不会取消已运行的任务。</p>
+            <fieldset class="at-fieldset"><legend><span>01</span> 团队目标</legend>
+                <label class="at-field">团队名称<input id="at-name" class="form-input" required maxlength="160" placeholder="例如：手机包回归团队"></label>
+                <label class="at-field">目标与范围<textarea id="at-objective" class="form-input" required maxlength="16000" rows="3" placeholder="描述该团队负责什么，以及完成目标的标准"></textarea></label>
+            </fieldset>
+            <fieldset class="at-fieldset"><legend><span>02</span> 测试经理 <small>每个团队一名在任</small></legend>
+                <div class="at-two-cols"><label class="at-field">主经理<select id="at-primary" class="form-select" required></select></label><label class="at-field">备用经理（可选）<select id="at-backup" class="form-select"></select></label></div>
+                <p class="at-help">主备不能为同一 Agent。备用经理仅在接管有效任期后参与调度。</p>
+            </fieldset>
+            <fieldset class="at-fieldset"><legend><span>03</span> 团队成员 <small>支持多名、跨团队复用</small></legend>
+                <div id="at-members"></div>
+                <div class="at-member-actions"><button type="button" id="at-add-analyst" class="btn btn-secondary btn-sm">＋ 代码分析员</button><button type="button" id="at-add-executor" class="btn btn-secondary btn-sm">＋ 测试执行员</button></div>
+                <p class="at-help">执行员至少选择一项二级角色，可同时负责编辑器、手机包和客户端性能。</p>
+            </fieldset>
+            <fieldset class="at-fieldset"><legend><span>04</span> 调度范围</legend>
+                <label class="at-field">筛选 Flow<input id="at-flow-search" type="search" class="form-input" placeholder="按名称或 ID 筛选"></label>
+                <div id="at-flows" class="at-flow-picker" aria-label="允许调度的 Flow"></div>
+                <p class="at-help">至少选一个 Flow。这里限定团队可选择的范围；实际派发仍检查执行 Agent 的 Flow 权限和可信 Runtime。</p>
+                <label class="at-field at-budget">每个 Mission 最多创建 Run 数<input id="at-budget" class="form-input" type="number" min="1" max="100" step="1" required value="20"></label>
+            </fieldset>
+        </div>
+        <footer class="at-dialog-foot"><span class="at-muted" id="at-editor-project"></span><div><button type="button" id="at-cancel" class="btn btn-secondary">取消</button><button id="at-save" type="submit" class="btn btn-primary">保存团队</button></div></footer>
+    </form>
+</dialog>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='js/agent_teams.js') }}?v=20260920a"></script>{% endblock %}
