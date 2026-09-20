@@ -4,6 +4,8 @@ Reuses the staged, drift-checked and rollback-capable Team release transport.
 Apply only after committing this release. No secret values are printed.
 """
 import deploy_agent_teams as release
+import argparse
+import paramiko
 
 release.BASE = '5079afe'
 release.FILES = (
@@ -67,6 +69,7 @@ app = create_app('production')
 with app.app_context():
     admin = User.query.filter_by(role='super_admin').first()
     assert admin
+    admin_id = admin.id
     gates = {k:app.config.get(k) for k in ('AGENT_TEAMS_ENABLED','AGENT_TEAM_CONTRACTS_ENABLED','AGENT_TEAMS_PROJECT_IDS','RESOURCE_LEASE_RECONCILIATION_ENABLED')}
     assert gates['AGENT_TEAMS_ENABLED'] and gates['AGENT_TEAM_CONTRACTS_ENABLED']
     assert str(gates['AGENT_TEAMS_PROJECT_IDS']).strip() == '6'
@@ -75,38 +78,45 @@ with app.app_context():
     assert project and project.name.lower() == 'racinggo'
     client = app.test_client()
     with client.session_transaction() as session:
-        session['user_id'] = admin.id
+        session['user_id'] = admin_id
+    def call(method, path, **kwargs):
+        try:
+            return getattr(client, method)(path, **kwargs)
+        finally:
+            # A shared app_context otherwise retains a read transaction across
+            # requests and can hold metadata locks against concurrent startup DDL.
+            db.session.remove()
     paths = ['/agent-teams','/workflows','/test-reports','/knowledge','/automation-closed-loop']
     for path in paths:
-        assert client.get(path).status_code == 200, path
+        assert call('get', path).status_code == 200, path
     teams = AgentTeam.query.filter_by(project_id=6).all()
     assert teams, 'Expected the user-created team; do not create synthetic production teams'
     card_checks = []
     for team in teams:
         url = '/api/v1/agent-teams/%d/members/activity' % team.id
-        response = client.get(url)
+        response = call('get', url)
         assert response.status_code == 200, (url, response.status_code)
         members = response.get_json()['items']
         assert members
         for member in members:
             detail = '/api/v1/agent-teams/%d/members/%d/activity' % (team.id, member['claw_id'])
-            assert client.get(detail).status_code == 200
+            assert call('get', detail).status_code == 200
             # No impersonated reports, not even as admin; no row is written.
-            denied = client.post(detail, json={'event_id':'release-check','expected_version':0,'state':'idle'})
+            denied = call('post', detail, json={'event_id':'release-check','expected_version':0,'state':'idle'})
             assert denied.status_code == 403
         card_checks.append({'team_id':team.id,'member_count':len(members),
                             'states':[m['effective_state'] for m in members]})
     entry = KnowledgeEntry.query.filter_by(entry_type='article').first()
     assert entry
     url = '/api/v1/knowledge/%d' % entry.id
-    rejected = client.put(url, json={'project_id':-1})
+    rejected = call('put', url, json={'project_id':-1})
     assert rejected.status_code == 400 and rejected.get_json()['code'] == 'KNOWLEDGE_PROJECT_INVALID'
-    assert client.get(url).status_code == 200
+    assert call('get', url).status_code == 200
     assert app.test_client().get('/api/v1/agent-teams?project_id=6').status_code == 401
     # Verify the running server as well, not merely a second imported app.
     http_checks = {}
     if os.getcwd() == '/opt/openclaw-web':
-        cookie = app.session_interface.get_signing_serializer(app).dumps({'user_id':admin.id})
+        cookie = app.session_interface.get_signing_serializer(app).dumps({'user_id':admin_id})
         headers = {'Cookie': app.config.get('SESSION_COOKIE_NAME','session') + '=' + cookie}
         for attempt in range(20):
             try:
@@ -130,5 +140,35 @@ with app.app_context():
         'persistent_gates':gates,'knowledge_validation':'passed','business_rows_modified':0,'workers_modified':False,'runs_started':0}))
 '''
 
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--key', required=True)
+    parser.add_argument('--apply', action='store_true')
+    args = parser.parse_args()
+    if not args.apply:
+        return release.main()
+    client = paramiko.SSHClient()
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    client.connect('9.134.11.169', port=36000, username='root', key_filename=args.key, timeout=20)
+    sftp = client.open_sftp()
+    target = '/run/systemd/system/openclaw-web.service.d/90-team-release-explicit-migration.conf'
+    content = b'[Service]\nEnvironment="SKIP_AUTO_MIGRATE=1"\n'
+    installed = False
+    try:
+        assert release.read(sftp, target) is None, 'Existing release override needs inspection'
+        release.write(client, sftp, target, content, 0o644)
+        installed = True
+        release.command(client, 'systemctl daemon-reload')
+        release.main()
+    finally:
+        if installed and release.read(sftp, target) == content:
+            sftp.remove(target)
+            release.command(client, 'systemctl daemon-reload')
+            print('TEMPORARY_MIGRATION_OVERRIDE_REMOVED', flush=True)
+        sftp.close()
+        client.close()
+
+
 if __name__ == '__main__':
-    release.main()
+    main()
