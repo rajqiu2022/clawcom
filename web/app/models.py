@@ -1353,6 +1353,67 @@ class AgentTeamMember(db.Model):
                 'specialties': self.specialties_json or []}
 
 
+class AgentTeamMemberTask(db.Model):
+    """Agent-authored activity log; not an authoritative Workflow/Run result."""
+    __tablename__ = 'agent_team_member_tasks'
+    id = db.Column(db.Integer, primary_key=True)
+    team_id = db.Column(db.Integer, db.ForeignKey('agent_teams.id'), nullable=False)
+    claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'), nullable=False)
+    task_key = db.Column(db.String(96), nullable=False)
+    title = db.Column(db.String(240), nullable=False)
+    task_type = db.Column(db.String(24), nullable=False)
+    reference = db.Column(db.String(240), nullable=False, default='')
+    status = db.Column(db.String(24), nullable=False)
+    progress_percent = db.Column(db.Integer)
+    progress_message = db.Column(db.Text, default='')
+    started_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(db.DateTime, default=_now, nullable=False)
+    finished_at = db.Column(db.DateTime)
+    __table_args__ = (
+        db.UniqueConstraint('team_id', 'claw_id', 'task_key', name='uq_team_member_task_key'),
+        db.Index('ix_team_member_tasks_history', 'team_id', 'claw_id', 'id'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'task_key': self.task_key, 'title': self.title, 'task_type': self.task_type,
+            'reference': self.reference, 'status': self.status, 'progress_percent': self.progress_percent,
+            'progress_message': self.progress_message, 'started_at': str(self.started_at),
+            'updated_at': str(self.updated_at), 'finished_at': str(self.finished_at) if self.finished_at else None,
+            'source': 'agent_self_report',
+        }
+
+
+class AgentTeamMemberStatus(db.Model):
+    __tablename__ = 'agent_team_member_statuses'
+    id = db.Column(db.Integer, primary_key=True)
+    team_id = db.Column(db.Integer, db.ForeignKey('agent_teams.id'), nullable=False)
+    claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'), nullable=False)
+    state = db.Column(db.String(24), nullable=False)
+    summary = db.Column(db.String(500), nullable=False, default='')
+    current_task_id = db.Column(db.Integer, db.ForeignKey('agent_team_member_tasks.id'))
+    version = db.Column(db.Integer, nullable=False, default=0)
+    reported_at = db.Column(db.DateTime, nullable=False, default=_now)
+    __table_args__ = (db.UniqueConstraint('team_id', 'claw_id', name='uq_team_member_status'),)
+
+
+class AgentTeamMemberReport(db.Model):
+    """Immutable report receipts for retry deduplication and progress history."""
+    __tablename__ = 'agent_team_member_reports'
+    id = db.Column(db.Integer, primary_key=True)
+    team_id = db.Column(db.Integer, db.ForeignKey('agent_teams.id'), nullable=False)
+    claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'), nullable=False)
+    event_id = db.Column(db.String(96), nullable=False)
+    request_sha256 = db.Column(db.String(64), nullable=False)
+    task_id = db.Column(db.Integer, db.ForeignKey('agent_team_member_tasks.id'))
+    response_json = db.Column(db.JSON, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=_now)
+    __table_args__ = (
+        db.UniqueConstraint('team_id', 'claw_id', 'event_id', name='uq_team_member_report_event'),
+        db.Index('ix_team_member_report_task', 'team_id', 'claw_id', 'task_id', 'id'),
+    )
+
+
 class AgentTeamMission(db.Model):
     """Immutable team policy/roster baseline; execution stays in Mission/Stage."""
     __tablename__ = 'agent_team_missions'

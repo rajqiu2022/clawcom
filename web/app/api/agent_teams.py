@@ -17,6 +17,8 @@ from app.models import (
     MissionStage, OpenClawInstance, Project, WorkflowDefinition, WorkflowMission,
 )
 from app.services.worker_runtime import runtime_summary
+from app.services import agent_team_activity as activity
+from app.models import AgentTeamMemberStatus, AgentTeamMemberTask, AgentTeamMemberReport
 from app.services.agent_teams import (
     EXECUTOR_SPECIALTIES, TEAM_ROLES, TeamError, integer, load_team,
     mission_team, normalize_config, require_manager, require_stage_member,
@@ -152,6 +154,59 @@ def get_agent_team(team_id):
     team = load_team(team_id)
     _access(team.project_id)
     return jsonify(team.to_dict())
+
+
+def _activity_member(team, claw_id):
+    person = activity.roster(team).get(claw_id)
+    if not person:
+        raise TeamError('TEAM_ACTIVITY_NOT_MEMBER', '该 Agent 不属于当前团队', 403)
+    claw = scoped_claw(claw_id, team.project_id)
+    return person, claw
+
+
+@api_bp.route('/agent-teams/<int:team_id>/members/activity', methods=['GET'])
+def list_team_member_activity(team_id):
+    team = load_team(team_id)
+    _access(team.project_id)
+    people = activity.roster(team)
+    claws = OpenClawInstance.query.filter(OpenClawInstance.id.in_(list(people)),
+        OpenClawInstance.project_id == team.project_id, OpenClawInstance.status != 'deleted').all()
+    statuses = {row.claw_id: row for row in AgentTeamMemberStatus.query.filter_by(team_id=team.id).all()}
+    task_ids = [row.current_task_id for row in statuses.values() if row.current_task_id]
+    tasks = {row.id:row for row in AgentTeamMemberTask.query.filter(AgentTeamMemberTask.team_id == team.id,
+        AgentTeamMemberTask.id.in_(task_ids)).all()} if task_ids else {}
+    items = []
+    for claw in claws:
+        status = statuses.get(claw.id)
+        items.append(activity.member_summary(people[claw.id], claw, status,
+            tasks.get(status.current_task_id) if status else None))
+    return jsonify({'team_id':team.id, 'items':items, 'stale_after_seconds':activity.STALE_SECONDS,
+        'report_contract': {'method':'POST', 'path':'/api/v1/agent-teams/%d/members/{claw_id}/activity' % team.id,
+                            'self_only':True, 'recommended_interval_seconds':60, 'requires_expected_version':True}})
+
+
+@api_bp.route('/agent-teams/<int:team_id>/members/<int:claw_id>/activity', methods=['GET', 'POST'])
+def team_member_activity(team_id, claw_id):
+    team = load_team(team_id, lock=request.method == 'POST')
+    actor = _access(team.project_id)
+    person, claw = _activity_member(team, claw_id)
+    if request.method == 'POST':
+        if actor['type'] != 'claw' or actor['id'] != claw_id:
+            raise TeamError('TEAM_ACTIVITY_SELF_ONLY', '仅 Agent 自身可上报；用户或其他 Agent 不可代报', 403)
+        return jsonify(activity.ingest(team, claw_id, _body()))
+    limit, offset = _pagination(default=20)
+    status = AgentTeamMemberStatus.query.filter_by(team_id=team.id, claw_id=claw_id).first()
+    current = db.session.get(AgentTeamMemberTask, status.current_task_id) if status and status.current_task_id else None
+    history = AgentTeamMemberTask.query.filter_by(team_id=team.id, claw_id=claw_id).filter(AgentTeamMemberTask.status.in_(activity.TERMINAL))
+    total = history.count()
+    rows = history.order_by(AgentTeamMemberTask.id.desc()).offset(offset).limit(limit).all()
+    reports = AgentTeamMemberReport.query.filter_by(team_id=team.id, claw_id=claw_id)
+    if current:
+        reports = reports.filter_by(task_id=current.id)
+    recent = reports.order_by(AgentTeamMemberReport.id.desc()).limit(20).all()
+    return jsonify({'member':activity.member_summary(person, claw, status, current),
+                    'history':{'items':[row.to_dict() for row in rows], 'total':total, 'limit':limit, 'offset':offset},
+                    'recent_reports':[row.response_json for row in recent]})
 
 
 @api_bp.route('/agent-teams/<int:team_id>', methods=['PUT'])

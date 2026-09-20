@@ -1,4 +1,4 @@
-/* Project-scoped team console. No polling, manager impersonation or Run starts. */
+/* Project-scoped team console. Activity refresh is read-only; no Run starts. */
 (() => {
     'use strict';
     // Narrow-screen navigation is local to this page; do not overwrite the user's saved preference.
@@ -54,6 +54,7 @@
         }).join('') : '<p class="at-empty">这个项目还没有团队。<br>可为不同目标创建多支团队。</p>';
     }
     async function reloadProject(preferredTeam = null) {
+        AgentTeamActivity.reset();
         const epoch = ++state.loadEpoch;
         ++state.missionEpoch;
         state.project = $('at-project').value;
@@ -100,14 +101,10 @@
         } catch (error) { if (epoch === state.loadEpoch) notice(messageFor(error), true); }
         finally { $('at-more').disabled = false; }
     }
-    function rosterPeople(team, role) {
-        const members = team.members.filter(m => m.role_key === role);
-        return members.length ? members.map(m => `<div class="at-person">${esc(agentLabel(m.claw_id))}${
-            m.specialties.map(s => `<span class="at-tag">${esc(state.options.executor_specialties[s] || s)}</span>`).join('')}</div>`).join('') : '<p class="at-muted">尚未配置</p>';
-    }
     async function selectTeam(id) {
         const team = state.teams.find(t => t.id === id);
         if (!team) return;
+        AgentTeamActivity.reset();
         state.selected = id; state.missionOffset = 0; renderList();
         const manage = state.options.can_manage;
         const actions = manage ? `<button class="btn btn-secondary btn-sm" data-action="edit" type="button">编辑配置</button>
@@ -117,12 +114,10 @@
         $('at-detail').innerHTML = `<header class="at-detail-head"><div class="at-detail-title"><div><span class="at-eyebrow">TEAM #${team.id} / CONFIG v${team.version}</span><h2>${esc(team.name)}</h2></div><div class="at-detail-actions">${actions}</div></div>
             <p class="at-detail-goal">${esc(team.objective)}</p><div class="at-lease">${badge(team.status)}<strong>${esc(lease)}</strong><span>任期 #${team.manager_epoch}</span></div>
             <p class="at-help">任期状态为本次读取快照，不等同于 Agent 在线状态。${team.manager_lease_expires_at ? '到期时间：' + esc(team.manager_lease_expires_at) : '经理接入团队合同并申请任期后才可调度。'}</p></header>
-            <div class="at-roster"><section class="at-role"><h3>测试经理 <span>一名在任</span></h3><div class="at-person">${esc(agentLabel(team.primary_manager_claw_id))}<small>主经理</small></div>${team.backup_manager_claw_id ? `<div class="at-person">${esc(agentLabel(team.backup_manager_claw_id))}<small>备用经理 · 接管后生效</small></div>` : '<p class="at-muted">未配置备用经理</p>'}</section>
-            <section class="at-role"><h3>代码分析员 <span>${team.members.filter(m => m.role_key === 'code_analyst').length} 名</span></h3>${rosterPeople(team, 'code_analyst')}</section>
-            <section class="at-role"><h3>测试执行员 <span>${team.members.filter(m => m.role_key === 'test_executor').length} 名</span></h3>${rosterPeople(team, 'test_executor')}</section></div>
+            <section class="at-activity"><header class="at-activity-head"><div><h3>团队成员 <span class="at-muted">Agent 自报状态</span></h3><p class="at-help">状态与进度由成员自行上报；超过 3 分钟未更新标为过期，不推断为空闲。</p></div><button type="button" class="btn btn-secondary btn-sm" id="at-activity-refresh">刷新状态</button></header><p id="at-activity-note" class="at-help" role="status"></p><div id="at-activity-cards" class="at-activity-grid"><p class="at-empty">正在读取成员状态…</p></div></section>
             <div class="at-policy">允许调度：${team.policy.allowed_definition_ids.map(flowId => `<a href="/workflows?definition_id=${flowId}">Flow #${flowId}</a>`).join('')}<br>每个 Mission 最多 ${team.policy.max_child_runs} 个 Run；团队范围不替代 Flow ACL。</div>
             <div class="at-missions-head"><h3>团队任务 / Mission</h3><span class="at-muted" id="at-mission-count">读取中…</span></div><div id="at-missions"><p class="at-empty">正在读取任务…</p></div><div id="at-pager" class="at-pager"></div>`;
-        await loadMissions(0);
+        await Promise.all([loadMissions(0), AgentTeamActivity.mount(id)]);
     }
     async function loadMissions(offset) {
         const teamId = state.selected, epoch = ++state.missionEpoch;

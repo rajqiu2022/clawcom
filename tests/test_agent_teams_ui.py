@@ -46,6 +46,20 @@ class AgentTeamsUiTest(unittest.TestCase):
         self.assertIn('overflow:auto', self.css)
         self.assertIn('.at-shell [hidden]', self.css)
 
+    def test_member_activity_is_read_only_safe_and_refreshes_while_visible(self):
+        js = (ROOT / 'web/static/js/agent_team_activity.js').read_text(encoding='utf-8')
+        for marker in ('document.hidden', 'detailEpoch', 'epoch', 'clearTimeout(timer)',
+                       'esc(m.name)', 'esc(task.title)', 'esc(task.progress_message)',
+                       'setTimeout(refresh, 15000)'):
+            self.assertIn(marker, js)
+        for forbidden in ('API.post', 'API.put', 'API.delete', '/dispatch', 'setInterval('):
+            self.assertNotIn(forbidden, js)
+        self.assertIn('AgentTeamActivity.reset()', self.js)
+        self.assertIn('aria-labelledby="at-activity-title"', self.html)
+        self.assertIn('at-agent-card', js)
+        self.assertIn('data-history', js)
+        self.assertIn('.at-activity-dialog[open]', self.css)
+
 
 if __name__ == '__main__':
     unittest.main()

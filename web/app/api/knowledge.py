@@ -6,7 +6,7 @@ from flask import (Response, request, jsonify, current_app,
                    send_from_directory)
 from app import db
 from app.models import (KnowledgeEntry, KnowledgeDistribution,
-                        KnowledgeFavorite, OpenClawInstance, Topic)
+                        KnowledgeFavorite, OpenClawInstance, Project, Topic)
 from app.api import api_bp
 from app.services.knowledge_sharing import (
     can_manage_knowledge_share,
@@ -80,6 +80,43 @@ def _journal_entry_visible(entry):
     project_id = entry.project_id or (
         entry.notebook.project_id if entry.notebook else None)
     return _can_access_project(_actor(), project_id)
+
+
+def _project_assignment(data, entry=None):
+    """Validate before mutating; names alone remain legacy display metadata."""
+    from app.api.knowledge_notebooks import _actor, _can_access_project
+
+    def fail(code, message, status=400):
+        return {}, (jsonify({'code': code, 'error': message}), status)
+
+    explicit = 'project_id' in data
+    bound_id = entry.project_id if entry else None
+    if not explicit and not (bound_id and 'project_name' in data):
+        return {}, None
+    target_id = data.get('project_id') if explicit else bound_id
+    if target_id is not None and (isinstance(target_id, bool)
+            or not isinstance(target_id, int) or not 1 <= target_id <= 2147483647):
+        return fail('KNOWLEDGE_PROJECT_INVALID', 'project_id 必须为正整数或 null')
+    target = db.session.get(Project, target_id) if target_id is not None else None
+    if target_id is not None and not target:
+        return fail('KNOWLEDGE_PROJECT_NOT_FOUND', '关联项目不存在', 404)
+    if explicit:
+        actor = _actor()
+        # Legacy records may only carry a name. Check the original project too,
+        # but never infer or bulk-backfill an ID merely from a display name.
+        source_id = bound_id
+        if entry and not source_id and entry.project_name:
+            source = Project.query.filter_by(name=entry.project_name).first()
+            source_id = source.id if source else None
+        for project_id in (source_id, target_id):
+            if project_id and not _can_access_project(actor, project_id):
+                return fail('KNOWLEDGE_PROJECT_FORBIDDEN', '无权变更原项目或目标项目的知识关联', 403)
+    canonical_name = target.name if target else None
+    supplied_name = data.get('project_name')
+    if 'project_name' in data and supplied_name != canonical_name:
+        if not (target is None and supplied_name in (None, '')):
+            return fail('KNOWLEDGE_PROJECT_MISMATCH', 'project_name 与 project_id 不一致；只传 project_id 即可自动同步名称')
+    return {'project_id': target_id, 'project_name': canonical_name}, None
 
 
 def _owned_claw_ids(user, claw):
@@ -279,8 +316,11 @@ def list_knowledge():
 def create_knowledge():
     """创建知识条目"""
     data = request.get_json()
-    if not data or not data.get('title') or not data.get('content'):
+    if not isinstance(data, dict) or not data.get('title') or not data.get('content'):
         return jsonify({'error': '标题和内容为必填项'}), 400
+    project_fields, error = _project_assignment(data)
+    if error:
+        return error
 
     # 从 Bearer Token 反推 OpenClaw，强制覆盖 source_openclaw_id / source_type
     # 防止 Agent 因不知道自己 ID 而 hardcode 错的数字（历史曾因此出现"未知 Agent"）
@@ -305,7 +345,8 @@ def create_knowledge():
         content=data['content'],
         category=data.get('category', 'general'),
         scope=data.get('scope', 'global'),
-        project_name=data.get('project_name'),
+        project_id=project_fields.get('project_id'),
+        project_name=project_fields.get('project_name', data.get('project_name')),
         module_name=data.get('module_name'),
         source_openclaw_id=source_openclaw_id,
         source_type=source_type,
@@ -340,10 +381,12 @@ def create_knowledge():
 def batch_import_knowledge():
     """批量导入知识条目（来自 OpenSpace 或 Agent 上报）"""
     data = request.get_json()
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求必须为 JSON 对象'}), 400
     entries = data.get('entries', [])
     source_type = data.get('source_type', 'openspace')
 
-    if not entries:
+    if not isinstance(entries, list) or not entries:
         return jsonify({'error': 'entries 数组不能为空'}), 400
 
     if source_type not in ('openclaw', 'openspace'):
@@ -351,12 +394,21 @@ def batch_import_knowledge():
 
     # 同 create_knowledge：Bearer Token → 强制覆盖 source_openclaw_id / source_type
     caller_claw = _get_current_openclaw()
-
-    created = 0
+    user = _get_current_user()
+    # Validate the whole batch before adding rows or sending review notices.
+    prepared = []
     for e_data in entries:
+        if not isinstance(e_data, dict):
+            return jsonify({'error': 'entries 中每项必须为 JSON 对象'}), 400
         if not e_data.get('title') or not e_data.get('content'):
             continue
+        project_fields, error = _project_assignment(e_data)
+        if error:
+            return error
+        prepared.append((e_data, project_fields))
 
+    created = 0
+    for e_data, project_fields in prepared:
         if caller_claw:
             entry_source_id = caller_claw.id
             entry_source_type = 'openclaw'
@@ -370,7 +422,8 @@ def batch_import_knowledge():
             content=e_data['content'],
             category=e_data.get('category', 'general'),
             scope=e_data.get('scope', 'global'),
-            project_name=e_data.get('project_name'),
+            project_id=project_fields.get('project_id'),
+            project_name=project_fields.get('project_name', e_data.get('project_name')),
             module_name=e_data.get('module_name'),
             source_openclaw_id=entry_source_id,
             source_type=entry_source_type,
@@ -544,10 +597,18 @@ def update_knowledge(entry_id):
         }), 409
     data = request.get_json()
 
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求必须为 JSON 对象'}), 400
+    project_fields, error = _project_assignment(data, entry)
+    if error:
+        return error
+
     for field in ['title', 'content', 'category', 'scope',
                   'project_name', 'module_name', 'status']:
         if field in data:
             setattr(entry, field, data[field])
+    for field, value in project_fields.items():
+        setattr(entry, field, value)
 
     db.session.commit()
     return jsonify(entry.to_dict())
