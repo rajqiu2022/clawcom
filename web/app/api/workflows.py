@@ -2962,6 +2962,351 @@ def _propagate_fatal_workflow_dependencies(run, steps, definition, state):
     return strict_result_ids
 
 
+def _external_review_contract(run):
+    """Return the explicit cross-Workflow review contract, if enabled."""
+    definition = (
+        run.definition.definition_json
+        if run and run.definition
+        and isinstance(run.definition.definition_json, dict) else {})
+    context = (
+        definition.get('context')
+        if isinstance(definition.get('context'), dict) else {})
+    contract = (
+        context.get('dual_agent_contract')
+        if isinstance(context.get('dual_agent_contract'), dict) else {})
+    if str(contract.get('review_mode') or '').strip() != 'external_workflow':
+        return None
+    try:
+        review_definition_id = int(contract.get('review_flow_definition_id'))
+    except (TypeError, ValueError):
+        return None
+    if review_definition_id <= 0:
+        return None
+    return dict(contract, review_flow_definition_id=review_definition_id)
+
+
+def _run_has_published_report(steps):
+    """Require a real publisher receipt before dispatching report review."""
+    for step in steps or []:
+        outputs = step.outputs_json if isinstance(step.outputs_json, dict) else {}
+        publication = (
+            outputs.get('publication_manifest')
+            if isinstance(outputs.get('publication_manifest'), dict) else {})
+        readback = (
+            outputs.get('report_readback')
+            if isinstance(outputs.get('report_readback'), dict) else {})
+        if outputs.get('report_published') is True and (
+                outputs.get('hub_report_id') not in (None, '')
+                or publication.get('report_id') not in (None, '')
+                or readback.get('report_id') not in (None, '')):
+            return True
+    return False
+
+
+def _record_external_review_dispatch(source_run, payload):
+    context = copy.deepcopy(
+        source_run.context_json
+        if isinstance(source_run.context_json, dict) else {})
+    context['external_review_dispatch'] = copy.deepcopy(payload)
+    source_run.context_json = context
+
+
+def _sync_external_review_parent(review_run):
+    """Project an external review Run's terminal receipt onto its source Run."""
+    context = (
+        review_run.context_json
+        if isinstance(review_run.context_json, dict) else {})
+    relation = (
+        context.get('external_review_source')
+        if isinstance(context.get('external_review_source'), dict) else {})
+    try:
+        source_run_id = int(relation.get('workflow_run_id'))
+    except (TypeError, ValueError):
+        return
+    source_run = WorkflowRun.query.get(source_run_id)
+    if not source_run:
+        return
+    dispatch = {
+        'schema': 'hub.workflow.external_review_dispatch@1',
+        'status': 'completed',
+        'source_workflow_run_id': source_run.id,
+        'review_workflow_run_id': review_run.id,
+        'review_workflow_definition_id': review_run.definition_id,
+        'review_status': review_run.status,
+        'finished_at': (
+            review_run.finished_at.isoformat()
+            if review_run.finished_at else datetime.now().isoformat()),
+    }
+    _record_external_review_dispatch(source_run, dispatch)
+    outcomes = dict(
+        source_run.outcomes_json
+        if isinstance(source_run.outcomes_json, dict) else {})
+    outcomes['review'] = (
+        'COMPLETED' if review_run.status == 'succeeded' else 'FAILED')
+    source_run.outcomes_json = outcomes
+
+
+def _ensure_external_review_run(source_run, steps, actor='system'):
+    """Create the declared independent review Run exactly once.
+
+    Flow definitions previously carried ``review_flow_definition_id`` only as
+    prose.  This terminal hook turns that declaration into an idempotent Hub
+    dispatch after the source report has a publisher receipt.
+    """
+    contract = _external_review_contract(source_run)
+    if not contract or not _run_has_published_report(steps):
+        return None
+
+    source_context = (
+        source_run.context_json
+        if isinstance(source_run.context_json, dict) else {})
+    assignment = (
+        source_context.get('assignment_snapshot')
+        if isinstance(source_context.get('assignment_snapshot'), dict) else {})
+    start_vars = (
+        source_context.get('start_vars')
+        if isinstance(source_context.get('start_vars'), dict) else {})
+    try:
+        reviewer_claw_id = int(
+            assignment.get('reviewer_claw_id')
+            or start_vars.get('reviewer_claw_id'))
+    except (TypeError, ValueError):
+        _record_external_review_dispatch(source_run, {
+            'schema': 'hub.workflow.external_review_dispatch@1',
+            'status': 'failed',
+            'code': 'EXTERNAL_REVIEWER_NOT_BOUND',
+            'source_workflow_run_id': source_run.id,
+        })
+        return None
+
+    review_definition_id = contract['review_flow_definition_id']
+    idempotency_key = 'external-review:%s:%s' % (
+        source_run.id, review_definition_id)
+    existing = WorkflowRun.query.filter_by(
+        definition_id=review_definition_id,
+        idempotency_key=idempotency_key,
+    ).first()
+    if existing:
+        existing_terminal = existing.status in (
+            'succeeded', 'failed', 'blocked', 'cancelled')
+        _record_external_review_dispatch(source_run, {
+            'schema': 'hub.workflow.external_review_dispatch@1',
+            'status': 'completed' if existing_terminal else 'started',
+            'source_workflow_run_id': source_run.id,
+            'review_workflow_run_id': existing.id,
+            'review_workflow_definition_id': review_definition_id,
+            'review_status': existing.status,
+            'idempotency_key': idempotency_key,
+        })
+        outcomes = dict(
+            source_run.outcomes_json
+            if isinstance(source_run.outcomes_json, dict) else {})
+        outcomes['review'] = (
+            'COMPLETED' if existing.status == 'succeeded'
+            else 'FAILED' if existing_terminal else 'INCOMPLETE')
+        source_run.outcomes_json = outcomes
+        return existing
+
+    review_definition = WorkflowDefinition.query.filter(
+        WorkflowDefinition.id == review_definition_id,
+        WorkflowDefinition.status != 'deleted',
+    ).first()
+    reviewer = OpenClawInstance.query.filter(
+        OpenClawInstance.id == reviewer_claw_id,
+        OpenClawInstance.status != 'deleted',
+    ).first()
+    if not review_definition or not reviewer:
+        _record_external_review_dispatch(source_run, {
+            'schema': 'hub.workflow.external_review_dispatch@1',
+            'status': 'failed',
+            'code': (
+                'EXTERNAL_REVIEW_DEFINITION_NOT_FOUND'
+                if not review_definition else 'EXTERNAL_REVIEWER_NOT_FOUND'),
+            'source_workflow_run_id': source_run.id,
+            'review_workflow_definition_id': review_definition_id,
+            'reviewer_claw_id': reviewer_claw_id,
+        })
+        return None
+
+    normalized = copy.deepcopy(review_definition.definition_json or {})
+    cycle_index = start_vars.get('cycle_index') or 1
+    requested_vars = {
+        'controller_run_id': (
+            source_run.controller_run_id
+            or 'external-review-flow%s' % source_run.id),
+        'cycle_index': cycle_index,
+        'source_flow12_run_id': str(source_run.id),
+        'worker_claw_id': reviewer_claw_id,
+    }
+    trusted_vars = {
+        'worker_claw_id': reviewer_claw_id,
+        'executor_claw_id': reviewer_claw_id,
+        'executor_claw_ids': [reviewer_claw_id],
+    }
+    resolved_vars = resolve_workflow_start_vars(
+        normalized,
+        requested_vars,
+        trusted_vars,
+        defer_required_fields={
+            'worker_claw_id', 'executor_claw_id', 'executor_claw_ids',
+            'reviewer_claw_id',
+        },
+    )
+    review_assignment = resolve_workflow_run_assignment(
+        normalized,
+        resolved_vars,
+        worker_claw_id=reviewer_claw_id,
+        selected_executor_claw_ids=[reviewer_claw_id],
+    )
+    if review_assignment:
+        normalized = materialize_workflow_run_assignment(
+            normalized, review_assignment,
+            {reviewer_claw_id: reviewer.name})
+        resolved_vars = review_assignment['start_vars']
+
+    definition_hash = hashlib.sha256(json.dumps(
+        normalized, ensure_ascii=False, sort_keys=True,
+        separators=(',', ':'),
+    ).encode('utf-8')).hexdigest()
+    child_context = build_workflow_start_context(
+        resolved_vars,
+        {'external_review_source': {
+            'schema': 'hub.workflow.external_review_source@1',
+            'workflow_run_id': source_run.id,
+            'workflow_definition_id': source_run.definition_id,
+        }},
+        executor_claw_ids=[reviewer_claw_id],
+        executor_user_ids=[],
+        worker_claw_id=reviewer_claw_id,
+    )
+    child_context['workflow_definition_snapshot'] = {
+        'workflow_definition_id': review_definition.id,
+        'version': int(review_definition.version or 1),
+        'sha256': definition_hash,
+        'template_revision': str(
+            normalized.get('template_revision')
+            or (normalized.get('context') or {}).get('template_revision')
+            or ''),
+    }
+    child_context['workflow_catalog_snapshot'] = workflow_catalog_metadata(
+        normalized)
+    child_context['outcome_requirements_snapshot'] = (
+        workflow_outcome_requirements(normalized))
+    if review_assignment:
+        child_context['assignment_snapshot'] = {
+            'schema': review_assignment['schema'],
+            'executor_claw_id': review_assignment['executor_claw_id'],
+            'reviewer_claw_id': review_assignment.get('reviewer_claw_id'),
+            'worker_claw_id': review_assignment['worker_claw_id'],
+            'step_roles': review_assignment['step_roles'],
+            'source': review_assignment['source'],
+        }
+    child_context['execution_input_snapshot'] = (
+        _workflow_execution_input_snapshot(
+            child_context['workflow_definition_snapshot'],
+            resolved_vars,
+            child_context,
+            normalized.get('context'),
+        ))
+
+    child = WorkflowRun(
+        definition_id=review_definition.id,
+        run_name='Flow #%s 独立报告复查' % source_run.id,
+        status='pending',
+        project_id=review_definition.project_id or source_run.project_id,
+        triggered_by='workflow-external-review',
+        idempotency_key=idempotency_key,
+        idempotency_request_hash=_workflow_run_create_hash(
+            review_definition.id, {
+                'source_workflow_run_id': source_run.id,
+                'reviewer_claw_id': reviewer_claw_id,
+            }),
+        controller_run_id=requested_vars['controller_run_id'],
+        correlation_id=(
+            source_run.correlation_id or 'workflow-run:%s' % source_run.id),
+        trigger_source='workflow_external_review',
+        context_json=child_context,
+    )
+    try:
+        with db.session.begin_nested():
+            db.session.add(child)
+            db.session.flush()
+    except IntegrityError:
+        existing = WorkflowRun.query.filter_by(
+            definition_id=review_definition.id,
+            idempotency_key=idempotency_key,
+        ).first()
+        if existing:
+            _record_external_review_dispatch(source_run, {
+                'schema': 'hub.workflow.external_review_dispatch@1',
+                'status': 'started',
+                'source_workflow_run_id': source_run.id,
+                'review_workflow_run_id': existing.id,
+                'review_workflow_definition_id': review_definition.id,
+                'reviewer_claw_id': reviewer_claw_id,
+                'review_status': existing.status,
+                'idempotency_key': idempotency_key,
+            })
+            return existing
+        raise
+    for idx, config in enumerate(normalized.get('steps') or []):
+        status = (
+            'waiting_approval'
+            if config.get('approval_required') and not config.get('depends_on')
+            else 'pending')
+        db.session.add(WorkflowRunStep(
+            run_id=child.id,
+            step_id=config['id'],
+            position=idx,
+            name=config['name'],
+            step_type=config.get('type') or 'worker_task',
+            runner=config.get('runner') or '',
+            target_claw_id=config.get('target_claw_id'),
+            target_agent=config.get('target_agent') or '',
+            target_post=config.get('target_post') or '',
+            status=status,
+            depends_on_json=config.get('depends_on') or [],
+            step_config_json=config,
+        ))
+    db.session.flush()
+    _recompute_run_status(child, actor)
+    _record_external_review_dispatch(source_run, {
+        'schema': 'hub.workflow.external_review_dispatch@1',
+        'status': 'started',
+        'source_workflow_run_id': source_run.id,
+        'review_workflow_run_id': child.id,
+        'review_workflow_definition_id': review_definition.id,
+        'reviewer_claw_id': reviewer_claw_id,
+        'review_status': child.status,
+        'idempotency_key': idempotency_key,
+        'started_at': datetime.now().isoformat(),
+    })
+    outcomes = dict(
+        source_run.outcomes_json
+        if isinstance(source_run.outcomes_json, dict) else {})
+    outcomes['review'] = 'INCOMPLETE'
+    source_run.outcomes_json = outcomes
+    return child
+
+
+def _on_workflow_run_terminal(run, steps, actor):
+    """Run terminal side effects without making source completion fragile."""
+    try:
+        _sync_external_review_parent(run)
+        _ensure_external_review_run(run, steps, actor)
+    except Exception as exc:
+        current_app.logger.exception(
+            'Workflow Run %s external review dispatch failed: %s',
+            run.id, exc)
+        _record_external_review_dispatch(run, {
+            'schema': 'hub.workflow.external_review_dispatch@1',
+            'status': 'failed',
+            'code': 'EXTERNAL_REVIEW_DISPATCH_FAILED',
+            'message': str(exc)[:500],
+            'source_workflow_run_id': run.id,
+        })
+
+
 def _recompute_run_status(run, actor='system'):
     """Advance pending steps whose dependencies are satisfied."""
     steps = WorkflowRunStep.query.filter_by(run_id=run.id).all()
@@ -3043,6 +3388,7 @@ def _recompute_run_status(run, actor='system'):
             run.current_step_id = problem.step_id if problem else ''
             run.blocker_json = problem.blocker_json if problem else {}
         _sync_run_conclusions(run)
+        _on_workflow_run_terminal(run, steps, actor)
         return
     if any(s.status == 'waiting_approval' for s in steps):
         run.status = 'waiting_approval'
@@ -3059,6 +3405,7 @@ def _recompute_run_status(run, actor='system'):
         run.finished_at = run.finished_at or datetime.now()
         _sync_run_outcomes(run)
         _sync_run_conclusions(run)
+        _on_workflow_run_terminal(run, steps, actor)
         return
 
     step_by_id = {s.step_id: s for s in steps}
