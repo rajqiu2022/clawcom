@@ -18,6 +18,7 @@ from app.models import (
 )
 from app.services.worker_runtime import runtime_summary
 from app.services import agent_team_activity as activity
+from app.services.agent_team_onboarding import queue_join_notifications, wake_join_recipients
 from app.models import AgentTeamMemberStatus, AgentTeamMemberTask, AgentTeamMemberReport
 from app.services.agent_teams import (
     EXECUTOR_SPECIALTIES, TEAM_ROLES, TeamError, integer, load_team,
@@ -131,10 +132,12 @@ def create_agent_team():
     try:
         db.session.flush()
         _audit(team, actor, 'create', config)
+        notified_ids = queue_join_notifications(team)
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
         raise TeamError('TEAM_NAME_EXISTS', '同项目团队名称已存在')
+    wake_join_recipients(notified_ids)
     return jsonify(team.to_dict()), 201
 
 
@@ -219,6 +222,7 @@ def update_agent_team(team_id):
     if integer(data.get('expected_version'), 'expected_version') != team.version:
         raise TeamError('TEAM_VERSION_CONFLICT', '团队配置已更新，请回读重试')
     config = normalize_config(data, team.project_id)
+    previous_member_ids = set(activity.roster(team))
     _apply_config(team, config)
     team.version += 1
     # Any config change revokes the old planner. Existing executions keep their
@@ -229,10 +233,12 @@ def update_agent_team(team_id):
     team.active_manager_claw_id = None
     _audit(team, actor, 'update', dict(config, version=team.version, manager_epoch=team.manager_epoch))
     try:
+        notified_ids = queue_join_notifications(team, previous_member_ids)
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
         raise TeamError('TEAM_NAME_EXISTS', '同项目团队名称已存在')
+    wake_join_recipients(notified_ids)
     return jsonify(team.to_dict())
 
 

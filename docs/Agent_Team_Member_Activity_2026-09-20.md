@@ -61,6 +61,22 @@
 
 ## 接入与部署
 
+### 入队 Skill 通知
+
+创建团队时向主经理、备用经理和成员的去重名单发送 Hub 入队消息；更新团队时仅通知新加入的 Claw。重复保存、修改目标、调整已有成员角色、暂停/恢复不会重复发入队通知；完全退队后重新加入会再通知。此规则不依赖 Provider 或企微配置。
+
+消息包含团队 ID/项目/角色，以及 `agent-team-collaboration`、`agent-team-member-activity` 的公开已审核版本读取和文档包路径（按稳定名称解析市场 ID，不硬编码生产 ID）。未发布或不可见时仅提示联系管理员，不泄露私有 Skill 内容或阻断入队。
+
+通知与团队变更同事务持久化为 ClawMessage，提交成功后才唤醒 SSE；离线或即时唤醒失败保留 pending 消息，沿用 Hub 现有收件箱补取。通知不是自动安装或任务派发，不创建 OpenClawSkill 关联，不启动 Flow，不抢占当前任务。Agent 有受控本地安装能力时按规则安装，否则请管理员分配；不引导普通 Agent 调用管理员安装接口。已安装时核对内容，不反复安装。处理迟到通知前回读团队确认仍是成员。
+
+部署本增量需一起发布 `app/api/agent_teams.py` 和 `app/services/agent_team_onboarding.py`，无需数据库迁移；不会追溯补发历史成员。历史团队补发应另外按明确名单执行，避免重复通知和重装。
+
+专项测试：`python -m pytest tests/test_agent_team_onboarding.py -q`。
+
+部署工具：`python ops/deploy_team_onboarding.py --key <已有SSH密钥路径>` 默认预检；提交后加 `--apply` 发布，保留生产独有补丁、备份并在失败时回滚。重启期间临时禁用旧启动迁移，避免重复 DDL 引发元数据锁；不修改持久功能开关。
+
+历史补发工具：`python ops/backfill_team_skill_notices.py --key <已有SSH密钥路径>` 先列出已启用项目的非归档团队和精确名单。经授权后加 `--team-id <ID> --expected-members <逗号分隔Claw IDs> --apply`，锁住团队行并确认名单未变后，仅补缺失入队消息并记审计。同命令再次运行不重复发送；消息沿用在线 SSE 定时补取/离线收件箱，不伪造已送达或已安装状态。
+
 本次提供 Hub 接口、存储、卡片和详情。尚未改动各机器上的 Worker。Agent 可通过 HTTP 自行接入；要稳定周期上报，应在 Worker/执行器开始、进展、阻塞、终态及重启对账处接入本合同，并与业务调度、heartbeat 分开。未接入的成员会保持“尚未上报”，Hub 不伪造空闲。
 
 上线前备份并应用 `ops/migrations/20260920_agent_team_member_activity.sql`，前置 `20260920_agent_teams.sql`。新增三表独立存放成员状态、任务历史、幂等进展回执。MariaDB 10.1 JSON 回执使用 LONGTEXT。先建表后部署代码/模板/JS/CSS。无需修改团队名单、Flow 权限、Worker 配置或启动任何 Run。
