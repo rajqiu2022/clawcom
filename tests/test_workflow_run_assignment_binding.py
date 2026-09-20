@@ -48,6 +48,7 @@ from app.services.workflows import (  # noqa: E402
 from flask import Flask, g  # noqa: E402
 from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
+from app.api import workflows as workflows_api  # noqa: E402
 from app.models import (  # noqa: E402
     OpenClawInstance,
     Project,
@@ -394,6 +395,133 @@ class WorkflowRunAssignmentApiTest(unittest.TestCase):
         self.assertEqual(200, replay.status_code, replay.get_data(as_text=True))
         self.assertTrue(replay.get_json()['idempotent_replay'])
         self.assertEqual(1, WorkflowRun.query.count())
+
+    def test_terminal_published_report_dispatches_external_review_once(self):
+        review_definition = WorkflowDefinition(
+            workflow_key='independent-report-review',
+            name='Independent report review',
+            project_id=self.definition.project_id,
+            status='active',
+            version=6,
+            owner_type='claw',
+            owner_id=self.reviewer.id,
+            visibility_scope='project',
+            definition_json={
+                'key': 'independent-report-review',
+                'name': 'Independent report review',
+                'require_worker_binding': True,
+                'start_vars_schema': {
+                    'worker_claw_id': {'type': 'integer', 'required': True},
+                    'source_flow12_run_id': {
+                        'type': 'string', 'required': True},
+                    'controller_run_id': {
+                        'type': 'string', 'required': True},
+                    'cycle_index': {'type': 'integer', 'default': 1},
+                },
+                'steps': [{
+                    'id': 'review_report',
+                    'name': 'Review report',
+                    'type': 'agent_task',
+                    'runner': 'agent.review.report',
+                }],
+            },
+        )
+        db.session.add(review_definition)
+        db.session.flush()
+        source_definition = WorkflowDefinition(
+            workflow_key='source-with-external-review',
+            name='Source with external review',
+            project_id=self.definition.project_id,
+            status='active',
+            version=112,
+            owner_type='claw',
+            owner_id=self.executor.id,
+            visibility_scope='project',
+            definition_json={
+                'key': 'source-with-external-review',
+                'name': 'Source with external review',
+                'require_worker_binding': True,
+                'context': {'dual_agent_contract': {
+                    'review_mode': 'external_workflow',
+                    'review_flow_definition_id': review_definition.id,
+                }},
+                'start_vars_schema': {
+                    'worker_claw_id': {'type': 'integer', 'required': True},
+                    'reviewer_claw_id': {'type': 'integer', 'required': True},
+                },
+                'steps': [{
+                    'id': 'editor_report',
+                    'name': 'Publish report',
+                    'type': 'agent_task',
+                    'runner': 'agent.publish.report',
+                }],
+            },
+        )
+        db.session.add(source_definition)
+        db.session.commit()
+
+        response = self.client.post(
+            '/api/v1/workflow-runs',
+            json={
+                'definition_id': source_definition.id,
+                'worker_claw_id': self.executor.id,
+                'start_vars': {
+                    'worker_claw_id': self.executor.id,
+                    'reviewer_claw_id': self.reviewer.id,
+                },
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(201, response.status_code, response.get_data(as_text=True))
+        source = WorkflowRun.query.filter_by(
+            definition_id=source_definition.id).one()
+        report_step = WorkflowRunStep.query.filter_by(
+            run_id=source.id, step_id='editor_report').one()
+        report_step.status = 'passed'
+        report_step.outputs_json = {
+            'report_published': True,
+            'hub_report_id': 680,
+            'publication_manifest': {'report_id': 680, 'status': 'published'},
+        }
+        workflows_api._recompute_run_status(source, 'test')
+        db.session.commit()
+
+        children = WorkflowRun.query.filter_by(
+            definition_id=review_definition.id).all()
+        self.assertEqual(1, len(children))
+        child = children[0]
+        self.assertEqual('workflow_external_review', child.trigger_source)
+        self.assertEqual(
+            str(source.id), child.context_json['start_vars'][
+                'source_flow12_run_id'])
+        self.assertEqual(
+            self.reviewer.id,
+            child.context_json['workflow_start']['worker_claw_id'])
+        dispatch = source.context_json['external_review_dispatch']
+        self.assertEqual(child.id, dispatch['review_workflow_run_id'])
+        self.assertEqual('started', dispatch['status'])
+        self.assertEqual('INCOMPLETE', source.outcomes_json['review'])
+        self.assertEqual(
+            self.reviewer.id,
+            WorkflowRunStep.query.filter_by(run_id=child.id).one().target_claw_id)
+
+        workflows_api._recompute_run_status(source, 'test-replay')
+        db.session.commit()
+        self.assertEqual(
+            1,
+            WorkflowRun.query.filter_by(
+                definition_id=review_definition.id).count())
+
+        child_step = WorkflowRunStep.query.filter_by(run_id=child.id).one()
+        child_step.status = 'passed'
+        child_step.outputs_json = {'analysis_ready': False}
+        workflows_api._recompute_run_status(child, 'test-review-complete')
+        db.session.commit()
+        db.session.refresh(source)
+        self.assertEqual('COMPLETED', source.outcomes_json['review'])
+        self.assertEqual(
+            'completed',
+            source.context_json['external_review_dispatch']['status'])
 
     def test_invalid_assignment_returns_422_without_creating_run(self):
         response = self.client.post(
