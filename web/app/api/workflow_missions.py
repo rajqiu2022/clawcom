@@ -17,9 +17,10 @@ from app import db
 from app.api import api_bp
 from app.api.auth_utils import get_current_claw, get_current_user
 from app.models import (
-    AuditLog, OpenClawInstance, Project, WorkflowDefinition,
+    AuditLog, ClawSidecarConfig, OpenClawInstance, Project, WorkflowDefinition,
     WorkflowMission, WorkflowMissionDispatch, WorkflowRun, WorkflowRunStep,
 )
+from app.services.worker_runtime import runtime_summary
 from app.services.workflow_library_snapshots import (
     append_workflow_snapshot_warning,
     freeze_workflow_run_library_snapshot,
@@ -27,6 +28,7 @@ from app.services.workflow_library_snapshots import (
 )
 from app.services.workflows import (
     build_workflow_start_context,
+    can_execute_workflow,
     workflow_catalog_metadata,
     workflow_outcome_requirements,
 )
@@ -34,8 +36,7 @@ from app.services.workflows import (
 
 _EXECUTOR_OVERRIDE_FIELDS = frozenset({
     'executor_claw_ids', 'target_claw_ids', 'selected_claw_ids',
-    'executor_user_ids', 'selected_user_ids', 'worker_claw_id',
-    'executor_worker_claw_id',
+    'executor_user_ids', 'selected_user_ids', 'executor_worker_claw_id',
 })
 
 
@@ -122,6 +123,34 @@ def _mission_definition_allowed(mission, definition):
         not allowed or definition.id in allowed)
 
 
+def _trusted_worker_runtime(claw_id):
+    config = db.session.get(ClawSidecarConfig, int(claw_id))
+    if not config:
+        return None
+    summary = runtime_summary(
+        config.runtime_config_json or {}, config.config_owner or 'hub')
+    return summary if summary.get('has_worker_runtime') else None
+
+
+def _claw_can_execute_definition(claw_id, definition):
+    return can_execute_workflow(
+        definition.owner_type,
+        definition.owner_id,
+        definition.executor_acl_json or {},
+        'claw',
+        int(claw_id),
+        is_admin=False,
+        editor_acl=definition.editor_acl_json or {},
+    )
+
+
+def _allowed_worker_ids(mission):
+    return {
+        int(item) for item in (mission.allowed_worker_claw_ids_json or [])
+        if str(item).isdigit() and int(item) > 0
+    }
+
+
 def _mission_payload(mission, with_dispatches=False):
     payload = mission.to_dict(with_dispatches=with_dispatches)
     payload['definitions_api'] = (
@@ -133,8 +162,10 @@ def _mission_payload(mission, with_dispatches=False):
         'required_fields': ['workflow_definition_id'],
         'optional_fields': [
             'start_vars', 'context', 'reason', 'decision_key',
-            'idempotency_key', 'run_name'],
-        'executor_override_forbidden': True,
+            'idempotency_key', 'run_name', 'worker_claw_id'],
+        'default_worker_claw_id': mission.main_claw_id,
+        'allowed_worker_claw_ids': sorted(_allowed_worker_ids(mission)),
+        'arbitrary_executor_override_forbidden': True,
         'per_step_approval_required': False,
     }
     return payload
@@ -220,6 +251,7 @@ def create_workflow_mission():
     try:
         allowed = _int_ids(data.get('allowed_definition_ids'))
         denied = _int_ids(data.get('denied_definition_ids'))
+        allowed_workers = _int_ids(data.get('allowed_worker_claw_ids'))
         max_child_runs = _bounded_int(
             data.get('max_child_runs'), 20, 1, 100,
             'max_child_runs')
@@ -231,6 +263,32 @@ def create_workflow_mission():
             'expires_in_hours')
     except ValueError as exc:
         return _error('MISSION_POLICY_INVALID', str(exc))
+    if main_claw_id in allowed_workers:
+        allowed_workers.remove(main_claw_id)
+    if allowed_workers:
+        worker_rows = OpenClawInstance.query.filter(
+            OpenClawInstance.id.in_(allowed_workers),
+            OpenClawInstance.status != 'deleted').all()
+        workers_by_id = {row.id: row for row in worker_rows}
+        invalid_workers = [
+            worker_id for worker_id in allowed_workers
+            if worker_id not in workers_by_id
+            or int(workers_by_id[worker_id].project_id or 0) != project_id
+        ]
+        if invalid_workers:
+            return _error(
+                'MISSION_WORKER_SCOPE_INVALID',
+                'Mission Worker 必须存在且属于同一项目',
+                details={'worker_claw_ids': invalid_workers})
+        untrusted_workers = [
+            worker_id for worker_id in allowed_workers
+            if not _trusted_worker_runtime(worker_id)
+        ]
+        if untrusted_workers:
+            return _error(
+                'MISSION_WORKER_RUNTIME_REQUIRED',
+                'Mission Worker 必须先注册可信 Claw Worker Runtime', 409,
+                {'worker_claw_ids': untrusted_workers})
     scoped_ids = sorted(set(allowed + denied))
     if scoped_ids:
         rows = WorkflowDefinition.query.filter(
@@ -284,6 +342,7 @@ def create_workflow_mission():
         control_mode='agent_autonomous',
         allowed_definition_ids_json=allowed,
         denied_definition_ids_json=denied,
+        allowed_worker_claw_ids_json=allowed_workers,
         max_child_runs=max_child_runs,
         child_run_count=0,
         max_retries_per_flow=max_retries,
@@ -308,6 +367,7 @@ def create_workflow_mission():
         detail=json.dumps({
             'project_id': project_id,
             'main_claw_id': main_claw_id,
+            'allowed_worker_claw_ids': allowed_workers,
             'control_mode': 'agent_autonomous',
             'max_child_runs': max_child_runs,
         }, ensure_ascii=False, sort_keys=True),
@@ -452,10 +512,15 @@ def dispatch_workflow_mission(mission_id):
     try:
         definition_id = int(
             data.get('workflow_definition_id') or data.get('definition_id'))
+        requested_worker_id = (
+            int(data.get('worker_claw_id'))
+            if data.get('worker_claw_id') not in (None, '') else None)
+        if requested_worker_id is not None and requested_worker_id <= 0:
+            raise ValueError
     except (TypeError, ValueError):
         return _error(
             'MISSION_DEFINITION_REQUIRED',
-            'workflow_definition_id 必须是整数')
+            'workflow_definition_id 与 worker_claw_id 必须是正整数')
     start_vars = (
         data.get('start_vars')
         if isinstance(data.get('start_vars'), dict) else {})
@@ -466,9 +531,24 @@ def dispatch_workflow_mission(mission_id):
     raw_context.pop('mission', None)
     reason = str(data.get('reason') or '').strip()[:4000]
     decision_key = str(data.get('decision_key') or '').strip()[:128]
+    mission = (WorkflowMission.query.filter_by(id=mission_id)
+               .with_for_update().first())
+    if not mission:
+        return _error('MISSION_NOT_FOUND', 'Mission 不存在', 404)
+    if int(actor['id']) != int(mission.main_claw_id):
+        return _error('MISSION_ACCESS_DENIED', '不是该 Mission 主 Agent', 403)
+    worker_claw_id = requested_worker_id or int(mission.main_claw_id)
+    if (worker_claw_id != int(mission.main_claw_id)
+            and worker_claw_id not in _allowed_worker_ids(mission)):
+        return _error(
+            'MISSION_WORKER_NOT_ALLOWED',
+            '所选 Worker 不在 Mission 白名单内', 403,
+            {'worker_claw_id': worker_claw_id,
+             'allowed_worker_claw_ids': sorted(_allowed_worker_ids(mission))})
     hash_payload = {
         'mission_id': mission_id,
         'workflow_definition_id': definition_id,
+        'worker_claw_id': worker_claw_id,
         'start_vars': start_vars,
         'context': raw_context,
         'run_name': str(data.get('run_name') or ''),
@@ -477,13 +557,6 @@ def dispatch_workflow_mission(mission_id):
     }
     request_hash = _request_hash(hash_payload)
     idempotency_key = _dispatch_key(mission_id, data, request_hash)
-
-    mission = (WorkflowMission.query.filter_by(id=mission_id)
-               .with_for_update().first())
-    if not mission:
-        return _error('MISSION_NOT_FOUND', 'Mission 不存在', 404)
-    if int(actor['id']) != int(mission.main_claw_id):
-        return _error('MISSION_ACCESS_DENIED', '不是该 Mission 主 Agent', 403)
     existing = WorkflowMissionDispatch.query.filter_by(
         mission_id=mission.id, idempotency_key=idempotency_key).first()
     if existing:
@@ -508,11 +581,33 @@ def dispatch_workflow_mission(mission_id):
         return _error(
             'MISSION_DEFINITION_NOT_ALLOWED',
             '该 Workflow 不在 Mission 项目授权范围内', 403)
+    selected_worker = OpenClawInstance.query.filter(
+        OpenClawInstance.id == worker_claw_id,
+        OpenClawInstance.status != 'deleted').first()
+    if (not selected_worker
+            or int(selected_worker.project_id or 0) != int(mission.project_id)):
+        return _error(
+            'MISSION_WORKER_SCOPE_INVALID',
+            '所选 Worker 不存在或不属于 Mission 项目', 403,
+            {'worker_claw_id': worker_claw_id})
+    if worker_claw_id != int(mission.main_claw_id):
+        runtime = _trusted_worker_runtime(worker_claw_id)
+        if not runtime:
+            return _error(
+                'MISSION_WORKER_RUNTIME_REQUIRED',
+                '所选 Worker 未注册可信 Claw Worker Runtime', 409,
+                {'worker_claw_id': worker_claw_id})
+        if not _claw_can_execute_definition(worker_claw_id, definition):
+            return _error(
+                'MISSION_WORKER_EXECUTE_FORBIDDEN',
+                '所选 Worker 没有该 Workflow 的执行权限', 403,
+                {'worker_claw_id': worker_claw_id,
+                 'workflow_definition_id': definition.id})
 
     context = build_workflow_start_context(
         start_vars, raw_context, start_mode='mission_dispatch',
         executor_claw_ids=[], executor_user_ids=[],
-        worker_claw_id=mission.main_claw_id,
+        worker_claw_id=worker_claw_id,
     )
     context['mission'] = {
         'id': mission.id,
@@ -520,6 +615,7 @@ def dispatch_workflow_mission(mission_id):
         'objective': mission.objective,
         'control_mode': 'agent_autonomous',
         'main_claw_id': mission.main_claw_id,
+        'worker_claw_id': worker_claw_id,
         'allow_external_notification': bool(
             mission.allow_external_notification),
         'allow_destructive_actions': bool(
@@ -612,6 +708,7 @@ def dispatch_workflow_mission(mission_id):
             idempotency_key=idempotency_key, request_hash=request_hash,
             reason=reason, status='created',
             created_by_claw_id=actor['id'],
+            worker_claw_id=worker_claw_id,
         )
         mission.child_run_count = int(mission.child_run_count or 0) + 1
         db.session.add(dispatch)
@@ -622,6 +719,7 @@ def dispatch_workflow_mission(mission_id):
             detail=json.dumps({
                 'definition_id': definition.id,
                 'workflow_run_id': run.id,
+                'worker_claw_id': worker_claw_id,
                 'decision_key': dispatch.decision_key,
                 'reason': reason,
             }, ensure_ascii=False, sort_keys=True),

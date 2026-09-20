@@ -1,8 +1,8 @@
 """Canonical Hub contract for Claw Worker runtime identity.
 
 Runtime identity is intentionally separate from the provider.  A Claw Worker
-can host either Hermes or Codex, while legacy sidecars may still use the same
-provider names without being a Claw Worker deployment.
+can host Hermes, Codex or CodeBuddy, while legacy sidecars may still use the
+same provider names without being a Claw Worker deployment.
 """
 
 import re
@@ -10,7 +10,7 @@ import re
 
 RUNTIME_SCHEMA_VERSION = 1
 RUNTIME_KINDS = {'claw_worker', 'legacy_sidecar', 'hermes_agent'}
-WORKER_PROVIDERS = {'hermes', 'codex'}
+WORKER_PROVIDERS = {'hermes', 'codex', 'codebuddy'}
 RUNTIME_MODES = {
     'legacy_split',
     'agent_host_v3',
@@ -97,8 +97,10 @@ def validate_worker_runtime(value):
 
     provider = _text(value.get('provider'), 'provider', 20).lower()
     if kind == 'claw_worker' and provider not in WORKER_PROVIDERS:
-        raise ValueError('claw_worker provider 仅支持 hermes / codex')
-    if kind != 'claw_worker' and provider not in {'openclaw', 'hermes', 'codex', 'custom'}:
+        raise ValueError(
+            'claw_worker provider 仅支持 hermes / codex / codebuddy')
+    if kind != 'claw_worker' and provider not in {
+            'openclaw', 'hermes', 'codex', 'codebuddy', 'custom'}:
         raise ValueError('provider 不受支持')
 
     runtime_mode = _text(value.get('runtime_mode'), 'runtime_mode', 40).lower()

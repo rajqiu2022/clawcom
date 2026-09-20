@@ -1318,6 +1318,9 @@ class WorkflowMission(db.Model):
         db.String(32), nullable=False, default='agent_autonomous')
     allowed_definition_ids_json = db.Column(db.JSON)
     denied_definition_ids_json = db.Column(db.JSON)
+    # Delegated Workers are an explicit allow-list in addition to the main
+    # Agent. Mission dispatch still defaults to main_claw_id when omitted.
+    allowed_worker_claw_ids_json = db.Column(db.JSON)
     max_child_runs = db.Column(db.Integer, nullable=False, default=20)
     child_run_count = db.Column(db.Integer, nullable=False, default=0)
     max_retries_per_flow = db.Column(db.Integer, nullable=False, default=3)
@@ -1364,6 +1367,8 @@ class WorkflowMission(db.Model):
             'control_mode': self.control_mode or 'agent_autonomous',
             'allowed_definition_ids': self.allowed_definition_ids_json or [],
             'denied_definition_ids': self.denied_definition_ids_json or [],
+            'allowed_worker_claw_ids': (
+                self.allowed_worker_claw_ids_json or []),
             'max_child_runs': self.max_child_runs or 20,
             'child_run_count': self.child_run_count or 0,
             'max_retries_per_flow': self.max_retries_per_flow or 3,
@@ -1915,6 +1920,9 @@ class WorkflowMissionDispatch(db.Model):
     reason = db.Column(db.Text)
     status = db.Column(db.String(24), nullable=False, default='created')
     created_by_claw_id = db.Column(db.Integer, nullable=False)
+    # Nullable only for historical rows created before Worker delegation was
+    # introduced; every new dispatch persists the selected Worker explicitly.
+    worker_claw_id = db.Column(db.Integer)
     created_at = db.Column(db.DateTime, default=_now, nullable=False)
 
     mission = db.relationship(
@@ -1943,6 +1951,7 @@ class WorkflowMissionDispatch(db.Model):
             'reason': self.reason or '',
             'status': self.status or 'created',
             'created_by_claw_id': self.created_by_claw_id,
+            'worker_claw_id': self.worker_claw_id,
             'created_at': str(self.created_at) if self.created_at else None,
         }
 
@@ -4284,8 +4293,9 @@ class ClawSidecarConfig(db.Model):
 
     claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
                         primary_key=True, comment='关联 OpenClaw ID')
-    agent_type = db.Column(db.String(20), default='openclaw',
-                           comment='agent 类型：openclaw/hermes/custom')
+    agent_type = db.Column(
+        db.String(20), default='openclaw',
+        comment='agent 类型：openclaw/hermes/codex/codebuddy/custom')
     openclaw_bin = db.Column(db.String(500), default='',
                              comment='openclaw CLI 绝对路径（自动探测后回填）')
     hermes_home = db.Column(db.String(500), default='',
@@ -4437,8 +4447,9 @@ class AgentDeployment(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     openclaw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'),
                             nullable=False, comment='关联 OpenClaw ID')
-    agent_type = db.Column(db.String(20), default='hermes',
-                           comment='agent 类型：hermes / codex（Claw Worker）')
+    agent_type = db.Column(
+        db.String(20), default='hermes',
+        comment='agent 类型：hermes / codex / codebuddy（Claw Worker）')
     deploy_method = db.Column(db.String(20), default='systemd',
                               comment='部署方式：Hub 代建当前固定 systemd')
     host = db.Column(db.String(255), default='', comment='远端目标机 host:port 或纯 host')

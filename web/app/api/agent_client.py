@@ -252,7 +252,8 @@ def _audit_sidecar_health():
         threshold = datetime.now() - timedelta(seconds=SIDECAR_AUDIT_OFFLINE_GRACE)
         managed_claws = (
             db.session.query(AgentDeployment.openclaw_id)
-            .filter(AgentDeployment.agent_type.in_(('hermes', 'codex')),
+            .filter(AgentDeployment.agent_type.in_(
+                        ('hermes', 'codex', 'codebuddy')),
                     AgentDeployment.deploy_method == 'systemd',
                     AgentDeployment.status == 'success')
             .group_by(AgentDeployment.openclaw_id)
@@ -1085,7 +1086,7 @@ def claw_sidecar_config(claw_id, claw=None):
         sidecar_version=2.0.0  - sidecar 自身版本
         agent_type=openclaw    - 旧版 sidecar 自动探测到的 provider
         runtime_kind=claw_worker - 新版 Worker 运行时类型
-        runtime_provider=codex - 新版 Worker provider（hermes/codex）
+        runtime_provider=codex - 新版 Worker provider（hermes/codex/codebuddy）
         runtime_mode=legacy_split/agent_direct - Worker 进程拓扑
         runtime_platform=linux - Worker 平台（linux/windows/macos）
         openclaw_bin=/path/...  - 自动探测到的 bin 路径
@@ -1137,7 +1138,8 @@ def claw_sidecar_config(claw_id, claw=None):
             (cfg.runtime_config_json or {}).get('kind')
             if isinstance(cfg.runtime_config_json, dict) else '')
         if stored_kind != 'claw_worker' \
-                and reported_type in ('openclaw', 'hermes', 'codex', 'custom') \
+                and reported_type in (
+                    'openclaw', 'hermes', 'codex', 'codebuddy', 'custom') \
                 and cfg.agent_type != reported_type:
             cfg.agent_type = reported_type
             cfg.config_version = int(cfg.config_version or 0) + 1
@@ -1187,7 +1189,8 @@ def claw_sidecar_config(claw_id, claw=None):
         runtime_info['runtime_provider']
         if runtime_info['has_worker_runtime']
         else (runtime_agent_type
-              if runtime_agent_type in ('openclaw', 'hermes', 'codex', 'custom')
+              if runtime_agent_type in (
+                  'openclaw', 'hermes', 'codex', 'codebuddy', 'custom')
               else (payload.get('agent_type') or 'openclaw'))
     )
     # agent_type remains the compatibility field consumed by existing Worker
@@ -1197,11 +1200,12 @@ def claw_sidecar_config(claw_id, claw=None):
     # Codex receives only sanitized conversational context. Its separately
     # supervised WeCom bridge reads the ACL-protected local credential file.
     payload['wecom_bot_secret'] = (
-        '' if effective_runtime_agent_type == 'codex'
+        '' if effective_runtime_agent_type in ('codex', 'codebuddy')
         else claw.get_wecom_bot_secret_plain() or ''
     )
     payload['wecom_bot_id'] = (
-        '' if effective_runtime_agent_type == 'codex' else claw.wecom_bot_id or ''
+        '' if effective_runtime_agent_type in ('codex', 'codebuddy')
+        else claw.wecom_bot_id or ''
     )
     payload['wecom_enabled'] = bool(claw.wecom_bot_id and claw.wecom_bot_secret)
     payload['owner_wecom_userid'] = owner_wecom_userid

@@ -138,6 +138,29 @@ def create_app(config_name=None):
             try:
                 from sqlalchemy import text
                 with db.engine.begin() as conn:
+                    # Mission Worker delegation (CodeBuddy/Codex/Hermes). The
+                    # selected Worker is allow-listed on the Mission and also
+                    # persisted on each dispatch for immutable audit readback.
+                    for ddl, label in (
+                        (
+                            'ALTER TABLE workflow_missions ADD COLUMN '
+                            # Production still runs MariaDB 10.1, where JSON
+                            # is not a native DDL type. SQLAlchemy's JSON
+                            # serializer remains compatible with LONGTEXT.
+                            'allowed_worker_claw_ids_json LONGTEXT DEFAULT NULL',
+                            'workflow_missions.allowed_worker_claw_ids_json',
+                        ),
+                        (
+                            'ALTER TABLE workflow_mission_dispatches ADD COLUMN '
+                            'worker_claw_id INT DEFAULT NULL',
+                            'workflow_mission_dispatches.worker_claw_id',
+                        ),
+                    ):
+                        try:
+                            conn.execute(text(ddl))
+                            logger.info('已添加 %s 列', label)
+                        except Exception:
+                            pass
                     # test_cases 表添加 module_path 和 created_by
                     for col, coltype in [('module_path', 'VARCHAR(500) DEFAULT ""'), ('created_by', 'VARCHAR(100) DEFAULT ""')]:
                         try:

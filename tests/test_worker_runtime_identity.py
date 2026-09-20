@@ -89,8 +89,23 @@ class WorkerRuntimeValidationTest(unittest.TestCase):
                 })
                 self.assertEqual(runtime['platform'], 'macos')
 
+    def test_codebuddy_agent_direct_runtime_is_supported_without_auth_mode(self):
+        runtime = validate_worker_runtime({
+            'kind': 'claw_worker',
+            'provider': 'codebuddy',
+            'runtime_mode': 'agent_direct',
+            'platform': 'windows-x86_64',
+            'provider_version': 'codebuddy-cli',
+            'source_commit': '76500ef',
+            'source': 'worker',
+        })
+        self.assertEqual(runtime['provider'], 'codebuddy')
+        self.assertEqual(runtime['runtime_mode'], 'agent_direct')
+        self.assertEqual(runtime['platform'], 'windows')
+        self.assertEqual(runtime['auth_mode'], '')
+
     def test_openclaw_is_retired_as_worker_provider(self):
-        with self.assertRaisesRegex(ValueError, 'hermes / codex'):
+        with self.assertRaisesRegex(ValueError, 'hermes / codex / codebuddy'):
             validate_worker_runtime({
                 'kind': 'claw_worker',
                 'provider': 'openclaw',
@@ -209,6 +224,38 @@ class WorkerRuntimeApiTest(unittest.TestCase):
         self.assertEqual(payload['agent_type'], 'codex')
         self.assertEqual(payload['llm_provider'], 'openai')
         self.assertEqual(payload['worker_runtime']['auth_mode'], 'subscription')
+        self.assertNotIn('llm_apply', payload)
+
+    def test_worker_owned_codebuddy_runtime_is_trusted_by_sidecar_config(self):
+        configured = self.client.put(
+            f'/api/v1/openclaws/{self.claw.id}/worker-runtime',
+            json={
+                'config_owner': 'worker',
+                'runtime': {
+                    'kind': 'claw_worker',
+                    'provider': 'codebuddy',
+                    'runtime_mode': 'agent_direct',
+                    'platform': 'windows',
+                    'provider_version': 'codebuddy-cli',
+                    'source': 'worker',
+                },
+            },
+        )
+        self.assertEqual(configured.status_code, 200,
+                         configured.get_data(as_text=True))
+        self.assertTrue(configured.get_json()['has_worker_runtime'])
+        self.assertEqual(configured.get_json()['runtime_provider'], 'codebuddy')
+
+        sidecar = self.client.get(
+            f'/api/openclaws/{self.claw.id}/sidecar-config',
+            headers={'Authorization': f'Bearer {self.token}'},
+        )
+        self.assertEqual(sidecar.status_code, 200, sidecar.get_data(as_text=True))
+        payload = sidecar.get_json()
+        self.assertEqual(payload['agent_type'], 'codebuddy')
+        self.assertEqual(payload['runtime_kind'], 'claw_worker')
+        self.assertEqual(payload['runtime_provider'], 'codebuddy')
+        self.assertEqual(payload['worker_runtime']['auth_mode'], '')
         self.assertNotIn('llm_apply', payload)
 
 

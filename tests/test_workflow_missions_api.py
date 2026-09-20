@@ -39,6 +39,7 @@ from flask import Flask  # noqa: E402
 from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
 from app.models import (  # noqa: E402
+    ClawSidecarConfig,
     OpenClawInstance,
     Project,
     User,
@@ -84,6 +85,28 @@ class WorkflowMissionsApiTest(unittest.TestCase):
             api_token_hash=hash_token(self.other_token), status='工作')
         db.session.add_all([self.main_claw, self.other_claw])
         db.session.flush()
+        db.session.add(ClawSidecarConfig(
+            claw_id=self.other_claw.id,
+            agent_type='codebuddy',
+            config_owner='worker',
+            runtime_config_json={
+                'schema': 1,
+                'kind': 'claw_worker',
+                'provider': 'codebuddy',
+                'runtime_mode': 'agent_direct',
+                'platform': 'windows',
+                'provider_version': 'codebuddy-cli',
+                'auth_mode': '',
+                'llm_provider': '',
+                'llm_model': '',
+                'timiai_project': '',
+                'release_id': '',
+                'source_commit': '',
+                'artifact_sha256': '',
+                'config_digest': '',
+                'source': 'worker',
+            },
+        ))
         self.flow_a = self._definition('mission-flow-a', self.project.id)
         self.flow_b = self._definition('mission-flow-b', self.project.id)
         self.foreign_flow = self._definition(
@@ -199,6 +222,72 @@ class WorkflowMissionsApiTest(unittest.TestCase):
             }, headers=self._headers())
         self.assertEqual(forbidden.status_code, 400)
         self.assertEqual(forbidden.get_json()['code'], 'MISSION_EXECUTOR_OVERRIDE_FORBIDDEN')
+
+    def test_main_agent_can_delegate_to_allowlisted_codebuddy_worker(self):
+        self.flow_a.editor_acl_json = {
+            'claw_ids': [self.other_claw.id], 'user_ids': []}
+        db.session.commit()
+        mission = self._create_mission(
+            allowed_worker_claw_ids=[self.other_claw.id])
+        self.assertEqual(
+            mission['allowed_worker_claw_ids'], [self.other_claw.id])
+        self.assertIn(
+            'worker_claw_id',
+            mission['dispatch_contract']['optional_fields'])
+        with self.client.session_transaction() as session:
+            session.clear()
+
+        dispatched = self.client.post(
+            f"/api/v1/workflow-missions/{mission['id']}/dispatch",
+            json={
+                'workflow_definition_id': self.flow_a.id,
+                'worker_claw_id': self.other_claw.id,
+                'decision_key': 'delegate-to-codebuddy',
+            },
+            headers=self._headers(),
+        )
+
+        self.assertEqual(dispatched.status_code, 201,
+                         dispatched.get_data(as_text=True))
+        self.assertEqual(dispatched.get_json()['worker_claw_id'],
+                         self.other_claw.id)
+        run = db.session.get(
+            WorkflowRun, dispatched.get_json()['workflow_run_id'])
+        self.assertEqual(
+            run.context_json['workflow_start']['worker_claw_id'],
+            self.other_claw.id)
+        self.assertEqual(run.context_json['mission']['worker_claw_id'],
+                         self.other_claw.id)
+
+    def test_mission_rejects_unlisted_or_unauthorized_delegated_worker(self):
+        mission = self._create_mission()
+        with self.client.session_transaction() as session:
+            session.clear()
+        unlisted = self.client.post(
+            f"/api/v1/workflow-missions/{mission['id']}/dispatch",
+            json={
+                'workflow_definition_id': self.flow_a.id,
+                'worker_claw_id': self.other_claw.id,
+            }, headers=self._headers())
+        self.assertEqual(unlisted.status_code, 403)
+        self.assertEqual(unlisted.get_json()['code'],
+                         'MISSION_WORKER_NOT_ALLOWED')
+
+        self._login_admin()
+        allowed = self._create_mission(
+            allowed_worker_claw_ids=[self.other_claw.id],
+            mission_key='mission-worker-without-flow-acl')
+        with self.client.session_transaction() as session:
+            session.clear()
+        forbidden = self.client.post(
+            f"/api/v1/workflow-missions/{allowed['id']}/dispatch",
+            json={
+                'workflow_definition_id': self.flow_a.id,
+                'worker_claw_id': self.other_claw.id,
+            }, headers=self._headers())
+        self.assertEqual(forbidden.status_code, 403)
+        self.assertEqual(forbidden.get_json()['code'],
+                         'MISSION_WORKER_EXECUTE_FORBIDDEN')
 
     def test_main_agent_restarts_blocked_child_without_new_dispatch(self):
         mission = self._create_mission()

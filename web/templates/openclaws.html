@@ -1428,11 +1428,16 @@ function renderClawCard(c) {
     const runtime = c.worker_runtime || {};
     const runtimeProvider = c.runtime_provider || '';
     const runtimeOwner = c.runtime_config_owner || 'hub';
-    const runtimeProviderLabel = runtimeProvider === 'codex' ? 'Codex SDK' : 'Hermes';
+    const runtimeProviderLabel = runtimeProvider === 'codex'
+        ? 'Codex SDK'
+        : (runtimeProvider === 'codebuddy' ? 'CodeBuddy CLI' : 'Hermes');
     const runtimeAuthLabel = runtimeProvider === 'codex'
         ? (runtime.auth_mode === 'timiai_bridge' ? 'TimiAI 接口' : '订阅认证')
-        : (runtime.llm_model || (runtime.llm_provider === 'timiai' ? 'TimiAI' : ''));
-    const deployedAgentName = c.agent_type === 'codex' ? 'Claw Worker' : 'Hermes Agent';
+        : (runtimeProvider === 'codebuddy'
+            ? '本机登录认证'
+            : (runtime.llm_model || (runtime.llm_provider === 'timiai' ? 'TimiAI' : '')));
+    const deployedAgentName = ['codex', 'codebuddy'].includes(c.agent_type)
+        ? 'Claw Worker' : 'Hermes Agent';
     const hasWecom = !!(c.wecom_bot_id || c.has_wecom_bot_secret);
     const isDeployingAgent = ['pending', 'in_progress'].includes(c.agent_deployment_status || '');
     const deployFailed = (c.agent_deployment_status || '') === 'failed';
@@ -2343,7 +2348,8 @@ function _startDeployListPolling(clawId) {
                 if (dep && ['success', 'failed', 'cancelled'].includes(dep.status)) {
                     clearInterval(_deployListPollTimer);
                     _deployListPollTimer = null;
-                    const providerName = dep.agent_type === 'codex' ? 'Claw Worker' : 'Hermes Agent';
+                    const providerName = ['codex', 'codebuddy'].includes(dep.agent_type)
+                        ? 'Claw Worker' : 'Hermes Agent';
                     showToast(dep.status === 'success'
                         ? `${providerName} 部署完成，已通知龙虾王发送企微`
                         : `${providerName} 部署结束，请查看卡片状态`, dep.status === 'success' ? 'success' : 'error');
@@ -2454,7 +2460,8 @@ document.getElementById('create-form').addEventListener('submit', async e => {
         if (result.agent_deployment) {
             const depStatus = result.agent_deployment.status;
             if (['pending', 'in_progress'].includes(depStatus)) {
-                const providerName = result.agent_deployment.agent_type === 'codex' ? 'Claw Worker' : 'Hermes Agent';
+                const providerName = ['codex', 'codebuddy'].includes(result.agent_deployment.agent_type)
+                    ? 'Claw Worker' : 'Hermes Agent';
                 showToast(`OpenClaw 已创建，后台部署 ${providerName} 中；部署完成后会通知龙虾王发送企微`, 'success');
                 _startDeployListPolling(clawId);
             } else {
