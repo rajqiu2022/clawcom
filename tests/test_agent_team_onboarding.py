@@ -38,6 +38,8 @@ class TeamOnboardingTest(unittest.TestCase):
         self.assertEqual({m.claw_id for m in messages}, ids)
         self.assertEqual({c.args[0] for c in wake.call_args_list}, ids)
         for message in messages:
+            self.assertIn('claw_id=%s' % message.claw_id, message.content)
+            self.assertIn('身份不一致或工具不可用时停止', message.content)
             self.assertEqual((message.status, message.direction, message.msg_type), ('pending', 'to_claw', 'text'))
             self.assertIn('手游回归团队', message.content)
             self.assertIn('/agent-teams?project_id=', message.content)
@@ -45,6 +47,29 @@ class TeamOnboardingTest(unittest.TestCase):
             for skill in Skill.query.all():
                 self.assertIn('/api/v1/skills/%s/raw' % skill.id, message.content)
         self.assertEqual(OpenClawSkill.query.count(), 0)
+
+    def test_context_contains_only_own_teams_and_roles_not_display_names(self):
+        from app.services.agent_team_context import build_team_context
+        from app.services.agent_system_context import build_agent_system_context
+        self._setup_team()
+        self.other_claw.name = '旧显示名-高级测试经理'
+        db.session.commit()
+        context = build_team_context(self.other_claw)
+        self.assertEqual(len(context), 1)
+        self.assertEqual(context[0]['primary_manager_claw_id'], self.main_claw.id)
+        self.assertIn('test_executor', context[0]['self']['roles'])
+        self.assertNotIn('primary_manager', context[0]['self']['roles'])
+        payload = build_agent_system_context(self.other_claw, 'codebuddy', [], [], agent_teams=context)
+        rule = next(r for r in payload['system_context']['rules'] if r['name'] == 'agent_team_identity')
+        self.assertIn('不得由名字推断经理', rule['content'])
+        self.assertNotIn('manager_session_id', rule['content'])
+        outsider = OpenClawInstance(name='旁观者', safe_name='observer', claw_tag='observer',
+                                   project_id=self.project.id, owner='other')
+        db.session.add(outsider)
+        db.session.commit()
+        self.assertEqual(build_team_context(outsider), [])
+        self.app.config['AGENT_TEAMS_ENABLED'] = False
+        self.assertEqual(build_team_context(self.other_claw), [])
 
     def test_unchanged_roster_role_change_and_pause_do_not_repeat(self):
         self._setup_team()

@@ -566,12 +566,29 @@ def build_agent_system_context(
     workflow_create_definition_ids: Iterable[int] | None = None,
     configured_policy: Any = None,
     workflow_missions: Iterable[Any] = (),
+    agent_teams: Iterable[dict] = (),
 ) -> dict[str, Any]:
     profiles, active_profile, profile_warnings = build_profile_context(assignments)
     rules = build_rule_context(rule_links)
     workflow_policy, policy_warnings = _resolve_workflow_policy(
         runtime_agent_type, workflow_create_definition_ids, configured_policy)
     trusted_rules = [dict(item) for item in rules]
+    teams = list(agent_teams)
+    if teams:
+        trusted_rules.append({
+            'id': -3, 'name': 'agent_team_identity', 'applied': True,
+            'runtime_generated': True, 'scope': 'invocation',
+            'content': (
+                '当前身份仅以 system_context.identity.claw_id 为准。'
+                '团队岗位独立于 Claw 显示名、旧 role 和 Profile；以以下团队配置为准，'
+                '不得由名字推断经理。配置经理不等于已持有经理任期，派发仍须校验 lease。'
+                '使用当前实例受控 Hub 工具；工具缺失或身份不一致应停止并报告，'
+                '禁止从 ~/.qclaw、其他实例配置、历史消息或记忆搜寻凭据替代当前身份。'
+                '仅能上报自身状态。操作前回读 definition_api 和 activity_api；'
+                '本快照不授予调度权限，也不代表当前空闲或实时状态。\n'
+                + json.dumps(teams, ensure_ascii=False, separators=(',', ':'))
+            ),
+        })
     if _as_text(runtime_agent_type).lower() == 'codex':
         trusted_rules.append(dict(_CODEX_HUB_API_DISCOVERY_RULE))
         create_rule = _codex_workflow_create_rule(

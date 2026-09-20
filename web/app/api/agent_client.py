@@ -1270,6 +1270,14 @@ def claw_sidecar_config(claw_id, claw=None):
         db.session.rollback()
         logger.exception('build workflow Mission grants failed for claw %s', claw_id)
         context_warnings.append('WORKFLOW_MISSION_GRANTS_UNAVAILABLE')
+    team_context = []
+    try:
+        from app.services.agent_team_context import build_team_context
+        team_context = build_team_context(claw)
+    except Exception:
+        db.session.rollback()
+        logger.exception('build agent team context failed for claw %s', claw_id)
+        context_warnings.append('AGENT_TEAM_CONTEXT_UNAVAILABLE')
     try:
         from app.services.agent_system_context import build_agent_system_context
         payload.update(build_agent_system_context(
@@ -1281,6 +1289,7 @@ def claw_sidecar_config(claw_id, claw=None):
             workflow_create_definition_ids=workflow_create_definition_ids,
             configured_policy=cfg.system_context_policy_json,
             workflow_missions=active_workflow_missions,
+            agent_teams=team_context,
         ))
     except Exception:
         logger.exception('build agent system context failed for claw %s', claw_id)
