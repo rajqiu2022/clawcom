@@ -79,6 +79,7 @@ def get_plan_supervision(plan_id):
         'has_more': bool(events and events[-1].sequence < through),
         'through_cursor': through,
         'run_ids': [r.workflow_run_id for r in runs],
+        'task_dispatches': svc.task_dispatch_receipts(sup),
         'lease_valid': bool(svc.available(sup) and sup.status == 'leased'
                             and sup.lease_expires_at and sup.lease_expires_at > _now())})
 
@@ -111,24 +112,11 @@ def start_plan_supervision(plan_id):
         svc.fail('PLAN_DATES_INVALID', '计划日期无效或已结束', 400)
     if plan.status not in ('draft', 'active'):
         svc.fail('PLAN_NOT_STARTABLE', '已完成/归档计划不可启动')
-    hashed = svc.digest(body)
-    if sup and sup.start_hash != hashed:
-        svc.fail('PLAN_ALREADY_SUPERVISED', '计划已绑定监督工作项；不可重复启动或更换身份')
-    if not sup:
-        sup = PlanSupervisor(plan_id=plan_id, team_id=team_id, orchestrator_claw_id=claw_id,
-                             start_hash=hashed, status='waiting', cursor=0,
-                             acknowledged_cursor=0, fencing_token=0, expired_turns=0)
-        db.session.add(sup)
-    def apply():
-        plan.status = 'active'
-        sup.next_check_at = max(_now(), datetime.combine(plan.start_date, time.min))
-        db.session.flush()
-        svc.add_event(plan_id, 'plan_started', ['start', plan_id], {'orchestrator_claw_id': claw_id})
-        svc.pump(sup)
-        return {'scheduled': True}
-    result = svc.receipt(sup, 'start', body, apply)
+    sup, result = svc.bootstrap(plan, team_id, claw_id, body)
+    target = result.pop('wake_claw_id', None)
     db.session.commit()
-    svc.wake(claw_id)
+    if target:
+        svc.wake(target)
     return jsonify(result)
 
 
@@ -146,6 +134,7 @@ def heartbeat_plan_supervision(plan_id):
     svc.require_lease(sup, claw.id, payload())
     now = _now()
     sup.lease_expires_at = min(now + timedelta(seconds=180), sup.turn_deadline_at)
+    svc.ensure_manager_tenure(sup, now)
     db.session.commit()
     return jsonify({'supervision': sup.to_dict()})
 

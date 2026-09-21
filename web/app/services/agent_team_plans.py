@@ -110,6 +110,9 @@ def overview(team, period, raw_date, limit, offset):
                'skipped': counts.get('skipped', 0), 'overdue': tasks.filter(overdue).count()}
     rows = plans.order_by(TestPlan.start_date.desc(), TestPlan.id.desc()).offset(offset).limit(limit).all()
     ids = [p.id for p in rows]
+    from app.models_plan_supervision import PlanSupervisor
+    supervisors = {row.plan_id: row for row in PlanSupervisor.query.filter(
+        PlanSupervisor.plan_id.in_(ids)).all()} if ids else {}
     period_counts = dict(tasks.filter(TestTask.plan_id.in_(ids)).with_entities(
         TestTask.plan_id, func.count(TestTask.id)).group_by(TestTask.plan_id).all()) if ids else {}
     unscheduled = dict(db.session.query(TestTask.plan_id, func.count(TestTask.id)).filter(
@@ -129,6 +132,8 @@ def overview(team, period, raw_date, limit, offset):
         preview = selected.outerjoin(OpenClawInstance, TestTask.assignee_claw_id == OpenClawInstance.id).with_entities(
             TestTask, OpenClawInstance.name).order_by(TestTask.end_date.is_(None), TestTask.end_date,
                                                    TestTask.priority, TestTask.id).limit(5).all()
+        supervisor = supervisors.get(plan.id)
+        supervisor_data = supervisor.to_dict() if supervisor else None
         items.append({'id': plan.id, 'name': plan.name, 'status': plan.status,
             'team_id': team.id, 'start_date': str(plan.start_date), 'end_date': str(plan.end_date),
             'url': '/testplans?plan_id=%s' % plan.id,
@@ -136,6 +141,16 @@ def overview(team, period, raw_date, limit, offset):
             'progress': round(all_counts.get('completed', 0) / plan_total * 100) if plan_total else 0,
             'period_tasks': period_counts.get(plan.id, 0),
             'unscheduled_tasks': unscheduled.get(plan.id, 0),
+            'supervision': ({
+                'status': supervisor_data['status'],
+                'orchestrator_claw_id': supervisor_data['orchestrator_claw_id'],
+                'mission_id': supervisor_data['mission_id'],
+                'next_check_at': supervisor_data['next_check_at'],
+                'manager_lease_active': bool(
+                    (supervisor_data.get('manager_lease') or {}).get('active')),
+                'lease_expires_at': (
+                    (supervisor_data.get('manager_lease') or {}).get('expires_at')),
+            } if supervisor_data else None),
             'tasks': [{'id': t.id, 'name': t.name, 'status': t.status, 'priority': t.priority,
                        'progress': max(0, min(100, t.progress or 0)),
                        'assignee': name or t.assignee_username or '未指派',

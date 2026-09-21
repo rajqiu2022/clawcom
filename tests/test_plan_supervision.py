@@ -5,7 +5,8 @@ from unittest.mock import patch
 
 import test_workflow_missions_api as fixtures
 from app import db
-from app.models import (TestPlan, TestTask, ClawMessage, WorkflowRun, WorkflowRunStep,
+from app.models import (AgentTeam, AgentTeamMember, AgentTeamMission, MissionStage,
+                        TestPlan, TestTask, ClawMessage, WorkflowRun, WorkflowRunStep,
                         WorkflowMission, WorkflowMissionDispatch, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
 from app.services import plan_supervision as svc
@@ -80,10 +81,14 @@ class PlanSupervisionTest(unittest.TestCase):
             'orchestrator_claw_id': self.other_claw.id}).status_code, 409)
 
     def scoped_team(self):
-        from app.models import AgentTeam
+        self.app.config.update(
+            AGENT_TEAMS_ENABLED=True,
+            AGENT_TEAM_CONTRACTS_ENABLED=True,
+            AGENT_TEAMS_PROJECT_IDS=[self.project.id],
+        )
         team = AgentTeam(project_id=self.project.id, name='First team', objective='Scoped test',
                          primary_manager_claw_id=self.main_claw.id, status='active',
-                         policy_json={'allowed_definition_ids': [], 'max_child_runs': 1})
+                         policy_json={'allowed_definition_ids': [self.flow_a.id], 'max_child_runs': 3})
         db.session.add(team)
         db.session.commit()
         self.app.config['PLAN_SUPERVISION_TEAM_IDS'] = str(team.id)
@@ -99,6 +104,9 @@ class PlanSupervisionTest(unittest.TestCase):
         response = self.post('start', dict(base, team_id=team.id))
         self.assertEqual(response.status_code, 200, response.json)
         self.assertEqual(response.json['supervision']['team_id'], team.id)
+        self.assertIsNotNone(response.json['supervision']['mission_id'])
+        self.assertTrue(response.json['supervision']['manager_lease']['active'])
+        self.assertEqual(WorkflowMission.query.count(), 1)
         self.assertEqual(WorkflowRun.query.count(), 0)
         self.agent()
         self.claim()
@@ -111,6 +119,105 @@ class PlanSupervisionTest(unittest.TestCase):
             db.session.commit()
         self.app.config['PLAN_SUPERVISION_TEAM_IDS'] = ''
         self.assertEqual(self.post('heartbeat', self.credentials()).status_code, 409)
+
+    def test_team_bootstrap_creates_member_stages_and_claim_receipt(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='执行 Flow', status='assigned',
+            assignee_claw_id=self.other_claw.id, task_type='automation')
+        manager_task = TestTask(
+            plan_id=self.plan.id, name='历史错误经理执行项', status='assigned',
+            assignee_claw_id=self.main_claw.id, task_type='automation')
+        # Use a claimable worker task so the test covers the authoritative
+        # Worker claim -> TestTask in_progress transition.
+        definition = dict(self.flow_a.definition_json)
+        definition['steps'] = [dict(definition['steps'][0], type='worker_task')]
+        self.flow_a.definition_json = definition
+        db.session.add_all([task, manager_task])
+        db.session.commit()
+
+        started = self.post('start', {
+            'command_key': 'team-bootstrap', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.assertEqual(started.status_code, 200, started.json)
+        supervisor = self.sup()
+        mission = db.session.get(WorkflowMission, supervisor.mission_id)
+        binding = db.session.get(AgentTeamMission, mission.id)
+        stage = MissionStage.query.filter_by(mission_id=mission.id).one()
+        self.assertEqual(mission.control_mode, 'team_managed')
+        self.assertEqual(mission.allowed_worker_claw_ids_json, [self.other_claw.id])
+        self.assertEqual(binding.team_id, team.id)
+        self.assertEqual(stage.assigned_claw_id, self.other_claw.id)
+        self.assertEqual(stage.input_snapshot_json['test_task_id'], task.id)
+        self.assertEqual(task.status, 'assigned')
+        gap = PlanSupervisorEvent.query.filter_by(
+            kind='task_assignment_gap').one()
+        self.assertEqual(gap.payload_json['task_id'], manager_task.id)
+        self.assertEqual(gap.payload_json['reason'], 'manager_cannot_execute')
+
+        self.agent()
+        claim = self.claim()
+        manager = claim['supervision']['manager_lease']
+        dispatched = self.client.post(
+            '/api/v1/workflow-missions/%s/dispatch' % mission.id,
+            headers=self._headers(), json={
+                'workflow_definition_id': self.flow_a.id,
+                'stage_key': stage.stage_key,
+                'decision_key': 'dispatch-task-%s' % task.id,
+                'manager_epoch': manager['epoch'],
+                'manager_session_id': manager['session_id'],
+                'plan_supervision': self.credentials(),
+            })
+        self.assertEqual(dispatched.status_code, 201, dispatched.json)
+        db.session.refresh(task)
+        self.assertEqual(task.status, 'assigned')
+        premature = self.client.put(
+            '/api/v1/test-plans/%s/tasks/%s' % (self.plan.id, task.id),
+            headers=self._headers(), json={'status': 'in_progress'})
+        self.assertEqual(premature.status_code, 409, premature.json)
+        self.assertEqual(
+            premature.json['code'], 'TEST_TASK_DISPATCH_RECEIPT_REQUIRED')
+
+        run_id = dispatched.json['workflow_run_id']
+        run = db.session.get(WorkflowRun, run_id)
+        step = WorkflowRunStep.query.filter_by(run_id=run_id).one()
+        run.status = 'running'
+        step.status = 'running'
+        db.session.commit()
+        claimed = self.client.post(
+            '/api/v1/workflow-runs/%s/steps/%s/claim' % (run_id, step.step_id),
+            headers=self._headers(self.other_token),
+            json={'worker_id': 'worker-other', 'lease_seconds': 120})
+        self.assertEqual(claimed.status_code, 200, claimed.json)
+        db.session.refresh(task)
+        self.assertEqual(task.status, 'in_progress')
+        self.assertGreaterEqual(task.progress, 1)
+        event = PlanSupervisorEvent.query.filter_by(kind='task_claimed').one()
+        self.assertEqual(event.payload_json['task_id'], task.id)
+
+    def test_active_team_plan_without_supervisor_is_repaired_by_watchdog(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        self.plan.status = 'active'
+        db.session.add(TestTask(
+            plan_id=self.plan.id, name='watchdog task', status='pending',
+            assignee_claw_id=self.other_claw.id, task_type='automation'))
+        db.session.commit()
+
+        self.assertIsNone(self.sup())
+        self.assertEqual(svc.sweep(), 1)
+        self.assertIsNotNone(self.sup())
+        self.assertIsNotNone(self.sup().mission_id)
+        self.assertEqual(WorkflowMission.query.count(), 1)
+        self.assertEqual(MissionStage.query.count(), 1)
+        self.assertEqual(ClawMessage.query.filter_by(msg_type='plan_supervision').count(), 1)
 
     def test_empty_team_allowlist_fails_closed_and_capability_is_scoped(self):
         team = self.scoped_team()

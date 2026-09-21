@@ -1,9 +1,12 @@
 """Explicit team ownership, manager authoring, schedule projections and no dispatch."""
 import unittest
 from datetime import date
+from unittest.mock import patch
 import test_agent_teams_api as fixtures
 from app import db
-from app.models import AgentTeam, TestPlan, TestTask, WorkflowRun, WorkflowMission
+from app.models import (AgentTeam, ClawMessage, MissionStage, TestPlan,
+                        TestTask, WorkflowRun, WorkflowMission)
+from app.models_plan_supervision import PlanSupervisor
 
 
 class AgentTeamPlansTest(unittest.TestCase):
@@ -36,6 +39,34 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(WorkflowMission.query.count(), 0)
         self.assertEqual(self.client.put('/api/v1/test-plans/%s' % plan['id'],
             headers=self._headers(), json={'name':'已调整'}).status_code, 200)
+
+    def test_active_team_plan_bootstraps_supervisor_mission_and_task_stage(self):
+        self.app.config.update(
+            PLAN_SUPERVISION_ENABLED=True,
+            PLAN_SUPERVISION_TEAM_IDS=str(self.team_id),
+        )
+        with patch('app.services.plan_supervision.wake') as wake:
+            plan = self.create(status='active')
+            supervisor = db.session.get(PlanSupervisor, plan['id'])
+            self.assertIsNotNone(supervisor)
+            self.assertIsNotNone(supervisor.mission_id)
+            self.assertEqual(WorkflowRun.query.count(), 0)
+            self.assertEqual(WorkflowMission.query.count(), 1)
+            self.assertEqual(ClawMessage.query.filter_by(
+                msg_type='plan_supervision').count(), 1)
+            wake.assert_called_once_with(self.main_claw.id)
+
+            task = self.client.post(
+                '/api/v1/test-plans/%s/tasks' % plan['id'],
+                headers=self._headers(), json={
+                    'name': '编辑器回归', 'task_type': 'automation',
+                    'assignee_claw_id': self.other_claw.id,
+                })
+            self.assertEqual(task.status_code, 201, task.json)
+            stage = MissionStage.query.filter_by(
+                mission_id=supervisor.mission_id).one()
+            self.assertEqual(stage.assigned_claw_id, self.other_claw.id)
+            self.assertEqual(stage.input_snapshot_json['test_task_id'], task.json['id'])
 
     def test_non_manager_cannot_create_edit_attach_or_create_tasks_even_same_owner(self):
         denied = self.client.post(self.url, headers=self._headers(self.other_token), json=self.body)
@@ -98,6 +129,7 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(day['items'][0]['total_tasks'],6)
         self.assertEqual(day['items'][0]['completed_tasks'],1)
         self.assertEqual(day['items'][0]['progress'],17)
+        self.assertIsNone(day['items'][0]['supervision'])
         week = self.client.get(self.url+'?period=week&date=2026-09-27',headers=self._headers()).json
         self.assertEqual(week['start_date'],'2026-09-21')
         self.assertEqual(week['summary']['total'],4)

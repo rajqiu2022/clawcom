@@ -633,7 +633,21 @@ def create_test_plan(team_id=None):
         created_by=created_by,
     )
     db.session.add(plan)
+    db.session.flush()
+    wake_target = None
+    if team and plan.status == 'active':
+        from app.services import plan_supervision as plan_guard
+        if plan_guard.team_enabled(team.id):
+            _, result = plan_guard.bootstrap(
+                plan, team.id, team.primary_manager_claw_id, {
+                    'command_key': 'auto-active-plan:%s' % plan.id,
+                    'team_id': team.id,
+                    'orchestrator_claw_id': team.primary_manager_claw_id,
+                })
+            wake_target = result.pop('wake_claw_id', None)
     db.session.commit()
+    if wake_target:
+        plan_guard.wake(wake_target)
 
     # 更新迭代统计
     if plan.iteration_id:
@@ -676,7 +690,6 @@ def update_test_plan(plan_id):
         plan.team_id = team.id
 
     old_iteration_id = plan.iteration_id
-
     updatable_fields = ['name', 'description', 'version_type', 'version_name',
                         'start_date', 'end_date', 'project_id', 'iteration_id',
                         'tapd_iteration_ids', 'tapd_iteration_names', 'tapd_workspace_id', 'status']
@@ -705,7 +718,20 @@ def update_test_plan(plan_id):
         if it:
             _recalc_iteration_stats(it)
 
+    wake_target = None
+    if (team and plan.status == 'active'
+            and plan_guard.team_enabled(team.id)
+            and not db.session.get(PlanSupervisor, plan.id)):
+        _, result = plan_guard.bootstrap(
+            plan, team.id, team.primary_manager_claw_id, {
+                'command_key': 'auto-active-plan:%s' % plan.id,
+                'team_id': team.id,
+                'orchestrator_claw_id': team.primary_manager_claw_id,
+            })
+        wake_target = result.pop('wake_claw_id', None)
     db.session.commit()
+    if wake_target:
+        plan_guard.wake(wake_target)
     return jsonify(plan.to_dict())
 
 
@@ -1206,6 +1232,12 @@ def create_test_task(plan_id):
             db.session.add(tc)
         task.total_cases = len(cases)
 
+    from app.models_plan_supervision import PlanSupervisor
+    from app.services import plan_supervision as plan_guard
+    supervisor = db.session.get(PlanSupervisor, plan.id)
+    if supervisor:
+        plan_guard.sync_plan_stages(supervisor)
+
     _recalc_plan_stats(plan)
     db.session.commit()
 
@@ -1232,6 +1264,9 @@ def update_test_task(plan_id, task_id):
                         'priority', 'status', 'progress',
                         'result_summary', 'bug_count']
     old_status = task.status
+    if data.get('status') == 'in_progress' and old_status != 'in_progress':
+        from app.services import plan_supervision as plan_guard
+        plan_guard.require_task_dispatch_receipt(task)
     for field in updatable_fields:
         if field in data:
             setattr(task, field, data[field])
@@ -1841,6 +1876,9 @@ def report_task_progress(claw_id, task_id):
 
     # 更新任务状态
     if data.get('status'):
+        if data['status'] == 'in_progress' and task.status != 'in_progress':
+            from app.services import plan_supervision as plan_guard
+            plan_guard.require_task_dispatch_receipt(task)
         task.status = data['status']
     if data.get('progress') is not None:
         task.progress = data['progress']

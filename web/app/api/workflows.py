@@ -4754,6 +4754,11 @@ def claim_workflow_step(run_id, step_id):
     step.claimed_claw_id = claw.id
     step.claim_lease_seconds = lease_seconds
     step.claim_expires_at = now + timedelta(seconds=lease_seconds)
+    # For supervised Test Plans, assignment/dispatch alone is not execution.
+    # The first authoritative Worker claim promotes the linked TestTask and
+    # persists a fenced receipt in the Plan event stream.
+    from app.services.plan_supervision import record_workflow_claim
+    record_workflow_claim(run.id, claw.id, worker_id, now)
     body = {
         'ok': True,
         'step': _step_runtime_payload(step),

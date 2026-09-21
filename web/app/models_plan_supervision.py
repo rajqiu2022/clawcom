@@ -1,6 +1,6 @@
 """Plan-scoped supervision, durable events and command receipts."""
 from app import db
-from app.models import _now
+from app.models import AgentTeam, _now
 
 
 class PlanSupervisor(db.Model):
@@ -31,17 +31,36 @@ class PlanSupervisor(db.Model):
     def to_dict(self):
         def stamp(value):
             return value.isoformat() + '+08:00' if value else None
-        return {name: getattr(self, name) for name in (
+        manager = None
+        if self.team_id:
+            team = db.session.get(AgentTeam, self.team_id)
+            if team:
+                manager = {
+                    'active': bool(
+                        team.status == 'active'
+                        and team.active_manager_claw_id == self.orchestrator_claw_id
+                        and team.manager_session_id
+                        and team.manager_lease_expires_at
+                        and team.manager_lease_expires_at > _now()),
+                    'epoch': int(team.manager_epoch or 0),
+                    'manager_claw_id': team.active_manager_claw_id,
+                    'session_id': team.manager_session_id or '',
+                    'expires_at': stamp(team.manager_lease_expires_at),
+                }
+        payload = {name: getattr(self, name) for name in (
             'plan_id', 'team_id', 'orchestrator_claw_id', 'mission_id', 'status', 'cursor',
             'acknowledged_cursor', 'resume_condition', 'wake_message_id', 'lease_owner',
-            'fencing_token', 'lease_cursor', 'expired_turns')} | {
+            'fencing_token', 'lease_cursor', 'expired_turns')}
+        payload.update({
             'work_item_id': 'plan-supervisor:%s' % self.plan_id,
             'next_check_at': stamp(self.next_check_at),
             'last_progress_at': stamp(self.last_progress_at),
             'lease_expires_at': stamp(self.lease_expires_at),
             'turn_deadline_at': stamp(self.turn_deadline_at),
             'last_decision': self.last_decision_json or {},
-        }
+            'manager_lease': manager,
+        })
+        return payload
 
 
 class PlanSupervisorEvent(db.Model):

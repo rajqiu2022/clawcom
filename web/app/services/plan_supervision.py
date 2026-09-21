@@ -1,4 +1,5 @@
 """Database-driven Plan supervision. No model calls and no implicit Flow grants."""
+import copy
 import hashlib
 import json
 import re
@@ -6,8 +7,10 @@ from datetime import datetime, time, timedelta, timezone
 
 from flask import current_app
 from app import db
-from app.models import (AgentTeam, ClawMessage, OpenClawInstance, TestPlan, TestTask,
-                        WorkflowMission, WorkflowMissionDispatch, WorkflowRun, WorkflowRunStep, _now)
+from app.models import (AgentTeam, AgentTeamMission, AuditLog, ClawMessage,
+                        MissionStage, OpenClawInstance, TestPlan, TestTask,
+                        WorkflowMission, WorkflowMissionDispatch, WorkflowRun,
+                        WorkflowRunStep, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
 
 
@@ -42,7 +45,7 @@ def team_capability(team_id):
     return {'enabled': team_enabled(team_id), 'contract': 'hub.plan_supervision.v1',
             'start_requires': ['team_id', 'orchestrator_claw_id', 'command_key'],
             'supervisor_api': '/api/v1/test-plans/{plan_id}/supervision',
-            'worker_lease_receipt_required': True, 'auto_start': False}
+            'worker_lease_receipt_required': True, 'auto_start': bool(team_enabled(team_id))}
 
 
 def fail(code, message, status=409):
@@ -70,6 +73,320 @@ def parse_time(value):
 
 def locked(plan_id):
     return PlanSupervisor.query.filter_by(plan_id=plan_id).with_for_update().first()
+
+
+def manager_lease_payload(sup, now=None):
+    """Return the manager fencing receipt paired with a Supervisor lease."""
+    if not sup or not sup.team_id:
+        return None
+    now = now or _now()
+    team = db.session.get(AgentTeam, sup.team_id)
+    if not team:
+        return None
+    active = bool(
+        team.status == 'active'
+        and team.active_manager_claw_id == sup.orchestrator_claw_id
+        and team.manager_session_id
+        and team.manager_lease_expires_at
+        and team.manager_lease_expires_at > now)
+    return {
+        'active': active,
+        'epoch': int(team.manager_epoch or 0),
+        'manager_claw_id': team.active_manager_claw_id,
+        'session_id': team.manager_session_id or '',
+        'expires_at': (
+            team.manager_lease_expires_at.isoformat() + '+08:00'
+            if team.manager_lease_expires_at else None),
+    }
+
+
+def ensure_manager_tenure(sup, now=None, ttl_seconds=300):
+    """Acquire/renew the team manager lease for one fenced plan Supervisor.
+
+    A live lease held by another manager is never stolen.  An expired lease is
+    reacquired with a stable plan-scoped session so Worker restarts can recover
+    from Hub state instead of chat history.
+    """
+    if not sup.team_id:
+        return None
+    now = now or _now()
+    team = (AgentTeam.query.filter_by(id=sup.team_id)
+            .populate_existing().with_for_update().first())
+    if (not team or team.status != 'active'
+            or team.project_id != db.session.get(TestPlan, sup.plan_id).project_id
+            or team.primary_manager_claw_id != sup.orchestrator_claw_id):
+        fail('PLAN_TEAM_NOT_ENABLED', '团队已失效，或计划监督者不再是主测试经理', 409)
+    live = bool(team.manager_lease_expires_at and team.manager_lease_expires_at > now)
+    if live and team.active_manager_claw_id != sup.orchestrator_claw_id:
+        fail('PLAN_MANAGER_LEASE_HELD', '另一测试经理仍持有有效调度任期', 409)
+    acquired = not live
+    if acquired:
+        team.manager_epoch = int(team.manager_epoch or 0) + 1
+        team.active_manager_claw_id = sup.orchestrator_claw_id
+        team.manager_session_id = 'plan-supervisor:%s:%s' % (
+            sup.plan_id, team.manager_epoch)
+    elif not team.manager_session_id:
+        fail('PLAN_MANAGER_LEASE_INVALID', '当前经理任期缺少会话凭据', 409)
+    team.manager_lease_expires_at = now + timedelta(
+        seconds=max(30, min(int(ttl_seconds or 300), 300)))
+    if acquired:
+        add_event(sup.plan_id, 'manager_lease_acquired',
+                  ['manager-lease', team.manager_epoch], {
+                      'manager_claw_id': sup.orchestrator_claw_id,
+                      'manager_epoch': team.manager_epoch,
+                  }, now)
+    return manager_lease_payload(sup, now)
+
+
+def _task_assignment(team, task):
+    if not task.assignee_claw_id:
+        return None
+    if task.assignee_claw_id in (
+            team.primary_manager_claw_id, team.backup_manager_claw_id):
+        # A test manager owns orchestration and review, never an execution
+        # Stage.  Historical plans may still point a task at the manager; keep
+        # that visible as an assignment gap so it can be reassigned explicitly.
+        return None
+    members = [row for row in team.members
+               if row.claw_id == task.assignee_claw_id]
+    if not members:
+        return None
+    text = '%s %s' % (task.name or '', task.description or '')
+    prefer_executor = task.task_type in (
+        'functional', 'automation', 'activity', 'performance',
+        'compatibility', 'security', 'interface')
+    rows = sorted(members, key=lambda row: (
+        0 if ((row.role_key == 'test_executor') == prefer_executor) else 1,
+        row.role_key))
+    member = rows[0]
+    if member.role_key != 'test_executor':
+        return {'role_key': member.role_key, 'specialty': None}
+    specialties = sorted(set(member.specialties_json or []))
+    choices = []
+    if task.task_type == 'performance':
+        choices.append('client_performance')
+    if re.search(r'android|ios|adb|手机|微信|包', text, re.I):
+        choices.append('mobile_package')
+    if task.task_type == 'automation' or re.search(r'unity|编辑器|flow\s*#?12', text, re.I):
+        choices.append('editor')
+    specialty = next((item for item in choices if item in specialties),
+                     specialties[0] if specialties else None)
+    return {'role_key': 'test_executor', 'specialty': specialty}
+
+
+def _stage_snapshot(team, task, assignment):
+    return {
+        'test_plan_id': task.plan_id,
+        'test_task_id': task.id,
+        'test_task_name': task.name,
+        'test_task_type': task.task_type,
+        'test_task_priority': task.priority,
+        'scheduled_start_date': str(task.start_date) if task.start_date else None,
+        'scheduled_end_date': str(task.end_date) if task.end_date else None,
+        'team_assignment': {
+            'team_id': team.id,
+            'team_version': team.version,
+            'role_key': assignment['role_key'],
+            'specialty': assignment['specialty'],
+        },
+    }
+
+
+def sync_plan_stages(sup):
+    """Append immutable stages for newly assigned non-terminal TestTasks."""
+    if not sup or not sup.mission_id or not sup.team_id:
+        return 0
+    team = db.session.get(AgentTeam, sup.team_id)
+    mission = db.session.get(WorkflowMission, sup.mission_id)
+    binding = db.session.get(AgentTeamMission, sup.mission_id)
+    if not team or not mission or not binding:
+        fail('PLAN_MISSION_INCOMPLETE', '计划 Mission 缺少团队绑定', 409)
+    existing = {}
+    for stage in MissionStage.query.filter_by(mission_id=mission.id).all():
+        task_id = (stage.input_snapshot_json or {}).get('test_task_id')
+        if type(task_id) is int:
+            existing[task_id] = stage
+    created = 0
+    for task in TestTask.query.filter_by(plan_id=sup.plan_id).order_by(TestTask.id).all():
+        if task.id in existing or task.status in ('completed', 'skipped'):
+            continue
+        assignment = _task_assignment(team, task)
+        if not assignment:
+            reason = ('manager_cannot_execute'
+                      if task.assignee_claw_id in (
+                          team.primary_manager_claw_id,
+                          team.backup_manager_claw_id)
+                      else 'missing_or_invalid_team_member')
+            add_event(sup.plan_id, 'task_assignment_gap',
+                      ['task-assignment-gap', task.id, task.assignee_claw_id], {
+                          'task_id': task.id,
+                          'assignee_claw_id': task.assignee_claw_id,
+                          'reason': reason,
+                      })
+            continue
+        snapshot = _stage_snapshot(team, task, assignment)
+        db.session.add(MissionStage(
+            mission_id=mission.id, stage_key='test_task_%s' % task.id,
+            stage_version=1, role_key=assignment['role_key'],
+            assigned_claw_id=task.assignee_claw_id, state='ready',
+            input_snapshot_json=snapshot, evidence_refs_json=[]))
+        add_event(sup.plan_id, 'task_stage_created',
+                  ['task-stage', task.id], {
+                      'task_id': task.id,
+                      'stage_key': 'test_task_%s' % task.id,
+                      'assigned_claw_id': task.assignee_claw_id,
+                  })
+        created += 1
+    if created:
+        db.session.flush()
+        stages = MissionStage.query.filter_by(mission_id=mission.id).order_by(
+            MissionStage.stage_key, MissionStage.stage_version).all()
+        manifest = [{
+            'stage_key': stage.stage_key,
+            'role_key': stage.role_key,
+            'assigned_claw_id': stage.assigned_claw_id,
+            'input_snapshot': stage.input_snapshot_json or {},
+        } for stage in stages]
+        binding.plan_sha256 = digest(manifest)
+        mission.version = int(mission.version or 1) + 1
+        context = dict(mission.context_json or {})
+        context['test_task_ids'] = sorted(
+            (stage.input_snapshot_json or {}).get('test_task_id')
+            for stage in stages
+            if type((stage.input_snapshot_json or {}).get('test_task_id')) is int)
+        context['stage_count'] = len(stages)
+        mission.context_json = context
+    return created
+
+
+def ensure_team_mission(sup):
+    """Create/recover the one durable Mission owned by a team Plan."""
+    if not sup.team_id:
+        return None
+    plan = db.session.get(TestPlan, sup.plan_id)
+    team = db.session.get(AgentTeam, sup.team_id)
+    if not plan or not team:
+        fail('PLAN_TEAM_NOT_ENABLED', '计划或团队不存在', 409)
+    if sup.mission_id:
+        mission = db.session.get(WorkflowMission, sup.mission_id)
+        if not mission:
+            fail('PLAN_MISSION_INCOMPLETE', '监督记录引用的 Mission 不存在', 409)
+        sync_plan_stages(sup)
+        return mission
+    mission_key = 'plan-supervisor-%s' % plan.id
+    mission = WorkflowMission.query.filter_by(mission_key=mission_key).first()
+    if mission:
+        binding = db.session.get(AgentTeamMission, mission.id)
+        if (mission.project_id != plan.project_id
+                or mission.main_claw_id != sup.orchestrator_claw_id
+                or not binding or binding.team_id != team.id):
+            fail('PLAN_MISSION_CONFLICT', '稳定 Mission key 已被不兼容记录占用', 409)
+    else:
+        excluded = {team.primary_manager_claw_id, team.backup_manager_claw_id}
+        allowed_workers = sorted({row.claw_id for row in team.members
+                                  if row.claw_id not in excluded})
+        mission = WorkflowMission(
+            mission_key=mission_key, project_id=plan.project_id,
+            main_claw_id=sup.orchestrator_claw_id,
+            objective='监督测试计划 #%s：%s' % (plan.id, plan.name),
+            status='active', control_mode='team_managed',
+            allowed_definition_ids_json=sorted(set(
+                (team.policy_json or {}).get('allowed_definition_ids') or [])),
+            denied_definition_ids_json=[],
+            allowed_worker_claw_ids_json=allowed_workers,
+            max_child_runs=int((team.policy_json or {}).get('max_child_runs') or 20),
+            child_run_count=0, max_retries_per_flow=3,
+            allow_external_notification=False, allow_destructive_actions=False,
+            context_json={
+                'plan_supervision_id': plan.id,
+                'test_plan_id': plan.id,
+                'team_id': team.id,
+                'created_by': 'hub_plan_supervisor',
+            },
+            created_by_type='system', created_by_id=0,
+            created_by_name='Hub Plan Supervisor', expires_at=ends_at(plan))
+        db.session.add(mission)
+        db.session.flush()
+        db.session.add(AgentTeamMission(
+            mission_id=mission.id, team_id=team.id, team_version=team.version,
+            snapshot_json={
+                'primary_manager_claw_id': team.primary_manager_claw_id,
+                'backup_manager_claw_id': team.backup_manager_claw_id,
+                'policy': copy.deepcopy(team.policy_json or {}),
+                'members': [row.to_dict() for row in team.members],
+                'manager_epoch_at_creation': team.manager_epoch,
+            }))
+        db.session.add(AuditLog(
+            action='create', resource_type='workflow_mission',
+            resource_id=mission.id, resource_name=mission.mission_key,
+            operator='Hub Plan Supervisor', ip_address='',
+            detail=json.dumps({
+                'plan_id': plan.id, 'team_id': team.id,
+                'main_claw_id': sup.orchestrator_claw_id,
+                'allowed_worker_claw_ids': allowed_workers,
+            }, ensure_ascii=False, sort_keys=True)))
+    sup.mission_id = mission.id
+    db.session.flush()
+    sync_plan_stages(sup)
+    add_event(sup.plan_id, 'mission_created', ['mission', mission.id], {
+        'mission_id': mission.id,
+        'stage_count': MissionStage.query.filter_by(mission_id=mission.id).count(),
+    })
+    return mission
+
+
+def bootstrap(plan, team_id, claw_id, body, now=None):
+    """Atomically activate Plan -> manager tenure -> Supervisor -> Mission."""
+    now = now or _now()
+    identity_hash = digest({
+        'plan_id': plan.id, 'team_id': team_id,
+        'orchestrator_claw_id': claw_id,
+    })
+    sup = locked(plan.id)
+    if sup and sup.start_hash != identity_hash:
+        fail('PLAN_ALREADY_SUPERVISED', '计划已绑定监督工作项；不可更换团队或身份')
+    if not sup:
+        sup = PlanSupervisor(
+            plan_id=plan.id, team_id=team_id, orchestrator_claw_id=claw_id,
+            start_hash=identity_hash, status='waiting', cursor=0,
+            acknowledged_cursor=0, fencing_token=0, expired_turns=0)
+        db.session.add(sup)
+        db.session.flush()
+
+    wake_target = {'claw_id': None}
+
+    def apply():
+        plan.status = 'active'
+        sup.next_check_at = max(now, datetime.combine(plan.start_date, time.min))
+        manager = ensure_manager_tenure(sup, now)
+        mission = ensure_team_mission(sup) if team_id else None
+        add_event(plan.id, 'plan_started', ['start', plan.id], {
+            'orchestrator_claw_id': claw_id,
+            'mission_id': mission.id if mission else None,
+        }, now)
+        target = pump(sup, now)
+        wake_target['claw_id'] = target
+        return {
+            'scheduled': True,
+            'mission_id': mission.id if mission else None,
+            'stage_count': (MissionStage.query.filter_by(
+                mission_id=mission.id).count() if mission else 0),
+            'manager_lease': manager,
+        }
+
+    result = receipt(sup, 'start', body, apply)
+    # Older stored receipts predate the manager/Mission bootstrap.  Repair the
+    # durable state before returning instead of replaying a false success.
+    if team_id and (not sup.mission_id or not manager_lease_payload(sup, now)['active']):
+        result.update(apply())
+        record = db.session.get(PlanSupervisorReceipt, result['receipt_id'])
+        if record:
+            record.response_json = dict(result, supervision=sup.to_dict())
+    result['supervision'] = sup.to_dict()
+    # Delivery is intentionally outside the persisted idempotency receipt.
+    # Replaying start must not emit another SSE wake for the same outbox row.
+    result['wake_claw_id'] = wake_target['claw_id']
+    return sup, result
 
 
 def available(sup, now=None):
@@ -208,6 +525,7 @@ def require_lease(sup, claw_id, body, now=None):
             or body['fencing_token'] != sup.fencing_token
             or body.get('worker_id') != sup.lease_owner):
         fail('PLAN_SUPERVISION_FENCED', '必须持有当前计划监督租约', 409)
+    ensure_manager_tenure(sup, now)
 
 
 def receipt(sup, action, body, apply):
@@ -241,6 +559,7 @@ def claim(sup, claw_id, body, now=None):
         owner = body.get('worker_id')
         if not isinstance(owner, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', owner):
             fail('PLAN_WORKER_ID_INVALID', 'worker_id 格式不合法', 400)
+        ensure_manager_tenure(sup, now)
         ingest(sup)
         sup.fencing_token += 1
         sup.status = 'leased'
@@ -307,16 +626,130 @@ def mission_guard(mission_id, claw_id, body):
     return sup
 
 
+def _stage_task_id(stage):
+    value = (stage.input_snapshot_json or {}).get('test_task_id') if stage else None
+    return value if type(value) is int and value > 0 else None
+
+
+def task_dispatch_receipts(sup):
+    """Read authoritative Mission/Run/claim state for supervised TestTasks."""
+    if not sup or not sup.mission_id:
+        return []
+    items = []
+    for stage in MissionStage.query.filter_by(mission_id=sup.mission_id).order_by(
+            MissionStage.id).all():
+        task_id = _stage_task_id(stage)
+        if not task_id:
+            continue
+        claim = None
+        if stage.workflow_run_id:
+            claim = WorkflowRunStep.query.filter(
+                WorkflowRunStep.run_id == stage.workflow_run_id,
+                WorkflowRunStep.claimed_by.isnot(None),
+                WorkflowRunStep.claimed_by != '',
+            ).order_by(WorkflowRunStep.claimed_at.asc(), WorkflowRunStep.id).first()
+        items.append({
+            'task_id': task_id,
+            'stage_key': stage.stage_key,
+            'stage_state': stage.state,
+            'executor_claw_id': stage.assigned_claw_id,
+            'workflow_run_id': stage.workflow_run_id,
+            'claimed': bool(claim),
+            'claimed_by': claim.claimed_by if claim else '',
+            'claimed_at': str(claim.claimed_at) if claim and claim.claimed_at else None,
+            'claim_fencing_token': (
+                int(claim.claim_fencing_token or 0) if claim else None),
+        })
+    return items
+
+
+def task_dispatch_receipt(task):
+    sup = locked(task.plan_id)
+    if not sup:
+        return None
+    return next((row for row in task_dispatch_receipts(sup)
+                 if row['task_id'] == task.id), None)
+
+
+def require_task_dispatch_receipt(task):
+    """A supervised TestTask becomes running only after a real Worker claim."""
+    sup = locked(task.plan_id)
+    if not sup:
+        return None
+    receipt = next((row for row in task_dispatch_receipts(sup)
+                    if row['task_id'] == task.id), None)
+    if not receipt or not receipt['workflow_run_id'] or not receipt['claimed']:
+        fail('TEST_TASK_DISPATCH_RECEIPT_REQUIRED',
+             '任务仅为 pending/assigned；须先取得 Mission、Child Run 与 Worker claim 回执', 409)
+    return receipt
+
+
+def record_workflow_claim(run_id, claw_id, worker_id, now=None):
+    """Promote the linked TestTask only after its assigned Worker claims a Run."""
+    stage = MissionStage.query.filter_by(workflow_run_id=run_id).first()
+    if not stage or stage.assigned_claw_id != claw_id:
+        return None
+    task_id = _stage_task_id(stage)
+    if not task_id:
+        return None
+    sup = PlanSupervisor.query.filter_by(mission_id=stage.mission_id).with_for_update().first()
+    task = db.session.get(TestTask, task_id)
+    if (not sup or not task or task.plan_id != sup.plan_id
+            or task.assignee_claw_id != claw_id):
+        return None
+    if task.status in ('assigned', 'pending'):
+        task.status = 'in_progress'
+        task.progress = max(1, int(task.progress or 0))
+    add_event(sup.plan_id, 'task_claimed',
+              ['task-claimed', task.id, run_id, claw_id, worker_id], {
+                  'task_id': task.id,
+                  'mission_id': sup.mission_id,
+                  'run_id': run_id,
+                  'executor_claw_id': claw_id,
+                  'worker_id': worker_id,
+              }, now or _now())
+    return task
+
+
 def sweep(now=None):
     """Backfill source state/health and pump due outboxes; never invoke a model."""
     if not enabled():
         return 0
     now = now or _now()
+    count = 0
+    # Repair active scoped team Plans that were activated before the durable
+    # supervision contract was deployed.  This is intentionally bounded and
+    # creates no Workflow Run; it only establishes the unique control chain.
+    candidates = TestPlan.query.filter(
+        TestPlan.status == 'active', TestPlan.team_id.isnot(None),
+        TestPlan.start_date <= now.date(), TestPlan.end_date >= now.date(),
+    ).order_by(TestPlan.id).limit(100).all()
+    for plan in candidates:
+        if locked(plan.id) or not team_enabled(plan.team_id):
+            continue
+        team = db.session.get(AgentTeam, plan.team_id)
+        if (not team or team.status != 'active'
+                or team.project_id != plan.project_id):
+            continue
+        try:
+            _, result = bootstrap(plan, team.id, team.primary_manager_claw_id, {
+                'command_key': 'auto-active-plan:%s' % plan.id,
+                'team_id': team.id,
+                'orchestrator_claw_id': team.primary_manager_claw_id,
+            }, now)
+            target = result.pop('wake_claw_id', None)
+            db.session.commit()
+            if target:
+                count += 1
+                wake(target)
+        except SupervisionError:
+            db.session.rollback()
+            current_app.logger.exception(
+                'Plan supervisor bootstrap failed for plan_id=%s', plan.id)
     ids = [r.plan_id for r in PlanSupervisor.query.filter(
         PlanSupervisor.status.notin_(['expired', 'stopped', 'blocked'])).order_by(
             PlanSupervisor.plan_id).all()]
     # One small transaction per Plan. The caller's scheduler already serializes scans.
-    count = 0
     for plan_id in ids:
         sup = locked(plan_id)
         plan = db.session.get(TestPlan, plan_id)

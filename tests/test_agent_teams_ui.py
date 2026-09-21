@@ -66,7 +66,8 @@ class AgentTeamsUiTest(unittest.TestCase):
         for marker in ('role="tablist"', 'aria-controls="at-members-panel"', 'id="at-plans-panel"'):
             self.assertIn(marker, self.js)
         for marker in ('data-period', 'period=','esc(p.name)', 'esc(t.name)', 'generation!==epoch',
-                       'can_manage', "status:'draft'", 'ArrowLeft', 'requestId'):
+                       'can_manage', "status:'draft'", 'ArrowLeft', 'requestId',
+                       '监管未启动', '经理任期无效', 'Mission #'):
             self.assertIn(marker, js)
         for forbidden in ('/dispatch', '/supervision/start', 'setInterval('):
             self.assertNotIn(forbidden, js)
