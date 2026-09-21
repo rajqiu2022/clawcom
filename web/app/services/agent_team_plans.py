@@ -131,7 +131,7 @@ def overview(team, period, raw_date, limit, offset):
                                                    TestTask.priority, TestTask.id).limit(5).all()
         items.append({'id': plan.id, 'name': plan.name, 'status': plan.status,
             'team_id': team.id, 'start_date': str(plan.start_date), 'end_date': str(plan.end_date),
-            'url': '/test-plans?plan_id=%s' % plan.id,
+            'url': '/testplans?plan_id=%s' % plan.id,
             'total_tasks': plan_total, 'completed_tasks': all_counts.get('completed', 0),
             'progress': round(all_counts.get('completed', 0) / plan_total * 100) if plan_total else 0,
             'period_tasks': period_counts.get(plan.id, 0),

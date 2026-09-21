@@ -57,7 +57,7 @@ with app.app_context():
     client = app.test_client()
     with client.session_transaction() as session:
         session['user_id'] = admin_id
-    paths = ['/agent-teams','/workflows','/test-plans','/test-reports','/knowledge']
+    paths = ['/agent-teams','/workflows','/testplans','/test-reports','/knowledge']
     teams = AgentTeam.query.filter_by(status='active').all()
     definitions = WorkflowDefinition.query.filter_by(status='active').all()
     checks = []
@@ -92,6 +92,7 @@ with app.app_context():
     db.session.remove()
     for path in paths:
         response = client.get(path)
+        print('TEAM_RELEASE '+json.dumps({'page':path,'status':response.status_code}))
         assert response.status_code == 200, (path,response.status_code)
         db.session.remove()
     http_checks = {}

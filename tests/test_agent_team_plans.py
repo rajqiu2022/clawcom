@@ -105,7 +105,7 @@ class AgentTeamPlansTest(unittest.TestCase):
         all_tasks = self.client.get(self.url+'?period=all',headers=self._headers()).json
         self.assertEqual(all_tasks['summary']['total'],6)
         self.assertEqual(len(all_tasks['items'][0]['tasks']),5)
-        self.assertEqual(all_tasks['items'][0]['url'],'/test-plans?plan_id=%s' % plan['id'])
+        self.assertEqual(all_tasks['items'][0]['url'],'/testplans?plan_id=%s' % plan['id'])
 
     def test_other_team_unbound_plans_pagination_and_input_errors(self):
         for i in range(7): self.create(name='plan '+str(i))

@@ -74,6 +74,10 @@ class AgentTeamsUiTest(unittest.TestCase):
         self.assertIn("params.get('plan_id')", plans)
         self.assertIn('async function showLinkedPlan', plans)
         self.assertIn('未归属迭代', plans)
+        views = (ROOT / 'web/app/views/__init__.py').read_text(encoding='utf-8')
+        service = (ROOT / 'web/app/services/agent_team_plans.py').read_text(encoding='utf-8')
+        self.assertIn("@views_bp.route('/testplans')", views)
+        self.assertIn("'url': '/testplans?plan_id=%s'", service)
 
 
 if __name__ == '__main__':

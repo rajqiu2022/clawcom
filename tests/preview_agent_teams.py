@@ -28,7 +28,7 @@ def main():
     def preview():
         return render_template('agent_teams.html', hub_public_url='http://127.0.0.1:18891', hub_web_url='http://127.0.0.1:18891')
 
-    @app.route('/test-plans')
+    @app.route('/testplans')
     def plan_preview():
         return render_template('testplans.html', hub_public_url='http://127.0.0.1:18891', hub_web_url='http://127.0.0.1:18891')
 
