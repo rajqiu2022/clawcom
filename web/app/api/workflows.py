@@ -678,6 +678,8 @@ def _workflow_api_error(code, message, status=400, details=None):
 
 def _workflow_lifecycle_conflict(run, step=None, operation='write'):
     """Return a stable, non-retryable contract for writes after terminal state."""
+    from app.services.plan_supervision_events import note_rejection
+    note_rejection(run, step, operation)
     return _workflow_api_error(
         'HUB_LIFECYCLE_CONFLICT',
         'Workflow Run or Step is already terminal; stop retrying this write and '
@@ -4735,6 +4737,8 @@ def heartbeat_workflow_step(run_id, step_id):
         step, claw, worker_id,
         data.get('fencing_token', data.get('claim_fencing_token')))
     if claim_error:
+        from app.services.plan_supervision_events import note_rejection
+        note_rejection(run, step, 'heartbeat', 'WORKFLOW_CLAIM_REJECTED')
         return claim_error
     step.heartbeat_at = now
     step.heartbeat_by = worker_id

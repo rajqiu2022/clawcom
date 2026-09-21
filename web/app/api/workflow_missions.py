@@ -399,6 +399,27 @@ def create_workflow_mission():
     )
     db.session.add(mission)
     db.session.flush()
+    if data.get('test_plan_id') is not None:
+        from app.services import plan_supervision as plan_guard
+        if not plan_guard.enabled():
+            plan_guard.fail('PLAN_SUPERVISION_DISABLED', '计划监督未启用', 503)
+        if type(data['test_plan_id']) is not int:
+            plan_guard.fail('PLAN_BODY_INVALID', 'test_plan_id 须为整数', 400)
+        supervisor = plan_guard.locked(data['test_plan_id'])
+        if not supervisor:
+            plan_guard.fail('PLAN_SUPERVISION_NOT_STARTED', '计划尚未启动监督')
+        plan_guard.require_lease(supervisor, actor['id'] if actor['type'] == 'claw' else None,
+                                 data.get('plan_supervision') or {})
+        if supervisor.mission_id:
+            plan_guard.fail('PLAN_MISSION_ALREADY_BOUND', '计划已有 Mission，请回读后复用，禁止重复创建')
+        if mission.main_claw_id != supervisor.orchestrator_claw_id:
+            plan_guard.fail('PLAN_MISSION_FORBIDDEN', 'Mission 主 Agent 必须为计划监督者', 403)
+        if supervisor.team_id and (not team or team.id != supervisor.team_id):
+            plan_guard.fail('PLAN_MISSION_FORBIDDEN', 'Mission 必须属于计划绑定的团队', 403)
+        supervisor.mission_id = mission.id
+        mission.context_json = dict(mission.context_json or {}, plan_supervision_id=supervisor.plan_id)
+        plan_guard.add_event(supervisor.plan_id, 'mission_created', ['mission', mission.id],
+                             {'mission_id': mission.id})
     if team:
         db.session.add(AgentTeamMission(
             mission_id=mission.id, team_id=team.id, team_version=team.version,
@@ -487,6 +508,11 @@ def _finish_mission(mission_id, target_status):
         return _error('MISSION_NOT_FOUND', 'Mission 不存在', 404)
     if not _can_read_mission(actor, mission):
         return _error('MISSION_ACCESS_DENIED', '无权操作该 Mission', 403)
+    from app.services import plan_supervision as plan_guard
+    if actor['type'] == 'claw' and (plan_guard.enabled() or (mission.context_json or {}).get('plan_supervision_id')):
+        if not plan_guard.enabled():
+            return _error('PLAN_SUPERVISION_DISABLED', '计划监督已禁用', 503)
+        plan_guard.mission_guard(mission.id, actor['id'], request.get_json(silent=True) or {})
     team, _ = mission_team(mission, lock=True)
     if team:
         require_manager(team, actor, request.get_json(silent=True) or {}, allow_paused=True)
@@ -602,6 +628,11 @@ def dispatch_workflow_mission(mission_id):
                .with_for_update().first())
     if not mission:
         return _error('MISSION_NOT_FOUND', 'Mission 不存在', 404)
+    from app.services import plan_supervision as plan_guard
+    if plan_guard.enabled() or (mission.context_json or {}).get('plan_supervision_id'):
+        if not plan_guard.enabled():
+            return _error('PLAN_SUPERVISION_DISABLED', '计划监督已禁用，禁止关联 Mission 新派工', 503)
+        plan_guard.mission_guard(mission.id, actor['id'], data)
     team, binding = mission_team(mission, lock=True)
     stage = None
     if team:

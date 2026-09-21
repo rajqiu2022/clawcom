@@ -2,6 +2,7 @@ from flask import request, jsonify, session, current_app
 from datetime import datetime
 from app import db
 from app.models import Skill, OpenClawSkill, OpenClawInstance, Rule, User, _now
+from app.services.skill_installation import reset_installation, installation_view, control_instructions
 
 OFF_SHELF_SKILL_NAMES = {'hub-connect'}
 # 按 skill id 下架（不进市场、不可再分配）。#135 是旧 hub-sse-sidecar，
@@ -231,26 +232,29 @@ def list_skills():
         d['market_status'] = _skill_market_status(s)
         d['recent_usage_count'] = usage_counts.get(s.id, 0)
         # 查出正在使用的 OpenClaw 名单 + 区分 fresh / stale
-        # stale 判定：installed_at IS NULL 或 installed_at < skill.updated_at
-        # 即「skill 修改过但 claw 还没重装」
+        # 分配时间不是安装证据：仅有效回执匹配当前内容才算 fresh。
         rows = (db.session.query(OpenClawInstance.name,
-                                 OpenClawSkill.installed_at)
+                                 OpenClawSkill)
                 .join(OpenClawSkill)
                 .filter(OpenClawSkill.skill_id == s.id,
                         OpenClawSkill.enabled == True)
                 .all())
         fresh, stale = [], []
-        skill_updated = s.updated_at
-        for name, ia in rows:
-            if ia and skill_updated and ia >= skill_updated:
+        installation_states = []
+        for name, assignment in rows:
+            view = installation_view(assignment)
+            installation_states.append({'name': name, **view})
+            if view['verified']:
                 fresh.append(name)
             else:
                 stale.append(name)
-        d['used_by'] = [r[0] for r in rows]      # 全量已装名单（兼容旧字段）
+        d['used_by'] = [r[0] for r in rows]      # 分配名单（兼容旧字段）
         d['used_by_fresh'] = fresh                # 已装且最新
-        d['used_by_stale'] = stale                # 已装但 skill 改过、需重装
+        d['used_by_stale'] = stale                # 待同步或缺少有效安装回执
         d['used_by_count'] = len(d['used_by'])
-        d['install_count'] = len(d['used_by'])    # 别名（前端 skills.html 用这个名）
+        d['assigned_count'] = len(rows)
+        d['install_count'] = len(fresh)
+        d['installation_states'] = installation_states
         d['stale_count'] = len(stale)
         result.append(d)
     return jsonify(result)
@@ -1049,10 +1053,9 @@ def install_skill(claw_id):
     """
     # 防止普通 Agent（Bearer）在处理 sync_config 时误调用本接口造成"自我重装"循环。
     # Skill 分配/重分配是 Hub 管理动作，Web 登录管理员 或 admin 级别 Bearer Token 可发起。
-    if not session.get('user_id'):
-        user = _get_current_user()
-        if not user or getattr(user, 'role', '') not in ('super_admin', 'admin'):
-            return jsonify({'error': '仅支持 Hub 管理员（Web 登录或 admin 级 Bearer Token）分配 Skill'}), 403
+    user = _get_current_user()
+    if not user or getattr(user, 'role', '') not in ('super_admin', 'admin'):
+        return jsonify({'error': '仅支持 Hub 管理员（Web 登录或 admin 级 Bearer Token）分配 Skill'}), 403
 
     claw = OpenClawInstance.query.get_or_404(claw_id)
     data = request.get_json()
@@ -1061,7 +1064,7 @@ def install_skill(claw_id):
     if not skill_id:
         return jsonify({'error': 'skill_id 为必填项'}), 400
 
-    skill = Skill.query.get_or_404(skill_id)
+    skill = Skill.query.filter_by(id=skill_id).with_for_update().first_or_404()
 
     if skill.is_deleted:
         return jsonify({'error': '此 Skill 已删除，无法安装'}), 403
@@ -1084,13 +1087,12 @@ def install_skill(claw_id):
 
     existing = OpenClawSkill.query.filter_by(
         openclaw_id=claw_id, skill_id=skill_id
-    ).first()
+    ).with_for_update().first()
 
     is_reinstall = False
     reinstall_reason = ''  # 'content_updated' | 'forced' | ''
     cancelled_uninstall_todo_ids = []
     if existing:
-        was_disabled = (existing.enabled is False)
         existing.enabled = True
         # existing 命中 = 强制/重新安装。两种 reason：
         #   - content_updated: hub 端 skill 改过了（installed_at < skill.updated_at）
@@ -1101,8 +1103,7 @@ def install_skill(claw_id):
             reinstall_reason = 'content_updated'
         else:
             reinstall_reason = 'forced'
-        # 一律刷新 installed_at —— 这样 used_by_stale 立即清零
-        existing.installed_at = _now()
+        # Assignment/reassignment never marks installation as verified.
 
         # 修 bug #2：link 复活/重装时，自动消除同 skill 残留的"卸载 Skill"未完成 todo，
         # 避免 claw 既收到"卸载"又收到"重装"两个矛盾指令。
@@ -1120,84 +1121,17 @@ def install_skill(claw_id):
     else:
         existing = OpenClawSkill(
             openclaw_id=claw_id, skill_id=skill_id,
-            enabled=True, installed_at=_now()
+            enabled=True
         )
         db.session.add(existing)
 
-    # 检测 skill 是否带一键安装脚本（install.sh / setup.sh）
-    # —— 主要给 sidecar / 守护进程类 skill 用，普通文档 skill 不会有
-    has_install_sh = False
-    install_sh_name = None
-    if skill.files:
-        for f in skill.files:
-            if isinstance(f, dict):
-                fname = f.get('name', '')
-                if fname.endswith('install.sh') or fname.endswith('setup.sh'):
-                    has_install_sh = True
-                    install_sh_name = fname
-                    break
-
-    # 拼描述：含 install.sh 的 skill 优先给一键命令
-    # 历史教训 #126b：fallback 用 http://clawteam.woa.com:18800（claw 实际可达的真身入口，
-    # 不是 443 的 lampp/Apache 占位）。不能用 request.host_url（不可控）。
-    import os as _os
-    hub_url_hint = (
-        _os.environ.get('OPENCLAW_PUBLIC_URL', '').rstrip('/')
-        or _os.environ.get('HUB_PUBLIC_URL', '').rstrip('/')
-        or 'https://clawteam.woa.com:18800'
-    )
-    action_label = '重新分配' if is_reinstall else '分配'
-    desc_lines = [
-        f'Hub 已{action_label} Skill「{skill.display_name}」(id={skill.id})，请{"重新拉取并覆盖" if is_reinstall else "拉取并安装"}到本地。',
-        '',
-    ]
-    if is_reinstall:
-        if reinstall_reason == 'content_updated':
-            desc_lines.extend([
-                f'⚠️ 这是 **重新分配（内容已更新）**：本 Skill 在 Hub 端已修改（updated_at={skill.updated_at}），',
-                f'你之前的安装版本已过期，必须重新拉取并**全量覆盖** `~/.qclaw/skills/{skill.name}/`。',
-                '',
-            ])
-        else:
-            desc_lines.extend([
-                f'🔁 这是 **强制重新分配（内容未变）**：通常用于安装失败恢复 / 文件被误删 / 强制覆盖场景。',
-                f'请重新拉取并**全量覆盖** `~/.qclaw/skills/{skill.name}/`，不要假定本地已有的就是对的。',
-                '',
-            ])
-    if has_install_sh:
-        desc_lines.extend([
-            f'⚡ 本 skill 含一键安装脚本 `{install_sh_name}`，推荐路径（一行搞定）：',
-            '',
-            '```bash',
-            f'curl -fsSL {hub_url_hint}/static/skills/{skill.name}/{install_sh_name} \\',
-            f'  | CLAW_ID={claw_id} API_TOKEN=<你的 Hub API token> bash',
-            '```',
-            '',
-            '或者照标准流程：把 skill 拉到 ~/.qclaw/skills/ 后再执行：',
-            '',
-            '```bash',
-            f'CLAW_ID={claw_id} API_TOKEN=<你的 token> \\',
-            f'  bash ~/.qclaw/skills/{skill.name}/{install_sh_name}',
-            '```',
-            '',
-            '标准拉取流程：',
-        ])
-    else:
-        desc_lines.append('执行步骤：')
-
-    desc_lines.extend([
-        f'1. GET /api/v1/openclaws/{claw_id}/assigned-skills 获取最新 Skills 列表',
-        f'2. 找到 name="{skill.name}" 的 Skill',
-        f'3. GET /api/v1/skills/{skill.id}/files 获取文档包文件清单',
-        f'4. 逐个拉取文件写入 ~/.qclaw/skills/{skill.name}/',
-        f'5. 完成后上报 POST /todos/{{todo_id}}/complete',
-    ])
+    reset_installation(existing, skill)
 
     from app.models import ClawTodo
     todo = ClawTodo(
         openclaw_id=claw_id,
         title=f'{"重新安装" if is_reinstall else "安装"} Skill：{skill.display_name}',
-        description='\n'.join(desc_lines),
+        description=control_instructions(claw_id, skill_id, existing.installation_generation),
         schedule_type='once',
         urgency_level='interrupt',
         priority='P0',
@@ -1208,6 +1142,8 @@ def install_skill(claw_id):
     )
     db.session.add(todo)
 
+    db.session.flush()
+    existing.installation_todo_id = todo.id
     _notify_claw_sync(claw_id, '重新分配 Skill' if is_reinstall else '分配 Skill', skill.display_name)
     db.session.commit()
 
@@ -1238,6 +1174,7 @@ def install_skill(claw_id):
         'is_reinstall': is_reinstall,
         'reinstall_reason': reinstall_reason,  # 'content_updated' | 'forced' | ''
         'cancelled_uninstall_todo_ids': cancelled_uninstall_todo_ids,
+        'installation': installation_view(existing),
     }), 201
 
 
@@ -1247,17 +1184,16 @@ def batch_assign_skill(skill_id):
 
     请求体：{ "openclaw_ids": [1, 2, 3] }
     """
-    if not session.get('user_id'):
-        user = _get_current_user()
-        if not user or getattr(user, 'role', '') not in ('super_admin', 'admin'):
-            return jsonify({'error': '仅支持 Hub 管理员分配 Skill'}), 403
+    user = _get_current_user()
+    if not user or getattr(user, 'role', '') not in ('super_admin', 'admin'):
+        return jsonify({'error': '仅支持 Hub 管理员分配 Skill'}), 403
 
     data = request.get_json() or {}
     openclaw_ids = data.get('openclaw_ids', [])
     if not openclaw_ids:
         return jsonify({'error': 'openclaw_ids 为必填项'}), 400
 
-    skill = Skill.query.get_or_404(skill_id)
+    skill = Skill.query.filter_by(id=skill_id).with_for_update().first_or_404()
     if skill.is_deleted:
         return jsonify({'error': '此 Skill 已删除，无法安装'}), 403
     if int(skill.id) in OFF_SHELF_SKILL_IDS:
@@ -1267,25 +1203,6 @@ def batch_assign_skill(skill_id):
     if skill.review_status != 'approved':
         if not user or user.role not in ('super_admin', 'admin'):
             return jsonify({'error': '此 Skill 尚未通过审核，无法安装'}), 403
-
-    import os as _os
-    hub_url_hint = (
-        _os.environ.get('OPENCLAW_PUBLIC_URL', '').rstrip('/')
-        or _os.environ.get('HUB_PUBLIC_URL', '').rstrip('/')
-        or 'https://clawteam.woa.com:18800'
-    )
-
-    # 检测 install.sh
-    has_install_sh = False
-    install_sh_name = None
-    if skill.files:
-        for f in skill.files:
-            if isinstance(f, dict):
-                fname = f.get('name', '')
-                if fname.endswith('install.sh') or fname.endswith('setup.sh'):
-                    has_install_sh = True
-                    install_sh_name = fname
-                    break
 
     from app.models import ClawTodo
     from app.api.agent_client import notify_claw_todo
@@ -1299,7 +1216,7 @@ def batch_assign_skill(skill_id):
 
             existing = OpenClawSkill.query.filter_by(
                 openclaw_id=claw_id, skill_id=skill_id
-            ).first()
+            ).with_for_update().first()
 
             is_reinstall = False
             reinstall_reason = ''
@@ -1311,7 +1228,6 @@ def batch_assign_skill(skill_id):
                     reinstall_reason = 'content_updated'
                 else:
                     reinstall_reason = 'forced'
-                existing.installed_at = _now()
                 # 清除残留卸载待办
                 zombie_todos = (ClawTodo.query
                                 .filter(ClawTodo.openclaw_id == claw_id,
@@ -1323,46 +1239,16 @@ def batch_assign_skill(skill_id):
             else:
                 existing = OpenClawSkill(
                     openclaw_id=claw_id, skill_id=skill_id,
-                    enabled=True, installed_at=_now()
+                    enabled=True
                 )
                 db.session.add(existing)
 
+            reset_installation(existing, skill)
             action_label = '重新分配' if is_reinstall else '分配'
-            desc_lines = [
-                f'Hub 已{action_label} Skill「{skill.display_name}」(id={skill.id})，请{"重新拉取并覆盖" if is_reinstall else "拉取并安装"}到本地。',
-                '',
-            ]
-            if is_reinstall and reinstall_reason == 'content_updated':
-                desc_lines.extend([
-                    f'⚠️ 这是 **重新分配（内容已更新）**：本 Skill 在 Hub 端已修改，请全量覆盖。',
-                    '',
-                ])
-            elif is_reinstall:
-                desc_lines.extend([
-                    f'🔁 这是 **强制重新分配**：请重新拉取并全量覆盖。',
-                    '',
-                ])
-            if has_install_sh:
-                desc_lines.extend([
-                    f'⚡ 本 skill 含一键安装脚本 `{install_sh_name}`：',
-                    '```bash',
-                    f'curl -fsSL {hub_url_hint}/static/skills/{skill.name}/{install_sh_name} \\',
-                    f'  | CLAW_ID={claw_id} API_TOKEN=<你的 Hub API token> bash',
-                    '```',
-                    '',
-                ])
-            desc_lines.extend([
-                f'1. GET /api/v1/openclaws/{claw_id}/assigned-skills 获取最新 Skills 列表',
-                f'2. 找到 name="{skill.name}" 的 Skill',
-                f'3. GET /api/v1/skills/{skill.id}/files 获取文档包文件清单',
-                f'4. 逐个拉取文件写入 ~/.qclaw/skills/{skill.name}/',
-                f'5. 完成后上报 POST /todos/{{todo_id}}/complete',
-            ])
-
             todo = ClawTodo(
                 openclaw_id=claw_id,
                 title=f'{"重新安装" if is_reinstall else "安装"} Skill：{skill.display_name}',
-                description='\n'.join(desc_lines),
+                description=control_instructions(claw_id, skill_id, existing.installation_generation),
                 schedule_type='once',
                 urgency_level='interrupt',
                 priority='P0',
@@ -1372,12 +1258,15 @@ def batch_assign_skill(skill_id):
                 created_by='hub',
             )
             db.session.add(todo)
+            db.session.flush()
+            existing.installation_todo_id = todo.id
             _notify_claw_sync(claw_id, action_label + ' Skill', skill.display_name)
 
             results.append({
                 'claw_id': claw_id, 'success': True,
                 'message': f'已为 {claw.name} {action_label} {skill.display_name}',
                 'is_reinstall': is_reinstall,
+                'installation': installation_view(existing),
             })
         except Exception as e:
             results.append({'claw_id': claw_id, 'success': False, 'message': str(e)})

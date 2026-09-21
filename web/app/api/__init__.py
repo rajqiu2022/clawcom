@@ -191,6 +191,8 @@ def require_auth():
 from app.api import openclaws, skills, knowledge, knowledge_notebooks, dashboard, projects, agent_hub, rules, ai_generator, testcases, reports, audit, system, tapd, auth, memos_api, todos, packs, snapshots, registration, uploads, openspace, topics, testplans, engineering, requirements, test_accounts, review_comments, wecom, agent_deployments, agent_templates, shared_articles, test_reports, panorama, testcase_panorama_links, exams, secrets, workflows, workflow_missions, agent_artifacts, mission_stages, mission_handoffs, agent_teams, agent_eval, tasks_context, ops_verify, memories, shift_left, automation_candidates, automation_capabilities, testcase_promotions, resource_leases, entity_relations, analysis_rules, automation_closed_loop, agent_control, chat_rooms, worker_releases  # noqa: F401
 
 # 注册 Agent Hub 通信中心蓝图
+from app.api import plan_supervision  # noqa: F401
+
 api_bp.register_blueprint(agent_hub.agent_hub_bp, url_prefix='/agent-hub')
 
 # 注意：agent_client.agent_bp 不在此处注册，已在 app/__init__.py 中直接注册到 app（url_prefix='/api/openclaws'）

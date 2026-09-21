@@ -44,6 +44,8 @@ class TeamOnboardingTest(unittest.TestCase):
             self.assertIn('手游回归团队', message.content)
             self.assertIn('/agent-teams?project_id=', message.content)
             self.assertIn('安装', message.content)
+            self.assertIn('正式安装由 Worker 控制面完成', message.content)
+            self.assertIn('普通消息 done 不代表安装成功', message.content)
             for skill in Skill.query.all():
                 self.assertIn('/api/v1/skills/%s/raw' % skill.id, message.content)
         self.assertEqual(OpenClawSkill.query.count(), 0)

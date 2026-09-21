@@ -563,7 +563,14 @@ class OpenClawSkill(db.Model):
     skill_id = db.Column(db.Integer, db.ForeignKey('skills.id'),
                          nullable=False)
     enabled = db.Column(db.Boolean, default=True)
-    installed_at = db.Column(db.DateTime, default=_now)
+    # Historical values predate receipt verification; never treat them as proof.
+    installed_at = db.Column(db.DateTime)
+    assigned_at = db.Column(db.DateTime, default=_now)
+    installation_generation = db.Column(db.String(32), default=lambda: secrets.token_hex(16))
+    installation_status = db.Column(db.String(24), default='pending')
+    installation_verified_at = db.Column(db.DateTime)
+    installation_receipt_json = db.Column(db.JSON)
+    installation_todo_id = db.Column(db.Integer)
 
     skill = db.relationship('Skill', backref='installations')
 
@@ -571,6 +578,20 @@ class OpenClawSkill(db.Model):
         db.UniqueConstraint('openclaw_id', 'skill_id',
                             name='uq_openclaw_skill'),
     )
+
+
+class SkillInstallationReceipt(db.Model):
+    """Immutable, generation-fenced Worker acknowledgements (not chat replies)."""
+    __tablename__ = 'skill_installation_receipts'
+    id = db.Column(db.Integer, primary_key=True)
+    assignment_id = db.Column(db.Integer, db.ForeignKey('openclaw_skills.id'), nullable=False)
+    generation = db.Column(db.String(32), nullable=False)
+    event_id = db.Column(db.String(96), nullable=False)
+    request_sha256 = db.Column(db.String(64), nullable=False)
+    response_json = db.Column(db.JSON, nullable=False)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    __table_args__ = (db.UniqueConstraint('assignment_id', 'generation', 'event_id',
+                                        name='uq_skill_install_receipt_event'),)
 
 
 class DailyReport(db.Model):

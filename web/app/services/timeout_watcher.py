@@ -173,6 +173,7 @@ def _scan_stuck_claw_messages(db, app):
     threshold = _now() - timedelta(minutes=MESSAGE_TIMEOUT_MIN)
     rows = (ClawMessage.query
             .filter(ClawMessage.direction == 'to_claw')
+            .filter(ClawMessage.msg_type != 'plan_supervision')
             .filter(ClawMessage.status.in_(['pending', 'processing']))
             .filter(ClawMessage.created_at < threshold)
             .order_by(ClawMessage.id.asc())
@@ -321,6 +322,13 @@ def _watcher_loop(app):
                             '[timeout_watcher] 普通 AgentTask 扫描异常: %s', e)
 
                     # 读运行开关（存 system_config，DB 改完立即生效，不用重启）
+                    try:
+                        from app.services.plan_supervision import sweep
+                        sweep()
+                    except Exception:
+                        db.session.rollback()
+                        logger.exception('[timeout_watcher] Plan supervision deferred')
+
                     todo_on = _get_switch(db, SWITCH_TODO_FALLBACK, default_on=False)
                     msg_on = _get_switch(db, SWITCH_MESSAGE_ALERT, default_on=False)
 

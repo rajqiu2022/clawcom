@@ -24,6 +24,8 @@ def create_app(config_name=None):
                 static_folder='../static',
                 template_folder='../templates')
     app.config.from_object(config[config_name])
+    app.config['PLAN_SUPERVISION_ENABLED'] = os.getenv('PLAN_SUPERVISION_ENABLED', '0').lower() in ('1', 'true')
+    app.config['PLAN_SUPERVISION_TEAM_IDS'] = os.getenv('PLAN_SUPERVISION_TEAM_IDS', '')
 
     # 关闭严格尾斜杠（修复 MEMORY #155）
     # 默认 Flask 对路由 `/openclaws` 严格匹配，访问 `/openclaws/` 直接 404。

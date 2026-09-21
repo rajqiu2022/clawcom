@@ -1521,6 +1521,7 @@ def list_reports(claw_id):
 @require_claw_token
 def get_assigned_skills(claw_id, claw=None):
     """OpenClaw 获取分配给自己的 Skills（需 Token 认证）"""
+    from app.services.skill_installation import installation_view
     skills = []
     for s in claw.skills:
         if s.enabled and s.skill:
@@ -1531,6 +1532,7 @@ def get_assigned_skills(claw_id, claw=None):
                 'description': s.skill.description,
                 'template_content': s.skill.template_content,
                 'trigger_phrase': s.skill.trigger_phrase,
+                'installation': installation_view(s),
             })
     return jsonify({'skills': skills})
 
@@ -1585,6 +1587,20 @@ def get_skill_manifest(claw_id, claw=None):
             ref_id=ref_id,
         ))
     except SkillDeliveryError as exc:
+        return _skill_delivery_error(exc)
+
+
+@api_bp.route('/openclaws/<int:claw_id>/skills/<int:skill_id>/installation-receipts', methods=['POST'])
+@require_claw_token
+def submit_skill_installation_receipt(claw_id, skill_id, claw=None):
+    from app.services.skill_installation import accept_receipt
+    from app.services.skill_delivery import SkillDeliveryError
+    try:
+        result = accept_receipt(claw, skill_id, request.get_json(silent=True))
+        db.session.commit()
+        return jsonify(result)
+    except SkillDeliveryError as exc:
+        db.session.rollback()
         return _skill_delivery_error(exc)
 
 

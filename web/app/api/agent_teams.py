@@ -149,14 +149,19 @@ def list_agent_teams():
     query = AgentTeam.query.filter_by(project_id=project_id)
     total = query.count()
     rows = query.options(selectinload(AgentTeam.members)).order_by(AgentTeam.id).offset(offset).limit(limit).all()
-    return jsonify({'items': [row.to_dict() for row in rows], 'total': total, 'limit': limit, 'offset': offset})
+    return jsonify({'items': [_team_read_payload(row) for row in rows], 'total': total, 'limit': limit, 'offset': offset})
+
+
+def _team_read_payload(team):
+    from app.services.plan_supervision import team_capability
+    return dict(team.to_dict(), plan_supervision=team_capability(team.id))
 
 
 @api_bp.route('/agent-teams/<int:team_id>', methods=['GET'])
 def get_agent_team(team_id):
     team = load_team(team_id)
     _access(team.project_id)
-    return jsonify(team.to_dict())
+    return jsonify(_team_read_payload(team))
 
 
 def _activity_member(team, claw_id):

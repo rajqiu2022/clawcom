@@ -321,6 +321,15 @@ def complete_todo(claw_id, todo_id):
     today = now_cst.date()
     status = data.get('status', 'submitted')
 
+    if status != 'retry_failed':
+        from app.services.skill_installation import require_installation_for_todo
+        from app.services.skill_delivery import SkillDeliveryError
+        try:
+            require_installation_for_todo(todo)
+        except SkillDeliveryError as exc:
+            db.session.rollback()
+            return jsonify({'code': exc.code, 'error': exc.message}), exc.status_code
+
     log = ClawTodoLog.query.filter_by(todo_id=todo_id, log_date=today).first()
     state = todo_schedule_state(todo, today_log=log, now=now_cst)
     if not state['is_due']:
@@ -419,6 +428,13 @@ def approve_todo(claw_id, todo_id):
         if not log:
             return jsonify({'error': '未找到可审核的 submitted 记录'}), 404
 
+    from app.services.skill_installation import require_installation_for_todo
+    from app.services.skill_delivery import SkillDeliveryError
+    try:
+        require_installation_for_todo(todo)
+    except SkillDeliveryError as exc:
+        db.session.rollback()
+        return jsonify({'error': exc.message, 'code': exc.code}), exc.status_code
     log.status = 'approved'
     db.session.commit()
     gate = None

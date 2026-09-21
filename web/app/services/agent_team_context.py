@@ -7,6 +7,7 @@ from app.services.agent_teams import TeamError, require_team_project
 
 
 def team_snapshot(team, claw_id, names):
+    from app.services.plan_supervision import team_capability
     people = roster(team)
     if claw_id not in people:
         return None
@@ -23,6 +24,7 @@ def team_snapshot(team, claw_id, names):
         'members_truncated': len(selected) < len(ids),
         'definition_api': '/api/v1/agent-teams/%s' % team.id,
         'activity_api': '/api/v1/agent-teams/%s/members/activity' % team.id,
+        'plan_supervision': team_capability(team.id),
     }
 
 

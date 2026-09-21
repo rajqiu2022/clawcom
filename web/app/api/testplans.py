@@ -615,6 +615,14 @@ def get_test_plan(plan_id):
 @api_bp.route('/test-plans/<int:plan_id>', methods=['PUT'])
 def update_test_plan(plan_id):
     """更新测试计划"""
+    from app.services import plan_supervision as plan_guard
+    from app.models_plan_supervision import PlanSupervisor
+    if plan_guard.enabled() and db.session.get(PlanSupervisor, plan_id):
+        from app.api.plan_supervision import load
+        _, supervisor, caller_claw = load(plan_id, write=True)
+        if caller_claw:
+            plan_guard.require_lease(supervisor, caller_claw.id,
+                (request.get_json(silent=True) or {}).get('plan_supervision') or {})
     plan = TestPlan.query.get_or_404(plan_id)
     data = request.get_json()
 

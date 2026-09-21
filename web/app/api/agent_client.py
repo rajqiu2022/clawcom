@@ -967,6 +967,12 @@ def claw_mark_done(claw_id, msg_id, claw=None):
     msg = ClawMessage.query.filter_by(id=msg_id, claw_id=claw_id).first()
     if not msg:
         return jsonify({'error': '消息不存在'}), 404
+    if msg.msg_type == 'plan_supervision':
+        # Only the fenced decision endpoint may close this control work item.
+        if msg.status != 'done':
+            return jsonify({'code': 'PLAN_DECISION_RECEIPT_REQUIRED',
+                            'error': '必须先提交计划监督 decision 并取得回执；聊天不能代替调度'}), 409
+        return jsonify({'status': 'ok', 'msg_id': msg_id, 'state': 'done'})
     data = request.get_json(silent=True) or {}
     msg.status = 'done'
     msg.done_at = datetime.now()

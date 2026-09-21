@@ -265,7 +265,11 @@ def build_skill_manifest(
     ref_id=None,
     base_path='/api/v1',
 ) -> dict[str, Any]:
-    from app.models import Skill
+    from app.models import Skill, OpenClawSkill
+    from app.services.skill_installation import installation_view
+
+    assignments = {a.skill_id: a for a in OpenClawSkill.query.filter_by(
+        openclaw_id=claw.id, enabled=True).all()}
 
     sources_by_name, blocking_skills = _source_contract(
         claw,
@@ -329,6 +333,8 @@ def build_skill_manifest(
             'sources': sources,
             'blocking': name in blocking_set,
             'files': files,
+            'installation': installation_view(assignments[skill.id], descriptor)
+                if skill.id in assignments else None,
             'pack_url': (
                 f'{root}/openclaws/{claw.id}/skills/{skill.id}/pack{query}'
             ),
