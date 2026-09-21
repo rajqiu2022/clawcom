@@ -21,6 +21,10 @@ from app.models import (
     WorkflowMission, WorkflowMissionDispatch, WorkflowRun, WorkflowRunStep,
 )
 from app.services.worker_runtime import runtime_summary
+from app.services.agent_context_snapshots import (
+    ContextSnapshotError,
+    freeze_run_context,
+)
 from app.services.agent_teams import (
     TeamError, enabled as team_enabled, integer as team_integer, load_team, mission_team,
     require_manager, require_stage_member,
@@ -788,6 +792,9 @@ def dispatch_workflow_mission(mission_id):
     db.session.add(run)
     try:
         db.session.flush()
+        freeze_run_context(
+            run, team=team,
+            manager_claw_id=actor['id'] if team else mission.main_claw_id)
         if stage:
             stage.workflow_run_id = run.id
             stage.version = int(stage.version or 1) + 1
@@ -865,6 +872,12 @@ def dispatch_workflow_mission(mission_id):
             }, ensure_ascii=False, sort_keys=True),
         ))
         db.session.commit()
+    except ContextSnapshotError as exc:
+        db.session.rollback()
+        return _error(
+            exc.code, str(exc), 409,
+            {'workflow_definition_id': definition.id,
+             'worker_claw_id': worker_claw_id})
     except IntegrityError:
         db.session.rollback()
         existing = WorkflowMissionDispatch.query.filter_by(

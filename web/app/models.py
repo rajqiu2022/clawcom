@@ -996,6 +996,8 @@ class AgentTask(db.Model):
     progress_digest = db.Column(db.String(64), default='')
     progress_json = db.Column(db.Text)
     progress_at = db.Column(db.DateTime)
+    context_snapshot_id = db.Column(db.String(64), index=True)
+    context_snapshot_sha256 = db.Column(db.String(64), default='')
     created_at = db.Column(db.DateTime, default=_now)
     assigned_at = db.Column(db.DateTime)
     completed_at = db.Column(db.DateTime)
@@ -1039,6 +1041,8 @@ class AgentTask(db.Model):
             'terminal_reason': self.terminal_reason or '',
             'progress': self._progress_payload(),
             'progress_at': str(self.progress_at) if self.progress_at else None,
+            'context_snapshot_id': self.context_snapshot_id,
+            'context_snapshot_sha256': self.context_snapshot_sha256 or '',
             'task_age_seconds': task_age,
             'heartbeat_age_seconds': heartbeat_age,
             'lease_expired': bool(
@@ -1247,6 +1251,8 @@ class WorkflowRun(db.Model):
     correlation_id = db.Column(db.String(160), index=True)
     trigger_source = db.Column(db.String(64), index=True)
     context_json = db.Column(db.JSON)
+    context_snapshot_id = db.Column(db.String(64), index=True)
+    context_snapshot_sha256 = db.Column(db.String(64), default='')
     summary = db.Column(db.Text)
     blocker_json = db.Column(db.JSON)
     business_conclusion = db.Column(db.String(64), default='')
@@ -1291,6 +1297,8 @@ class WorkflowRun(db.Model):
             'trigger_source': self.trigger_source,
             'context': self.context_json or {},
             'context_json': self.context_json or {},
+            'context_snapshot_id': self.context_snapshot_id,
+            'context_snapshot_sha256': self.context_snapshot_sha256 or '',
             'summary': self.summary,
             'blocker': self.blocker_json or {},
             'blocker_json': self.blocker_json or {},
@@ -1319,6 +1327,46 @@ class WorkflowRun(db.Model):
         if with_steps:
             steps = sorted(self.steps, key=lambda s: s.position or 0)
             data['steps'] = [step.to_dict() for step in steps]
+        return data
+
+
+class AgentContextSnapshot(db.Model):
+    """Immutable Hub-owned identity and team role contract for one Run.
+
+    The document deliberately contains no credentials.  Workers receive the
+    identifier and digest with every AgentTask and later acknowledge exactly
+    the same pair in progress/result receipts.
+    """
+    __tablename__ = 'agent_context_snapshots'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    snapshot_id = db.Column(db.String(64), nullable=False, unique=True)
+    schema_version = db.Column(db.Integer, nullable=False, default=1)
+    workflow_run_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_runs.id', ondelete='CASCADE'), nullable=False,
+        unique=True, index=True)
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), index=True)
+    team_id = db.Column(db.Integer, db.ForeignKey('agent_teams.id'), index=True)
+    context_sha256 = db.Column(db.String(64), nullable=False, index=True)
+    context_json = db.Column(db.JSON, nullable=False)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+
+    run = db.relationship('WorkflowRun', backref=db.backref(
+        'agent_context_snapshot', uselist=False,
+        cascade='all, delete-orphan', single_parent=True))
+
+    def to_dict(self, include_context=True):
+        data = {
+            'snapshot_id': self.snapshot_id,
+            'schema_version': int(self.schema_version or 1),
+            'workflow_run_id': self.workflow_run_id,
+            'project_id': self.project_id,
+            'team_id': self.team_id,
+            'context_sha256': self.context_sha256,
+            'created_at': str(self.created_at) if self.created_at else None,
+        }
+        if include_context:
+            data['context'] = self.context_json or {}
         return data
 
 

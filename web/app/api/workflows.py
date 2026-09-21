@@ -19,6 +19,7 @@ from app import db
 from app.api import api_bp
 from app.api.auth_utils import get_current_claw, get_current_user, is_admin_user
 from app.models import (
+    AgentContextSnapshot,
     AgentPostAssignment,
     AuditLog,
     ClawSidecarConfig,
@@ -53,6 +54,12 @@ from app.services.workflow_library_snapshots import (
     append_workflow_snapshot_warning,
     freeze_workflow_run_library_snapshot,
     resolve_workflow_library_id,
+)
+from app.services.agent_context_snapshots import (
+    ContextSnapshotError,
+    freeze_run_context,
+    inherit_run_context,
+    resolve_team_for_run,
 )
 from app.services.workflows import (
     RACINGGO_FLOW25_CONTROLLED_RUNNER,
@@ -1937,6 +1944,7 @@ def _dispatch_heartbeat_fallback_task(run, step):
             payload=jsonify_safe(payload),
             status='pending',
         )
+        inherit_run_context(task, run)
         db.session.add(task)
     notice = build_heartbeat_fallback_notice(
         run_id=step.run_id,
@@ -2692,6 +2700,7 @@ def _dispatch_agent_task(step):
                 payload=jsonify_safe(task_payload),
                 status='pending',
             )
+            inherit_run_context(task, step.run)
             db.session.add(task)
         _dispatch_agent_start_message(step, target_claw_id, task_id)
         notify_claw(target_claw_id)
@@ -3241,6 +3250,7 @@ def _ensure_external_review_run(source_run, steps, actor='system'):
         with db.session.begin_nested():
             db.session.add(child)
             db.session.flush()
+            freeze_run_context(child)
     except IntegrityError:
         existing = WorkflowRun.query.filter_by(
             definition_id=review_definition.id,
@@ -4399,6 +4409,17 @@ def create_workflow_run():
     db.session.add(run)
     try:
         db.session.flush()
+        run_team = resolve_team_for_run(
+            run.project_id, definition.id,
+            caller_claw.id if caller_claw else None)
+        freeze_run_context(
+            run, team=run_team,
+            manager_claw_id=caller_claw.id if caller_claw else None)
+    except ContextSnapshotError as exc:
+        db.session.rollback()
+        return _workflow_api_error(
+            exc.code, str(exc), status=409,
+            details={'workflow_definition_id': definition.id})
     except IntegrityError:
         db.session.rollback()
         if idempotency_key:
@@ -4490,6 +4511,26 @@ def get_workflow_run(run_id):
         return jsonify({'error': 'workflow run 不存在'}), 404
     _refresh_workflow_step_health(run, commit=True)
     return jsonify(_run_payload(run, with_steps=True))
+
+
+@api_bp.route(
+    '/workflow-runs/<int:run_id>/agent-context-snapshot', methods=['GET'])
+def get_workflow_run_agent_context_snapshot(run_id):
+    """Read the immutable role/config contract used by this Run."""
+    err = _require_actor()
+    if err:
+        return err
+    run = WorkflowRun.query.get_or_404(run_id)
+    if not _run_visible_to_actor(run):
+        return jsonify({'error': 'workflow run 不存在'}), 404
+    snapshot = AgentContextSnapshot.query.filter_by(
+        workflow_run_id=run.id).first()
+    if not snapshot:
+        return _workflow_api_error(
+            'AGENT_CONTEXT_SNAPSHOT_NOT_FOUND',
+            'Workflow Run does not have a frozen Agent context snapshot',
+            status=404)
+    return jsonify(snapshot.to_dict(include_context=True))
 
 
 @api_bp.route(

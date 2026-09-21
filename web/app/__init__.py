@@ -140,6 +140,55 @@ def create_app(config_name=None):
             try:
                 from sqlalchemy import text
                 with db.engine.begin() as conn:
+                    # Immutable Agent identity/role context for Workflow Runs.
+                    # MariaDB 10.1 has no native JSON DDL type; SQLAlchemy JSON
+                    # remains compatible with LONGTEXT for ORM serialization.
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS agent_context_snapshots (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                snapshot_id VARCHAR(64) NOT NULL,
+                                schema_version INTEGER NOT NULL DEFAULT 1,
+                                workflow_run_id INTEGER NOT NULL,
+                                project_id INTEGER DEFAULT NULL,
+                                team_id INTEGER DEFAULT NULL,
+                                context_sha256 VARCHAR(64) NOT NULL,
+                                context_json LONGTEXT NOT NULL,
+                                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                UNIQUE KEY uq_agent_context_snapshot_id (snapshot_id),
+                                UNIQUE KEY uq_agent_context_snapshot_run (workflow_run_id),
+                                INDEX ix_agent_context_snapshot_project (project_id),
+                                INDEX ix_agent_context_snapshot_team (team_id),
+                                INDEX ix_agent_context_snapshot_sha (context_sha256),
+                                FOREIGN KEY (workflow_run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE,
+                                FOREIGN KEY (project_id) REFERENCES projects(id),
+                                FOREIGN KEY (team_id) REFERENCES agent_teams(id)
+                            )
+                        """))
+                        logger.info('agent_context_snapshots 表已创建')
+                    except Exception as e:
+                        logger.info('agent_context_snapshots 表创建跳过: %s', e)
+                    for table_name in ('workflow_runs', 'agent_tasks'):
+                        for column_name, column_ddl in (
+                            ('context_snapshot_id', 'VARCHAR(64) DEFAULT NULL'),
+                            ('context_snapshot_sha256', "VARCHAR(64) DEFAULT ''"),
+                        ):
+                            try:
+                                conn.execute(text(
+                                    'ALTER TABLE %s ADD COLUMN %s %s' % (
+                                        table_name, column_name, column_ddl)))
+                                logger.info(
+                                    '已添加 %s.%s', table_name, column_name)
+                            except Exception:
+                                pass
+                    for table_name in ('workflow_runs', 'agent_tasks'):
+                        try:
+                            conn.execute(text(
+                                'CREATE INDEX ix_%s_context_snapshot_id '
+                                'ON %s (context_snapshot_id)' % (
+                                    table_name, table_name)))
+                        except Exception:
+                            pass
                     # Mission Worker delegation (CodeBuddy/Codex/Hermes). The
                     # selected Worker is allow-listed on the Mission and also
                     # persisted on each dispatch for immutable audit readback.

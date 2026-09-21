@@ -645,6 +645,7 @@ def build_agent_system_context(
     return {
         'agent_profiles': profiles,
         'active_agent_profile': active_profile,
+        'agent_teams': teams,
         'rules': rules,
         'system_context': system_context,
         'system_context_version': SYSTEM_CONTEXT_VERSION,

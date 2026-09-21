@@ -4,6 +4,7 @@ from sqlalchemy.orm import selectinload
 from app.models import AgentTeam, OpenClawInstance
 from app.services.agent_team_activity import roster
 from app.services.agent_teams import TeamError, require_team_project
+from app.services.agent_context_snapshots import ROLE_CONTRACTS
 
 
 def team_snapshot(team, claw_id, names):
@@ -14,13 +15,28 @@ def team_snapshot(team, claw_id, names):
     ids = sorted(people)
     # Keep self even for a large team; full roster is available at the API.
     selected = sorted(set(ids[:49]) | {claw_id})
+    def identity(person_id):
+        value = dict(people[person_id], name=names.get(person_id, ''))
+        roles = value.get('roles') or []
+        if 'primary_manager' in roles or 'backup_manager' in roles:
+            value['effective_role_key'] = 'test_manager'
+            value['manager_kind'] = (
+                'primary' if 'primary_manager' in roles else 'backup')
+            value['is_active_manager'] = (
+                person_id == team.active_manager_claw_id)
+        elif 'code_analyst' in roles:
+            value['effective_role_key'] = 'code_analyst'
+        elif 'test_executor' in roles:
+            value['effective_role_key'] = 'test_executor'
+        return value
     return {
         'team_id': team.id, 'name': team.name, 'project_id': team.project_id,
         'version': team.version, 'status': team.status,
-        'self': dict(people[claw_id], name=names.get(claw_id, '')),
+        'self': identity(claw_id),
         'primary_manager_claw_id': team.primary_manager_claw_id,
         'backup_manager_claw_id': team.backup_manager_claw_id,
-        'members': [dict(people[cid], name=names.get(cid, '')) for cid in selected],
+        'members': [identity(cid) for cid in selected],
+        'role_contracts': ROLE_CONTRACTS,
         'members_truncated': len(selected) < len(ids),
         'definition_api': '/api/v1/agent-teams/%s' % team.id,
         'activity_api': '/api/v1/agent-teams/%s/members/activity' % team.id,

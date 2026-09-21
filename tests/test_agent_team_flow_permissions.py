@@ -4,8 +4,12 @@ import unittest
 
 import test_agent_teams_api as fixtures
 from app import db
-from app.models import AgentTeam, ClawSidecarConfig, OpenClawInstance, WorkflowRun
+from app.models import (
+    AgentContextSnapshot, AgentTask, AgentTeam, ClawSidecarConfig,
+    OpenClawInstance, WorkflowRun,
+)
 from app.services.agent_team_permissions import can_dispatch_to, can_execute, flow_grants
+from app.services.agent_context_snapshots import ContextSnapshotError, freeze_run_context
 
 
 class TeamFlowPermissionsTest(unittest.TestCase):
@@ -73,6 +77,65 @@ class TeamFlowPermissionsTest(unittest.TestCase):
         self.assertEqual(response.get_json()['run']['context']['workflow_start']['worker_claw_id'],
                          self.other_claw.id)
 
+    def test_team_dispatch_freezes_test_manager_contract_and_task_reference(self):
+        self.setup_grants()
+        mission_id = self._mission()
+        self.assertEqual(self._plan(mission_id).status_code, 201)
+        response = self._dispatch(mission_id)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        run = db.session.get(WorkflowRun, response.get_json()['workflow_run_id'])
+        snapshot = AgentContextSnapshot.query.filter_by(
+            workflow_run_id=run.id).one()
+        self.assertEqual(snapshot.snapshot_id, run.context_snapshot_id)
+        self.assertEqual(snapshot.context_sha256, run.context_snapshot_sha256)
+        readback = self.client.get(
+            '/api/v1/workflow-runs/%s/agent-context-snapshot' % run.id,
+            headers=self._headers())
+        self.assertEqual(readback.status_code, 200, readback.get_json())
+        self.assertEqual(readback.get_json()['snapshot_id'], snapshot.snapshot_id)
+        document = snapshot.context_json
+        self.assertEqual(document['assignment']['manager_claw_id'], self.main_claw.id)
+        manager = next(item for item in document['participants']
+                       if item['claw_id'] == self.main_claw.id)
+        self.assertEqual(manager['role_key'], 'test_manager')
+        responsibilities = manager['role_contract']['responsibilities']
+        self.assertTrue(any('调度' in item for item in responsibilities))
+        self.assertTrue(any('证据' in item for item in responsibilities))
+        self.assertFalse(manager['role_contract']['dispatch_policy'].get(
+            'manager_is_default_executor', False))
+        task = AgentTask.query.filter_by(
+            task_type='workflow_agent_task').order_by(AgentTask.id.desc()).first()
+        if task:
+            self.assertEqual(task.context_snapshot_id, snapshot.snapshot_id)
+            self.assertEqual(task.context_snapshot_sha256, snapshot.context_sha256)
+
+        before = snapshot.to_dict()
+        team = db.session.get(AgentTeam, self.team_id)
+        team.objective = 'changed after dispatch'
+        team.version += 1
+        db.session.commit()
+        db.session.refresh(snapshot)
+        self.assertEqual(snapshot.to_dict(), before)
+
+    def test_test_manager_is_not_a_default_executor(self):
+        self.setup_grants()
+        run = WorkflowRun(
+            definition_id=self.flow_a.id,
+            project_id=self.project.id,
+            context_json={'workflow_start': {
+                'worker_claw_id': self.main_claw.id,
+                'executor_claw_id': self.main_claw.id,
+            }},
+        )
+        db.session.add(run)
+        db.session.flush()
+        with self.assertRaises(ContextSnapshotError) as raised:
+            freeze_run_context(
+                run, team=db.session.get(AgentTeam, self.team_id),
+                manager_claw_id=self.main_claw.id)
+        self.assertEqual(raised.exception.code, 'POLICY_ROLE_OVERLAP')
+        db.session.rollback()
+
     def test_ordinary_delegation_only_to_same_team_member(self):
         self.setup_grants()
         self.assertTrue(can_dispatch_to(self.main_claw.id, self.other_claw.id, self.flow_a))
@@ -96,6 +159,13 @@ class TeamFlowPermissionsTest(unittest.TestCase):
         db.session.commit()
         first = self.sidecar()
         self.assertIn(self.flow_a.id, first['system_context']['policy']['allowed_workflow_create_definition_ids'])
+        team_rule = next(item for item in first['system_context']['rules']
+                         if item.get('name') == 'agent_team_identity')
+        self.assertIn('负责团队整体测试管理', team_rule['content'])
+        self.assertIn('不合格结果必须退回', team_rule['content'])
+        manager_team = next(item for item in first['agent_teams']
+                            if item['team_id'] == self.team_id)
+        self.assertEqual(manager_team['self']['effective_role_key'], 'test_manager')
         cfg = db.session.get(ClawSidecarConfig, self.main_claw.id)
         self.assertEqual(cfg.system_context_policy_json['allowed_workflow_create_definition_ids'], [])
         self.save_team(policy={'allowed_definition_ids': [self.flow_b.id], 'max_child_runs': 3})
