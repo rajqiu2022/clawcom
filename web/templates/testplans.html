@@ -633,7 +633,9 @@ function parseTestplanDeepLink() {
     const rawIter = params.get('iteration_id') || params.get('iter_id') || params.get('iteration');
     const iterationId = rawIter && /^\d+$/.test(rawIter) ? Number(rawIter) : null;
     const tabKey = (params.get('tab') || params.get('tab_key') || 'plans').trim() || 'plans';
-    return { iterationId, tabKey, applied: false };
+    const rawPlan = params.get('plan_id');
+    const planId = rawPlan && /^\d+$/.test(rawPlan) ? Number(rawPlan) : null;
+    return { iterationId, planId, tabKey, applied: false };
 }
 
 function updateTestplanDeepLink(iterId = currentIterId, tabKey = currentIterTabKey, replace = false) {
@@ -650,7 +652,7 @@ function updateTestplanDeepLink(iterId = currentIterId, tabKey = currentIterTabK
 
 function clearTestplanDeepLink(replace = true) {
     const url = new URL(window.location.href);
-    ['iteration_id', 'iter_id', 'iteration', 'tab', 'tab_key'].forEach(k => url.searchParams.delete(k));
+    ['iteration_id', 'iter_id', 'iteration', 'tab', 'tab_key', 'plan_id'].forEach(k => url.searchParams.delete(k));
     window.history[replace ? 'replaceState' : 'pushState']({}, '', url);
 }
 
@@ -737,9 +739,10 @@ async function loadProjects() {
 
 async function applyInitialTestplanDeepLink() {
     const link = pendingTestplanDeepLink;
-    if (!link || !link.iterationId) return;
+    if (!link || (!link.iterationId && !link.planId)) return;
     try {
-        const iter = await API.get(`/test-iterations/${link.iterationId}`);
+        const iter = link.planId ? await API.get(`/test-plans/${link.planId}`) : await API.get(`/test-iterations/${link.iterationId}`);
+        if (link.planId) link.iterationId = iter.iteration_id;
         const sel = document.getElementById('filter-project');
         if (sel && iter && iter.project_id != null) {
             const projectValue = String(iter.project_id);
@@ -793,6 +796,17 @@ async function loadIterations() {
 
     renderIterList();
     document.getElementById('iter-count').textContent = iterations.length;
+
+    if (pendingTestplanDeepLink?.planId && !pendingTestplanDeepLink.applied) {
+        pendingTestplanDeepLink.applied = true;
+        await showLinkedPlan(pendingTestplanDeepLink.planId);
+        return;
+    }
+    if (currentPlanId && !currentIterId) {
+        const plan = await API.get(`/test-plans/${currentPlanId}`).catch(()=>null);
+        if (plan && (!pid || Number(pid)===plan.project_id)) { await showLinkedPlan(plan.id); return; }
+        currentPlanId = null;
+    }
 
     if (pendingTestplanDeepLink && pendingTestplanDeepLink.iterationId && !pendingTestplanDeepLink.applied) {
         const target = iterations.find(it => Number(it.id) === Number(pendingTestplanDeepLink.iterationId));
@@ -1885,6 +1899,24 @@ function onPlanSelect(value) {
     showPlanDetail(planId);
 }
 
+async function showLinkedPlan(planId) {
+    try {
+        const plan = await API.get(`/test-plans/${planId}`);
+        currentPlanId = plan.id;
+        currentIterId = plan.iteration_id || null;
+        if (currentIterId) {
+            await showIterDetail(currentIterId, {tabKey:'plans', replaceUrl:true});
+        } else {
+            currentIterDetail = {project_id:plan.project_id, plans:[plan]};
+            currentIterTabs = []; currentIterTabKey = 'plans';
+            document.getElementById('main-area').innerHTML = `<div class="tp-plan-area"><div class="tp-detail-header"><p>独立测试计划 · 未归属迭代${plan.team_name ? ' · 团队：'+esc(plan.team_name) : ''}</p><div id="plan-actions"></div></div><div id="plan-detail-area"></div></div>`;
+        }
+        await showPlanDetail(plan.id);
+    } catch(error) {
+        document.getElementById('main-area').innerHTML = `<div class="tp-no-iter-selected">无法打开指定测试计划：${esc(error.message || '不存在或无权访问')}</div>`;
+    }
+}
+
 async function showPlanDetail(planId) {
     currentPlanId = planId;
     const select = document.getElementById('plan-select');
@@ -1894,6 +1926,12 @@ async function showPlanDetail(planId) {
 
     try {
         const plan = await API.get(`/test-plans/${planId}`);
+        if (currentPlanId !== planId) return;
+        const url = new URL(location.href);
+        url.searchParams.set('plan_id', String(planId));
+        if (plan.iteration_id) url.searchParams.set('iteration_id', String(plan.iteration_id));
+        else url.searchParams.delete('iteration_id');
+        history.replaceState(null, '', url);
         renderPlanDetail(plan);
     } catch(e) {
         showToast('加载计划详情失败', 'error');

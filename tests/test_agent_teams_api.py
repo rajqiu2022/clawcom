@@ -166,16 +166,15 @@ class AgentTeamsApiTest(unittest.TestCase):
         response = self._dispatch(mission_id, token=self.backup_token, **self._auth(session='backup'))
         self.assertEqual(response.status_code, 201, response.get_json())
 
-    def test_team_roles_do_not_grant_flow_permission(self):
+    def test_team_selection_grants_flow_execution_without_manual_acl(self):
         self._setup_team()
         mission_id = self._mission()
         self.assertEqual(self._plan(mission_id).status_code, 201)
         self.flow_a.executor_acl_json = {'claw_ids': []}
         db.session.commit()
         response = self._dispatch(mission_id)
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.get_json()['code'], 'MISSION_WORKER_EXECUTE_FORBIDDEN')
-        self.assertEqual(WorkflowRun.query.count(), 0)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(WorkflowRun.query.count(), 1)
 
     def test_role_specialty_and_snapshot_intersection(self):
         self._setup_team()

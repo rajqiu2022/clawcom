@@ -1226,6 +1226,7 @@ def claw_sidecar_config(claw_id, claw=None):
     assignments = []
     rule_links = []
     workflow_create_definition_ids = None
+    team_workflow_create_definition_ids = []
     active_workflow_missions = []
     context_warnings = []
     if runtime_report_warning:
@@ -1251,6 +1252,10 @@ def claw_sidecar_config(claw_id, claw=None):
             status='active').all()
         workflow_create_definition_ids = allowed_workflow_create_definition_ids(
             claw, active_definitions)
+        from app.services.agent_team_permissions import flow_grants
+        team_workflow_create_definition_ids = flow_grants(claw, active_definitions)
+        workflow_create_definition_ids = sorted(set(workflow_create_definition_ids).union(
+            team_workflow_create_definition_ids))
     except Exception:
         logger.exception('build workflow create grants failed for claw %s', claw_id)
         context_warnings.append('WORKFLOW_CREATE_GRANTS_UNAVAILABLE')
@@ -1296,6 +1301,7 @@ def claw_sidecar_config(claw_id, claw=None):
             configured_policy=cfg.system_context_policy_json,
             workflow_missions=active_workflow_missions,
             agent_teams=team_context,
+            team_workflow_create_definition_ids=team_workflow_create_definition_ids,
         ))
     except Exception:
         logger.exception('build agent system context failed for claw %s', claw_id)

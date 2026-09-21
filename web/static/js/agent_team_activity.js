@@ -31,7 +31,7 @@ window.AgentTeamActivity = (() => {
     }
     function schedule() {
         clearTimeout(timer);
-        if (teamId && !document.hidden) timer = setTimeout(refresh, 15000);
+        if (teamId && !document.hidden && !$('at-members-panel')?.hidden) timer = setTimeout(refresh, 15000);
     }
     async function refresh(force = false) {
         if (!teamId || loading || (document.hidden && !force)) return;
@@ -96,5 +96,5 @@ window.AgentTeamActivity = (() => {
         const card=event.target.closest('[data-member]');if(card)loadDetail(Number(card.dataset.member));
         if(event.target.closest('#at-activity-refresh'))refresh(true);
     });
-    return {reset, mount:async id=>{teamId=id;await refresh(true);}};
+    return {reset, refresh, mount:async id=>{teamId=id;await refresh(true);}};
 })();

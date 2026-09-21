@@ -405,6 +405,10 @@ def _definition_visible(definition):
         return True
     if _can_edit_definition(definition):
         return True
+    if actor['type'] == 'claw':
+        from app.services.agent_team_permissions import can_execute
+        if can_execute(actor['id'], definition):
+            return True
     return can_view_workflow(
         definition.visibility_scope or 'project',
         definition.owner_type,
@@ -507,6 +511,10 @@ def _can_execute_definition(definition):
         return False
     if _is_legacy_owner(definition, actor):
         return True
+    if actor['type'] == 'claw':
+        from app.services.agent_team_permissions import can_execute
+        if can_execute(actor['id'], definition):
+            return True
     return can_execute_workflow(
         definition.owner_type,
         definition.owner_id,
@@ -4133,11 +4141,13 @@ def create_workflow_run():
                 return _workflow_api_error(
                     'INVALID_WORKER_CLAW_ID',
                     'worker_claw_id must be an integer')
+            from app.services.agent_team_permissions import can_dispatch_to
             if (requested_worker_claw_id != caller_claw.id
-                    and not _can_edit_definition(definition)):
+                    and not _can_edit_definition(definition)
+                    and not can_dispatch_to(caller_claw.id, requested_worker_claw_id, definition)):
                 return _workflow_api_error(
                     'WORKER_BINDING_MISMATCH',
-                    'Only a Flow editor may start it for another bound Worker',
+                    'A Flow editor or authorized team manager is required to dispatch to this Worker',
                     status=403,
                     details={
                         'initiating_claw_id': caller_claw.id,

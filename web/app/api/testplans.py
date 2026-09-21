@@ -86,6 +86,10 @@ def _can_edit_plan(user, plan):
     """检查用户是否有权编辑测试计划"""
     if not user:
         return False
+    if plan.team_id:
+        from app.services.agent_team_plans import access
+        from app.services.agent_teams import load_team
+        return access(load_team(plan.team_id))[1]
     if user.role in ('super_admin', 'admin'):
         return True
     return plan.created_by == user.username
@@ -178,6 +182,24 @@ def _create_test_task_notification(task, plan, action='assigned', message=''):
 
 
 # ==================== 测试迭代 CRUD ====================
+
+@api_bp.before_request
+def authorize_team_plan_request():
+    """Apply project/manager boundaries to newly team-owned plans only."""
+    plan_id = (request.view_args or {}).get('plan_id')
+    if not plan_id or not request.path.startswith('/api/v1/test-plans/'):
+        return
+    plan = db.session.get(TestPlan, plan_id)
+    if not plan or not plan.team_id:
+        return
+    from app.services.agent_team_plans import access
+    from app.services.agent_teams import load_team
+    actor, manager = access(load_team(plan.team_id))
+    root = '/api/v1/test-plans/%s' % plan_id
+    if (request.path == root and request.method in ('PUT', 'DELETE')) or (
+            request.path == root + '/tasks' and request.method == 'POST'):
+        access(load_team(plan.team_id), write=True)
+
 
 @api_bp.route('/test-iterations', methods=['GET'])
 def list_test_iterations():
@@ -518,6 +540,12 @@ def list_test_plans():
     - search: 搜索名称
     """
     query = TestPlan.query
+    if request.args.get('team_id') is not None:
+        from app.services.agent_teams import load_team
+        from app.services.agent_team_plans import access
+        team = load_team(request.args.get('team_id', type=int))
+        access(team)
+        query = query.filter_by(team_id=team.id)
 
     project_id = request.args.get('project_id', type=int)
     status = request.args.get('status')
@@ -554,9 +582,20 @@ def list_test_plans():
 
 
 @api_bp.route('/test-plans', methods=['POST'])
-def create_test_plan():
+def create_test_plan(team_id=None):
     """创建测试计划"""
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求须为 JSON 对象'}), 400
+    data = dict(data)
+    if team_id is not None:
+        if data.get('team_id', team_id) != team_id:
+            return jsonify({'error': 'team_id 与 URL 不一致'}), 400
+        data['team_id'] = team_id
+    from app.services import agent_team_plans as team_plans
+    team = team_plans.bind(data)
+    if team:
+        team_plans.validate_dates(data)
     if not data or not data.get('name'):
         return jsonify({'error': 'name 为必填项'}), 400
     if not data.get('start_date') or not data.get('end_date'):
@@ -578,6 +617,7 @@ def create_test_plan():
         created_by = getattr(user, 'username', '') or getattr(user, 'name', '')
 
     plan = TestPlan(
+        team_id=team.id if team else None,
         name=data['name'],
         description=data.get('description', ''),
         iteration_id=data.get('iteration_id'),
@@ -624,7 +664,16 @@ def update_test_plan(plan_id):
             plan_guard.require_lease(supervisor, caller_claw.id,
                 (request.get_json(silent=True) or {}).get('plan_supervision') or {})
     plan = TestPlan.query.get_or_404(plan_id)
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': '请求须为 JSON 对象'}), 400
+    data = dict(data)
+    plan = TestPlan.query.filter_by(id=plan_id).populate_existing().with_for_update().first_or_404()
+    from app.services import agent_team_plans as team_plans
+    team = team_plans.bind(data, plan)
+    if team:
+        team_plans.validate_dates(data, plan)
+        plan.team_id = team.id
 
     old_iteration_id = plan.iteration_id
 
@@ -664,6 +713,10 @@ def update_test_plan(plan_id):
 def delete_test_plan(plan_id):
     """删除测试计划"""
     plan = TestPlan.query.get_or_404(plan_id)
+    if plan.team_id:
+        from app.services.agent_team_plans import access
+        from app.services.agent_teams import load_team
+        access(load_team(plan.team_id), write=True)
     iteration_id = plan.iteration_id
     db.session.delete(plan)
 

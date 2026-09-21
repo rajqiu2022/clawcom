@@ -358,6 +358,7 @@ def _resolve_workflow_policy(
     runtime_agent_type: str,
     workflow_create_definition_ids: Iterable[int] | None,
     configured_policy: Any,
+    team_workflow_create_definition_ids: Iterable[int] = (),
 ) -> tuple[dict[str, Any], list[str]]:
     acl_ids = None
     if workflow_create_definition_ids is not None:
@@ -379,8 +380,11 @@ def _resolve_workflow_policy(
         return {'allowed_workflow_create_definition_ids': []}, [
             'WORKFLOW_CREATE_GRANTS_UNAVAILABLE',
         ]
+    # Team selection is itself an administrator grant, independent of the
+    # legacy persisted ceiling. Intersect with live grants for revocation.
     effective_ids = sorted(set(acl_ids).intersection(
-        configured['allowed_workflow_create_definition_ids']))
+        set(configured['allowed_workflow_create_definition_ids']).union(
+            team_workflow_create_definition_ids)))
     result: dict[str, Any] = {
         'allowed_workflow_create_definition_ids': effective_ids,
     }
@@ -567,11 +571,13 @@ def build_agent_system_context(
     configured_policy: Any = None,
     workflow_missions: Iterable[Any] = (),
     agent_teams: Iterable[dict] = (),
+    team_workflow_create_definition_ids: Iterable[int] = (),
 ) -> dict[str, Any]:
     profiles, active_profile, profile_warnings = build_profile_context(assignments)
     rules = build_rule_context(rule_links)
     workflow_policy, policy_warnings = _resolve_workflow_policy(
-        runtime_agent_type, workflow_create_definition_ids, configured_policy)
+        runtime_agent_type, workflow_create_definition_ids, configured_policy,
+        team_workflow_create_definition_ids)
     trusted_rules = [dict(item) for item in rules]
     teams = list(agent_teams)
     if teams:

@@ -14,7 +14,7 @@
 一个执行员可具备多个二级角色；一个 Claw 可加入多个团队，亦可兼任不同团队岗位。
 新角色仅保存在 `agent_teams/agent_team_members`，不修改 Claw.role、AgentPost、Profile、现有 Flow ACL。
 经理在主备字段配置，不能通过 members 塞入第二个经理。主备只有一份有效 lease，按 Hub 时间判定。
-角色是分工，不是权限或运行能力：不会自动授予 Flow 编辑/执行权，也不会伪造 Worker Runtime。
+角色与运行能力分离。2026-09-21 起，管理员勾选的 Flow 自动授予经理调度、代码分析员/测试执行员执行权限，不授予编辑权限，也不伪造 Worker Runtime。详见 `agent_team_flow_permissions.md`。
 
 ## 二、本批已实现的行为
 
@@ -24,7 +24,7 @@
 - Manager lease 使用数据库行锁、epoch、会话 ID，30–300 秒 TTL（默认 120 秒）。续期不调用模型。
 - 只有当前经理和当前会话可建 Mission、写计划、dispatch、完成/取消 Team Mission。过期任期不能复活；主备接管不重写已有 Run。
 - 计划首次写入 Stage，计算内容 hash；相同内容幂等，不同内容不能原地覆盖。新基线需要新 Mission。
-- dispatch 必须提供 stage_key，执行 Agent 从阶段绑定解析；仍检查可信 Runtime 和 Flow ACL。
+- dispatch 必须提供 stage_key，执行 Agent 从阶段绑定解析；仍检查可信 Runtime 和有效 Flow 权限（手工 ACL 或当前团队授权）。
 - 角色绑定同时满足 Mission 快照和团队当前成员关系；移除的角色不能继续启动新 Run。
 - Stage 与 Run 同事务关联，每阶段仅启动一次；相同 decision_key 重试回读同一个 Run。经理任期不进入决策 hash，接管后可回读原决策，但旧任期不能操作。
 - Team 的 Handoff 接收按目标 Stage 指定 Agent + 团队角色判断，不使用 Claw.role/AgentPost。
@@ -128,7 +128,7 @@ Flow 列表必须属于团队策略且创建者具备执行/编辑权限。Worke
 - `GET /agent-teams/options?project_id=...` 仅返回同项目可用 Agent 的最小字段与当前调用者可见的 active Flow，不返回凭据或 Sidecar 配置；团队列表支持 `limit/offset` 分页。
 - 展示团队策略、经理任期快照、Mission 队列和 Stage/Run 关联。任期快照不等同于实时在线状态；页面不轮询、不申请经理任期、不代创建 Run。
 - 保存携带 `expected_version`；版本冲突保留表单并提示刷新，不静默覆盖。切换项目/团队时忽略旧请求结果。
-- 团队角色不授予 Flow 权限；管理员选定的 Flow 仍须在实际派发时通过现有 ACL 和 Runtime 校验。
+- 管理员选定的 Flow 自动提供团队调度/执行授权；实际派发仍校验当前团队范围、阶段绑定和 Runtime。撤回团队授权不会改动独立的手工 ACL。
 - 沿用 Hub 明暗主题，配置弹窗有独立滚动区域及窄屏布局；文本按纯文本安全转义。
 - 本地浏览器验收使用 `python tests/preview_agent_teams.py`，仅监听 `127.0.0.1:18891`、内存数据库及模拟登录。该工具不可部署为服务；结束后停止本地进程即可。
 

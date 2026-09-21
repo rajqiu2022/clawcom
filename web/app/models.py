@@ -5193,6 +5193,7 @@ class TestPlan(db.Model):
     __tablename__ = 'test_plans'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    team_id = db.Column(db.Integer, db.ForeignKey('agent_teams.id'), index=True)
     name = db.Column(db.String(200), nullable=False, comment='计划名称')
     description = db.Column(db.Text, comment='计划描述')
 
@@ -5244,12 +5245,15 @@ class TestPlan(db.Model):
 
     # 关联
     project = db.relationship('Project', backref='test_plans')
+    agent_team = db.relationship('AgentTeam')
     tasks = db.relationship('TestTask', backref='plan',
                             lazy='dynamic', cascade='all, delete-orphan')
 
     def to_dict(self, with_tasks=False):
         data = {
             'id': self.id,
+            'team_id': self.team_id,
+            'team_name': self.agent_team.name if self.agent_team else None,
             'name': self.name,
             'description': self.description,
             'iteration_id': self.iteration_id,

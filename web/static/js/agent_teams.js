@@ -55,6 +55,7 @@
     }
     async function reloadProject(preferredTeam = null) {
         AgentTeamActivity.reset();
+        AgentTeamPlans.reset();
         const epoch = ++state.loadEpoch;
         ++state.missionEpoch;
         state.project = $('at-project').value;
@@ -105,6 +106,7 @@
         const team = state.teams.find(t => t.id === id);
         if (!team) return;
         AgentTeamActivity.reset();
+        AgentTeamPlans.reset();
         state.selected = id; state.missionOffset = 0; renderList();
         const manage = state.options.can_manage;
         const actions = manage ? `<button class="btn btn-secondary btn-sm" data-action="edit" type="button">编辑配置</button>
@@ -114,10 +116,11 @@
         $('at-detail').innerHTML = `<header class="at-detail-head"><div class="at-detail-title"><div><span class="at-eyebrow">TEAM #${team.id} / CONFIG v${team.version}</span><h2>${esc(team.name)}</h2></div><div class="at-detail-actions">${actions}</div></div>
             <p class="at-detail-goal">${esc(team.objective)}</p><div class="at-lease">${badge(team.status)}<strong>${esc(lease)}</strong><span>任期 #${team.manager_epoch}</span></div>
             <p class="at-help">任期状态为本次读取快照，不等同于 Agent 在线状态。${team.manager_lease_expires_at ? '到期时间：' + esc(team.manager_lease_expires_at) : '经理接入团队合同并申请任期后才可调度。'}</p></header>
-            <section class="at-activity"><header class="at-activity-head"><div><h3>团队成员 <span class="at-muted">Agent 自报状态</span></h3><p class="at-help">状态与进度由成员自行上报；超过 3 分钟未更新标为过期，不推断为空闲。</p></div><button type="button" class="btn btn-secondary btn-sm" id="at-activity-refresh">刷新状态</button></header><p id="at-activity-note" class="at-help" role="status"></p><div id="at-activity-cards" class="at-activity-grid"><p class="at-empty">正在读取成员状态…</p></div></section>
-            <div class="at-policy">允许调度：${team.policy.allowed_definition_ids.map(flowId => `<a href="/workflows?definition_id=${flowId}">Flow #${flowId}</a>`).join('')}<br>每个 Mission 最多 ${team.policy.max_child_runs} 个 Run；团队范围不替代 Flow ACL。</div>
-            <div class="at-missions-head"><h3>团队任务 / Mission</h3><span class="at-muted" id="at-mission-count">读取中…</span></div><div id="at-missions"><p class="at-empty">正在读取任务…</p></div><div id="at-pager" class="at-pager"></div>`;
-        await Promise.all([loadMissions(0), AgentTeamActivity.mount(id)]);
+            <div class="at-detail-tabs" role="tablist" aria-label="团队工作视图"><button id="at-tab-members" role="tab" aria-selected="true" aria-controls="at-members-panel" data-team-tab="members" type="button">团队成员</button><button id="at-tab-plans" role="tab" aria-selected="false" aria-controls="at-plans-panel" data-team-tab="plans" tabindex="-1" type="button">任务计划</button></div>
+            <div id="at-members-panel" role="tabpanel" aria-labelledby="at-tab-members"><section class="at-activity"><header class="at-activity-head"><div><h3>团队成员 <span class="at-muted">Agent 自报状态</span></h3><p class="at-help">状态与进度由成员自行上报；超过 3 分钟未更新标为过期，不推断为空闲。</p></div><button type="button" class="btn btn-secondary btn-sm" id="at-activity-refresh">刷新状态</button></header><p id="at-activity-note" class="at-help" role="status"></p><div id="at-activity-cards" class="at-activity-grid"><p class="at-empty">正在读取成员状态…</p></div></section>
+            <div class="at-policy">允许调度：${team.policy.allowed_definition_ids.map(flowId => `<a href="/workflows?definition_id=${flowId}">Flow #${flowId}</a>`).join('')}<br>每个 Mission 最多 ${team.policy.max_child_runs} 个 Run；经理自动获得调度权限，成员自动获得执行权限，不授予 Flow 编辑权限。</div>
+            </div><div id="at-plans-panel" role="tabpanel" aria-labelledby="at-tab-plans" hidden><div id="at-plans-root"></div><div class="at-missions-head"><h3>执行链 / Mission</h3><span class="at-muted" id="at-mission-count">读取中…</span></div><div id="at-missions"><p class="at-empty">正在读取任务…</p></div><div id="at-pager" class="at-pager"></div></div>`;
+        await Promise.all([loadMissions(0), AgentTeamActivity.mount(id), AgentTeamPlans.mount(team)]);
     }
     async function loadMissions(offset) {
         const teamId = state.selected, epoch = ++state.missionEpoch;

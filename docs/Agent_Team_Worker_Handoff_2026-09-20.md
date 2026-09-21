@@ -6,7 +6,7 @@ Hub 当前发布版本 `97ea71a`，提供团队角色、经理任期、Mission �
 
 {{PUBLISHED_SKILLS}}
 
-身份：一支团队一名在任测试经理（可有备用），多名代码分析员、测试执行员；执行员细分 editor/mobile_package/client_performance。团队角色不修改 Claw.role/Profile，不授予 Flow 权限，不代替可信 Runtime 或执行槽。成员自报适用于全部 Provider；正式 Mission dispatch 仍检查可信 Runtime 和实际 ACL。
+身份：一支团队一名在任测试经理（可有备用），多名代码分析员、测试执行员；执行员细分 editor/mobile_package/client_performance。团队角色不修改 Claw.role/Profile。2026-09-21 起管理员勾选 Flow 自动授予经理调度、成员执行权限，不代替可信 Runtime 或执行槽。成员自报适用于全部 Provider；正式 Mission dispatch 仍检查可信 Runtime 和有效权限（手工 ACL 或当前团队授权）。详见 `agent_team_flow_permissions.md`。
 
 ### Worker P0：公共层可靠成员动态上报
 

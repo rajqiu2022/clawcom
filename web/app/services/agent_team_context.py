@@ -24,7 +24,19 @@ def team_snapshot(team, claw_id, names):
         'members_truncated': len(selected) < len(ids),
         'definition_api': '/api/v1/agent-teams/%s' % team.id,
         'activity_api': '/api/v1/agent-teams/%s/members/activity' % team.id,
+        'workflow_permissions': {
+            'source': 'active_team_selection',
+            'allowed_definition_ids': list((team.policy_json or {}).get(
+                'allowed_definition_ids', [])) if team.status == 'active' else [],
+            'can_dispatch_members': team.status == 'active' and claw_id in (
+                team.primary_manager_claw_id, team.backup_manager_claw_id),
+            'note': '勾选 Flow 自动授予经理调度、成员执行权限，不授予编辑权限；'
+                    'Mission 仍须有效经理租约、阶段绑定和可信 Runtime。',
+        },
         'plan_supervision': team_capability(team.id),
+        'test_plans': {'api': '/api/v1/agent-teams/%s/test-plans' % team.id,
+                       'create_role': 'test_manager', 'periods': ['day', 'week', 'all'],
+                       'note': '团队计划创建为草稿；排期概览不是自动执行调度。'},
     }
 
 

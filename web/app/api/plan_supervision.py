@@ -31,6 +31,11 @@ def load(plan_id, write=False):
             (plan.project_id in user_project_ids(user) and
              (not write or user.role == 'admin' or plan.created_by == user.username)))
     if not allowed:
+        if write and plan.team_id:
+            from app.services.agent_team_plans import access
+            from app.services.agent_teams import load_team
+            _, allowed = access(load_team(plan.team_id))
+    if not allowed:
         svc.fail('PLAN_ACCESS_DENIED', '无权访问或管理此计划', 403)
     return plan, svc.locked(plan_id), claw
 
@@ -95,7 +100,9 @@ def start_plan_supervision(plan_id):
     claw = db.session.get(OpenClawInstance, claw_id) if type(claw_id) is int else None
     if not claw or claw.status == 'deleted' or claw.project_id != plan.project_id:
         svc.fail('PLAN_ORCHESTRATOR_INVALID', '必须绑定同项目的有效 Agent', 400)
-    team_id = body.get('team_id')
+    team_id = body.get('team_id', plan.team_id)
+    if plan.team_id and team_id != plan.team_id:
+        svc.fail('PLAN_TEAM_INVALID', '监督团队必须与测试计划归属一致', 400)
     if team_id is not None and (type(team_id) is not int or team_id <= 0):
         svc.fail('PLAN_TEAM_INVALID', 'team_id 必须为正整数', 400)
     if not svc.team_binding_valid(team_id, plan.project_id, claw_id):

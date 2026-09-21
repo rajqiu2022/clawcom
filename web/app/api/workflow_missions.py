@@ -142,6 +142,9 @@ def _trusted_worker_runtime(claw_id):
 
 
 def _claw_can_execute_definition(claw_id, definition):
+    from app.services.agent_team_permissions import can_execute
+    if can_execute(claw_id, definition):
+        return True
     return can_execute_workflow(
         definition.owner_type,
         definition.owner_id,
@@ -372,6 +375,15 @@ def create_workflow_mission():
         return _error('MISSION_KEY_TOO_LONG', 'mission_key 不能超过128字符')
     if WorkflowMission.query.filter_by(mission_key=mission_key).first():
         return _error('MISSION_KEY_EXISTS', 'mission_key 已存在', 409)
+    mission_context = dict(data.get('context') or {}) if isinstance(data.get('context'), dict) else {}
+    # Do not let an ordinary Mission turn revocable team grants into a lasting
+    # authorization snapshot. This provenance is written by Hub, not callers.
+    mission_context.pop('team_grant_definition_ids', None)
+    if not team and actor['type'] == 'claw':
+        from app.services.agent_team_permissions import flow_grants
+        derived = sorted(set(allowed).intersection(flow_grants(main_claw, candidates)))
+        if derived:
+            mission_context['team_grant_definition_ids'] = derived
     mission = WorkflowMission(
         mission_key=mission_key,
         project_id=project_id,
@@ -389,9 +401,7 @@ def create_workflow_mission():
             data.get('allow_external_notification') is True),
         allow_destructive_actions=(
             data.get('allow_destructive_actions') is True),
-        context_json=(
-            data.get('context') if isinstance(data.get('context'), dict)
-            else {}),
+        context_json=mission_context,
         created_by_type=actor['type'],
         created_by_id=actor['id'],
         created_by_name=actor['name'],
@@ -699,6 +709,9 @@ def dispatch_workflow_mission(mission_id):
         return _error(
             'MISSION_DEFINITION_NOT_ALLOWED',
             '该 Workflow 不在 Mission 项目授权范围内', 403)
+    if (not team and definition_id in (mission.context_json or {}).get('team_grant_definition_ids', [])
+            and not _claw_can_execute_definition(mission.main_claw_id, definition)):
+        return _error('MISSION_TEAM_GRANT_REVOKED', '团队 Flow 授权已撤回', 403)
     selected_worker = OpenClawInstance.query.filter(
         OpenClawInstance.id == worker_claw_id,
         OpenClawInstance.status != 'deleted').first()

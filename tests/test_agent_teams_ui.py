@@ -60,6 +60,21 @@ class AgentTeamsUiTest(unittest.TestCase):
         self.assertIn('data-history', js)
         self.assertIn('.at-activity-dialog[open]', self.css)
 
+    def test_plan_tabs_authoring_escaping_and_deep_links(self):
+        js = (ROOT / 'web/static/js/agent_team_plans.js').read_text(encoding='utf-8')
+        plans = (ROOT / 'web/templates/testplans.html').read_text(encoding='utf-8')
+        for marker in ('role="tablist"', 'aria-controls="at-members-panel"', 'id="at-plans-panel"'):
+            self.assertIn(marker, self.js)
+        for marker in ('data-period', 'period=','esc(p.name)', 'esc(t.name)', 'generation!==epoch',
+                       'can_manage', "status:'draft'", 'ArrowLeft', 'requestId'):
+            self.assertIn(marker, js)
+        for forbidden in ('/dispatch', '/supervision/start', 'setInterval('):
+            self.assertNotIn(forbidden, js)
+        self.assertIn('aria-labelledby="at-plan-dialog-title"', self.html)
+        self.assertIn("params.get('plan_id')", plans)
+        self.assertIn('async function showLinkedPlan', plans)
+        self.assertIn('未归属迭代', plans)
+
 
 if __name__ == '__main__':
     unittest.main()

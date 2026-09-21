@@ -157,6 +157,21 @@ def _team_read_payload(team):
     return dict(team.to_dict(), plan_supervision=team_capability(team.id))
 
 
+@api_bp.route('/agent-teams/<int:team_id>/test-plans', methods=['GET', 'POST'])
+def team_test_plans(team_id):
+    team = load_team(team_id)
+    _access(team.project_id)
+    if request.method == 'POST':
+        from app.api.testplans import create_test_plan
+        return create_test_plan(team_id=team_id)
+    from app.services.agent_team_plans import overview
+    limit, offset = _pagination(default=6)
+    if limit > 24:
+        raise TeamError('TEAM_VALIDATION_FAILED', '计划卡片每页最多 24 项', 400)
+    return jsonify(overview(team, request.args.get('period', 'week'),
+                            request.args.get('date'), limit, offset))
+
+
 @api_bp.route('/agent-teams/<int:team_id>', methods=['GET'])
 def get_agent_team(team_id):
     team = load_team(team_id)
