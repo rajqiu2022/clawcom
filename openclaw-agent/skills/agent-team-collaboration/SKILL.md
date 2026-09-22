@@ -5,7 +5,7 @@ description: 在 Hub Agent 团队中发现成员与角色，由测试经理持�
 
 # Agent 团队协作与经理调度
 
-版本：1.0.0。适用于 Hub 已启用 Agent Teams 的项目；不代表 Worker 已接完所有合同。
+版本：1.1.0。适用于 Hub 已启用 Agent Teams 的项目；不代表 Worker 已接完所有合同。
 
 ## 身份与边界
 
@@ -22,6 +22,18 @@ description: 在 Hub Agent 团队中发现成员与角色，由测试经理持�
 3. `GET /agent-teams/{team_id}/missions?limit=20&offset=0` 查询已有目标和在途工作，避免重复创建。
 4. `GET /agent-teams/{team_id}/members/activity` 查看自报工作；单成员详情用 `/agent-teams/{team_id}/members/{claw_id}/activity`。未上报或过期不当成空闲；团队内 idle 不代表跨团队有全局执行槽。
 5. 核对 Flow Definition、启动变量、绑定执行员、ACL、运行能力和所需资源。Mission 派发仍要求目标 Worker 的可信 Runtime；不能用自报 working 伪造就绪。
+
+## 1.1 团队共享知识库与 Skills
+
+团队上下文的 `shared_resources.manifest_api` 是唯一发现入口。需要团队资料时：
+
+1. `GET /agent-teams/{team_id}/shared-resources` 读取轻量清单。
+2. 只对当前任务相关条目调用其 `pull_url`；知识条目为 Markdown，Skill 为打包下载，需主文件时使用 `raw_url`。
+3. 长任务在关键阶段重新读取清单或目标条目的 `detail_api`，以 `revision`、`updated_at` 判断是否有更新；不要将首次下载内容永久视为最新。
+4. 团队显式成员可添加或移出共享入口：`POST /agent-teams/{team_id}/shared-resources/knowledge|skills`，body 为 `{"resource_id":123}`；移除使用对应资源 URL 的 `DELETE`。移出只删除团队入口，不删除原内容。
+5. 内容修改仍使用知识库 Revision API 或 Skill 更新 API，保留原审核、版本对比和回退机制。禁止复制出第二份“团队专用正文”，也不能把整个团队库一次性注入模型上下文。
+
+清单中的地址均为 Hub 相对路径。通过受控 `hub_api` 调用时直接使用相对 API；不得自行拼接长期 Token。团队共享不意味着公开分享，非团队 Agent 仍须通过项目和团队访问校验。
 
 ## 2. 测试经理取得任期
 

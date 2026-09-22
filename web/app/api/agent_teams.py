@@ -13,8 +13,10 @@ from app import db
 from app.api import api_bp
 from app.api.mission_stages import _actor, _can_access_project, _can_administer
 from app.models import (
-    AgentTeam, AgentTeamMember, AgentTeamMission, AuditLog, ClawSidecarConfig,
-    MissionStage, OpenClawInstance, Project, WorkflowDefinition, WorkflowMission,
+    AgentTeam, AgentTeamKnowledgeResource, AgentTeamMember, AgentTeamMission,
+    AgentTeamSkillResource, AuditLog, ClawSidecarConfig, KnowledgeEntry,
+    MissionStage, OpenClawInstance, Project, Skill, WorkflowDefinition,
+    WorkflowMission,
 )
 from app.services.worker_runtime import runtime_summary
 from app.services import agent_team_activity as activity
@@ -155,6 +157,183 @@ def list_agent_teams():
 def _team_read_payload(team):
     from app.services.plan_supervision import team_capability
     return dict(team.to_dict(), plan_supervision=team_capability(team.id))
+
+
+def _team_resource_editor(team, actor):
+    """Project people may curate; Agents must be an explicit team member."""
+    if actor['type'] == 'user':
+        return True
+    return actor['id'] in activity.roster(team)
+
+
+def _knowledge_resource(row):
+    entry = row.knowledge
+    is_wiki = (entry.entry_type or 'article') == 'test_journal'
+    return {
+        'id': entry.id, 'title': entry.title, 'kind': 'knowledge',
+        'entry_type': entry.entry_type or 'article',
+        'category': entry.category, 'module_name': entry.module_name,
+        'status': entry.status, 'revision': int(entry.current_revision or 0),
+        'updated_at': str(entry.updated_at) if entry.updated_at else None,
+        'linked_at': str(row.created_at) if row.created_at else None,
+        'linked_by': row.linked_by_name,
+        'web_url': ('/knowledge/wiki/%s' % entry.id if is_wiki
+                    else '/knowledge?entry_id=%s' % entry.id),
+        'detail_api': ('/api/v1/knowledge/journal-pages/%s' % entry.id if is_wiki
+                       else '/api/v1/knowledge/%s' % entry.id),
+        'pull_url': '/api/v1/knowledge/%s/export.md' % entry.id,
+        'revisions_api': ('/api/v1/knowledge/%s/revisions' % entry.id
+                          if is_wiki else None),
+    }
+
+
+def _skill_resource(row):
+    skill = row.skill
+    return {
+        'id': skill.id, 'name': skill.name, 'title': skill.display_name,
+        'kind': 'skill', 'category': skill.category, 'scope': skill.scope,
+        'review_status': skill.review_status, 'visibility': skill.visibility,
+        'updated_at': str(skill.updated_at) if skill.updated_at else None,
+        'linked_at': str(row.created_at) if row.created_at else None,
+        'linked_by': row.linked_by_name,
+        'web_url': '/skills?skill_id=%s' % skill.id,
+        'detail_api': '/api/v1/skills/%s' % skill.id,
+        'pull_url': '/api/v1/skills/%s/pack' % skill.id,
+        'raw_url': '/api/v1/skills/%s/raw' % skill.id,
+    }
+
+
+def _resource_manifest(team, actor):
+    knowledge = (AgentTeamKnowledgeResource.query
+                 .filter_by(team_id=team.id)
+                 .order_by(AgentTeamKnowledgeResource.id.desc()).all())
+    skills = (AgentTeamSkillResource.query
+              .join(Skill, Skill.id == AgentTeamSkillResource.skill_id)
+              .filter(AgentTeamSkillResource.team_id == team.id,
+                      db.or_(Skill.is_deleted.is_(False), Skill.is_deleted.is_(None)))
+              .order_by(AgentTeamSkillResource.id.desc()).all())
+    return {
+        'schema_version': 1, 'team_id': team.id,
+        'project_id': team.project_id, 'team_version': team.version,
+        'can_manage': _team_resource_editor(team, actor),
+        'knowledge': [_knowledge_resource(row) for row in knowledge],
+        'skills': [_skill_resource(row) for row in skills],
+        'pull_policy': {
+            'mode': 'on_demand',
+            'note': '清单只返回元数据；通过 pull_url 拉取完整内容，更新后同一 URL 始终读取最新版本。',
+        },
+    }
+
+
+@api_bp.route('/agent-teams/<int:team_id>/shared-resources', methods=['GET'])
+def team_shared_resources(team_id):
+    team = load_team(team_id)
+    actor = _access(team.project_id)
+    return jsonify(_resource_manifest(team, actor))
+
+
+@api_bp.route('/agent-teams/<int:team_id>/shared-resources/options', methods=['GET'])
+def team_shared_resource_options(team_id):
+    team = load_team(team_id)
+    actor = _access(team.project_id)
+    if not _team_resource_editor(team, actor):
+        raise TeamError('TEAM_RESOURCE_EDITOR_REQUIRED', '仅项目成员或团队 Agent 可维护共享资源', 403)
+    linked_knowledge = {row.knowledge_id for row in
+                        AgentTeamKnowledgeResource.query.filter_by(team_id=team.id).all()}
+    linked_skills = {row.skill_id for row in
+                     AgentTeamSkillResource.query.filter_by(team_id=team.id).all()}
+    knowledge = (KnowledgeEntry.query.filter_by(project_id=team.project_id)
+                 .order_by(KnowledgeEntry.updated_at.desc(), KnowledgeEntry.id.desc())
+                 .limit(500).all())
+    skill_rows = (Skill.query.filter(
+                      db.or_(Skill.is_deleted.is_(False), Skill.is_deleted.is_(None)),
+                      db.or_(Skill.review_status != 'rejected', Skill.review_status.is_(None)))
+                  .order_by(Skill.updated_at.desc(), Skill.id.desc()).limit(500).all())
+    skills = []
+    team_claw_ids = set(activity.roster(team))
+    for skill in skill_rows:
+        projects = {int(value) for value in (skill.applicable_projects or [])
+                    if str(value).isdigit()}
+        if projects and team.project_id not in projects:
+            continue
+        if skill.visibility == 'private' and skill.owner_claw_id not in team_claw_ids:
+            continue
+        skills.append({'id': skill.id, 'name': skill.name,
+                       'title': skill.display_name, 'category': skill.category,
+                       'linked': skill.id in linked_skills})
+    return jsonify({
+        'knowledge': [{'id': row.id, 'title': row.title,
+                       'entry_type': row.entry_type or 'article',
+                       'module_name': row.module_name,
+                       'revision': int(row.current_revision or 0),
+                       'linked': row.id in linked_knowledge}
+                      for row in knowledge],
+        'skills': skills,
+    })
+
+
+def _link_resource(team, actor, kind, resource_id):
+    if not _team_resource_editor(team, actor):
+        raise TeamError('TEAM_RESOURCE_EDITOR_REQUIRED', '仅项目成员或团队 Agent 可维护共享资源', 403)
+    if kind == 'knowledge':
+        resource = db.session.get(KnowledgeEntry, resource_id)
+        if not resource or resource.project_id != team.project_id:
+            raise TeamError('TEAM_RESOURCE_SCOPE_INVALID', '知识不存在或不属于团队项目', 400)
+        model, field = AgentTeamKnowledgeResource, 'knowledge_id'
+    else:
+        resource = db.session.get(Skill, resource_id)
+        if not resource or resource.is_deleted or resource.review_status == 'rejected':
+            raise TeamError('TEAM_RESOURCE_SCOPE_INVALID', 'Skill 不存在或已下架', 400)
+        if (resource.visibility == 'private'
+                and resource.owner_claw_id not in set(activity.roster(team))):
+            raise TeamError('TEAM_RESOURCE_SCOPE_INVALID', '私有 Skill 不属于团队成员', 400)
+        projects = {int(value) for value in (resource.applicable_projects or [])
+                    if str(value).isdigit()}
+        if projects and team.project_id not in projects:
+            raise TeamError('TEAM_RESOURCE_SCOPE_INVALID', 'Skill 不适用于团队项目', 400)
+        model, field = AgentTeamSkillResource, 'skill_id'
+    existing = model.query.filter_by(team_id=team.id, **{field: resource_id}).first()
+    if existing:
+        return existing, False
+    row = model(team_id=team.id, **{field: resource_id},
+                linked_by_type=actor['type'], linked_by_id=actor['id'],
+                linked_by_name=actor['name'])
+    db.session.add(row)
+    db.session.flush()
+    _audit(team, actor, 'link_%s' % kind, {'resource_id': resource_id})
+    return row, True
+
+
+@api_bp.route('/agent-teams/<int:team_id>/shared-resources/<string:kind>', methods=['POST'])
+def link_team_shared_resource(team_id, kind):
+    if kind not in ('knowledge', 'skills'):
+        raise TeamError('TEAM_RESOURCE_KIND_INVALID', '资源类型仅支持 knowledge/skills', 404)
+    team = load_team(team_id)
+    actor = _access(team.project_id)
+    data = _body()
+    resource_id = integer(data.get('resource_id'), 'resource_id')
+    row, created = _link_resource(team, actor, 'knowledge' if kind == 'knowledge' else 'skill', resource_id)
+    db.session.commit()
+    payload = _knowledge_resource(row) if kind == 'knowledge' else _skill_resource(row)
+    return jsonify(payload), 201 if created else 200
+
+
+@api_bp.route('/agent-teams/<int:team_id>/shared-resources/<string:kind>/<int:resource_id>', methods=['DELETE'])
+def unlink_team_shared_resource(team_id, kind, resource_id):
+    if kind not in ('knowledge', 'skills'):
+        raise TeamError('TEAM_RESOURCE_KIND_INVALID', '资源类型仅支持 knowledge/skills', 404)
+    team = load_team(team_id)
+    actor = _access(team.project_id)
+    if not _team_resource_editor(team, actor):
+        raise TeamError('TEAM_RESOURCE_EDITOR_REQUIRED', '仅项目成员或团队 Agent 可维护共享资源', 403)
+    model, field = ((AgentTeamKnowledgeResource, 'knowledge_id') if kind == 'knowledge'
+                    else (AgentTeamSkillResource, 'skill_id'))
+    row = model.query.filter_by(team_id=team.id, **{field: resource_id}).first()
+    if row:
+        db.session.delete(row)
+        _audit(team, actor, 'unlink_%s' % kind, {'resource_id': resource_id})
+        db.session.commit()
+    return jsonify({'removed': bool(row), 'resource_id': resource_id})
 
 
 @api_bp.route('/agent-teams/<int:team_id>/test-plans', methods=['GET', 'POST'])

@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 import test_workflow_missions_api as fixtures
 from app import db
 from app.models import (
-    AgentTeam, AgentTeamMember, AgentTeamMission, ClawSidecarConfig,
-    MissionStage, OpenClawInstance, WorkflowRun, hash_token,
+    AgentTeam, AgentTeamKnowledgeResource, AgentTeamMember, AgentTeamMission,
+    AgentTeamSkillResource, ClawSidecarConfig, KnowledgeEntry, MissionStage,
+    OpenClawInstance, Skill, WorkflowRun, hash_token,
 )
 
 
@@ -96,6 +97,48 @@ class AgentTeamsApiTest(unittest.TestCase):
         self.assertEqual(AgentTeamMember.query.filter_by(claw_id=self.other_claw.id).count(), 4)
         self.assertEqual(team['manager_epoch'], 0)
         self.assertFalse(team['manager_lease_active'])
+
+    def test_team_shared_resources_reuse_canonical_content_and_agent_can_curate(self):
+        self._setup_team()
+        knowledge = KnowledgeEntry(
+            title='回归策略', content='# 回归策略', category='testing',
+            scope='project', project_id=self.project.id, status='approved',
+            entry_type='test_journal', current_revision=3)
+        skill = Skill(name='team-regression', display_name='团队回归',
+                      review_status='approved', visibility='public',
+                      applicable_projects=[self.project.id])
+        db.session.add_all([knowledge, skill]); db.session.commit()
+        with self.client.session_transaction() as session:
+            session.clear()
+
+        for kind, resource_id in (('knowledge', knowledge.id), ('skills', skill.id)):
+            response = self.client.post(
+                f'/api/v1/agent-teams/{self.team_id}/shared-resources/{kind}',
+                headers=self._headers(self.other_token), json={'resource_id': resource_id})
+            self.assertEqual(response.status_code, 201, response.get_json())
+        manifest = self.client.get(
+            f'/api/v1/agent-teams/{self.team_id}/shared-resources',
+            headers=self._headers(self.other_token)).get_json()
+        self.assertTrue(manifest['can_manage'])
+        self.assertEqual(manifest['knowledge'][0]['revision'], 3)
+        self.assertEqual(manifest['knowledge'][0]['pull_url'],
+                         f'/api/v1/knowledge/{knowledge.id}/export.md')
+        self.assertEqual(manifest['skills'][0]['pull_url'],
+                         f'/api/v1/skills/{skill.id}/pack')
+        self.assertEqual(AgentTeamKnowledgeResource.query.count(), 1)
+        self.assertEqual(AgentTeamSkillResource.query.count(), 1)
+        update = self.client.put(
+            f'/api/v1/skills/{skill.id}', headers=self._headers(self.other_token),
+            json={'description': '团队成员共同维护的更新'})
+        self.assertEqual(update.status_code, 200, update.get_json())
+        self.assertIn('团队成员共同维护', update.get_json()['mirror_content'])
+
+        # Removing a team pointer never deletes canonical content.
+        response = self.client.delete(
+            f'/api/v1/agent-teams/{self.team_id}/shared-resources/knowledge/{knowledge.id}',
+            headers=self._headers(self.other_token))
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(db.session.get(KnowledgeEntry, knowledge.id))
 
     def test_members_cannot_introduce_second_manager_or_arbitrary_specialty(self):
         self._setup_team()

@@ -53,6 +53,12 @@ def team_snapshot(team, claw_id, names):
         'test_plans': {'api': '/api/v1/agent-teams/%s/test-plans' % team.id,
                        'create_role': 'test_manager', 'periods': ['day', 'week', 'all'],
                        'note': '团队计划创建为草稿；排期概览不是自动执行调度。'},
+        'shared_resources': {
+            'manifest_api': '/api/v1/agent-teams/%s/shared-resources' % team.id,
+            'mode': 'on_demand',
+            'editable_by': 'project_people_and_explicit_team_agents',
+            'note': '需要团队知识或 Skill 时先读取清单，再按 pull_url 拉取完整内容；不要把全部正文长期注入上下文。',
+        },
     }
 
 

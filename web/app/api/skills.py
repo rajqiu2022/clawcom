@@ -1,7 +1,8 @@
 from flask import request, jsonify, session, current_app
 from datetime import datetime
 from app import db
-from app.models import Skill, OpenClawSkill, OpenClawInstance, Rule, User, _now
+from app.models import (AgentTeam, AgentTeamMember, AgentTeamSkillResource,
+                        Skill, OpenClawSkill, OpenClawInstance, Rule, User, _now)
 from app.services.skill_installation import reset_installation, installation_view, control_instructions
 
 OFF_SHELF_SKILL_NAMES = {'hub-connect'}
@@ -66,6 +67,32 @@ def _can_edit(user, resource):
         + 项目 admin 可编辑其 managed_projects 范围内的资源
       - 私有 Skill：作者始终可编辑
     """
+    # A Skill explicitly curated into a team library is jointly maintained by
+    # project people and that team's registered Agents. This does not widen
+    # access to other Skills in the same project.
+    links = AgentTeamSkillResource.query.filter_by(skill_id=resource.id).all()
+    if links:
+        team_ids = {row.team_id for row in links}
+        from app.api.auth_utils import get_current_claw
+        claw = get_current_claw()
+        claw_id = ((getattr(user, 'bound_claw_id', None)
+                    or getattr(user, '_claw_id', None)) if user
+                   else (claw.id if claw else None))
+        if claw_id:
+            if AgentTeam.query.filter(
+                    AgentTeam.id.in_(team_ids),
+                    db.or_(AgentTeam.primary_manager_claw_id == claw_id,
+                           AgentTeam.backup_manager_claw_id == claw_id)).first():
+                return True
+            if AgentTeamMember.query.filter(
+                    AgentTeamMember.team_id.in_(team_ids),
+                    AgentTeamMember.claw_id == claw_id).first():
+                return True
+        project_ids = _user_project_ids(user) if user else set()
+        if project_ids and AgentTeam.query.filter(
+                AgentTeam.id.in_(team_ids),
+                AgentTeam.project_id.in_(project_ids)).first():
+            return True
     if not user:
         return False
     # 私有 Skill 作者始终可编辑
@@ -768,6 +795,8 @@ def update_skill(skill_id):
         import logging
         logging.warning(f'[SKILL AUTH] 403 denied: user={user}, user.role={getattr(user,"role",None)}, user.username={getattr(user,"username",None)}, skill={skill_id}, created_by={skill.created_by}')
         return jsonify({'error': '无权修改此 Skill，只有超级管理员、管理员或提交人可编辑'}), 403
+    from app.api.auth_utils import get_current_claw
+    caller_claw = get_current_claw()
 
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
@@ -832,6 +861,7 @@ def update_skill(skill_id):
             or getattr(user, '_claw_name', '')
             or getattr(user, 'display_name', '')
             or getattr(user, 'username', '')
+            or (caller_claw.name if caller_claw else '')
             or 'unknown'
         )
         mirror_data = {}
@@ -863,7 +893,8 @@ def update_skill(skill_id):
 
     # 记录最后修改人 + 来源（不论镜像/直改路径，只要有内容/元数据变更就写入）
     if data:
-        claw_name = getattr(user, '_claw_name', None) if user else None
+        claw_name = ((getattr(user, '_claw_name', None) if user else None)
+                     or (caller_claw.name if caller_claw else None))
         if claw_name:
             skill.last_modified_by = claw_name
             skill.last_modified_source = 'openclaw'

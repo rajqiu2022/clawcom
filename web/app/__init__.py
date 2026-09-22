@@ -168,6 +168,47 @@ def create_app(config_name=None):
                         logger.info('agent_context_snapshots 表已创建')
                     except Exception as e:
                         logger.info('agent_context_snapshots 表创建跳过: %s', e)
+                    # Team libraries only store canonical Knowledge/Skill links;
+                    # content and version history remain in their source tables.
+                    for ddl, label in (
+                        ("""
+                            CREATE TABLE IF NOT EXISTS agent_team_knowledge_resources (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                team_id INTEGER NOT NULL,
+                                knowledge_id INTEGER NOT NULL,
+                                linked_by_type VARCHAR(20) NOT NULL,
+                                linked_by_id INTEGER DEFAULT NULL,
+                                linked_by_name VARCHAR(100) NOT NULL DEFAULT '',
+                                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                UNIQUE KEY uq_agent_team_knowledge_resource (team_id, knowledge_id),
+                                INDEX ix_agent_team_knowledge_team (team_id),
+                                INDEX ix_agent_team_knowledge_entry (knowledge_id),
+                                FOREIGN KEY (team_id) REFERENCES agent_teams(id) ON DELETE CASCADE,
+                                FOREIGN KEY (knowledge_id) REFERENCES knowledge_entries(id) ON DELETE CASCADE
+                            )
+                        """, 'agent_team_knowledge_resources'),
+                        ("""
+                            CREATE TABLE IF NOT EXISTS agent_team_skill_resources (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                team_id INTEGER NOT NULL,
+                                skill_id INTEGER NOT NULL,
+                                linked_by_type VARCHAR(20) NOT NULL,
+                                linked_by_id INTEGER DEFAULT NULL,
+                                linked_by_name VARCHAR(100) NOT NULL DEFAULT '',
+                                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                UNIQUE KEY uq_agent_team_skill_resource (team_id, skill_id),
+                                INDEX ix_agent_team_skill_team (team_id),
+                                INDEX ix_agent_team_skill_entry (skill_id),
+                                FOREIGN KEY (team_id) REFERENCES agent_teams(id) ON DELETE CASCADE,
+                                FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
+                            )
+                        """, 'agent_team_skill_resources'),
+                    ):
+                        try:
+                            conn.execute(text(ddl))
+                            logger.info('%s 表已就绪', label)
+                        except Exception as e:
+                            logger.info('%s 表创建跳过: %s', label, e)
                     for table_name in ('workflow_runs', 'agent_tasks'):
                         for column_name, column_ddl in (
                             ('context_snapshot_id', 'VARCHAR(64) DEFAULT NULL'),

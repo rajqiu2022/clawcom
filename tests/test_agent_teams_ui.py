@@ -80,6 +80,17 @@ class AgentTeamsUiTest(unittest.TestCase):
         self.assertIn("@views_bp.route('/testplans')", views)
         self.assertIn("'url': '/testplans?plan_id=%s'", service)
 
+    def test_team_knowledge_and_skill_shelves_are_on_demand(self):
+        resources = (ROOT / 'web/static/js/agent_team_resources.js').read_text(encoding='utf-8')
+        for marker in ('共享知识库', '共享 Skills', 'at-knowledge-panel', 'at-skills-panel'):
+            self.assertIn(marker, self.js)
+        for marker in ('/shared-resources', 'pull_url', '复制拉取地址',
+                       'Agent 按需拉取最新版本', 'data-unlink-resource'):
+            self.assertIn(marker, resources)
+        self.assertIn('id="at-resource-dialog"', self.html)
+        self.assertIn('agent_team_resources.js', self.html)
+        self.assertNotIn('template_content', resources)
+
 
 if __name__ == '__main__':
     unittest.main()

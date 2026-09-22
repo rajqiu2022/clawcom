@@ -1423,6 +1423,48 @@ class AgentTeamMember(db.Model):
                 'specialties': self.specialties_json or []}
 
 
+class AgentTeamKnowledgeResource(db.Model):
+    """A team-scoped pointer to canonical Hub knowledge.
+
+    Content and revisions stay in KnowledgeEntry; this table only defines the
+    team library and its curation audit trail.
+    """
+    __tablename__ = 'agent_team_knowledge_resources'
+    id = db.Column(db.Integer, primary_key=True)
+    team_id = db.Column(db.Integer, db.ForeignKey('agent_teams.id', ondelete='CASCADE'),
+                        nullable=False, index=True)
+    knowledge_id = db.Column(db.Integer, db.ForeignKey('knowledge_entries.id', ondelete='CASCADE'),
+                             nullable=False, index=True)
+    linked_by_type = db.Column(db.String(20), nullable=False)
+    linked_by_id = db.Column(db.Integer)
+    linked_by_name = db.Column(db.String(100), nullable=False, default='')
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    team = db.relationship('AgentTeam', backref=db.backref(
+        'knowledge_resources', cascade='all, delete-orphan'))
+    knowledge = db.relationship('KnowledgeEntry')
+    __table_args__ = (db.UniqueConstraint(
+        'team_id', 'knowledge_id', name='uq_agent_team_knowledge_resource'),)
+
+
+class AgentTeamSkillResource(db.Model):
+    """A team-scoped pointer to a canonical Skill market package."""
+    __tablename__ = 'agent_team_skill_resources'
+    id = db.Column(db.Integer, primary_key=True)
+    team_id = db.Column(db.Integer, db.ForeignKey('agent_teams.id', ondelete='CASCADE'),
+                        nullable=False, index=True)
+    skill_id = db.Column(db.Integer, db.ForeignKey('skills.id', ondelete='CASCADE'),
+                         nullable=False, index=True)
+    linked_by_type = db.Column(db.String(20), nullable=False)
+    linked_by_id = db.Column(db.Integer)
+    linked_by_name = db.Column(db.String(100), nullable=False, default='')
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    team = db.relationship('AgentTeam', backref=db.backref(
+        'skill_resources', cascade='all, delete-orphan'))
+    skill = db.relationship('Skill')
+    __table_args__ = (db.UniqueConstraint(
+        'team_id', 'skill_id', name='uq_agent_team_skill_resource'),)
+
+
 class AgentTeamMemberTask(db.Model):
     """Agent-authored activity log; not an authoritative Workflow/Run result."""
     __tablename__ = 'agent_team_member_tasks'
