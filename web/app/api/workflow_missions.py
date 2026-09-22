@@ -195,6 +195,25 @@ def _mission_payload(mission, with_dispatches=False):
             'required_fields': ['workflow_definition_id', 'stage_key', 'manager_epoch', 'manager_session_id'],
             'default_worker_claw_id': None,
         })
+    from app.models_plan_supervision import PlanSupervisor
+    supervisor = PlanSupervisor.query.filter_by(mission_id=mission.id).first()
+    if supervisor:
+        required = payload['dispatch_contract']['required_fields']
+        if 'plan_supervision' not in required:
+            required.append('plan_supervision')
+        payload['dispatch_contract']['plan_supervision'] = {
+            'required': True,
+            'source': ('POST /api/v1/test-plans/%s/supervision/claim'
+                       % supervisor.plan_id),
+            'preferred_shape': {
+                'plan_supervision': {
+                    'worker_id': '<claim.worker_id>',
+                    'fencing_token': '<claim.fencing_token>',
+                },
+            },
+            'legacy_flat_shape_accepted': True,
+            'flat_fields': ['worker_id', 'fencing_token'],
+        }
     return payload
 
 

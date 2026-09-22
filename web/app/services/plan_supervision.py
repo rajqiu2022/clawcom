@@ -45,7 +45,13 @@ def team_capability(team_id):
     return {'enabled': team_enabled(team_id), 'contract': 'hub.plan_supervision.v1',
             'start_requires': ['team_id', 'orchestrator_claw_id', 'command_key'],
             'supervisor_api': '/api/v1/test-plans/{plan_id}/supervision',
-            'worker_lease_receipt_required': True, 'auto_start': bool(team_enabled(team_id))}
+            'worker_lease_receipt_required': True, 'auto_start': bool(team_enabled(team_id)),
+            'owner_notification_policy': {
+                'enabled': bool(current_app.config.get(
+                    'PLAN_SUPERVISION_OWNER_NOTIFICATIONS', False)),
+                'notify_on': ['blocked', 'run_terminal', 'heartbeat_anomaly', 'stale'],
+                'quiet_on': ['heartbeat', 'unchanged', 'ordinary_progress'],
+            }}
 
 
 def fail(code, message, status=409):
@@ -528,6 +534,35 @@ def require_lease(sup, claw_id, body, now=None):
     ensure_manager_tenure(sup, now)
 
 
+def lease_credentials(body):
+    """Normalize the advertised nested lease and the legacy flat shape.
+
+    Mission dispatch never uses ``worker_id`` for executor selection (that is
+    ``worker_claw_id``), so accepting the two lease fields at the top level is
+    unambiguous.  Conflicting dual representations fail closed.
+    """
+    body = body if isinstance(body, dict) else {}
+    nested = body.get('plan_supervision')
+    flat_present = 'worker_id' in body or 'fencing_token' in body
+    if nested is not None and not isinstance(nested, dict):
+        fail('PLAN_LEASE_INVALID', 'plan_supervision 必须为 JSON 对象', 400)
+    if nested is not None and flat_present:
+        flat = {
+            'worker_id': body.get('worker_id'),
+            'fencing_token': body.get('fencing_token'),
+        }
+        if any(nested.get(key) != value for key, value in flat.items()):
+            fail('PLAN_LEASE_CONFLICT', '嵌套与平铺的监督租约凭据不一致', 400)
+    if nested is not None:
+        return nested
+    if flat_present:
+        return {
+            'worker_id': body.get('worker_id'),
+            'fencing_token': body.get('fencing_token'),
+        }
+    return {}
+
+
 def receipt(sup, action, body, apply):
     key = body.get('command_key')
     if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,96}', key):
@@ -598,6 +633,16 @@ def decide(sup, claw_id, body, now=None):
                 fail('PLAN_RESUME_CONDITION_REQUIRED', '须声明 timer_or_event；重要事件可提前唤醒', 400)
         elif body.get('next_check_at') is not None:
             fail('PLAN_DECISION_INVALID', '人工阻断不能附带自动唤醒时间', 400)
+        event_kinds = sorted({row.kind for row in PlanSupervisorEvent.query.filter(
+            PlanSupervisorEvent.plan_id == sup.plan_id,
+            PlanSupervisorEvent.sequence > sup.acknowledged_cursor,
+            PlanSupervisorEvent.sequence <= sup.lease_cursor,
+        ).all()})
+        notification_reasons = []
+        if outcome == 'blocked':
+            notification_reasons.append('blocked')
+        notification_reasons.extend(kind for kind in (
+            'run_terminal', 'heartbeat_anomaly', 'stale') if kind in event_kinds)
         sup.acknowledged_cursor = sup.lease_cursor
         sup.last_decision_json = {'outcome': outcome, 'summary': summary,
             'cursor': sup.lease_cursor, 'at': now.isoformat() + '+08:00'}
@@ -612,7 +657,15 @@ def decide(sup, claw_id, body, now=None):
         sup.lease_expires_at = None
         sup.turn_deadline_at = None
         sup.expired_turns = 0
-        return {'scheduled': bool(check)}
+        return {
+            'scheduled': bool(check),
+            'owner_notification': {
+                'required': bool(notification_reasons),
+                'reasons': notification_reasons,
+                'event_kinds': event_kinds,
+                'status': 'pending' if notification_reasons else 'not_required',
+            },
+        }
     return receipt(sup, 'decision', body, apply)
 
 
@@ -622,8 +675,73 @@ def mission_guard(mission_id, claw_id, body):
     if sup:
         if not enabled():
             fail('PLAN_SUPERVISION_DISABLED', '计划监督已禁用', 503)
-        require_lease(sup, claw_id, body.get('plan_supervision') or {})
+        require_lease(sup, claw_id, lease_credentials(body))
     return sup
+
+
+def deliver_owner_notification(plan_id, result):
+    """Deliver one audited Owner report for a committed decision receipt.
+
+    The decision remains successful even when the external channel is down.
+    Replays reuse the existing send log and never create duplicate messages.
+    """
+    notice = dict(result.get('owner_notification') or {})
+    if not notice.get('required'):
+        return notice
+    if not current_app.config.get('PLAN_SUPERVISION_OWNER_NOTIFICATIONS', False):
+        return dict(notice, status='disabled')
+    receipt_id = result.get('receipt_id')
+    if type(receipt_id) is not int:
+        return dict(notice, status='invalid_receipt')
+    from app.models import WecomSendLog
+    existing = WecomSendLog.query.filter_by(
+        related_type='plan_supervision', related_id=receipt_id).order_by(
+            WecomSendLog.id.desc()).first()
+    if existing:
+        return dict(notice, status=existing.status, log_id=existing.id,
+                    replayed=True)
+    plan = db.session.get(TestPlan, plan_id)
+    sup = db.session.get(PlanSupervisor, plan_id)
+    claw = (db.session.get(OpenClawInstance, sup.orchestrator_claw_id)
+            if sup else None)
+    if not plan or not sup or not claw:
+        return dict(notice, status='target_missing')
+    target = (claw.owner_wecom_userid or claw.owner or '').strip()
+    if not target:
+        return dict(notice, status='target_missing')
+    decision = sup.last_decision_json or {}
+    labels = {
+        'blocked': '需要人工处理',
+        'run_terminal': 'Child Run 已结束',
+        'heartbeat_anomaly': '执行心跳异常',
+        'stale': '执行长时间无实质进展',
+    }
+    reasons = '、'.join(labels.get(item, item) for item in notice.get('reasons') or [])
+    content = '\n'.join(filter(None, [
+        '测试计划 #%s：%s' % (plan.id, plan.name),
+        '状态：%s' % reasons,
+        '小策结论：%s' % str(decision.get('summary') or '').strip(),
+        '查看：https://clawteam.woa.com/testplans?plan_id=%s' % plan.id,
+    ]))
+    from app.api.wecom import WecomDispatcher
+    ok, log = WecomDispatcher.send(
+        target_userid=target,
+        title='测试计划监督提醒',
+        content=content,
+        claw_id=claw.id,
+        related_type='plan_supervision',
+        related_id=receipt_id,
+        request_summary={
+            'plan_id': plan.id,
+            'receipt_id': receipt_id,
+            'reasons': notice.get('reasons') or [],
+            'target': target,
+        },
+        template_version='plan-supervision-owner-v1',
+        message_hash=hashlib.sha256(content.encode('utf-8')).hexdigest(),
+    )
+    return dict(notice, status='sent' if ok else 'failed', log_id=log.id,
+                replayed=False)
 
 
 def _stage_task_id(stage):

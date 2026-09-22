@@ -154,6 +154,15 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(stage.assigned_claw_id, self.other_claw.id)
         self.assertEqual(stage.input_snapshot_json['test_task_id'], task.id)
         self.assertEqual(task.status, 'assigned')
+        contract = self.client.get(
+            '/api/v1/workflow-missions/%s' % mission.id,
+            headers=self._headers()).json['dispatch_contract']
+        self.assertIn('plan_supervision', contract['required_fields'])
+        self.assertEqual(
+            contract['plan_supervision']['source'],
+            'POST /api/v1/test-plans/%s/supervision/claim' % self.plan.id)
+        self.assertTrue(
+            contract['plan_supervision']['legacy_flat_shape_accepted'])
         gap = PlanSupervisorEvent.query.filter_by(
             kind='task_assignment_gap').one()
         self.assertEqual(gap.payload_json['task_id'], manager_task.id)
@@ -170,7 +179,7 @@ class PlanSupervisionTest(unittest.TestCase):
                 'decision_key': 'dispatch-task-%s' % task.id,
                 'manager_epoch': manager['epoch'],
                 'manager_session_id': manager['session_id'],
-                'plan_supervision': self.credentials(),
+                **self.credentials(),
             })
         self.assertEqual(dispatched.status_code, 201, dispatched.json)
         db.session.refresh(task)
@@ -256,6 +265,45 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(self.post('decision', dict(body, summary='changed')).status_code, 409)
         self.assertEqual(self.post('heartbeat', self.credentials()).status_code, 409)
 
+    def test_key_decision_notifies_owner_once_and_quiet_wait_stays_silent(self):
+        self.app.config['PLAN_SUPERVISION_OWNER_NOTIFICATIONS'] = True
+        self.main_claw.owner_wecom_userid = 'owner-user'
+        db.session.commit()
+        self.start()
+        self.claim()
+        blocked = {
+            'command_key': 'blocked-notice', **self.credentials(),
+            'cursor': self.sup().lease_cursor,
+            'outcome': 'blocked', 'summary': '派发合同不匹配，需要人工处理',
+        }
+        with patch('app.api.wecom._send_via_rtx_info',
+                   return_value=(True, '', {'code': 20000})) as send:
+            response = self.post('decision', blocked)
+            self.assertEqual(response.status_code, 200, response.json)
+            self.assertEqual(
+                response.json['owner_notification']['status'], 'sent')
+            self.assertEqual(
+                response.json['owner_notification']['reasons'], ['blocked'])
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(send.call_args.args[0], 'owner-user')
+            replay = self.post('decision', blocked)
+            self.assertEqual(replay.status_code, 200, replay.json)
+            self.assertEqual(send.call_count, 1)
+
+        self._login_admin()
+        resumed = self.client.post(
+            self.base + '/resume', json={'command_key': 'resume-after-notice'})
+        self.assertEqual(resumed.status_code, 200, resumed.json)
+        self.agent()
+        self.claim('quiet-claim')
+        quiet = self.wait_body(command_key='quiet-wait')
+        with patch('app.api.wecom.WecomDispatcher.send') as send:
+            response = self.post('decision', quiet)
+            self.assertEqual(response.status_code, 200, response.json)
+            self.assertEqual(
+                response.json['owner_notification']['status'], 'not_required')
+            send.assert_not_called()
+
     def test_timer_restarts_and_unchanged_watchdog_stays_quiet(self):
         self.start()
         self.claim()
@@ -329,6 +377,12 @@ class PlanSupervisionTest(unittest.TestCase):
         path = '/api/v1/workflow-missions/%s/dispatch' % mission_id
         body = {'workflow_definition_id': self.flow_a.id, 'decision_key': 'first-run'}
         self.assertEqual(self.client.post(path, json=body, headers=self._headers()).status_code, 409)
+        conflict = dict(body, plan_supervision=self.credentials(),
+                        worker_id='other-worker',
+                        fencing_token=self.sup().fencing_token)
+        invalid = self.client.post(path, json=conflict, headers=self._headers())
+        self.assertEqual(invalid.status_code, 400, invalid.json)
+        self.assertEqual(invalid.json['code'], 'PLAN_LEASE_CONFLICT')
         body['plan_supervision'] = self.credentials()
         dispatched = self.client.post(path, json=body, headers=self._headers())
         self.assertEqual(dispatched.status_code, 201, dispatched.json)

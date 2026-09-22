@@ -75,7 +75,7 @@ Worker 处理这类消息时先 GET 根路径核实自身身份、现有 Mission
 
 其余项目、主 Agent、objective、预算、Flow/Worker 白名单字段沿用原合同。创建与计划关联在同一事务提交；计划已经有 Mission 时返回 `PLAN_MISSION_ALREADY_BOUND`，Worker 必须回读复用，不另建平行链。
 
-关联 Mission 的每次 `/dispatch` 也必须提供 `plan_supervision`，并沿用稳定 decision_key/idempotency_key。旧 fence、过期 lease、计划未开始/已到期/停止均拒绝新派工。租约不扩大执行权限。`/bind-mission` 额外带 command_key、mission_id、worker_id、fencing_token；只能绑定相同主 Agent 和项目，且 Mission 不得已属于其他计划。
+关联 Mission 的每次 `/dispatch` 也必须提供 `plan_supervision`，并沿用稳定 decision_key/idempotency_key。Mission GET 返回的 `dispatch_contract` 会明确列出该字段、claim 来源和结构。兼容已经发布的 Worker，可将 `worker_id`、`fencing_token` 平铺在 dispatch 请求顶层；同时提交两种结构时必须完全一致。旧 fence、过期 lease、计划未开始/已到期/停止均拒绝新派工。租约不扩大执行权限。`/bind-mission` 额外带 command_key、mission_id、worker_id、fencing_token；只能绑定相同主 Agent 和项目，且 Mission 不得已属于其他计划。
 
 Agent 对关联 Mission 的 complete/cancel，以及对已监督 Plan 的修改，同样检查当前监督租约，防止旧 Turn 在失去租约后结束新链路。登录的计划管理者保留人工停止/收口能力。
 
@@ -116,6 +116,6 @@ next_check_at 必须带时区、在未来且早于计划结束日次日零点（
 
 本次未改 Worker。Worker 须识别 plan_supervision 控制消息、持久化 wake/lease/receipt、恢复时回读、在 decision 后立即释放模型槽，并在 Hub fencing 拒绝时停止旧监督写入。不得用模型循环轮询模拟 watchdog。
 
-普通心跳、无变化检查不发送 Owner 通知；计划监督消息不进入旧的“消息卡住五分钟”泛化告警。首版不新增 Owner 主动推送链路，阻断/决策通过回执和监督 API 回读；每日/最终收口通知与报告仍须后续按受控通知合同接线，不能宣称已全链路验收。
+普通心跳、无变化检查不发送 Owner 通知；计划监督消息不进入旧的“消息卡住五分钟”泛化告警。开启 `PLAN_SUPERVISION_OWNER_NOTIFICATIONS=1` 后，Hub 仅对人工阻断、Child Run 终态、心跳异常和长时间无实质进展进行集中企微通知，发送请求与回执写入 `wecom_send_logs`，同一 decision receipt 幂等去重。普通进度与无变化检查保持静默；每日汇总和最终报告仍由后续报告合同负责。
 
 本地专项测试覆盖：重复启动/唯一工作项、唯一租约与 fencing、未来开始/定时唤醒、重启回读、事件在途不丢、游标分页、聊天假完成拒绝、Mission 真派工与幂等、三次过期停止、计划到期和权限边界。生产 MariaDB 多进程竞争、真实 Worker 重启及跨日 Todo 候选仍需独立 canary。
