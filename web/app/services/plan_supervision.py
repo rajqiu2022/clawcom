@@ -516,12 +516,6 @@ def pump(sup, now=None):
             'team_id': sup.team_id,
             'supervisor_api': '/api/v1/test-plans/%s/supervision' % sup.plan_id,
             'cursor': sup.cursor,
-            'owner_notification_policy': {
-                'delivery': 'agent_wecom',
-                'notify_on': ['blocked', 'run_terminal', 'heartbeat_anomaly', 'stale'],
-                'quiet_on': ['heartbeat', 'unchanged', 'ordinary_progress'],
-                'decision_response_field': 'owner_notification',
-            },
             'instruction': '先回读并 claim 唯一监督租约。恢复关联 Mission/Run，勿重复创建。'
                            '稍后继续须提交 decision 并拿到调度回执；无有效租约不得派工。'
                            '单个 Child Run 或 Stage 阻断时，继续判断未派发 Stage 的依赖与资源冲突；'

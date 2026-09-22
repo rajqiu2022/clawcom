@@ -49,6 +49,8 @@
 
 唤醒使用持久 `ClawMessage(msg_type=plan_supervision)` outbox，content 为 `hub.plan_supervision.v1` JSON。SSE 仅提醒拉取，丢失 SSE 不丢工作项。
 
+v1 唤醒信封固定只包含 `contract / plan_id / team_id / supervisor_api / cursor / instruction`。通知策略从团队能力和 decision 回执读取，不向严格校验的既有 Worker 信封追加字段。
+
 Worker 处理这类消息时先 GET 根路径核实自身身份、现有 Mission/Run，再 claim。不可让普通聊天 done 表示计划已安排。
 
 ```json

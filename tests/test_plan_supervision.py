@@ -1,4 +1,5 @@
 """Plan wake/lease/receipt contract, including actual Mission dispatch fencing."""
+import json
 import unittest
 from datetime import timedelta
 from unittest.mock import patch
@@ -75,6 +76,11 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(first['receipt_id'], again.json['receipt_id'])
         self.assertEqual(PlanSupervisor.query.count(), 1)
         self.assertEqual(ClawMessage.query.filter_by(msg_type='plan_supervision').count(), 1)
+        wake = ClawMessage.query.filter_by(msg_type='plan_supervision').one()
+        self.assertEqual(set(json.loads(wake.content)), {
+            'contract', 'plan_id', 'team_id', 'supervisor_api', 'cursor',
+            'instruction',
+        })
         self.assertEqual(WorkflowRun.query.count(), 0)
         self.assertEqual(self.plan.status, 'active')
         self.assertEqual(self.post('start', {'command_key': 'start-2',
