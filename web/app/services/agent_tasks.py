@@ -268,7 +268,15 @@ def claim_pending_tasks(claw_id, limit=10, now=None, lease_seconds=None):
         }, synchronize_session=False)
         if updated == 1:
             db.session.commit()
-            claimed.append(db.session.get(AgentTask, candidate.id))
+            claimed_task = db.session.get(AgentTask, candidate.id)
+            # A supervised direct TestTask uses the same durable claim as any
+            # ordinary AgentTask.  Promote its plan/stage only after the real
+            # Worker claim exists; Todo delivery is never an execution receipt.
+            from app.services import plan_supervision
+            plan_supervision.record_agent_task_claim(
+                claimed_task, now=now)
+            db.session.commit()
+            claimed.append(claimed_task)
         else:
             db.session.rollback()
     return claimed
@@ -389,6 +397,9 @@ def complete_task(task, data, now=None):
     task.lease_expires_at = None
     task.claim_token = None
     task.version = int(task.version or 0) + 1
+    from app.services import plan_supervision
+    plan_supervision.record_agent_task_terminal(
+        task, result, status, now=now)
     db.session.commit()
     return 'completed'
 

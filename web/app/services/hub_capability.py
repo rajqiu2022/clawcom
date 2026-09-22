@@ -15,7 +15,7 @@
     - 对未升级的旧 sidecar 无破坏：多返回一个字段，旧代码忽略即可。
 """
 
-HUB_CAPABILITY_VERSION = 5
+HUB_CAPABILITY_VERSION = 6
 
 HUB_CAPABILITY_DIGEST = """【Hub 能力索引 · 回复/执行前必读（Rule #19 速查）】
 不确定某功能在 Hub 哪里，先按下表定位对应 Skill 再动手；禁止凭记忆猜接口/字段，枚举与 ID 一律查 API options。
@@ -25,6 +25,7 @@ HUB_CAPABILITY_DIGEST = """【Hub 能力索引 · 回复/执行前必读（Rule 
 - 持久笔记（跨 session 保留，随本索引回注）：关键决策写 POST /api/v1/memos/upsert（tag=decision，scope_key=项目/主题）；当前任务上下文写 tag=taskctx、scope_key=todo-{id}/agent_task-{id}（同 scope_key 会滚动更新，处理完成后 Hub 自动归档）。回复前若「你的持久笔记索引」有相关项，先 GET /api/v1/memos/memo/{id} 取全文再作答，勿凭记忆臆测。
 - 工作流四态编排（节点拆分 / 执行者变量 / 节点参考 / 阻断续跑）→ workflow-manager
 - 主 Agent 自主调度 Mission：首次启动/切换 Flow 用 POST /api/v1/workflow-missions/{id}/dispatch；恢复已有 Run 统一用 POST /api/v1/workflow-runs/{run_id}/recover，由 Hub 判定 wait/reconcile/restart/supersede/reject。不要自行串联低层 retry、execution-reconciliation、restart 或重复新建 Run；写入均需稳定幂等键，禁止传 executor/worker 覆盖字段。
+- 团队计划中的非 Flow 任务：主测试经理决策后用 POST /api/v1/test-plans/{plan_id}/supervision/agent-tasks 创建普通 AgentTask；Todo 仅提醒，不能视为已派工或执行回执。
 - 接入注册 / Token / 拉标准包与增量同步 → hub-connect；Skill 市场增删改查 → skill-market-operations
 - 知识库·踩坑沉淀 → knowledge-manager；课题讨论 → topic-discuss；见闻分享 → insight-sharing
 - 测试报告（6 类 / 类别自定义 / 收藏 / 隐藏报告同项目按 ID 可见 / 附件 / 分享外链）→ test-report-manager

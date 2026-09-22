@@ -83,8 +83,32 @@ def get_plan_supervision(plan_id):
         'run_ids': [r.workflow_run_id for r in runs],
         'task_dispatches': svc.task_dispatch_receipts(sup),
         'undispatched_stages': svc.undispatched_stages(sup),
+        'agent_task_dispatch_api': (
+            '/api/v1/test-plans/%s/supervision/agent-tasks' % plan_id),
         'lease_valid': bool(svc.available(sup) and sup.status == 'leased'
                             and sup.lease_expires_at and sup.lease_expires_at > _now())})
+
+
+@api_bp.route(
+    '/test-plans/<int:plan_id>/supervision/agent-tasks', methods=['POST'])
+def dispatch_plan_agent_task(plan_id):
+    """Manager-selected direct execution that does not depend on Todo intake."""
+    _, sup, claw = load(plan_id)
+    if not claw:
+        svc.fail('PLAN_MANAGER_AGENT_REQUIRED', '仅团队主 Agent 可以直接派发执行任务', 403)
+    body = payload()
+    allowed = {'command_key', 'test_task_id', 'instruction', 'retry_max'}
+    if set(body) - allowed:
+        svc.fail('PLAN_BODY_INVALID', '直接派发包含不支持的字段', 400)
+    task_id = body.get('test_task_id')
+    if isinstance(task_id, bool) or not isinstance(task_id, int) or task_id <= 0:
+        svc.fail('TEST_TASK_ID_REQUIRED', 'test_task_id 须为正整数', 400)
+    result = svc.dispatch_test_task(sup, claw.id, task_id, body)
+    target = result.pop('wake_claw_id', None)
+    db.session.commit()
+    if target:
+        svc.wake(target)
+    return jsonify(result), (200 if result.get('replayed') else 201)
 
 
 @api_bp.route('/test-plans/<int:plan_id>/supervision/receipts/<int:receipt_id>', methods=['GET'])

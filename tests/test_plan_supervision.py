@@ -6,11 +6,12 @@ from unittest.mock import patch
 
 import test_workflow_missions_api as fixtures
 from app import db
-from app.models import (AgentTeam, AgentTeamMember, AgentTeamMission, MissionStage,
+from app.models import (AgentTask, AgentTeam, AgentTeamMember, AgentTeamMission, MissionStage,
                         TestPlan, TestTask, ClawMessage, WorkflowRun, WorkflowRunStep,
                         WorkflowMission, WorkflowMissionDispatch, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
 from app.services import plan_supervision as svc
+from app.services.agent_tasks import claim_pending_tasks, complete_task
 
 
 class PlanSupervisionTest(unittest.TestCase):
@@ -370,6 +371,79 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(blocked.json['block_scope'], 'plan')
         self.assertFalse(blocked.json['continue_supervision'])
         self.assertEqual(self.sup().status, 'blocked')
+
+    def test_manager_can_dispatch_non_flow_agent_task_while_plan_is_blocked(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='每日 Bug 回归', status='pending',
+            assignee_claw_id=self.other_claw.id, task_type='functional')
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'direct-task-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.agent()
+        self.claim('direct-task-claim')
+        blocked = self.post('decision', {
+            'command_key': 'direct-task-block-plan', **self.credentials(),
+            'cursor': self.sup().lease_cursor, 'outcome': 'blocked',
+            'block_scope': 'plan', 'summary': '其他 Flow 需人工处理',
+        })
+        self.assertEqual(blocked.status_code, 200, blocked.json)
+        self.assertEqual(self.sup().status, 'blocked')
+
+        path = self.base + '/agent-tasks'
+        body = {
+            'command_key': 'plan-task-%s-direct-v1' % task.id,
+            'test_task_id': task.id,
+            'instruction': '独立执行 Bug 回归，不启动 Flow',
+            'retry_max': 1,
+        }
+        dispatched = self.client.post(
+            path, json=body, headers=self._headers(self.main_token))
+        self.assertEqual(dispatched.status_code, 201, dispatched.json)
+        self.assertEqual(dispatched.json['execution_mode'], 'ordinary_agent_task')
+        agent_task = AgentTask.query.one()
+        self.assertEqual(agent_task.claw_id, self.other_claw.id)
+        self.assertEqual(agent_task.status, 'pending')
+        stage = MissionStage.query.filter_by(
+            mission_id=self.sup().mission_id,
+            stage_key='test_task_%s' % task.id).one()
+        self.assertEqual(stage.state, 'dispatched')
+
+        replay = self.client.post(
+            path, json=body, headers=self._headers(self.main_token))
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertTrue(replay.json['replayed'])
+        self.assertEqual(AgentTask.query.count(), 1)
+
+        claimed = claim_pending_tasks(self.other_claw.id)
+        self.assertEqual(len(claimed), 1)
+        agent_task = claimed[0]
+        self.assertEqual(db.session.get(TestTask, task.id).status, 'in_progress')
+        self.assertEqual(db.session.get(MissionStage, stage.id).state, 'running')
+        complete_task(agent_task, {
+            'claim_token': agent_task.claim_token,
+            'attempt_no': agent_task.attempt_no,
+            'fencing_token': agent_task.fencing_token,
+            'status': 'completed',
+            'result': {
+                'status': 'passed', 'summary': '回归通过',
+                'outputs': {'checked': 8}, 'evidence': {'report_id': 9},
+            },
+        })
+        completed = db.session.get(TestTask, task.id)
+        self.assertEqual(completed.status, 'completed')
+        self.assertEqual(completed.progress, 100)
+        self.assertEqual(completed.result_summary, '回归通过')
+        self.assertEqual(db.session.get(MissionStage, stage.id).state, 'completed')
+        receipt = svc.task_dispatch_receipt(completed)
+        self.assertEqual(receipt['execution_mode'], 'ordinary_agent_task')
+        self.assertTrue(receipt['claimed'])
 
     def test_timer_restarts_and_unchanged_watchdog_stays_quiet(self):
         self.start()

@@ -82,6 +82,26 @@ expected_epoch 必须来自最新回读。会话 ID 为本进程唯一身份；�
 
 start_vars 按实际 Definition 补齐，不照抄空对象。worker_claw_id 省略时从 Stage 解析，显式提供必须一致。相同 decision_key 重试回读原 Run；每阶段只能派发一次，不换 key 绕过。创建后回读 Run ID、Definition 快照和绑定执行员，向调用者返回。由已接入的 Worker watcher 继续跟踪；尚无 watcher 时明确需后续查询，不占模型槽轮询。
 
+### 3.1 无需 Flow 的测试任务
+
+测试计划里的独立任务不应为了派工强行包装成 Flow，也不能用 Todo 冒充执行任务。主测试经理
+确认任务无 Flow 依赖后调用：
+
+`POST /test-plans/{plan_id}/supervision/agent-tasks`
+
+```json
+{
+  "command_key":"plan-{plan_id}-task-{task_id}-dispatch-v1",
+  "test_task_id":228,
+  "instruction":"执行任务并返回结构化结论、outputs 与 evidence",
+  "retry_max":1
+}
+```
+
+Hub 根据既有 Mission Stage 固定执行 Agent，创建带 claim/heartbeat/fencing/result 的普通
+AgentTask；调用方不得覆盖执行者。该动作以团队主经理的持久任命为授权，不依赖当前计划监督
+Turn 的短租约，因此其他 Stage 阻断时仍可派发无依赖任务。Todo 只作提醒，不能当领取或完成回执。
+
 ## 4. 阶段与交付证据
 
 - 接手前 `GET /missions/{mission_id}/stages/{stage_key}/context`，另用 `GET /missions/{mission_id}/stages`、`GET /missions/{mission_id}/artifacts` 和 `GET /missions/{mission_id}/handoffs` 回读事实。

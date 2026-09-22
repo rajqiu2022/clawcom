@@ -7,7 +7,7 @@ from datetime import datetime, time, timedelta, timezone
 
 from flask import current_app
 from app import db
-from app.models import (AgentTeam, AgentTeamMission, AuditLog, ClawMessage,
+from app.models import (AgentTask, AgentTeam, AgentTeamMission, AuditLog, ClawMessage,
                         MissionStage, OpenClawInstance, TestPlan, TestTask,
                         WorkflowMission, WorkflowMissionDispatch, WorkflowRun,
                         WorkflowRunStep, _now)
@@ -45,6 +45,8 @@ def team_capability(team_id):
     return {'enabled': team_enabled(team_id), 'contract': 'hub.plan_supervision.v1',
             'start_requires': ['team_id', 'orchestrator_claw_id', 'command_key'],
             'supervisor_api': '/api/v1/test-plans/{plan_id}/supervision',
+            'direct_task_dispatch_api': (
+                '/api/v1/test-plans/{plan_id}/supervision/agent-tasks'),
             'worker_lease_receipt_required': True, 'auto_start': bool(team_enabled(team_id)),
             'blocking_policy': {
                 'default_scope': 'stage',
@@ -525,6 +527,10 @@ def pump(sup, now=None):
                            '单个 Child Run 或 Stage 阻断时，继续判断未派发 Stage 的依赖与资源冲突；'
                            '默认 blocked 仅按阶段级处理，不暂停全队。只有团队级问题才提交 '
                            'block_scope=plan。'
+                           '无需 Flow 的独立测试任务由你决策后调用 '
+                           '/api/v1/test-plans/{plan_id}/supervision/agent-tasks，'
+                           '提交 test_task_id、稳定 command_key 和可选 instruction；'
+                           'Hub 将创建可租约、可回写的普通 AgentTask。禁止用 Todo 代替正式派工。'
                            '禁止模型轮询；正常心跳和无变化检查不通知 Owner。'
                            'decision 返回 owner_notification.required=true 时，使用本 Agent 自己的企微通道'
                            '向 Owner 汇报；不得调用 Hub /wecom/send 或 SendRTXInfo。'}, ensure_ascii=False))
@@ -651,8 +657,243 @@ def undispatched_stages(sup):
             'test_task_name': snapshot.get('test_task_name') or '',
             'executor_claw_id': stage.assigned_claw_id,
             'role_key': stage.role_key,
+            'agent_task_dispatch_api': (
+                '/api/v1/test-plans/%s/supervision/agent-tasks'
+                % sup.plan_id),
         })
     return items
+
+
+_PLAN_AGENT_TASK_CONTRACT = 'hub.plan_test_task.agent_task.v1'
+
+
+def _agent_task_plan_link(agent_task):
+    """Return a trusted Plan/TestTask link from an ordinary AgentTask."""
+    try:
+        payload = json.loads(agent_task.payload or '{}')
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(payload, dict)
+            or payload.get('contract') != _PLAN_AGENT_TASK_CONTRACT):
+        return None
+    try:
+        return {
+            'plan_id': int(payload['test_plan_id']),
+            'test_task_id': int(payload['test_task_id']),
+            'mission_id': int(payload['mission_id']),
+            'mission_stage_id': int(payload['mission_stage_id']),
+            'stage_key': str(payload['stage_key']),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _plan_agent_tasks(sup):
+    """Index the bounded ordinary task history belonging to one Plan Mission."""
+    if not sup or not sup.mission_id:
+        return {}
+    rows = (AgentTask.query.filter(
+        AgentTask.task_type == 'test_plan_agent_task',
+        AgentTask.task_id.like('plan_%s_test_task_%%' % sup.plan_id))
+        .order_by(AgentTask.id.desc()).limit(1000).all())
+    indexed = {}
+    for row in rows:
+        link = _agent_task_plan_link(row)
+        if (link and link['plan_id'] == sup.plan_id
+                and link['mission_id'] == sup.mission_id):
+            indexed.setdefault(link['mission_stage_id'], row)
+    return indexed
+
+
+def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
+    """Dispatch a non-Flow TestTask through the ordinary AgentTask channel.
+
+    This is intentionally independent from the Todo worker and from a blocked
+    Plan Supervisor turn.  The durable team manager assignment is the authority;
+    the command receipt supplies idempotency while the AgentTask lease supplies
+    execution fencing.
+    """
+    if not sup or not sup.team_id or not sup.mission_id:
+        fail('PLAN_MISSION_INCOMPLETE', '计划尚未建立团队 Mission', 409)
+    retry_value = body.get('retry_max', 1)
+    if isinstance(retry_value, bool):
+        fail('AGENT_TASK_RETRY_INVALID', 'retry_max 须为 0 到 3 的整数', 400)
+    try:
+        retry_max = int(retry_value)
+    except (TypeError, ValueError):
+        fail('AGENT_TASK_RETRY_INVALID', 'retry_max 须为 0 到 3 的整数', 400)
+    if retry_max < 0 or retry_max > 3:
+        fail('AGENT_TASK_RETRY_INVALID', 'retry_max 须为 0 到 3 的整数', 400)
+    team = db.session.get(AgentTeam, sup.team_id)
+    plan = db.session.get(TestPlan, sup.plan_id)
+    if (not team or team.status != 'active' or not plan
+            or plan.status != 'active'
+            or team.primary_manager_claw_id != manager_claw_id
+            or sup.orchestrator_claw_id != manager_claw_id):
+        fail('PLAN_MANAGER_REQUIRED', '仅当前团队主测试经理可以直接派发测试任务', 403)
+    task = TestTask.query.filter_by(
+        id=test_task_id, plan_id=sup.plan_id).with_for_update().first()
+    if not task:
+        fail('TEST_TASK_NOT_FOUND', '测试任务不存在', 404)
+    if task.status not in ('assigned', 'pending'):
+        fail('TEST_TASK_NOT_DISPATCHABLE', '仅新分配或待开始任务可直接派发', 409)
+    stage = MissionStage.query.filter_by(
+        mission_id=sup.mission_id,
+        stage_key='test_task_%s' % task.id,
+        stage_version=1,
+    ).with_for_update().first()
+    if (not stage or stage.assigned_claw_id != task.assignee_claw_id
+            or not task.assignee_claw_id):
+        fail('TEST_TASK_STAGE_INVALID', '任务缺少有效的团队执行阶段或执行 Agent', 409)
+    if stage.workflow_run_id:
+        fail('TEST_TASK_ALREADY_FLOW_DISPATCHED', '任务已经通过 Workflow 派发', 409)
+
+    def apply():
+        active = _plan_agent_tasks(sup).get(stage.id)
+        if active and active.status in ('pending', 'running'):
+            fail('TEST_TASK_ALREADY_DISPATCHED', '任务已有待领取或执行中的 AgentTask', 409)
+        if stage.state != 'ready':
+            fail('TEST_TASK_STAGE_NOT_READY', '任务阶段已派发或不再可执行', 409)
+        instruction = str(body.get('instruction') or '').strip()
+        if len(instruction) > 4000:
+            fail('TEST_TASK_INSTRUCTION_INVALID', '执行说明不能超过 4000 字', 400)
+        command_key = str(body.get('command_key') or '')
+        task_id = 'plan_%s_test_task_%s_%s' % (
+            sup.plan_id, task.id,
+            hashlib.sha256(command_key.encode()).hexdigest()[:16])
+        payload = {
+            'contract': _PLAN_AGENT_TASK_CONTRACT,
+            'test_plan_id': sup.plan_id,
+            'test_task_id': task.id,
+            'mission_id': sup.mission_id,
+            'mission_stage_id': stage.id,
+            'stage_key': stage.stage_key,
+            'objective': task.name,
+            'description': task.description or '',
+            'instruction': instruction,
+            'priority': task.priority,
+            'task_type': task.task_type,
+            'acceptance': {
+                'result_contract': 'ordinary_agent_task',
+                'report_to_hub': True,
+            },
+        }
+        agent_task = AgentTask(
+            task_id=task_id,
+            claw_id=task.assignee_claw_id,
+            task_type='test_plan_agent_task',
+            command=instruction or (
+                '执行测试计划 #%s 的任务 #%s：%s。完成后返回结构化结论、'
+                'outputs 与 evidence。' % (sup.plan_id, task.id, task.name)),
+            payload=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            status='pending',
+            retry_max=retry_max,
+        )
+        db.session.add(agent_task)
+        db.session.flush()
+        stage.state = 'dispatched'
+        stage.last_reason_code = 'ordinary_agent_task_dispatched'
+        stage.fencing_token = int(stage.fencing_token or 0) + 1
+        stage.version = int(stage.version or 1) + 1
+        add_event(sup.plan_id, 'task_agent_dispatched', [
+            'task-agent-dispatched', task.id, agent_task.task_id,
+        ], {
+            'task_id': task.id,
+            'stage_key': stage.stage_key,
+            'executor_claw_id': task.assignee_claw_id,
+            'agent_task_id': agent_task.task_id,
+        })
+        return {
+            'dispatched': True,
+            'execution_mode': 'ordinary_agent_task',
+            'test_task_id': task.id,
+            'stage_key': stage.stage_key,
+            'agent_task': agent_task.to_dict(),
+            'wake_claw_id': task.assignee_claw_id,
+        }
+
+    return receipt(sup, 'dispatch_agent_task', body, apply)
+
+
+def record_agent_task_claim(agent_task, now=None):
+    link = _agent_task_plan_link(agent_task)
+    if not link:
+        return None
+    now = now or _now()
+    task = db.session.get(TestTask, link['test_task_id'])
+    stage = db.session.get(MissionStage, link['mission_stage_id'])
+    sup = locked(link['plan_id'])
+    if (not task or not stage or not sup
+            or task.plan_id != link['plan_id']
+            or stage.mission_id != link['mission_id']
+            or agent_task.claw_id != task.assignee_claw_id
+            or stage.assigned_claw_id != agent_task.claw_id):
+        fail('PLAN_AGENT_TASK_LINK_INVALID', 'AgentTask 与计划阶段绑定不一致', 409)
+    if task.status in ('assigned', 'pending'):
+        task.status = 'in_progress'
+        task.progress = max(1, int(task.progress or 0))
+    stage.state = 'running'
+    stage.last_reason_code = 'ordinary_agent_task_claimed'
+    stage.version = int(stage.version or 1) + 1
+    add_event(sup.plan_id, 'task_claimed', [
+        'ordinary-task-claimed', agent_task.task_id,
+        int(agent_task.attempt_no or 0),
+    ], {
+        'task_id': task.id,
+        'mission_id': sup.mission_id,
+        'agent_task_id': agent_task.task_id,
+        'executor_claw_id': agent_task.claw_id,
+        'fencing_token': int(agent_task.fencing_token or 0),
+    }, now)
+    return task
+
+
+def record_agent_task_terminal(agent_task, result, status, now=None):
+    link = _agent_task_plan_link(agent_task)
+    if not link:
+        return None
+    now = now or _now()
+    task = db.session.get(TestTask, link['test_task_id'])
+    stage = db.session.get(MissionStage, link['mission_stage_id'])
+    sup = locked(link['plan_id'])
+    if not task or not stage or not sup:
+        fail('PLAN_AGENT_TASK_LINK_INVALID', 'AgentTask 关联计划已不存在', 409)
+    result = result if isinstance(result, dict) else {}
+    provider_status = str(result.get('status') or '').lower()
+    summary = str(result.get('summary') or result.get('reason') or '')[:8000]
+    if status == 'completed' and provider_status == 'skipped':
+        task.status, stage.state = 'skipped', 'skipped'
+    elif status == 'completed':
+        task.status, stage.state = 'completed', 'completed'
+        task.progress = 100
+    elif status == 'blocked':
+        task.status, stage.state = 'blocked', 'blocked'
+    else:
+        task.status, stage.state = 'blocked', 'failed'
+    task.result_summary = summary
+    stage.last_reason_code = str(
+        result.get('error_code') or status or 'agent_task_terminal')[:80]
+    evidence = result.get('evidence')
+    if evidence:
+        refs = list(stage.evidence_refs_json or [])
+        refs.append({
+            'type': 'ordinary_agent_task_result',
+            'agent_task_id': agent_task.task_id,
+            'sha256': digest(result),
+        })
+        stage.evidence_refs_json = refs[-100:]
+    stage.version = int(stage.version or 1) + 1
+    add_event(sup.plan_id, 'task_agent_terminal', [
+        'task-agent-terminal', agent_task.task_id,
+        int(agent_task.attempt_no or 0), status,
+    ], {
+        'task_id': task.id,
+        'agent_task_id': agent_task.task_id,
+        'status': status,
+        'test_task_status': task.status,
+        'summary': summary,
+    }, now)
+    return task
 
 
 def recovery_snapshot(sup):
@@ -810,6 +1051,7 @@ def task_dispatch_receipts(sup):
     """Read authoritative Mission/Run/claim state for supervised TestTasks."""
     if not sup or not sup.mission_id:
         return []
+    ordinary_tasks = _plan_agent_tasks(sup)
     items = []
     for stage in MissionStage.query.filter_by(mission_id=sup.mission_id).order_by(
             MissionStage.id).all():
@@ -823,17 +1065,33 @@ def task_dispatch_receipts(sup):
                 WorkflowRunStep.claimed_by.isnot(None),
                 WorkflowRunStep.claimed_by != '',
             ).order_by(WorkflowRunStep.claimed_at.asc(), WorkflowRunStep.id).first()
+        ordinary = ordinary_tasks.get(stage.id)
+        ordinary_claimed = bool(
+            ordinary and ordinary.assigned_at
+            and ordinary.status != 'pending')
         items.append({
             'task_id': task_id,
             'stage_key': stage.stage_key,
             'stage_state': stage.state,
             'executor_claw_id': stage.assigned_claw_id,
             'workflow_run_id': stage.workflow_run_id,
-            'claimed': bool(claim),
-            'claimed_by': claim.claimed_by if claim else '',
-            'claimed_at': str(claim.claimed_at) if claim and claim.claimed_at else None,
+            'agent_task_id': ordinary.task_id if ordinary else None,
+            'agent_task_status': ordinary.status if ordinary else None,
+            'execution_mode': (
+                'workflow' if stage.workflow_run_id else
+                'ordinary_agent_task' if ordinary else None),
+            'claimed': bool(claim) or ordinary_claimed,
+            'claimed_by': (
+                claim.claimed_by if claim else
+                ('claw:%s' % ordinary.claw_id if ordinary_claimed else '')),
+            'claimed_at': (
+                str(claim.claimed_at) if claim and claim.claimed_at else
+                str(ordinary.assigned_at)
+                if ordinary_claimed and ordinary.assigned_at else None),
             'claim_fencing_token': (
-                int(claim.claim_fencing_token or 0) if claim else None),
+                int(claim.claim_fencing_token or 0) if claim else
+                int(ordinary.fencing_token or 0)
+                if ordinary_claimed else None),
         })
     return items
 
@@ -853,9 +1111,10 @@ def require_task_dispatch_receipt(task):
         return None
     receipt = next((row for row in task_dispatch_receipts(sup)
                     if row['task_id'] == task.id), None)
-    if not receipt or not receipt['workflow_run_id'] or not receipt['claimed']:
+    if (not receipt or not receipt['claimed']
+            or not (receipt['workflow_run_id'] or receipt['agent_task_id'])):
         fail('TEST_TASK_DISPATCH_RECEIPT_REQUIRED',
-             '任务仅为 pending/assigned；须先取得 Mission、Child Run 与 Worker claim 回执', 409)
+             '任务仅为 pending/assigned；须先取得 Child Run 或 AgentTask 的 Worker claim 回执', 409)
     return receipt
 
 

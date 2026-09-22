@@ -122,6 +122,30 @@ completed / blocked / skipped
 > 只有状态变为 `pending` 后才可以开始测试。
 > 状态变化时会通过待办任务系统发送通知，请关注待办列表中 `task_category=test_task` 的任务。
 
+### 团队主 Agent 直接派发非 Flow 任务
+
+团队测试计划中，若任务无需启动 Workflow，测试经理作出执行决策后必须创建正式的普通
+`AgentTask`，不能只创建 Todo。Todo 只负责可见性提醒，不提供领取、租约、进度或终态回执。
+
+```
+POST /api/v1/test-plans/{PLAN_ID}/supervision/agent-tasks
+
+{
+  "command_key": "plan-50-task-228-dispatch-v1",
+  "test_task_id": 228,
+  "instruction": "执行每日 Bug 回归并回写结构化结论与证据",
+  "retry_max": 1
+}
+```
+
+- 只有计划绑定团队的主测试经理 Agent 可以调用；不要求 Plan Supervisor 当前持有短期 Turn
+  租约，因此某个 Flow/Stage 阻断不会误伤独立任务。
+- Hub 从不可变 Stage 解析执行 Agent，调用方不能覆盖执行者。
+- 相同 `command_key` 幂等重放返回原 `AgentTask`；任务被 Worker 领取后，测试任务才从
+  `pending/assigned` 进入 `in_progress`。
+- Worker 完成普通 `AgentTask` 后，Hub 自动同步测试任务和 Mission Stage 终态；不要让
+  Agent 另行拼接进度/终态回写请求。
+
 ### 用例执行记录 (TestTaskCase)
 
 ```json
