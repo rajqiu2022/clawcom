@@ -80,6 +80,7 @@ def get_plan_supervision(plan_id):
         'through_cursor': through,
         'run_ids': [r.workflow_run_id for r in runs],
         'task_dispatches': svc.task_dispatch_receipts(sup),
+        'undispatched_stages': svc.undispatched_stages(sup),
         'lease_valid': bool(svc.available(sup) and sup.status == 'leased'
                             and sup.lease_expires_at and sup.lease_expires_at > _now())})
 

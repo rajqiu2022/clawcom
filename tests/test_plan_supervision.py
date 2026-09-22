@@ -302,6 +302,69 @@ class PlanSupervisionTest(unittest.TestCase):
                 response.json['owner_notification']['status'], 'not_required')
             send.assert_not_called()
 
+    def test_stage_block_keeps_supervisor_running_while_undispatched_stages_remain(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        db.session.add_all([
+            TestTask(plan_id=self.plan.id, name='先执行的冒烟', status='assigned',
+                     assignee_claw_id=self.other_claw.id, task_type='automation'),
+            TestTask(plan_id=self.plan.id, name='可继续派发的性能测试', status='assigned',
+                     assignee_claw_id=self.other_claw.id, task_type='performance'),
+        ])
+        db.session.commit()
+        started = self.post('start', {
+            'command_key': 'stage-block-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.assertEqual(started.status_code, 200, started.json)
+        self.agent()
+        self.claim('stage-block-claim')
+
+        blocked = self.post('decision', {
+            'command_key': 'stage-block-decision', **self.credentials(),
+            'cursor': self.sup().lease_cursor, 'outcome': 'blocked',
+            'summary': '首个执行项阻断，但其他任务仍可由经理判断后派发',
+        })
+        self.assertEqual(blocked.status_code, 200, blocked.json)
+        self.assertEqual(blocked.json['requested_outcome'], 'blocked')
+        self.assertEqual(blocked.json['effective_outcome'], 'wait')
+        self.assertEqual(blocked.json['block_scope'], 'stage')
+        self.assertTrue(blocked.json['continue_supervision'])
+        self.assertEqual(len(blocked.json['undispatched_stages']), 2)
+        self.assertNotEqual(self.sup().status, 'blocked')
+        self.assertIsNotNone(self.sup().wake_message_id)
+
+    def test_explicit_plan_scope_can_block_with_undispatched_stages(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        db.session.add(TestTask(
+            plan_id=self.plan.id, name='尚未派发的任务', status='assigned',
+            assignee_claw_id=self.other_claw.id, task_type='automation'))
+        db.session.commit()
+        started = self.post('start', {
+            'command_key': 'plan-block-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.assertEqual(started.status_code, 200, started.json)
+        self.agent()
+        self.claim('plan-block-claim')
+
+        blocked = self.post('decision', {
+            'command_key': 'plan-block-decision', **self.credentials(),
+            'cursor': self.sup().lease_cursor, 'outcome': 'blocked',
+            'block_scope': 'plan',
+            'summary': '团队级安全问题，明确暂停整个计划',
+        })
+        self.assertEqual(blocked.status_code, 200, blocked.json)
+        self.assertEqual(blocked.json['effective_outcome'], 'blocked')
+        self.assertEqual(blocked.json['block_scope'], 'plan')
+        self.assertFalse(blocked.json['continue_supervision'])
+        self.assertEqual(self.sup().status, 'blocked')
+
     def test_timer_restarts_and_unchanged_watchdog_stays_quiet(self):
         self.start()
         self.claim()

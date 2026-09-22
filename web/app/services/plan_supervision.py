@@ -46,6 +46,13 @@ def team_capability(team_id):
             'start_requires': ['team_id', 'orchestrator_claw_id', 'command_key'],
             'supervisor_api': '/api/v1/test-plans/{plan_id}/supervision',
             'worker_lease_receipt_required': True, 'auto_start': bool(team_enabled(team_id)),
+            'blocking_policy': {
+                'default_scope': 'stage',
+                'plan_scope_requires': {'block_scope': 'plan'},
+                'continue_when_undispatched_stages_remain': True,
+                'note': ('单个 Child Run/Stage 阻断不得暂停整个计划；主 Agent 应继续判断并派发'
+                         '无依赖、无资源冲突的 Stage。只有团队级问题才显式使用 block_scope=plan。'),
+            },
             'owner_notification_policy': {
                 'enabled': True,
                 'delivery': 'agent_wecom',
@@ -517,6 +524,9 @@ def pump(sup, now=None):
             },
             'instruction': '先回读并 claim 唯一监督租约。恢复关联 Mission/Run，勿重复创建。'
                            '稍后继续须提交 decision 并拿到调度回执；无有效租约不得派工。'
+                           '单个 Child Run 或 Stage 阻断时，继续判断未派发 Stage 的依赖与资源冲突；'
+                           '默认 blocked 仅按阶段级处理，不暂停全队。只有团队级问题才提交 '
+                           'block_scope=plan。'
                            '禁止模型轮询；正常心跳和无变化检查不通知 Owner。'
                            'decision 返回 owner_notification.required=true 时，使用本 Agent 自己的企微通道'
                            '向 Owner 汇报；不得调用 Hub /wecom/send 或 SendRTXInfo。'}, ensure_ascii=False))
@@ -621,6 +631,32 @@ def claim(sup, claw_id, body, now=None):
     return result
 
 
+def undispatched_stages(sup):
+    """Return stages that still have no Child Run for the manager to assess.
+
+    Hub deliberately does not infer cross-task dependencies here.  The main
+    Agent remains responsible for deciding which of these stages can run in
+    parallel; this list only prevents one terminal Child Run from silently
+    turning into a plan-wide stop.
+    """
+    if not sup or not sup.mission_id:
+        return []
+    items = []
+    rows = MissionStage.query.filter_by(
+        mission_id=sup.mission_id, state='ready', workflow_run_id=None,
+    ).order_by(MissionStage.id).all()
+    for stage in rows:
+        snapshot = stage.input_snapshot_json or {}
+        items.append({
+            'stage_key': stage.stage_key,
+            'test_task_id': _stage_task_id(stage),
+            'test_task_name': snapshot.get('test_task_name') or '',
+            'executor_claw_id': stage.assigned_claw_id,
+            'role_key': stage.role_key,
+        })
+    return items
+
+
 def decide(sup, claw_id, body, now=None):
     now = now or _now()
     def apply():
@@ -630,11 +666,31 @@ def decide(sup, claw_id, body, now=None):
         outcome = body.get('outcome')
         if outcome not in ('wait', 'blocked'):
             fail('PLAN_DECISION_INVALID', 'outcome 仅支持 wait/blocked', 400)
+        block_scope = body.get('block_scope')
+        if block_scope is not None and (
+                outcome != 'blocked' or block_scope not in ('stage', 'plan')):
+            fail('PLAN_DECISION_INVALID',
+                 'block_scope 仅可在 blocked 时设为 stage/plan', 400)
         summary = body.get('summary')
         if not isinstance(summary, str) or not summary.strip() or len(summary) > 4000:
             fail('PLAN_DECISION_INVALID', '必须提供不超过 4000 字的决策摘要', 400)
+        remaining = undispatched_stages(sup)
+        local_block = bool(
+            outcome == 'blocked' and block_scope != 'plan' and remaining)
+        effective_outcome = 'wait' if local_block else outcome
+        effective_scope = (
+            'stage' if local_block else
+            ('plan' if outcome == 'blocked' else None))
         check = None
-        if outcome == 'wait':
+        if local_block:
+            # End this fenced Turn, then immediately create a fresh wake so the
+            # main Agent can decide which remaining Stage is actually safe to
+            # dispatch.  No Worker is auto-selected by Hub.
+            if body.get('next_check_at') is not None:
+                fail('PLAN_DECISION_INVALID',
+                     '阶段级阻断由 Hub 立即续调度，不接受 next_check_at', 400)
+            check = now
+        elif outcome == 'wait':
             check = parse_time(body.get('next_check_at'))
             if not now < check < ends_at(db.session.get(TestPlan, sup.plan_id)):
                 fail('PLAN_SCHEDULE_OUT_OF_RANGE', '下一次检查须在未来且不晚于计划结束')
@@ -653,21 +709,40 @@ def decide(sup, claw_id, body, now=None):
         notification_reasons.extend(kind for kind in (
             'run_terminal', 'heartbeat_anomaly', 'stale') if kind in event_kinds)
         sup.acknowledged_cursor = sup.lease_cursor
-        sup.last_decision_json = {'outcome': outcome, 'summary': summary,
-            'cursor': sup.lease_cursor, 'at': now.isoformat() + '+08:00'}
+        sup.last_decision_json = {
+            'outcome': effective_outcome,
+            'requested_outcome': outcome,
+            'block_scope': effective_scope,
+            'summary': summary,
+            'cursor': sup.lease_cursor,
+            'at': now.isoformat() + '+08:00',
+        }
         msg = db.session.get(ClawMessage, sup.wake_message_id)
         if msg:
             msg.status, msg.done_at = 'done', now
         sup.wake_message_id = None
-        sup.status = 'waiting' if outcome == 'wait' else 'blocked'
+        sup.status = 'waiting' if effective_outcome == 'wait' else 'blocked'
         sup.next_check_at = check
         sup.resume_condition = 'timer_or_event' if check else 'manual'
         sup.lease_owner = None
         sup.lease_expires_at = None
         sup.turn_deadline_at = None
         sup.expired_turns = 0
+        if local_block:
+            add_event(sup.plan_id, 'stage_blocked_continuation', [
+                'stage-blocked-continuation', body.get('command_key'),
+            ], {
+                'summary': summary,
+                'undispatched_stage_keys': [row['stage_key'] for row in remaining],
+                'rule': 'manager_decides_next_stage',
+            }, now)
         return {
             'scheduled': bool(check),
+            'requested_outcome': outcome,
+            'effective_outcome': effective_outcome,
+            'block_scope': effective_scope,
+            'continue_supervision': local_block,
+            'undispatched_stages': remaining,
             'owner_notification': {
                 'required': bool(notification_reasons),
                 'reasons': notification_reasons,

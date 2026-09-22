@@ -98,7 +98,9 @@ TestTask 的 `assigned/pending` 只表示排队。Mission dispatch 创建 Child 
 
 next_check_at 必须带时区、在未来且早于计划结束日次日零点（北京时间）。只有成功 response 且独立 GET 回读 receipt_id 后，才可说“已安排”。回执描述历史接受结果；后来 stop/到期会取消该安排，恢复时必须读取当前状态。
 
-成功 decision 原子确认本轮游标、保存最近决策和 next_check_at、关闭唤醒消息并释放租约。有未消费的关键事件时可以提前再次唤醒；普通进度合并并限频 60 秒。`outcome=blocked` 表示需人工决策，不附 next_check_at，等待管理者 resume。
+成功 decision 原子确认本轮游标、保存最近决策和 next_check_at、关闭唤醒消息并释放租约。有未消费的关键事件时可以提前再次唤醒；普通进度合并并限频 60 秒。
+
+`outcome=blocked` 默认只表示当前 Child Run/Stage 阻断。只要 Mission 仍有尚未创建 Child Run 的 ready Stage，Hub 就保持 Supervisor 运行，立即产生下一次监督唤醒，并在响应的 `undispatched_stages` 中返回待判断项；由主 Agent 根据依赖和资源冲突决定下一项，不由 Hub 自动选择 Worker。只有团队级安全、配置或共享基础设施问题需要暂停整个计划时，主 Agent 才显式提交 `block_scope=plan`。明确的计划级阻断不附 next_check_at，等待管理者 resume。
 
 同 action + command_key 的同内容请求返回原回执；不同内容拒绝。普通 `messages/{id}/done` 在没有 decision 回执时返回 `PLAN_DECISION_RECEIPT_REQUIRED`，避免聊天承诺假成功。
 
