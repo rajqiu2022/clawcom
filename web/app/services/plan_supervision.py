@@ -59,7 +59,10 @@ def team_capability(team_id):
     team = db.session.get(AgentTeam, team_id) if type(team_id) is int else None
     schedule = ((team.policy_json or {}).get('supervision_schedule')
                 if team else None) or DEFAULT_SCHEDULE
-    return {'enabled': team_enabled(team_id), 'contract': 'hub.plan_supervision.v2',
+    return {'enabled': team_enabled(team_id), 'contract': 'hub.plan_supervision.v1',
+            'contract_extensions': [
+                'recoverable_states_v2', 'persistent_schedule_v1',
+                'terminal_projection_v1', 'authoritative_execution_v1'],
             'start_requires': ['team_id', 'orchestrator_claw_id', 'command_key'],
             'supervisor_api': '/api/v1/test-plans/{plan_id}/supervision',
             'direct_task_dispatch_api': (
@@ -728,7 +731,7 @@ def pump(sup, now=None):
         sup.next_check_at = next_schedule_at(sup, now)
     message = ClawMessage(claw_id=sup.orchestrator_claw_id, sender_name='Hub Plan Supervisor',
         msg_type='plan_supervision', direction='to_claw', status='pending',
-        content=json.dumps({'contract': 'hub.plan_supervision.v2', 'plan_id': sup.plan_id,
+        content=json.dumps({'contract': 'hub.plan_supervision.v1', 'plan_id': sup.plan_id,
             'team_id': sup.team_id,
             'supervisor_api': '/api/v1/test-plans/%s/supervision' % sup.plan_id,
             'cursor': sup.cursor,
