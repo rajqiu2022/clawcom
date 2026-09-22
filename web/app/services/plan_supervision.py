@@ -47,8 +47,9 @@ def team_capability(team_id):
             'supervisor_api': '/api/v1/test-plans/{plan_id}/supervision',
             'worker_lease_receipt_required': True, 'auto_start': bool(team_enabled(team_id)),
             'owner_notification_policy': {
-                'enabled': bool(current_app.config.get(
-                    'PLAN_SUPERVISION_OWNER_NOTIFICATIONS', False)),
+                'enabled': True,
+                'delivery': 'agent_wecom',
+                'fallback': 'hub_receipt_only',
                 'notify_on': ['blocked', 'run_terminal', 'heartbeat_anomaly', 'stale'],
                 'quiet_on': ['heartbeat', 'unchanged', 'ordinary_progress'],
             }}
@@ -508,9 +509,17 @@ def pump(sup, now=None):
             'team_id': sup.team_id,
             'supervisor_api': '/api/v1/test-plans/%s/supervision' % sup.plan_id,
             'cursor': sup.cursor,
+            'owner_notification_policy': {
+                'delivery': 'agent_wecom',
+                'notify_on': ['blocked', 'run_terminal', 'heartbeat_anomaly', 'stale'],
+                'quiet_on': ['heartbeat', 'unchanged', 'ordinary_progress'],
+                'decision_response_field': 'owner_notification',
+            },
             'instruction': '先回读并 claim 唯一监督租约。恢复关联 Mission/Run，勿重复创建。'
                            '稍后继续须提交 decision 并拿到调度回执；无有效租约不得派工。'
-                           '禁止模型轮询；正常心跳和无变化检查不通知 Owner。'}, ensure_ascii=False))
+                           '禁止模型轮询；正常心跳和无变化检查不通知 Owner。'
+                           'decision 返回 owner_notification.required=true 时，使用本 Agent 自己的企微通道'
+                           '向 Owner 汇报；不得调用 Hub /wecom/send 或 SendRTXInfo。'}, ensure_ascii=False))
     db.session.add(message)
     db.session.flush()
     sup.wake_message_id = message.id
@@ -663,7 +672,9 @@ def decide(sup, claw_id, body, now=None):
                 'required': bool(notification_reasons),
                 'reasons': notification_reasons,
                 'event_kinds': event_kinds,
-                'status': 'pending' if notification_reasons else 'not_required',
+                'delivery': 'agent_wecom',
+                'status': ('agent_action_required' if notification_reasons
+                           else 'not_required'),
             },
         }
     return receipt(sup, 'decision', body, apply)
@@ -677,71 +688,6 @@ def mission_guard(mission_id, claw_id, body):
             fail('PLAN_SUPERVISION_DISABLED', '计划监督已禁用', 503)
         require_lease(sup, claw_id, lease_credentials(body))
     return sup
-
-
-def deliver_owner_notification(plan_id, result):
-    """Deliver one audited Owner report for a committed decision receipt.
-
-    The decision remains successful even when the external channel is down.
-    Replays reuse the existing send log and never create duplicate messages.
-    """
-    notice = dict(result.get('owner_notification') or {})
-    if not notice.get('required'):
-        return notice
-    if not current_app.config.get('PLAN_SUPERVISION_OWNER_NOTIFICATIONS', False):
-        return dict(notice, status='disabled')
-    receipt_id = result.get('receipt_id')
-    if type(receipt_id) is not int:
-        return dict(notice, status='invalid_receipt')
-    from app.models import WecomSendLog
-    existing = WecomSendLog.query.filter_by(
-        related_type='plan_supervision', related_id=receipt_id).order_by(
-            WecomSendLog.id.desc()).first()
-    if existing:
-        return dict(notice, status=existing.status, log_id=existing.id,
-                    replayed=True)
-    plan = db.session.get(TestPlan, plan_id)
-    sup = db.session.get(PlanSupervisor, plan_id)
-    claw = (db.session.get(OpenClawInstance, sup.orchestrator_claw_id)
-            if sup else None)
-    if not plan or not sup or not claw:
-        return dict(notice, status='target_missing')
-    target = (claw.owner_wecom_userid or claw.owner or '').strip()
-    if not target:
-        return dict(notice, status='target_missing')
-    decision = sup.last_decision_json or {}
-    labels = {
-        'blocked': '需要人工处理',
-        'run_terminal': 'Child Run 已结束',
-        'heartbeat_anomaly': '执行心跳异常',
-        'stale': '执行长时间无实质进展',
-    }
-    reasons = '、'.join(labels.get(item, item) for item in notice.get('reasons') or [])
-    content = '\n'.join(filter(None, [
-        '测试计划 #%s：%s' % (plan.id, plan.name),
-        '状态：%s' % reasons,
-        '小策结论：%s' % str(decision.get('summary') or '').strip(),
-        '查看：https://clawteam.woa.com/testplans?plan_id=%s' % plan.id,
-    ]))
-    from app.api.wecom import WecomDispatcher
-    ok, log = WecomDispatcher.send(
-        target_userid=target,
-        title='测试计划监督提醒',
-        content=content,
-        claw_id=claw.id,
-        related_type='plan_supervision',
-        related_id=receipt_id,
-        request_summary={
-            'plan_id': plan.id,
-            'receipt_id': receipt_id,
-            'reasons': notice.get('reasons') or [],
-            'target': target,
-        },
-        template_version='plan-supervision-owner-v1',
-        message_hash=hashlib.sha256(content.encode('utf-8')).hexdigest(),
-    )
-    return dict(notice, status='sent' if ok else 'failed', log_id=log.id,
-                replayed=False)
 
 
 def _stage_task_id(stage):

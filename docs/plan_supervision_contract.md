@@ -116,6 +116,6 @@ next_check_at 必须带时区、在未来且早于计划结束日次日零点（
 
 本次未改 Worker。Worker 须识别 plan_supervision 控制消息、持久化 wake/lease/receipt、恢复时回读、在 decision 后立即释放模型槽，并在 Hub fencing 拒绝时停止旧监督写入。不得用模型循环轮询模拟 watchdog。
 
-普通心跳、无变化检查不发送 Owner 通知；计划监督消息不进入旧的“消息卡住五分钟”泛化告警。开启 `PLAN_SUPERVISION_OWNER_NOTIFICATIONS=1` 后，Hub 仅对人工阻断、Child Run 终态、心跳异常和长时间无实质进展进行集中企微通知，发送请求与回执写入 `wecom_send_logs`，同一 decision receipt 幂等去重。普通进度与无变化检查保持静默；每日汇总和最终报告仍由后续报告合同负责。
+普通心跳、无变化检查不发送 Owner 通知；计划监督消息不进入旧的“消息卡住五分钟”泛化告警。Hub 在 decision 响应中对人工阻断、Child Run 终态、心跳异常和长时间无实质进展标记 `owner_notification.required=true`，由监督 Agent 使用自己的企微通道向 Owner 汇报；不得调用 Hub `/wecom/send` 或 `SendRTXInfo`。Hub 保留 decision receipt 作为汇报事实，无直属企微通道时只保留 Hub 回执。普通进度与无变化检查保持静默；每日汇总和最终报告仍由后续报告合同负责。
 
 本地专项测试覆盖：重复启动/唯一工作项、唯一租约与 fencing、未来开始/定时唤醒、重启回读、事件在途不丢、游标分页、聊天假完成拒绝、Mission 真派工与幂等、三次过期停止、计划到期和权限边界。生产 MariaDB 多进程竞争、真实 Worker 重启及跨日 Todo 候选仍需独立 canary。

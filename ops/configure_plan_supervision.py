@@ -40,7 +40,6 @@ app = create_app('production')
 with app.app_context():
     assert app.config['PLAN_SUPERVISION_ENABLED'] is True
     assert app.config['PLAN_SUPERVISION_TEAM_IDS'] == str(requested_team)
-    assert app.config['PLAN_SUPERVISION_OWNER_NOTIFICATIONS'] is True
     assert os.environ.get('TIMEOUT_WATCHER_ENABLED','1') not in ('0','false','False')
     team = db.session.get(AgentTeam,requested_team)
     manager = db.session.get(OpenClawInstance,team.primary_manager_claw_id)
@@ -54,7 +53,7 @@ with app.app_context():
               'plan50_status':db.session.get(TestPlan,50).status,
               'supervisor_count':PlanSupervisor.query.count(),
               'sidecar_team_capability':context['plan_supervision'],
-              'watchdog_enabled':True,'owner_notifications_enabled':True,
+              'watchdog_enabled':True,'owner_notification_delivery':'agent_wecom',
               'runs_started':0}
     db.session.remove()
     for attempt in range(20):
@@ -99,10 +98,10 @@ def main():
         prefix = r.ENV_SOURCE+'\nrequested_team = %d\n' % args.team_id
         r.run_python(client,sftp,stage,'check',prefix+CHECK)
         old = r.read(sftp,TARGET)
-        legacy = ('[Service]\nEnvironment="PLAN_SUPERVISION_ENABLED=1"\n'
-                  'Environment="PLAN_SUPERVISION_TEAM_IDS=%d"\n' % args.team_id).encode()
-        desired = legacy + b'Environment="PLAN_SUPERVISION_OWNER_NOTIFICATIONS=1"\n'
-        assert old in (None, legacy, desired), 'Existing supervisor override requires review'
+        desired = ('[Service]\nEnvironment="PLAN_SUPERVISION_ENABLED=1"\n'
+                   'Environment="PLAN_SUPERVISION_TEAM_IDS=%d"\n' % args.team_id).encode()
+        previous = desired + b'Environment="PLAN_SUPERVISION_OWNER_NOTIFICATIONS=1"\n'
+        assert old in (None, desired, previous), 'Existing supervisor override requires review'
         if not args.apply:
             print('ENABLE_PREFLIGHT_OK')
             return
@@ -116,7 +115,7 @@ def main():
             r.command(client,'systemctl is-active openclaw-web')
             r.run_python(client,sftp,stage,'verify',prefix+VERIFY)
             audit = {'commit':revision,'team_id':args.team_id,'enabled':True,
-                     'owner_notifications_enabled':True,
+                     'owner_notification_delivery':'agent_wecom',
                      'at':datetime.now().isoformat(),'auto_started_plans':False}
             r.write(client,sftp,stage+'/activation.json',json.dumps(audit).encode())
             print('ENABLE_OK',json.dumps(audit))

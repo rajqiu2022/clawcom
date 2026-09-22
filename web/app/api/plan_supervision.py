@@ -147,13 +147,6 @@ def decide_plan_supervision(plan_id):
     db.session.commit()
     if target:
         svc.wake(target)
-    notification = svc.deliver_owner_notification(plan_id, result)
-    if notification:
-        result['owner_notification'] = notification
-        record = db.session.get(PlanSupervisorReceipt, result.get('receipt_id'))
-        if record:
-            record.response_json = result
-            db.session.commit()
     return jsonify(result)
 
 

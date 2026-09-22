@@ -265,10 +265,7 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(self.post('decision', dict(body, summary='changed')).status_code, 409)
         self.assertEqual(self.post('heartbeat', self.credentials()).status_code, 409)
 
-    def test_key_decision_notifies_owner_once_and_quiet_wait_stays_silent(self):
-        self.app.config['PLAN_SUPERVISION_OWNER_NOTIFICATIONS'] = True
-        self.main_claw.owner_wecom_userid = 'owner-user'
-        db.session.commit()
+    def test_key_decision_delegates_owner_notice_to_agent_and_quiet_wait_stays_silent(self):
         self.start()
         self.claim()
         blocked = {
@@ -276,19 +273,20 @@ class PlanSupervisionTest(unittest.TestCase):
             'cursor': self.sup().lease_cursor,
             'outcome': 'blocked', 'summary': '派发合同不匹配，需要人工处理',
         }
-        with patch('app.api.wecom._send_via_rtx_info',
-                   return_value=(True, '', {'code': 20000})) as send:
+        with patch('app.api.wecom.WecomDispatcher.send') as send:
             response = self.post('decision', blocked)
             self.assertEqual(response.status_code, 200, response.json)
             self.assertEqual(
-                response.json['owner_notification']['status'], 'sent')
+                response.json['owner_notification']['status'],
+                'agent_action_required')
             self.assertEqual(
                 response.json['owner_notification']['reasons'], ['blocked'])
-            self.assertEqual(send.call_count, 1)
-            self.assertEqual(send.call_args.args[0], 'owner-user')
+            self.assertEqual(
+                response.json['owner_notification']['delivery'], 'agent_wecom')
+            send.assert_not_called()
             replay = self.post('decision', blocked)
             self.assertEqual(replay.status_code, 200, replay.json)
-            self.assertEqual(send.call_count, 1)
+            send.assert_not_called()
 
         self._login_admin()
         resumed = self.client.post(
