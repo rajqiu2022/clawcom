@@ -214,6 +214,16 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertGreaterEqual(task.progress, 1)
         event = PlanSupervisorEvent.query.filter_by(kind='task_claimed').one()
         self.assertEqual(event.payload_json['task_id'], task.id)
+        run.status = 'succeeded'
+        run.summary = 'Flow 验证通过'
+        db.session.commit()
+        svc.sweep()
+        db.session.refresh(task)
+        db.session.refresh(stage)
+        self.assertEqual(task.status, 'completed')
+        self.assertEqual(task.progress, 100)
+        self.assertEqual(stage.state, 'completed')
+        self.assertEqual(task.result_summary, 'Flow 验证通过')
 
     def test_active_team_plan_without_supervisor_is_repaired_by_watchdog(self):
         team = self.scoped_team()
@@ -271,6 +281,42 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertTrue(readback.json['scheduled'])
         self.assertEqual(self.post('decision', dict(body, summary='changed')).status_code, 409)
         self.assertEqual(self.post('heartbeat', self.credentials()).status_code, 409)
+
+    def test_retryable_decision_has_bounded_automatic_retry(self):
+        self.start()
+        self.claim()
+        response = self.post('decision', {
+            'command_key': 'provider-timeout', **self.credentials(),
+            'cursor': self.sup().lease_cursor, 'outcome': 'retryable',
+            'summary': 'Provider timeout; Hub will retry automatically',
+        })
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['supervisor_status'], 'retryable')
+        self.assertEqual(self.sup().status, 'retryable')
+        self.assertIsNotNone(self.sup().next_check_at)
+        self.assertEqual(self.sup().resume_condition, 'timer_or_event')
+
+    def test_hub_schedule_and_portfolio_are_in_readback(self):
+        team = self.scoped_team()
+        team.policy_json = dict(team.policy_json or {}, supervision_schedule={
+            'timezone': 'Asia/Shanghai', 'morning_check': '08:30',
+            'progress_summaries': ['12:30', '16:30'], 'day_close': '19:00',
+        })
+        self.plan.team_id = team.id
+        db.session.commit()
+        started = self.post('start', {
+            'command_key': 'scheduled-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.assertEqual(started.status_code, 200, started.json)
+        self.agent()
+        readback = self.client.get(self.base, headers=self._headers()).json
+        self.assertEqual(
+            readback['project_portfolio']['schedule']['timezone'],
+            'Asia/Shanghai')
+        self.assertEqual(
+            readback['project_portfolio']['schedule']['day_close'], '19:00')
+        self.assertIn('independent_stage_status', readback['supervision'])
+        self.assertIn('allowed_actions', readback['supervision'])
 
     def test_key_decision_delegates_owner_notice_to_agent_and_quiet_wait_stays_silent(self):
         self.start()
@@ -370,7 +416,7 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(blocked.json['effective_outcome'], 'blocked')
         self.assertEqual(blocked.json['block_scope'], 'plan')
         self.assertFalse(blocked.json['continue_supervision'])
-        self.assertEqual(self.sup().status, 'blocked')
+        self.assertEqual(self.sup().status, 'blocked_owner_gate')
 
     def test_manager_can_dispatch_non_flow_agent_task_while_plan_is_blocked(self):
         team = self.scoped_team()
@@ -394,7 +440,7 @@ class PlanSupervisionTest(unittest.TestCase):
             'block_scope': 'plan', 'summary': '其他 Flow 需人工处理',
         })
         self.assertEqual(blocked.status_code, 200, blocked.json)
-        self.assertEqual(self.sup().status, 'blocked')
+        self.assertEqual(self.sup().status, 'blocked_owner_gate')
 
         path = self.base + '/agent-tasks'
         body = {
@@ -462,7 +508,10 @@ class PlanSupervisionTest(unittest.TestCase):
         first = self.claim()
         old = self.credentials()
         expires = self.sup().lease_expires_at
-        self.assertEqual(svc.sweep(now=expires + timedelta(seconds=1)), 1)
+        self.assertEqual(svc.sweep(now=expires + timedelta(seconds=1)), 0)
+        retry_at = self.sup().next_check_at
+        self.assertGreater(retry_at, expires)
+        self.assertEqual(svc.sweep(now=retry_at), 1)
         self.assertEqual(self.post('heartbeat', old).status_code, 409)
         self.claim('claim-2')
         self.assertGreater(self.sup().fencing_token, first['supervision']['fencing_token'])
@@ -549,14 +598,17 @@ class PlanSupervisionTest(unittest.TestCase):
         self.post('decision', self.wait_body())
         self.assertEqual(self.client.put(path, json={}, headers=self._headers()).status_code, 200)
 
-    def test_three_expired_turns_block_instead_of_infinite_model_retries(self):
+    def test_expired_turns_back_off_without_permanent_plan_block(self):
         self.start()
         for index in range(3):
             self.claim('attempt-%s' % index)
-            svc.sweep(now=self.sup().lease_expires_at + timedelta(seconds=1))
-        self.assertEqual(self.sup().status, 'blocked')
-        self.assertIsNone(self.sup().wake_message_id)
-        self.assertEqual(svc.sweep(now=_now() + timedelta(hours=2)), 0)
+            self.assertEqual(
+                svc.sweep(now=self.sup().lease_expires_at + timedelta(seconds=1)),
+                0)
+            self.assertEqual(svc.sweep(now=self.sup().next_check_at), 1)
+        self.assertEqual(self.sup().status, 'pending')
+        self.assertIsNotNone(self.sup().next_check_at)
+        self.assertNotEqual(self.sup().resume_condition, 'manual')
 
     def test_future_start_is_persisted_without_early_wake(self):
         self.plan.start_date = (_now() + timedelta(days=1)).date()

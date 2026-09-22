@@ -92,6 +92,7 @@ def drain(response):
             sup = svc.locked(plan_id)
             if not sup:
                 continue
+            svc.reconcile_plan_truth(sup)
             target = svc.pump(sup)
             db.session.commit()
             if target:

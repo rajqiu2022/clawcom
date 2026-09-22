@@ -1,4 +1,5 @@
 """Team configuration, manager fencing and immutable membership contracts."""
+import re
 from datetime import datetime
 
 from flask import current_app
@@ -96,7 +97,8 @@ def normalize_config(data, project_id):
         seen.add((claw_id, role))
         normalized.append({'claw_id': claw_id, 'role_key': role, 'specialties': sorted(set(specialties))})
     policy = data.get('policy')
-    if not isinstance(policy, dict) or set(policy) - {'allowed_definition_ids', 'max_child_runs'}:
+    if not isinstance(policy, dict) or set(policy) - {
+            'allowed_definition_ids', 'max_child_runs', 'supervision_schedule'}:
         raise TeamError('TEAM_POLICY_INVALID', 'policy 包含不支持的字段', 400)
     ids = policy.get('allowed_definition_ids')
     if not isinstance(ids, list) or not ids or len(ids) > 100:
@@ -106,12 +108,42 @@ def normalize_config(data, project_id):
         flow = db.session.get(WorkflowDefinition, flow_id)
         if not flow or flow.project_id != project_id or flow.status != 'active':
             raise TeamError('TEAM_POLICY_INVALID', 'Flow 必须 active 且属于团队项目', 400)
+    schedule = policy.get('supervision_schedule') or {
+        'timezone': 'Asia/Shanghai',
+        'morning_check': '09:30',
+        'progress_summaries': ['13:30'],
+        'day_close': '18:30',
+    }
+    if (not isinstance(schedule, dict)
+            or set(schedule) - {
+                'timezone', 'morning_check', 'progress_summaries', 'day_close'}
+            or schedule.get('timezone') != 'Asia/Shanghai'):
+        raise TeamError(
+            'TEAM_POLICY_INVALID',
+            'supervision_schedule 仅支持 Asia/Shanghai 及固定日程字段', 400)
+    clock = re.compile(r'^(?:[01]\d|2[0-3]):[0-5]\d$')
+    morning = schedule.get('morning_check')
+    close = schedule.get('day_close')
+    summaries = schedule.get('progress_summaries', [])
+    if (not isinstance(morning, str) or not clock.fullmatch(morning)
+            or not isinstance(close, str) or not clock.fullmatch(close)
+            or not isinstance(summaries, list) or len(summaries) > 8
+            or any(not isinstance(value, str) or not clock.fullmatch(value)
+                   for value in summaries)):
+        raise TeamError('TEAM_POLICY_INVALID', '监督日程须为有效 HH:MM，阶段摘要最多 8 个', 400)
+    normalized_schedule = {
+        'timezone': 'Asia/Shanghai',
+        'morning_check': morning,
+        'progress_summaries': sorted(set(summaries)),
+        'day_close': close,
+    }
     return {
         'name': name.strip(), 'objective': objective.strip(), 'status': status,
         'primary_manager_claw_id': primary, 'backup_manager_claw_id': backup,
         'members': normalized,
         'policy': {'allowed_definition_ids': sorted(set(ids)),
-                   'max_child_runs': integer(policy.get('max_child_runs', 20), 'max_child_runs', 1, 100)},
+                   'max_child_runs': integer(policy.get('max_child_runs', 20), 'max_child_runs', 1, 100),
+                   'supervision_schedule': normalized_schedule},
     }
 
 

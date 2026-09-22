@@ -4,7 +4,10 @@ import json
 import re
 
 from app import db
-from app.models import AgentTeamMemberStatus, AgentTeamMemberTask, AgentTeamMemberReport, _now
+from app.models import (AgentTask, AgentTeamMemberStatus, AgentTeamMemberTask,
+                        AgentTeamMemberReport, AgentTeamMission,
+                        WorkflowMissionDispatch, WorkflowRun, WorkflowRunStep,
+                        _now)
 from app.services.agent_teams import TeamError, integer
 
 STALE_SECONDS = 180
@@ -28,22 +31,98 @@ def roster(team):
     return people
 
 
-def member_summary(person, claw, status, task, now=None):
+def authoritative_execution(team, claw_id, now=None):
+    """Derive execution from Hub claims; self reports never overwrite it."""
+    now = now or _now()
+    mission_ids = [row.mission_id for row in AgentTeamMission.query.filter_by(
+        team_id=team.id).all()]
+    if mission_ids:
+        run_ids = [row.workflow_run_id for row in WorkflowMissionDispatch.query.filter(
+            WorkflowMissionDispatch.mission_id.in_(mission_ids)).all()]
+        if run_ids:
+            step = (WorkflowRunStep.query.join(
+                WorkflowRun, WorkflowRun.id == WorkflowRunStep.run_id).filter(
+                    WorkflowRunStep.run_id.in_(run_ids),
+                    WorkflowRunStep.claimed_claw_id == claw_id,
+                    WorkflowRunStep.status.in_(['running', 'retrying']),
+                    WorkflowRun.status.in_([
+                        'pending', 'running', 'retrying', 'waiting_approval']),
+                    db.or_(WorkflowRunStep.claim_expires_at.is_(None),
+                           WorkflowRunStep.claim_expires_at > now))
+                .order_by(WorkflowRunStep.updated_at.desc(),
+                          WorkflowRunStep.id.desc()).first())
+            if step:
+                return {
+                    'source': 'workflow_claim', 'state': 'working',
+                    'reference': 'workflow-run:%s/step:%s' % (
+                        step.run_id, step.step_id),
+                    'run_id': step.run_id, 'step_id': step.step_id,
+                    'worker_id': step.claimed_by or '',
+                    'heartbeat_at': str(step.heartbeat_at) if step.heartbeat_at else None,
+                    'claim_expires_at': (str(step.claim_expires_at)
+                                         if step.claim_expires_at else None),
+                }
+    task = (AgentTask.query.filter_by(
+        claw_id=claw_id, task_type='test_plan_agent_task', status='running')
+        .filter(db.or_(AgentTask.lease_expires_at.is_(None),
+                       AgentTask.lease_expires_at > now))
+        .order_by(AgentTask.assigned_at.desc(), AgentTask.id.desc()).first())
+    if task:
+        return {
+            'source': 'agent_task_claim', 'state': 'working',
+            'reference': 'agent-task:%s' % task.task_id,
+            'agent_task_id': task.task_id,
+            'heartbeat_at': (str(task.last_heartbeat_at)
+                             if task.last_heartbeat_at else None),
+            'claim_expires_at': (str(task.lease_expires_at)
+                                 if task.lease_expires_at else None),
+        }
+    from app.models_plan_supervision import PlanSupervisor
+    supervisor = (PlanSupervisor.query.filter_by(
+        team_id=team.id, orchestrator_claw_id=claw_id, status='leased')
+        .filter(PlanSupervisor.lease_expires_at > now)
+        .order_by(PlanSupervisor.lease_expires_at.desc()).first())
+    if supervisor:
+        return {
+            'source': 'plan_supervision_claim', 'state': 'working',
+            'reference': 'plan-supervisor:%s' % supervisor.plan_id,
+            'plan_id': supervisor.plan_id,
+            'worker_id': supervisor.lease_owner or '',
+            'claim_expires_at': str(supervisor.lease_expires_at),
+        }
+    return None
+
+
+def member_summary(person, claw, status, task, team=None, now=None):
     now = now or _now()
     age = max(0, int((now - status.reported_at).total_seconds())) if status else None
     last_seen = claw.last_activity
     connection_age = max(0, int((now - last_seen).total_seconds())) if last_seen else None
     # Claw.status uses human activity labels too; only heartbeat recency is evidence of contact.
     connection = 'recently_seen' if connection_age is not None and connection_age <= STALE_SECONDS and claw.status not in ('offline', 'deleted') else 'not_recently_seen'
+    execution = authoritative_execution(team, claw.id, now) if team else None
+    reported_effective = (
+        ('stale' if age >= STALE_SECONDS else status.state)
+        if status else 'unknown')
+    effective = execution['state'] if execution else reported_effective
+    self_task = task.to_dict() if task else None
     return dict(person, name=claw.name, connection=connection,
                 connection_label='近期有连接活动' if connection == 'recently_seen' else '暂无近期连接活动',
                 last_seen_at=str(last_seen) if last_seen else None,
                 reported_state=status.state if status else None,
-                effective_state=('stale' if age >= STALE_SECONDS else status.state) if status else 'unknown',
+                effective_state=effective,
                 summary=status.summary if status else '', version=status.version if status else 0,
                 reported_at=str(status.reported_at) if status else None,
                 report_age_seconds=age, stale_after_seconds=STALE_SECONDS,
-                current_task=task.to_dict() if task else None, source='agent_self_report')
+                current_task=execution or self_task,
+                authoritative_execution=execution,
+                self_report={'state': status.state if status else None,
+                             'summary': status.summary if status else '',
+                             'current_task': self_task,
+                             'reported_at': (str(status.reported_at)
+                                             if status else None)},
+                source=('hub_authoritative_execution' if execution
+                        else 'agent_self_report'))
 
 
 def _text(value, field, maximum, required=False):

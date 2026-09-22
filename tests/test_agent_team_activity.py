@@ -3,7 +3,8 @@ from datetime import timedelta
 
 import test_agent_teams_api as fixtures
 from app import db
-from app.models import AgentTeamMemberReport, AgentTeamMemberStatus, AgentTeamMemberTask, AgentTeam, _now
+from app.models import (AgentTask, AgentTeamMemberReport, AgentTeamMemberStatus,
+                        AgentTeamMemberTask, AgentTeam, _now)
 
 
 class TeamActivityTest(unittest.TestCase):
@@ -34,6 +35,21 @@ class TeamActivityTest(unittest.TestCase):
         self.assertTrue(all(i['effective_state'] == 'unknown' for i in data['items']))
         self.assertTrue(all(i['version'] == 0 for i in data['items']))
         self.assertEqual(data['report_contract']['recommended_interval_seconds'], 60)
+
+    def test_hub_claim_is_authoritative_and_self_report_stays_separate(self):
+        self.setup_activity()
+        db.session.add(AgentTask(
+            task_id='plan-authoritative-1', claw_id=self.main_claw.id,
+            task_type='test_plan_agent_task', status='running',
+            lease_expires_at=_now() + timedelta(minutes=2),
+            last_heartbeat_at=_now()))
+        db.session.commit()
+        member = self.client.get(self.url).get_json()['member']
+        self.assertEqual(member['effective_state'], 'working')
+        self.assertEqual(member['source'], 'hub_authoritative_execution')
+        self.assertEqual(
+            member['authoritative_execution']['source'], 'agent_task_claim')
+        self.assertIsNone(member['self_report']['state'])
 
     def test_current_progress_finish_and_history_no_claw_state_mutation(self):
         self.setup_activity()

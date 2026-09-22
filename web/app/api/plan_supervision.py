@@ -74,7 +74,9 @@ def get_plan_supervision(plan_id):
     runs = WorkflowMissionDispatch.query.filter_by(mission_id=sup.mission_id).all() if sup.mission_id else []
     supervision = sup.to_dict()
     supervision.update(svc.recovery_snapshot(sup))
+    supervision.update(svc.stage_truth_snapshot(sup))
     return jsonify({'supervision': supervision,
+        'project_portfolio': svc.project_portfolio_snapshot(sup),
         'events': [{'id': r.id, 'sequence': r.sequence, 'kind': r.kind,
                     'payload': r.payload_json} for r in events],
         'next_cursor': events[-1].sequence if events else after,
@@ -205,7 +207,7 @@ def resume_plan_supervision(plan_id):
         plan = db.session.get(TestPlan, plan_id)
         if plan.status != 'active' or _now() >= svc.ends_at(plan):
             svc.fail('PLAN_SUPERVISION_INACTIVE', '计划已结束或不在 active 状态')
-        if sup.status not in ('blocked', 'stopped'):
+        if sup.status not in ('blocked', 'blocked_owner_gate', 'stopped'):
             svc.fail('PLAN_SUPERVISION_NOT_PAUSED', '不能重置正在监督的计划')
         sup.status = 'waiting'
         sup.expired_turns = 0

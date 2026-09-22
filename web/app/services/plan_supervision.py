@@ -7,10 +7,13 @@ from datetime import datetime, time, timedelta, timezone
 
 from flask import current_app
 from app import db
-from app.models import (AgentTask, AgentTeam, AgentTeamMission, AuditLog, ClawMessage,
-                        MissionStage, OpenClawInstance, TestPlan, TestTask,
-                        WorkflowMission, WorkflowMissionDispatch, WorkflowRun,
-                        WorkflowRunStep, _now)
+from app.models import (AgentTask, AgentTeam, AgentTeamMemberStatus,
+                        AgentTeamMemberTask, AgentTeamMission,
+                        AnalysisRefreshBatch, AuditLog, CapabilityGap,
+                        ClawMessage, MissionStage, OpenClawInstance,
+                        RequirementItem, TestIteration, TestPlan, TestReport,
+                        TestTask, WorkflowMission, WorkflowMissionDispatch,
+                        WorkflowRun, WorkflowRunStep, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
 
 
@@ -18,6 +21,17 @@ class SupervisionError(Exception):
     def __init__(self, code, message, status=409):
         super().__init__(message)
         self.code, self.message, self.status = code, message, status
+
+
+RECOVERABLE_STATUSES = {'waiting', 'pending', 'leased', 'degraded', 'retryable'}
+OWNER_GATE_STATUSES = {'blocked_owner_gate'}
+RUN_ACTIVE_STATUSES = {'pending', 'running', 'retrying', 'waiting_approval'}
+DEFAULT_SCHEDULE = {
+    'timezone': 'Asia/Shanghai',
+    'morning_check': '09:30',
+    'progress_summaries': ['13:30'],
+    'day_close': '18:30',
+}
 
 
 def enabled():
@@ -42,12 +56,21 @@ def team_binding_valid(team_id, project_id, claw_id):
 
 
 def team_capability(team_id):
-    return {'enabled': team_enabled(team_id), 'contract': 'hub.plan_supervision.v1',
+    team = db.session.get(AgentTeam, team_id) if type(team_id) is int else None
+    schedule = ((team.policy_json or {}).get('supervision_schedule')
+                if team else None) or DEFAULT_SCHEDULE
+    return {'enabled': team_enabled(team_id), 'contract': 'hub.plan_supervision.v2',
             'start_requires': ['team_id', 'orchestrator_claw_id', 'command_key'],
             'supervisor_api': '/api/v1/test-plans/{plan_id}/supervision',
             'direct_task_dispatch_api': (
                 '/api/v1/test-plans/{plan_id}/supervision/agent-tasks'),
             'worker_lease_receipt_required': True, 'auto_start': bool(team_enabled(team_id)),
+            'persistent_schedule': schedule,
+            'decision_outcomes': [
+                'wait', 'degraded', 'retryable', 'blocked'],
+            'supervisor_states': [
+                'waiting', 'pending', 'leased', 'degraded', 'retryable',
+                'blocked_owner_gate', 'stopped', 'expired'],
             'blocking_policy': {
                 'default_scope': 'stage',
                 'plan_scope_requires': {'block_scope': 'plan'},
@@ -85,6 +108,154 @@ def parse_time(value):
         return parsed.astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
     except (ValueError, TypeError):
         fail('PLAN_TIME_INVALID', '时间必须为带时区的 ISO 8601', 400)
+
+
+def schedule_policy(sup):
+    """Return the persisted team schedule, with a safe legacy default."""
+    team = db.session.get(AgentTeam, sup.team_id) if sup and sup.team_id else None
+    configured = ((team.policy_json or {}).get('supervision_schedule')
+                  if team else None)
+    if not isinstance(configured, dict):
+        configured = {}
+    return {
+        'timezone': 'Asia/Shanghai',
+        'morning_check': str(configured.get('morning_check') or
+                             DEFAULT_SCHEDULE['morning_check']),
+        'progress_summaries': list(configured.get('progress_summaries') or
+                                   DEFAULT_SCHEDULE['progress_summaries']),
+        'day_close': str(configured.get('day_close') or
+                         DEFAULT_SCHEDULE['day_close']),
+    }
+
+
+def _clock_at(day, value):
+    hour, minute = (int(part) for part in str(value).split(':', 1))
+    return datetime.combine(day, time(hour=hour, minute=minute))
+
+
+def next_schedule_at(sup, now=None):
+    """Compute the next Hub-owned daily tick independent of a model turn."""
+    now = now or _now()
+    policy = schedule_policy(sup)
+    clocks = [policy['morning_check'], *policy['progress_summaries'],
+              policy['day_close']]
+    candidates = [_clock_at(now.date(), value) for value in clocks]
+    candidates += [_clock_at(now.date() + timedelta(days=1), value)
+                   for value in clocks]
+    return min(value for value in candidates if value > now)
+
+
+def enqueue_schedule_ticks(sup, now=None):
+    """Persist every due daily slot once; late watchdog runs still catch up."""
+    now = now or _now()
+    policy = schedule_policy(sup)
+    slots = [('morning_version_check', policy['morning_check'])]
+    slots += [('progress_summary_%s' % index, value)
+              for index, value in enumerate(policy['progress_summaries'], 1)]
+    slots.append(('day_close', policy['day_close']))
+    for kind, value in slots:
+        due_at = _clock_at(now.date(), value)
+        if due_at <= now:
+            add_event(sup.plan_id, 'schedule_tick', [
+                'schedule', sup.plan_id, now.date().isoformat(), kind,
+            ], {
+                'schedule_kind': kind,
+                'scheduled_at': due_at.isoformat() + '+08:00',
+                'timezone': 'Asia/Shanghai',
+            }, now)
+    scheduled = next_schedule_at(sup, now)
+    if not sup.next_check_at or sup.next_check_at > scheduled:
+        sup.next_check_at = scheduled
+    return scheduled
+
+
+def project_portfolio_snapshot(sup, now=None):
+    """Bounded authoritative facts for one manager turn, never full documents."""
+    now = now or _now()
+    plan = db.session.get(TestPlan, sup.plan_id)
+    if not plan:
+        return {}
+    active_iteration = (TestIteration.query.filter_by(
+        project_id=plan.project_id, status='active')
+        .order_by(TestIteration.updated_at.desc(), TestIteration.id.desc()).first())
+    iteration_id = getattr(plan, 'iteration_id', None) or (
+        active_iteration.id if active_iteration else None)
+    requirements = (RequirementItem.query.filter_by(iteration_id=iteration_id).count()
+                    if iteration_id else 0)
+    recent_reports = (TestReport.query.filter_by(
+        project_id=plan.project_id, is_deleted=False)
+        .order_by(TestReport.updated_at.desc(), TestReport.id.desc())
+        .limit(10).all())
+    gap_counts = dict(db.session.query(
+        CapabilityGap.status, db.func.count(CapabilityGap.id)).filter_by(
+            project_id=plan.project_id).group_by(CapabilityGap.status).all())
+    tasks = TestTask.query.filter_by(plan_id=plan.id).all()
+    task_counts = {}
+    for task in tasks:
+        task_counts[task.status] = task_counts.get(task.status, 0) + 1
+    runs = (WorkflowRun.query.join(
+        WorkflowMissionDispatch,
+        WorkflowMissionDispatch.workflow_run_id == WorkflowRun.id).filter(
+            WorkflowMissionDispatch.mission_id == sup.mission_id).all()
+            if sup.mission_id else [])
+    recent_code = (AnalysisRefreshBatch.query.filter_by(
+        project_id=plan.project_id)
+        .order_by(AnalysisRefreshBatch.updated_at.desc(),
+                  AnalysisRefreshBatch.id.desc()).first())
+    team = db.session.get(AgentTeam, sup.team_id) if sup.team_id else None
+    member_execution = []
+    if team:
+        from app.services import agent_team_activity as activity
+        people = activity.roster(team)
+        claws = {row.id: row for row in OpenClawInstance.query.filter(
+            OpenClawInstance.id.in_(list(people))).all()} if people else {}
+        statuses = {row.claw_id: row for row in
+                    AgentTeamMemberStatus.query.filter_by(team_id=team.id).all()}
+        for claw_id in sorted(people):
+            claw = claws.get(claw_id)
+            if not claw:
+                continue
+            status = statuses.get(claw_id)
+            task = (db.session.get(AgentTeamMemberTask, status.current_task_id)
+                    if status and status.current_task_id else None)
+            summary = activity.member_summary(
+                people[claw_id], claw, status, task, team=team, now=now)
+            member_execution.append({
+                'claw_id': claw_id, 'name': claw.name,
+                'effective_state': summary['effective_state'],
+                'authoritative_execution': summary['authoritative_execution'],
+                'self_report': summary['self_report'],
+            })
+    return {
+        'captured_at': now.isoformat() + '+08:00',
+        'project_id': plan.project_id,
+        'test_plan': {'id': plan.id, 'name': plan.name, 'status': plan.status},
+        'iteration': (active_iteration.to_dict() if active_iteration else None),
+        'requirement_count': requirements,
+        'code_change': ({
+            'batch_id': recent_code.id, 'from_commit': recent_code.from_commit,
+            'to_commit': recent_code.to_commit,
+            'commit_count': int(recent_code.commit_count or 0),
+            'changed_file_count': int(recent_code.changed_file_count or 0),
+            'risk_level': recent_code.risk_level,
+            'status': recent_code.status,
+            'updated_at': str(recent_code.updated_at),
+        } if recent_code else None),
+        'test_task_status_counts': task_counts,
+        'bug_count': sum(int(task.bug_count or 0) for task in tasks),
+        'workflow_runs': [{
+            'run_id': run.id, 'definition_id': run.definition_id,
+            'status': run.status, 'current_step_id': run.current_step_id,
+            'updated_at': str(run.updated_at) if run.updated_at else None,
+        } for run in sorted(runs, key=lambda row: row.id)[-50:]],
+        'recent_reports': [{
+            'id': row.id, 'title': row.title, 'status': row.status,
+            'risk_level': row.risk_level, 'updated_at': str(row.updated_at),
+        } for row in recent_reports],
+        'capability_gap_status_counts': gap_counts,
+        'team_member_execution': member_execution,
+        'schedule': schedule_policy(sup),
+    }
 
 
 def locked(plan_id):
@@ -412,8 +583,26 @@ def available(sup, now=None):
     return bool(plan and plan.status == 'active' and plan.project_id
                 and team_binding_valid(sup.team_id, plan.project_id, sup.orchestrator_claw_id)
                 and claw and claw.status != 'deleted' and claw.project_id == plan.project_id
-                and sup.status not in ('stopped', 'expired', 'blocked')
+                and sup.status not in ('stopped', 'expired', 'blocked_owner_gate')
                 and datetime.combine(plan.start_date, time.min) <= now < ends_at(plan))
+
+
+def repair_recoverable_state(sup, now=None):
+    """Repair legacy/transient blocked states without crossing an Owner gate."""
+    now = now or _now()
+    if sup.status == 'blocked':
+        decision = sup.last_decision_json or {}
+        if decision.get('block_scope') == 'plan' or sup.resume_condition == 'manual':
+            sup.status = 'blocked_owner_gate'
+            return False
+        sup.status = 'retryable'
+        sup.next_check_at = min(sup.next_check_at or now, now)
+        sup.resume_condition = 'timer_or_event'
+        add_event(sup.plan_id, 'supervisor_auto_repaired', [
+            'auto-repair', sup.plan_id, sup.fencing_token,
+        ], {'from_status': 'blocked', 'to_status': 'retryable'}, now)
+        return True
+    return False
 
 
 def add_event(plan_id, kind, key, payload=None, now=None):
@@ -474,28 +663,49 @@ def pump(sup, now=None):
         if sup.status not in ('stopped', 'expired'):
             stop(sup, 'stopped')
         return None
+    repair_recoverable_state(sup, now)
     if not available(sup, now):
         return None
+    ensure_manager_tenure(sup, now)
+    enqueue_schedule_ticks(sup, now)
     ingest(sup)
     if sup.status == 'leased':
         if sup.lease_expires_at and sup.lease_expires_at > now:
             return None
         sup.expired_turns += 1
         old_fence = sup.fencing_token
-        stop(sup, 'waiting' if sup.expired_turns < 3 else 'blocked')
+        cancel_wake(sup)
+        sup.status = 'retryable'
+        sup.fencing_token += 1
+        sup.lease_owner = None
+        sup.lease_expires_at = None
+        sup.turn_deadline_at = None
+        delay = min(900, 30 * (2 ** min(sup.expired_turns - 1, 5)))
+        sup.next_check_at = now + timedelta(seconds=delay)
+        sup.resume_condition = 'timer_or_event'
         add_event(sup.plan_id, 'supervisor_lease_expired', ['lease', old_fence],
-                  {'fencing_token': old_fence, 'attempts': sup.expired_turns}, now)
+                  {'fencing_token': old_fence, 'attempts': sup.expired_turns,
+                   'retryable': True, 'next_check_at':
+                       sup.next_check_at.isoformat() + '+08:00'}, now)
         ingest(sup)
-        if sup.status == 'blocked':
-            return None
+        return None
     if sup.wake_message_id:
         message = db.session.get(ClawMessage, sup.wake_message_id)
         if message and message.status not in ('failed', 'done') and sup.last_wake_at and now < sup.last_wake_at + timedelta(minutes=10):
             return None
         sup.expired_turns += 1
-        stop(sup, 'waiting' if sup.expired_turns < 3 else 'blocked')
-        if sup.status == 'blocked':
-            return None
+        cancel_wake(sup)
+        sup.status = 'degraded'
+        delay = min(900, 30 * (2 ** min(sup.expired_turns - 1, 5)))
+        sup.next_check_at = now + timedelta(seconds=delay)
+        sup.resume_condition = 'timer_or_event'
+        add_event(sup.plan_id, 'supervisor_delivery_degraded', [
+            'delivery-degraded', sup.plan_id, sup.expired_turns,
+            sup.next_check_at,
+        ], {'attempts': sup.expired_turns, 'next_check_at':
+            sup.next_check_at.isoformat() + '+08:00'}, now)
+        ingest(sup)
+        return None
     pending = sup.cursor > sup.acknowledged_cursor
     due = bool(sup.next_check_at and sup.next_check_at <= now)
     if not pending and not due:
@@ -513,10 +723,12 @@ def pump(sup, now=None):
     if due:
         add_event(sup.plan_id, 'timer_due', ['timer', sup.next_check_at], {}, now)
         ingest(sup)
-        sup.next_check_at = None
+        # Keep the next Hub-owned daily tick even if the model does not
+        # schedule another turn.
+        sup.next_check_at = next_schedule_at(sup, now)
     message = ClawMessage(claw_id=sup.orchestrator_claw_id, sender_name='Hub Plan Supervisor',
         msg_type='plan_supervision', direction='to_claw', status='pending',
-        content=json.dumps({'contract': 'hub.plan_supervision.v1', 'plan_id': sup.plan_id,
+        content=json.dumps({'contract': 'hub.plan_supervision.v2', 'plan_id': sup.plan_id,
             'team_id': sup.team_id,
             'supervisor_api': '/api/v1/test-plans/%s/supervision' % sup.plan_id,
             'cursor': sup.cursor,
@@ -941,8 +1153,9 @@ def decide(sup, claw_id, body, now=None):
         if type(body.get('cursor')) is not int or body['cursor'] != sup.lease_cursor:
             fail('PLAN_CURSOR_CONFLICT', '必须确认本 Turn 领取时的事件游标')
         outcome = body.get('outcome')
-        if outcome not in ('wait', 'blocked'):
-            fail('PLAN_DECISION_INVALID', 'outcome 仅支持 wait/blocked', 400)
+        if outcome not in ('wait', 'degraded', 'retryable', 'blocked'):
+            fail('PLAN_DECISION_INVALID',
+                 'outcome 仅支持 wait/degraded/retryable/blocked', 400)
         block_scope = body.get('block_scope')
         if block_scope is not None and (
                 outcome != 'blocked' or block_scope not in ('stage', 'plan')):
@@ -967,11 +1180,16 @@ def decide(sup, claw_id, body, now=None):
                 fail('PLAN_DECISION_INVALID',
                      '阶段级阻断由 Hub 立即续调度，不接受 next_check_at', 400)
             check = now
-        elif outcome == 'wait':
-            check = parse_time(body.get('next_check_at'))
+        elif outcome in ('wait', 'degraded', 'retryable'):
+            if body.get('next_check_at') is None and outcome in ('degraded', 'retryable'):
+                check = now + timedelta(seconds=60)
+            else:
+                check = parse_time(body.get('next_check_at'))
             if not now < check < ends_at(db.session.get(TestPlan, sup.plan_id)):
                 fail('PLAN_SCHEDULE_OUT_OF_RANGE', '下一次检查须在未来且不晚于计划结束')
-            if body.get('resume_condition') != 'timer_or_event':
+            if (body.get('resume_condition') not in (None, 'timer_or_event')
+                    or (outcome == 'wait'
+                        and body.get('resume_condition') != 'timer_or_event')):
                 fail('PLAN_RESUME_CONDITION_REQUIRED', '须声明 timer_or_event；重要事件可提前唤醒', 400)
         elif body.get('next_check_at') is not None:
             fail('PLAN_DECISION_INVALID', '人工阻断不能附带自动唤醒时间', 400)
@@ -998,7 +1216,12 @@ def decide(sup, claw_id, body, now=None):
         if msg:
             msg.status, msg.done_at = 'done', now
         sup.wake_message_id = None
-        sup.status = 'waiting' if effective_outcome == 'wait' else 'blocked'
+        if effective_outcome == 'blocked':
+            sup.status = 'blocked_owner_gate'
+        elif outcome in ('degraded', 'retryable'):
+            sup.status = outcome
+        else:
+            sup.status = 'waiting'
         sup.next_check_at = check
         sup.resume_condition = 'timer_or_event' if check else 'manual'
         sup.lease_owner = None
@@ -1017,6 +1240,7 @@ def decide(sup, claw_id, body, now=None):
             'scheduled': bool(check),
             'requested_outcome': outcome,
             'effective_outcome': effective_outcome,
+            'supervisor_status': sup.status,
             'block_scope': effective_scope,
             'continue_supervision': local_block,
             'undispatched_stages': remaining,
@@ -1134,6 +1358,10 @@ def record_workflow_claim(run_id, claw_id, worker_id, now=None):
     if task.status in ('assigned', 'pending'):
         task.status = 'in_progress'
         task.progress = max(1, int(task.progress or 0))
+    if stage.state in ('ready', 'dispatched'):
+        stage.state = 'running'
+        stage.last_reason_code = 'workflow_claimed'
+        stage.version = int(stage.version or 1) + 1
     add_event(sup.plan_id, 'task_claimed',
               ['task-claimed', task.id, run_id, claw_id, worker_id], {
                   'task_id': task.id,
@@ -1143,6 +1371,110 @@ def record_workflow_claim(run_id, claw_id, worker_id, now=None):
                   'worker_id': worker_id,
               }, now or _now())
     return task
+
+
+def record_workflow_terminal(run_id, now=None):
+    """Project one terminal Child Run into its Stage and TestTask exactly once."""
+    now = now or _now()
+    run = db.session.get(WorkflowRun, run_id)
+    if not run or run.status in RUN_ACTIVE_STATUSES:
+        return None
+    stage = MissionStage.query.filter_by(workflow_run_id=run_id).with_for_update().first()
+    if not stage:
+        return None
+    task_id = _stage_task_id(stage)
+    sup = PlanSupervisor.query.filter_by(
+        mission_id=stage.mission_id).with_for_update().first()
+    task = db.session.get(TestTask, task_id) if task_id else None
+    if not sup or not task or task.plan_id != sup.plan_id:
+        return None
+    mapping = {
+        'succeeded': ('completed', 'completed', 100),
+        'completed': ('completed', 'completed', 100),
+        'skipped': ('skipped', 'skipped', int(task.progress or 0)),
+        'cancelled': ('cancelled', 'blocked', int(task.progress or 0)),
+        'blocked': ('blocked', 'blocked', int(task.progress or 0)),
+        'failed': ('failed', 'blocked', int(task.progress or 0)),
+    }
+    stage_state, task_status, progress = mapping.get(
+        run.status, ('failed', 'blocked', int(task.progress or 0)))
+    changed = (stage.state != stage_state or task.status != task_status
+               or (progress == 100 and int(task.progress or 0) != 100))
+    stage.state = stage_state
+    stage.last_reason_code = ('workflow_run_%s' % run.status)[:80]
+    if changed:
+        stage.version = int(stage.version or 1) + 1
+    task.status = task_status
+    task.progress = progress
+    if run.summary:
+        task.result_summary = str(run.summary)[:8000]
+    refs = list(stage.evidence_refs_json or [])
+    marker = {'type': 'workflow_run_terminal', 'run_id': run.id,
+              'status': run.status}
+    if not any(row.get('type') == marker['type'] and
+               row.get('run_id') == run.id and row.get('status') == run.status
+               for row in refs if isinstance(row, dict)):
+        refs.append(marker)
+        stage.evidence_refs_json = refs[-100:]
+    add_event(sup.plan_id, 'workflow_terminal_projected', [
+        'workflow-terminal-projected', run.id, run.status,
+    ], {
+        'run_id': run.id, 'stage_key': stage.stage_key,
+        'stage_state': stage.state, 'task_id': task.id,
+        'test_task_status': task.status,
+    }, now)
+    return task
+
+
+def reconcile_plan_truth(sup, now=None):
+    """Repair Run/Stage/Task drift after missed callbacks or process restarts."""
+    if not sup or not sup.mission_id:
+        return 0
+    runs = (WorkflowRun.query.join(
+        WorkflowMissionDispatch,
+        WorkflowMissionDispatch.workflow_run_id == WorkflowRun.id).filter(
+            WorkflowMissionDispatch.mission_id == sup.mission_id).all())
+    count = 0
+    for run in runs:
+        if run.status not in RUN_ACTIVE_STATUSES:
+            before = digest(task_dispatch_receipts(sup))
+            record_workflow_terminal(run.id, now)
+            after = digest(task_dispatch_receipts(sup))
+            count += int(before != after)
+    return count
+
+
+def stage_truth_snapshot(sup):
+    if not sup or not sup.mission_id:
+        return {'independent_stage_status': [], 'actionable_gaps': [],
+                'allowed_actions': [], 'next_check_at': None}
+    stages = MissionStage.query.filter_by(mission_id=sup.mission_id).order_by(
+        MissionStage.id).all()
+    rows, gaps = [], []
+    for stage in stages:
+        task_id = _stage_task_id(stage)
+        task = db.session.get(TestTask, task_id) if task_id else None
+        item = {
+            'stage_key': stage.stage_key, 'state': stage.state,
+            'test_task_id': task_id,
+            'test_task_status': task.status if task else None,
+            'workflow_run_id': stage.workflow_run_id,
+            'executor_claw_id': stage.assigned_claw_id,
+            'reason_code': stage.last_reason_code or '',
+        }
+        rows.append(item)
+        if stage.state in ('blocked', 'failed', 'cancelled'):
+            gaps.append(item)
+    actions = ['wait', 'dispatch_ready_stage', 'recover_run']
+    if sup.status in OWNER_GATE_STATUSES:
+        actions = ['wait_for_owner_resume']
+    return {
+        'independent_stage_status': rows,
+        'actionable_gaps': gaps,
+        'allowed_actions': actions,
+        'next_check_at': (sup.next_check_at.isoformat() + '+08:00'
+                          if sup.next_check_at else None),
+    }
 
 
 def sweep(now=None):
@@ -1181,13 +1513,18 @@ def sweep(now=None):
             current_app.logger.exception(
                 'Plan supervisor bootstrap failed for plan_id=%s', plan.id)
     ids = [r.plan_id for r in PlanSupervisor.query.filter(
-        PlanSupervisor.status.notin_(['expired', 'stopped', 'blocked'])).order_by(
+        PlanSupervisor.status.notin_(['expired', 'stopped',
+                                      'blocked_owner_gate'])).order_by(
             PlanSupervisor.plan_id).all()]
     # One small transaction per Plan. The caller's scheduler already serializes scans.
     for plan_id in ids:
         sup = locked(plan_id)
         plan = db.session.get(TestPlan, plan_id)
+        repair_recoverable_state(sup, now)
         if available(sup, now):
+            ensure_manager_tenure(sup, now)
+            enqueue_schedule_ticks(sup, now)
+            reconcile_plan_truth(sup, now)
             observations = dict(sup.observations_json or {})
             for task in TestTask.query.filter_by(plan_id=plan_id).all():
                 payload = {'task_id': task.id, 'status': task.status}
@@ -1196,11 +1533,12 @@ def sweep(now=None):
                 WorkflowMissionDispatch.workflow_run_id == WorkflowRun.id).filter(
                     WorkflowMissionDispatch.mission_id == sup.mission_id).all()) if sup.mission_id else []
             for run in runs:
-                terminal = run.status not in ('pending', 'running', 'retrying', 'waiting_approval')
+                terminal = run.status not in RUN_ACTIVE_STATUSES
                 kind = 'run_terminal' if terminal else 'run_changed'
                 add_event(plan_id, kind, ['run', run.id, run.status, run.current_step_id, run.updated_at],
                           {'run_id': run.id, 'status': run.status}, now)
                 if terminal:
+                    record_workflow_terminal(run.id, now)
                     continue
                 for step in WorkflowRunStep.query.filter_by(run_id=run.id).all():
                     if step.status not in ('running', 'retrying'):

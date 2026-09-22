@@ -381,7 +381,7 @@ def list_team_member_activity(team_id):
     for claw in claws:
         status = statuses.get(claw.id)
         items.append(activity.member_summary(people[claw.id], claw, status,
-            tasks.get(status.current_task_id) if status else None))
+            tasks.get(status.current_task_id) if status else None, team=team))
     return jsonify({'team_id':team.id, 'items':items, 'stale_after_seconds':activity.STALE_SECONDS,
         'report_contract': {'method':'POST', 'path':'/api/v1/agent-teams/%d/members/{claw_id}/activity' % team.id,
                             'self_only':True, 'recommended_interval_seconds':60, 'requires_expected_version':True}})
@@ -406,7 +406,8 @@ def team_member_activity(team_id, claw_id):
     if current:
         reports = reports.filter_by(task_id=current.id)
     recent = reports.order_by(AgentTeamMemberReport.id.desc()).limit(20).all()
-    return jsonify({'member':activity.member_summary(person, claw, status, current),
+    return jsonify({'member':activity.member_summary(
+                        person, claw, status, current, team=team),
                     'history':{'items':[row.to_dict() for row in rows], 'total':total, 'limit':limit, 'offset':offset},
                     'recent_reports':[row.response_json for row in recent]})
 
