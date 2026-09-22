@@ -503,7 +503,9 @@ def pump(sup, now=None):
         PlanSupervisorEvent.plan_id == sup.plan_id,
         PlanSupervisorEvent.sequence > sup.acknowledged_cursor,
         PlanSupervisorEvent.kind.in_(['run_terminal', 'heartbeat_anomaly', 'stale',
-                                      'supervisor_lease_expired', 'plan_started'])).first()
+                                      'supervisor_lease_expired', 'plan_started',
+                                      'run_recovery_required',
+                                      'run_reconciliation_resolved'])).first()
     if not due and not urgent and sup.last_wake_at and now < sup.last_wake_at + timedelta(seconds=60):
         return None
     if due:
@@ -517,6 +519,8 @@ def pump(sup, now=None):
             'supervisor_api': '/api/v1/test-plans/%s/supervision' % sup.plan_id,
             'cursor': sup.cursor,
             'instruction': '先回读并 claim 唯一监督租约。恢复关联 Mission/Run，勿重复创建。'
+                           '已有 Run 的恢复统一调用 /workflow-runs/{run_id}/recover，'
+                           '由 Hub 判定等待、对账、原地重启或替代；不要自行串联低层接口。'
                            '稍后继续须提交 decision 并拿到调度回执；无有效租约不得派工。'
                            '单个 Child Run 或 Stage 阻断时，继续判断未派发 Stage 的依赖与资源冲突；'
                            '默认 blocked 仅按阶段级处理，不暂停全队。只有团队级问题才提交 '
@@ -649,6 +653,44 @@ def undispatched_stages(sup):
             'role_key': stage.role_key,
         })
     return items
+
+
+def recovery_snapshot(sup):
+    """Expose stable Run recovery facts without asking the manager to infer."""
+    empty = {
+        'recovery_state': 'none',
+        'reconciliation_owner': None,
+        'conflicting_run_id': None,
+        'allowed_actions': [],
+        'next_check_at': (
+            sup.next_check_at.isoformat() + '+08:00'
+            if sup and sup.next_check_at else None),
+    }
+    if not sup or not sup.mission_id:
+        return empty
+    stages = MissionStage.query.filter_by(
+        mission_id=sup.mission_id, state='ready').order_by(
+            MissionStage.id.desc()).all()
+    recovery_stage = next((stage for stage in stages
+        if (stage.input_snapshot_json or {}).get('kind') ==
+           'workflow_execution_reconciliation'), None)
+    if recovery_stage:
+        snapshot = recovery_stage.input_snapshot_json or {}
+        owner = db.session.get(
+            OpenClawInstance, recovery_stage.assigned_claw_id)
+        return {
+            'recovery_state': 'reconciliation_required',
+            'reconciliation_owner': {
+                'claw_id': recovery_stage.assigned_claw_id,
+                'name': owner.name if owner else '',
+            },
+            'conflicting_run_id': snapshot.get('workflow_run_id'),
+            'allowed_actions': ['wait', 'submit_reconciliation_receipt'],
+            'next_check_at': empty['next_check_at'],
+            'reconciliation_stage': recovery_stage.to_dict(
+                include_input=True),
+        }
+    return empty
 
 
 def decide(sup, claw_id, body, now=None):

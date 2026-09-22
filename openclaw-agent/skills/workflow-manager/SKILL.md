@@ -529,9 +529,32 @@ POST /api/v1/workflow-runs/{RUN_ID}/steps/{STEP_ID}/retry
 - 截图/报告已人工修复。
 - Unity/ADB 卡住后已恢复环境。
 
-### 6.5 失败修复后完整重启同一个 Run
+### 6.5 统一恢复 Run（主 Agent 默认入口）
 
-当 Run 已是 `blocked/failed`，修复完成后仍要执行**同一个 Flow**，优先原地完整重启，不要创建新的 Run：
+主 Agent 只表达“恢复这个 Run”，不要自行串联 retry、对账、restart 或新建替代 Run：
+
+```http
+POST /api/v1/workflow-runs/{RUN_ID}/recover
+Idempotency-Key: workflow-run-{RUN_ID}-recover-{稳定业务序号}
+
+{
+  "reason": "执行环境已修复，请 Hub 判断安全恢复方式"
+}
+```
+
+Hub 会根据权威状态确定一个动作：
+
+- `wait`：Run 仍在执行或等待审批，不重复派工；
+- `reconcile`：旧执行是否停止或副作用状态未知，创建唯一的持久化 Reconciliation Stage，并返回负责人、原 Run/Step/attempt 和收据入口；
+- `restart`：无对账门禁且 Definition 快照未漂移，原 Run ID 原地完整重启；
+- `supersede`：快照已落后，禁止原地套用新 Definition，进入替代 Run 路径；
+- `reject`：终态或权限不允许恢复。
+
+`reconcile` 时不要反复调用恢复或新建 Run。对账负责人只需提交执行停止及副作用收据；Hub 验证通过后自动原地重启同一 Run，并用事件唤醒原 Plan Supervisor。监督快照会返回 `recovery_state`、`reconciliation_owner`、`conflicting_run_id`、`allowed_actions` 和 `next_check_at`。
+
+### 6.6 兼容入口：明确要求完整重启同一个 Run
+
+`/restart` 为旧 Worker/人工运维保留。新的主 Agent 调度一律优先使用 `/recover`。当 Run 已是 `blocked/failed` 且调用方已经确定不存在未对账执行时，可以明确请求原地完整重启：
 
 ```http
 POST /api/v1/workflow-runs/{RUN_ID}/restart
@@ -558,7 +581,8 @@ Idempotency-Key: workflow-run-{RUN_ID}-restart-{稳定业务序号}
 |---|---|
 | 仅当前节点临时失败 | `/steps/{STEP_ID}/retry` |
 | 要从某个中间节点重新执行 | `/resume` + `from_step_id` |
-| 修复后要把同一 Flow 从头再跑 | `/restart`，复用原 Run ID |
+| 主 Agent 只知道“恢复这个 Run” | `/recover`，由 Hub 判定动作 |
+| 运维已确认无对账门禁并要求从头再跑 | `/restart`，复用原 Run ID |
 | 目标变化，需要不同 Workflow Definition | Mission `/dispatch` 新 Child Run |
 
 `cancelled` Run 不允许重启；确实取消后重新开展，才创建新 Run。

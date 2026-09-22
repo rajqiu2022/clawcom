@@ -31,6 +31,7 @@ from app.models import (
     RequirementItem,
     RequirementReviewVerdict,
     RequirementTestcaseLink,
+    MissionStage,
     TestCaseLibrary,
     TestReport,
     TEST_REPORT_RISK_LEVELS,
@@ -42,6 +43,7 @@ from app.models import (
     WorkflowDefinition,
     WorkflowDefinitionFavorite,
     WorkflowEvidenceManifest,
+    WorkflowMissionDispatch,
     WorkflowOperationIdempotency,
     WorkflowRun,
     WorkflowRunLibrarySnapshot,
@@ -5287,14 +5289,171 @@ def _unresolved_execution(run_id):
                  if (row.blocker_json or {}).get('requires_reconciliation')), None)
 
 
+def _workflow_run_mission_dispatch(run_id):
+    return WorkflowMissionDispatch.query.filter_by(
+        workflow_run_id=run_id).first()
+
+
+def _reconciliation_stage_key(run, step):
+    digest = hashlib.sha256(str(step.step_id).encode('utf-8')).hexdigest()[:10]
+    return 'recover_run_%s_%s_a%s' % (
+        run.id, digest, int(step.attempt_no or 1))
+
+
+def _reconciliation_owner(run, step, dispatch=None):
+    owner_id = (
+        step.target_claw_id
+        or (dispatch.worker_claw_id if dispatch else None)
+        or _run_worker_claw_id(run))
+    claw = db.session.get(OpenClawInstance, owner_id) if owner_id else None
+    return {
+        'claw_id': int(owner_id) if owner_id else None,
+        'name': claw.name if claw else '',
+        'source': (
+            'step_target' if step.target_claw_id else
+            'mission_dispatch' if dispatch and dispatch.worker_claw_id else
+            'run_worker_binding' if owner_id else 'unassigned'),
+    }
+
+
+def _ensure_execution_reconciliation_stage(run, step):
+    """Create the one durable recovery stage for a timed-out execution.
+
+    The stage is deliberately data-only.  It records who must produce the
+    execution journal/receipt while the existing Worker contract remains
+    unchanged; Plan supervision owns the wake and dispatch decision.
+    """
+    dispatch = _workflow_run_mission_dispatch(run.id)
+    owner = _reconciliation_owner(run, step, dispatch)
+    if not dispatch:
+        return None, owner
+    key = _reconciliation_stage_key(run, step)
+    stage = MissionStage.query.filter_by(
+        mission_id=dispatch.mission_id,
+        stage_key=key,
+        stage_version=1,
+    ).first()
+    if stage:
+        return stage, owner
+    source_stage = MissionStage.query.filter_by(
+        mission_id=dispatch.mission_id,
+        workflow_run_id=run.id,
+    ).filter(MissionStage.stage_key != key).order_by(
+        MissionStage.id.desc()).first()
+    snapshot = {
+        'kind': 'workflow_execution_reconciliation',
+        'workflow_run_id': run.id,
+        'workflow_step_id': step.step_id,
+        'attempt_no': int(step.attempt_no or 1),
+        'source_stage_id': source_stage.id if source_stage else None,
+        'source_stage_key': source_stage.stage_key if source_stage else '',
+        'test_task_id': (
+            (source_stage.input_snapshot_json or {}).get('test_task_id')
+            if source_stage else None),
+        'reconciliation_owner_claw_id': owner['claw_id'],
+        'required_assertions': {
+            'execution_stopped': True,
+            'side_effects_reconciled': True,
+            'receipt_ref': 'required',
+        },
+        'resolve_api': (
+            '/api/v1/workflow-runs/%s/steps/%s/execution-reconciliation'
+            % (run.id, step.step_id)),
+        'recover_api': '/api/v1/workflow-runs/%s/recover' % run.id,
+        'auto_restart_same_run': True,
+    }
+    stage = MissionStage(
+        mission_id=dispatch.mission_id,
+        stage_key=key,
+        stage_version=1,
+        role_key=(source_stage.role_key if source_stage
+                  else 'execution_reconciler'),
+        assigned_claw_id=owner['claw_id'],
+        workflow_run_id=run.id,
+        state='ready',
+        input_snapshot_json=snapshot,
+        evidence_refs_json=[],
+        last_reason_code='EXECUTION_RECONCILIATION_REQUIRED',
+    )
+    db.session.add(stage)
+    db.session.flush()
+    return stage, owner
+
+
+def _workflow_recovery_payload(run, action, state, step=None, stage=None,
+                               owner=None, code=None, allowed_actions=None,
+                               conflict=None):
+    dispatch = _workflow_run_mission_dispatch(run.id)
+    source_stage = None
+    if dispatch:
+        source_stage = MissionStage.query.filter_by(
+            mission_id=dispatch.mission_id,
+            workflow_run_id=run.id,
+        ).filter(MissionStage.stage_key.notlike('recover_run_%')).order_by(
+            MissionStage.id.desc()).first()
+    payload = {
+        'code': code or 'WORKFLOW_RECOVERY_DECIDED',
+        'run_id': run.id,
+        'status': run.status,
+        'recovery': {
+            'state': state,
+            'selected_action': action,
+            'same_run_id': action != 'supersede',
+            'mission_id': dispatch.mission_id if dispatch else None,
+            'task_id': (
+                (source_stage.input_snapshot_json or {}).get('test_task_id')
+                if source_stage else None),
+            'conflicting_run_id': run.id if conflict else None,
+            'reconciliation_owner': owner,
+            'reconciliation_stage': (
+                stage.to_dict(include_input=True) if stage else None),
+            'allowed_actions': allowed_actions or [],
+            'next_check_at': None,
+        },
+    }
+    if step:
+        payload['recovery']['step_id'] = step.step_id
+        payload['recovery']['attempt_no'] = int(step.attempt_no or 1)
+    if conflict:
+        payload['conflict'] = conflict
+    return payload
+
+
+def _queue_plan_recovery_event(run, kind, payload):
+    dispatch = _workflow_run_mission_dispatch(run.id)
+    if not dispatch:
+        return None
+    from app.models_plan_supervision import PlanSupervisor
+    from app.services import plan_supervision as supervision_service
+    supervisor = PlanSupervisor.query.filter_by(
+        mission_id=dispatch.mission_id).with_for_update().first()
+    if not supervisor:
+        return None
+    supervision_service.add_event(
+        supervisor.plan_id,
+        kind,
+        [kind, run.id, payload.get('step_id'), payload.get('attempt_no')],
+        payload,
+    )
+    return supervision_service.pump(supervisor)
+
+
+def _wake_plan_supervisor(claw_id):
+    if not claw_id:
+        return
+    from app.services import plan_supervision as supervision_service
+    supervision_service.wake(claw_id)
+
+
 @api_bp.route('/workflow-runs/<int:run_id>/steps/<step_id>/execution-reconciliation', methods=['POST'])
 def resolve_workflow_execution_reconciliation(run_id, step_id):
     err = _require_actor()
     if err:
         return err
-    run = WorkflowRun.query.get_or_404(run_id)
-    if not _can_manage_definition(run.definition):
-        return jsonify({'error': '只有 Workflow 管理员可以确认副作用已对账'}), 403
+    run = (WorkflowRun.query.filter_by(id=run_id)
+           .with_for_update().first_or_404())
+    if not _can_reconcile_workflow_run(run):
+        return jsonify({'error': '只有 Workflow 管理员或 Mission 主 Agent 可以确认副作用已对账'}), 403
     step = _locked_workflow_step(run_id, step_id)
     data = request.get_json() or {}
     if not (step.blocker_json or {}).get('requires_reconciliation'):
@@ -5311,12 +5470,77 @@ def resolve_workflow_execution_reconciliation(run_id, step_id):
         'attempt_no', 'execution_stopped', 'side_effects_reconciled', 'receipt_ref')}
     step.blocker_json = dict(step.blocker_json, requires_reconciliation=False,
                             resolution=dict(resolution, resolved_by=_actor_name()))
+    dispatch = _workflow_run_mission_dispatch(run.id)
+    recovery_stage = None
+    if dispatch:
+        recovery_stage = MissionStage.query.filter_by(
+            mission_id=dispatch.mission_id,
+            stage_key=_reconciliation_stage_key(run, step),
+            stage_version=1,
+        ).with_for_update().first()
+    if recovery_stage:
+        recovery_stage.state = 'completed'
+        recovery_stage.last_reason_code = 'EXECUTION_RECONCILED'
+        recovery_stage.evidence_refs_json = [{
+            'type': 'execution_reconciliation_receipt',
+            'ref': data['receipt_ref'].strip(),
+            'workflow_run_id': run.id,
+            'step_id': step.step_id,
+            'attempt_no': int(step.attempt_no or 1),
+        }]
     db.session.add(AuditLog(action='execution_reconciled', resource_type='workflow_run',
         resource_id=run.id, resource_name=run.run_name, operator=_actor_name(),
         detail=json.dumps({'step_id': step_id, 'attempt_no': step.attempt_no,
                            'receipt_ref': data['receipt_ref']}, ensure_ascii=False)))
+    restart_payload = None
+    conflict = None
+    should_auto_restart = bool(
+        recovery_stage
+        and (recovery_stage.input_snapshot_json or {}).get(
+            'auto_restart_same_run') is True)
+    if should_auto_restart and run.status in ('blocked', 'failed'):
+        conflict = _workflow_restart_snapshot_conflict(run)
+        if conflict is None:
+            restart_payload = _restart_workflow_run_in_place(
+                run, '执行副作用已完成对账，Hub 自动恢复原 Run',
+                _actor_name())
+    event_payload = {
+        'run_id': run.id,
+        'step_id': step.step_id,
+        'attempt_no': int(step.attempt_no or 1),
+        'reconciliation_stage_id': recovery_stage.id if recovery_stage else None,
+        'receipt_ref': data['receipt_ref'].strip(),
+        'selected_action': (
+            'restart' if restart_payload else
+            'supersede' if conflict else 'wait'),
+    }
+    wake_target = _queue_plan_recovery_event(
+        run, 'run_reconciliation_resolved', event_payload)
     db.session.commit()
-    return jsonify({'resolved': True, 'step_id': step_id, 'status': step.status})
+    _wake_plan_supervisor(wake_target)
+    body = {
+        'resolved': True,
+        'step_id': step_id,
+        'status': step.status,
+        'reconciliation_stage_id': recovery_stage.id if recovery_stage else None,
+    }
+    if restart_payload:
+        body.update({
+            'code': 'WORKFLOW_RUN_RESTARTED',
+            'recovery': {'state': 'restarted', 'selected_action': 'restart',
+                         'same_run_id': True, 'run_id': run.id},
+            'run': restart_payload,
+            'restart': restart_payload['restart'],
+        })
+    elif conflict:
+        body.update({
+            'code': 'STALE_DEFINITION_SNAPSHOT',
+            'recovery': {'state': 'supersede_required',
+                         'selected_action': 'supersede',
+                         'same_run_id': False, 'run_id': run.id},
+            'conflict': conflict,
+        })
+    return jsonify(body)
 
 
 @api_bp.route('/workflow-runs/<int:run_id>/steps/<step_id>/retry', methods=['POST'])
@@ -5549,63 +5773,9 @@ def _reset_workflow_step_for_full_restart(step, definition_step, actor):
     _clear_step_claim(step)
 
 
-def _can_restart_workflow_run(run):
-    if run.definition and _can_execute_definition(run.definition):
-        return True
-    claw = get_current_claw()
-    mission = (
-        (run.context_json or {}).get('mission')
-        if isinstance(run.context_json, dict) else None)
-    return bool(
-        claw and run.trigger_source == 'mission_dispatch'
-        and isinstance(mission, dict)
-        and int(mission.get('main_claw_id') or 0) == int(claw.id))
-
-
-@api_bp.route('/workflow-runs/<int:run_id>/restart', methods=['POST'])
-def restart_workflow_run(run_id):
-    """Restart one blocked/failed Run in place instead of creating a new Run."""
-    err = _require_actor()
-    if err:
-        return err
-    key = str(request.headers.get('Idempotency-Key') or '').strip()
-    if not key:
-        return jsonify({
-            'error': '完整重启必须携带 Idempotency-Key',
-            'code': 'IDEMPOTENCY_KEY_REQUIRED',
-        }), 400
-    idem_record, idem_response = _workflow_idempotency_begin()
-    if idem_response:
-        return idem_response
-    run = (WorkflowRun.query.filter_by(id=run_id)
-           .with_for_update().first_or_404())
-    if not _can_restart_workflow_run(run):
-        return jsonify({'error': '无权重启该 Workflow Run'}), 403
-    if _unresolved_execution(run_id):
-        return jsonify({'error': '必须先确认旧执行已停止且副作用已对账',
-                        'code': 'EXECUTION_RECONCILIATION_REQUIRED'}), 409
-    if run.status not in ('blocked', 'failed'):
-        return jsonify({
-            'error': '只有 blocked/failed Run 可以完整重启',
-            'code': 'WORKFLOW_RUN_NOT_RESTARTABLE',
-            'status': run.status,
-        }), 409
-    snapshot_conflict = _workflow_restart_snapshot_conflict(run)
-    if snapshot_conflict is not None:
-        _workflow_idempotency_store(idem_record, 409, snapshot_conflict)
-        db.session.add(AuditLog(
-            action='restart_rejected', resource_type='workflow_run',
-            resource_id=run.id, resource_name=run.run_name,
-            operator=_actor_name(), ip_address=request.remote_addr,
-            detail=json.dumps(snapshot_conflict, ensure_ascii=False,
-                              sort_keys=True),
-        ))
-        db.session.commit()
-        return jsonify(snapshot_conflict), 409
-    data = request.get_json(silent=True) or {}
-    actor = _actor_name()
+def _restart_workflow_run_in_place(run, reason, actor):
+    """Reset a locked blocked/failed Run and return its stable response body."""
     now = datetime.now()
-    reason = str(data.get('reason') or '失败修复完成，原 Run 从头重启').strip()[:1000]
     steps = sorted(
         WorkflowRunStep.query.filter_by(run_id=run.id).all(),
         key=lambda row: row.position or 0)
@@ -5711,6 +5881,209 @@ def restart_workflow_run(run_id):
         'same_run_id': True,
         'reason': reason,
     }
+    return payload
+
+
+def _can_restart_workflow_run(run):
+    if run.definition and _can_execute_definition(run.definition):
+        return True
+    claw = get_current_claw()
+    mission = (
+        (run.context_json or {}).get('mission')
+        if isinstance(run.context_json, dict) else None)
+    return bool(
+        claw and run.trigger_source == 'mission_dispatch'
+        and isinstance(mission, dict)
+        and int(mission.get('main_claw_id') or 0) == int(claw.id))
+
+
+def _can_reconcile_workflow_run(run):
+    if run.definition and _can_manage_definition(run.definition):
+        return True
+    claw = get_current_claw()
+    mission = (
+        (run.context_json or {}).get('mission')
+        if isinstance(run.context_json, dict) else None)
+    return bool(
+        claw and run.trigger_source == 'mission_dispatch'
+        and isinstance(mission, dict)
+        and int(mission.get('main_claw_id') or 0) == int(claw.id))
+
+
+@api_bp.route('/workflow-runs/<int:run_id>/recover', methods=['POST'])
+def recover_workflow_run(run_id):
+    """Choose and execute the safe recovery action for one Run.
+
+    Callers express intent only.  Hub owns the decision between wait,
+    reconciliation, in-place restart, supersede, and rejection.
+    """
+    err = _require_actor()
+    if err:
+        return err
+    if not str(request.headers.get('Idempotency-Key') or '').strip():
+        return jsonify({
+            'error': '恢复 Run 必须携带 Idempotency-Key',
+            'code': 'IDEMPOTENCY_KEY_REQUIRED',
+        }), 400
+    idem_record, idem_response = _workflow_idempotency_begin()
+    if idem_response:
+        return idem_response
+    run = (WorkflowRun.query.filter_by(id=run_id)
+           .with_for_update().first_or_404())
+    if not _can_restart_workflow_run(run):
+        return jsonify({
+            'error': '无权恢复该 Workflow Run',
+            'code': 'WORKFLOW_RUN_RECOVERY_FORBIDDEN',
+        }), 403
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get('reason') or '请求 Hub 恢复 Run').strip()[:1000]
+
+    if run.status in ('pending', 'running', 'retrying', 'waiting_approval'):
+        body = _workflow_recovery_payload(
+            run, 'wait', 'waiting',
+            code='WORKFLOW_RUN_STILL_ACTIVE',
+            allowed_actions=['wait', 'cancel'])
+        body['recovery']['next_check_at'] = (
+            datetime.now() + timedelta(minutes=1)).isoformat()
+        _workflow_idempotency_store(idem_record, 200, body)
+        db.session.commit()
+        return jsonify(body)
+
+    unresolved = _unresolved_execution(run.id)
+    if unresolved:
+        stage, owner = _ensure_execution_reconciliation_stage(run, unresolved)
+        body = _workflow_recovery_payload(
+            run, 'reconcile', 'reconciliation_required',
+            step=unresolved, stage=stage, owner=owner,
+            code='EXECUTION_RECONCILIATION_REQUIRED',
+            allowed_actions=['wait', 'submit_reconciliation_receipt'],
+            conflict={'type': 'unreconciled_execution', 'run_id': run.id,
+                      'step_id': unresolved.step_id})
+        wake_target = _queue_plan_recovery_event(run, 'run_recovery_required', {
+            'run_id': run.id,
+            'step_id': unresolved.step_id,
+            'attempt_no': int(unresolved.attempt_no or 1),
+            'reconciliation_stage_id': stage.id if stage else None,
+            'reconciliation_owner_claw_id': owner['claw_id'],
+            'selected_action': 'reconcile',
+        })
+        _workflow_idempotency_store(idem_record, 202, body)
+        db.session.add(AuditLog(
+            action='recover_reconciliation_required',
+            resource_type='workflow_run', resource_id=run.id,
+            resource_name=run.run_name, operator=_actor_name(),
+            ip_address=request.remote_addr,
+            detail=json.dumps(body['recovery'], ensure_ascii=False,
+                              sort_keys=True),
+        ))
+        db.session.commit()
+        _wake_plan_supervisor(wake_target)
+        return jsonify(body), 202
+
+    if run.status not in ('blocked', 'failed'):
+        body = _workflow_recovery_payload(
+            run, 'reject', 'not_recoverable',
+            code='WORKFLOW_RUN_NOT_RECOVERABLE', allowed_actions=[])
+        body['error'] = '当前 Run 状态不允许恢复'
+        _workflow_idempotency_store(idem_record, 409, body)
+        db.session.commit()
+        return jsonify(body), 409
+
+    snapshot_conflict = _workflow_restart_snapshot_conflict(run)
+    if snapshot_conflict is not None:
+        body = _workflow_recovery_payload(
+            run, 'supersede', 'supersede_required',
+            code='STALE_DEFINITION_SNAPSHOT',
+            allowed_actions=['create_replacement_run'],
+            conflict=snapshot_conflict)
+        body['error'] = snapshot_conflict['error']
+        body['replacement_required'] = True
+        body['create_run_api'] = snapshot_conflict['create_run_api']
+        _workflow_idempotency_store(idem_record, 409, body)
+        db.session.add(AuditLog(
+            action='recover_supersede_required',
+            resource_type='workflow_run', resource_id=run.id,
+            resource_name=run.run_name, operator=_actor_name(),
+            ip_address=request.remote_addr,
+            detail=json.dumps(body, ensure_ascii=False, sort_keys=True),
+        ))
+        db.session.commit()
+        return jsonify(body), 409
+
+    payload = _restart_workflow_run_in_place(run, reason, _actor_name())
+    body = _workflow_recovery_payload(
+        run, 'restart', 'restarted',
+        code='WORKFLOW_RUN_RESTARTED', allowed_actions=['wait'])
+    body['run'] = payload
+    body['restart'] = payload['restart']
+    _workflow_idempotency_store(idem_record, 200, body)
+    db.session.commit()
+    return jsonify(body)
+
+
+@api_bp.route('/workflow-runs/<int:run_id>/restart', methods=['POST'])
+def restart_workflow_run(run_id):
+    """Restart one blocked/failed Run in place instead of creating a new Run."""
+    err = _require_actor()
+    if err:
+        return err
+    key = str(request.headers.get('Idempotency-Key') or '').strip()
+    if not key:
+        return jsonify({
+            'error': '完整重启必须携带 Idempotency-Key',
+            'code': 'IDEMPOTENCY_KEY_REQUIRED',
+        }), 400
+    idem_record, idem_response = _workflow_idempotency_begin()
+    if idem_response:
+        return idem_response
+    run = (WorkflowRun.query.filter_by(id=run_id)
+           .with_for_update().first_or_404())
+    if not _can_restart_workflow_run(run):
+        return jsonify({'error': '无权重启该 Workflow Run'}), 403
+    unresolved = _unresolved_execution(run_id)
+    if unresolved:
+        stage, owner = _ensure_execution_reconciliation_stage(run, unresolved)
+        body = _workflow_recovery_payload(
+            run, 'reconcile', 'reconciliation_required',
+            step=unresolved, stage=stage, owner=owner,
+            code='EXECUTION_RECONCILIATION_REQUIRED',
+            allowed_actions=['wait', 'submit_reconciliation_receipt'],
+            conflict={'type': 'unreconciled_execution', 'run_id': run.id,
+                      'step_id': unresolved.step_id})
+        body['error'] = '必须先确认旧执行已停止且副作用已对账'
+        wake_target = _queue_plan_recovery_event(run, 'run_recovery_required', {
+            'run_id': run.id,
+            'step_id': unresolved.step_id,
+            'attempt_no': int(unresolved.attempt_no or 1),
+            'reconciliation_stage_id': stage.id if stage else None,
+            'reconciliation_owner_claw_id': owner['claw_id'],
+            'selected_action': 'reconcile',
+        })
+        _workflow_idempotency_store(idem_record, 409, body)
+        db.session.commit()
+        _wake_plan_supervisor(wake_target)
+        return jsonify(body), 409
+    if run.status not in ('blocked', 'failed'):
+        return jsonify({
+            'error': '只有 blocked/failed Run 可以完整重启',
+            'code': 'WORKFLOW_RUN_NOT_RESTARTABLE',
+            'status': run.status,
+        }), 409
+    snapshot_conflict = _workflow_restart_snapshot_conflict(run)
+    if snapshot_conflict is not None:
+        _workflow_idempotency_store(idem_record, 409, snapshot_conflict)
+        db.session.add(AuditLog(
+            action='restart_rejected', resource_type='workflow_run',
+            resource_id=run.id, resource_name=run.run_name,
+            operator=_actor_name(), ip_address=request.remote_addr,
+            detail=json.dumps(snapshot_conflict, ensure_ascii=False,
+                              sort_keys=True),
+        ))
+        db.session.commit()
+        return jsonify(snapshot_conflict), 409
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get('reason') or '失败修复完成，原 Run 从头重启').strip()[:1000]
+    payload = _restart_workflow_run_in_place(run, reason, _actor_name())
     _workflow_idempotency_store(idem_record, 200, payload)
     db.session.commit()
     return jsonify(payload)

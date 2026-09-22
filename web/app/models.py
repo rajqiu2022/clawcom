@@ -1307,6 +1307,7 @@ class WorkflowRun(db.Model):
             'automation_conclusion': self.automation_conclusion or '',
             'evidence_ingest_status': self.evidence_ingest_status or '',
             'outcomes': self.outcomes_json or {},
+            'recover_api': f'/api/v1/workflow-runs/{self.id}/recover',
             'restart_api': f'/api/v1/workflow-runs/{self.id}/restart',
             'restart_count': int(
                 (self.context_json or {}).get('restart_count') or 0)

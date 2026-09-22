@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -43,6 +44,7 @@ from app.models import (  # noqa: E402
     AuditLog,
     ClawTodo,
     EntityRelation,
+    MissionStage,
     Project,
     ShiftLeftAnalysisFinding,
     ShiftLeftAnalysisRun,
@@ -52,6 +54,8 @@ from app.models import (  # noqa: E402
     WorkflowApproval,
     WorkflowDefinition,
     WorkflowEvidenceManifest,
+    WorkflowMission,
+    WorkflowMissionDispatch,
     WorkflowRun,
     WorkflowRunStep,
 )
@@ -368,6 +372,103 @@ class WorkflowRunControlPlaneApiTest(unittest.TestCase):
         self.assertEqual(1, AuditLog.query.filter_by(
             resource_type='workflow_run', resource_id=run_id,
             action='restart_rejected').count())
+
+    def test_recover_creates_one_reconciliation_stage_then_restarts_same_run(self):
+        created = self.client.post(
+            '/api/v1/workflow-runs', json=self._run_body('recover-run'))
+        self.assertEqual(201, created.status_code, created.get_data(as_text=True))
+        run_id = created.get_json()['id']
+        run = db.session.get(WorkflowRun, run_id)
+        step = WorkflowRunStep.query.filter_by(run_id=run_id).first()
+        step.status = 'blocked'
+        step.attempt_no = 2
+        step.blocker_json = {
+            'requires_reconciliation': True,
+            'code': 'HUMAN_GATE',
+            'side_effects': 'unknown',
+        }
+        run.status = 'blocked'
+        run.current_step_id = step.step_id
+        mission = WorkflowMission(
+            mission_key='recover-mission', project_id=self.project.id,
+            main_claw_id=99, objective='recover test', status='active',
+            allowed_definition_ids_json=[self.definition.id],
+            allowed_worker_claw_ids_json=[60],
+            created_by_type='user', created_by_id=self.admin.id,
+            created_by_name=self.admin.username,
+            expires_at=datetime.now() + timedelta(days=1),
+        )
+        db.session.add(mission)
+        db.session.flush()
+        db.session.add(WorkflowMissionDispatch(
+            mission_id=mission.id, definition_id=self.definition.id,
+            workflow_run_id=run.id, decision_key='recover-test',
+            idempotency_key='recover-test', request_hash='a' * 64,
+            status='created', created_by_claw_id=99,
+            worker_claw_id=60,
+        ))
+        db.session.add(MissionStage(
+            mission_id=mission.id, stage_key='test_task_229',
+            stage_version=1, role_key='test_executor', assigned_claw_id=60,
+            workflow_run_id=run.id, state='blocked',
+            input_snapshot_json={'test_task_id': 229},
+            evidence_refs_json=[]))
+        db.session.commit()
+
+        headers = {'Idempotency-Key': 'recover-run-1'}
+        first = self.client.post(
+            f'/api/v1/workflow-runs/{run_id}/recover',
+            json={'reason': '恢复 Run'}, headers=headers)
+        replay = self.client.post(
+            f'/api/v1/workflow-runs/{run_id}/recover',
+            json={'reason': '恢复 Run'}, headers=headers)
+
+        self.assertEqual(202, first.status_code, first.get_data(as_text=True))
+        self.assertEqual(first.get_json(), replay.get_json())
+        body = first.get_json()
+        self.assertEqual('reconcile', body['recovery']['selected_action'])
+        self.assertEqual(60, body['recovery']['reconciliation_owner']['claw_id'])
+        self.assertEqual(229, body['recovery']['task_id'])
+        recovery_stage = MissionStage.query.filter_by(
+            mission_id=mission.id, state='ready').one()
+        self.assertEqual(run_id, recovery_stage.workflow_run_id)
+        self.assertEqual(2, recovery_stage.input_snapshot_json['attempt_no'])
+        self.assertEqual(1, MissionStage.query.filter(
+            MissionStage.stage_key.like('recover_run_%')).count())
+
+        reconciled = self.client.post(
+            f'/api/v1/workflow-runs/{run_id}/steps/{step.step_id}/execution-reconciliation',
+            json={
+                'attempt_no': 2,
+                'execution_stopped': True,
+                'side_effects_reconciled': True,
+                'receipt_ref': 'artifact://reconciliation/run-1',
+            })
+        self.assertEqual(200, reconciled.status_code,
+                         reconciled.get_data(as_text=True))
+        self.assertEqual('WORKFLOW_RUN_RESTARTED', reconciled.get_json()['code'])
+        self.assertEqual(run_id, reconciled.get_json()['run']['id'])
+        self.assertEqual(1, reconciled.get_json()['restart']['restart_no'])
+        self.assertEqual(1, WorkflowRun.query.count())
+        db.session.refresh(recovery_stage)
+        self.assertEqual('completed', recovery_stage.state)
+        self.assertEqual('EXECUTION_RECONCILED', recovery_stage.last_reason_code)
+        self.assertEqual(
+            'artifact://reconciliation/run-1',
+            recovery_stage.evidence_refs_json[0]['ref'])
+
+    def test_recover_waits_for_active_run_without_mutating_it(self):
+        created = self.client.post(
+            '/api/v1/workflow-runs', json=self._run_body('recover-active'))
+        run_id = created.get_json()['id']
+        response = self.client.post(
+            f'/api/v1/workflow-runs/{run_id}/recover', json={},
+            headers={'Idempotency-Key': 'recover-active-1'})
+
+        self.assertEqual(200, response.status_code, response.get_data(as_text=True))
+        self.assertEqual('wait', response.get_json()['recovery']['selected_action'])
+        self.assertEqual('WORKFLOW_RUN_STILL_ACTIVE', response.get_json()['code'])
+        self.assertIsNotNone(response.get_json()['recovery']['next_check_at'])
 
     def test_fatal_runtime_result_skips_business_chain_and_runs_cleanup(self):
         definition_json = {

@@ -72,7 +72,9 @@ def get_plan_supervision(plan_id):
         PlanSupervisorEvent.sequence > after, PlanSupervisorEvent.sequence <= through).order_by(
             PlanSupervisorEvent.sequence).limit(200).all()
     runs = WorkflowMissionDispatch.query.filter_by(mission_id=sup.mission_id).all() if sup.mission_id else []
-    return jsonify({'supervision': sup.to_dict(),
+    supervision = sup.to_dict()
+    supervision.update(svc.recovery_snapshot(sup))
+    return jsonify({'supervision': supervision,
         'events': [{'id': r.id, 'sequence': r.sequence, 'kind': r.kind,
                     'payload': r.payload_json} for r in events],
         'next_cursor': events[-1].sequence if events else after,
