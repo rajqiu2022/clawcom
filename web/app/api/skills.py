@@ -3,6 +3,8 @@ from datetime import datetime
 from app import db
 from app.models import (AgentTeam, AgentTeamMember, AgentTeamSkillResource,
                         Skill, OpenClawSkill, OpenClawInstance, Rule, User, _now)
+from app.services.skill_visibility import normalize_skill_visibility
+from app.services.skill_payload import normalize_skill_payload
 from app.services.skill_installation import reset_installation, installation_view, control_instructions
 
 OFF_SHELF_SKILL_NAMES = {'hub-connect'}
@@ -23,6 +25,23 @@ def _is_off_shelf_skill(skill):
 
 def _skill_market_status(skill):
     return 'off_shelf' if _is_off_shelf_skill(skill) else 'online'
+
+
+def _reject_self_skill_mutation_via_token(target_claw_id):
+    """Prevent a Bearer-authenticated Agent from reinstalling itself forever."""
+    if session.get('user_id'):
+        return None
+    from app.api.auth_utils import get_current_claw
+    token_claw = get_current_claw()
+    if token_claw and int(token_claw.id) == int(target_claw_id):
+        return jsonify({
+            'error': (
+                '禁止 Agent 对自身调用 Skill 分配/卸载 API；'
+                '请 GET assigned-skills 获取文件并加载，完成后提交待办回执。'
+                '不要重复调用 POST/DELETE 管理接口。'
+            )
+        }), 403
+    return None
 
 
 def _get_current_user():
@@ -56,6 +75,33 @@ def _skill_project_ids(skill):
         except Exception:
             continue
     return ids
+
+
+def _current_claw_id(user):
+    return (getattr(user, '_claw_id', None)
+            or getattr(user, 'bound_claw_id', None))
+
+
+def _apply_skill_visibility(skill, visibility, user, data=None):
+    """Apply normalized visibility while preserving its ownership contract."""
+    if visibility not in ('private', 'public'):
+        return False
+    changed = (skill.visibility or 'public') != visibility
+    skill.visibility = visibility
+    if visibility == 'private':
+        if not skill.scope:
+            skill.scope = 'global'
+        owner_claw_id = (data or {}).get('owner_claw_id') or _current_claw_id(user)
+        if owner_claw_id:
+            try:
+                skill.owner_claw_id = int(owner_claw_id)
+            except Exception:
+                skill.owner_claw_id = owner_claw_id
+        skill.review_status = 'approved'
+        skill.review_comment = None
+    else:
+        skill.owner_claw_id = None
+    return changed
 
 
 def _can_edit(user, resource):
@@ -392,16 +438,16 @@ def create_skill():
     龙虾王（admin角色）或超级管理员创建的 Skill 直接 approved；
     其他 OpenClaw 提交的 Skill 默认 pending，需审核后才进入市场。
     """
-    data = request.get_json()
+    data = normalize_skill_payload(request.get_json())
     if not data or not data.get('name') or not data.get('display_name'):
         return jsonify({'error': '标识名和显示名称为必填项'}), 400
 
-    if Skill.query.filter_by(name=data['name']).first():
-        return jsonify({'error': f'Skill "{data["name"]}" 已存在'}), 409
+    vis_info = normalize_skill_visibility(data)
+    data = vis_info['data']
 
     # 判断提交者身份，决定审核状态
     user = _get_current_user()
-    is_private = data.get('visibility') == 'private'
+    is_private = vis_info['visibility'] == 'private'
     if is_private or (user and user.role == 'super_admin'):
         review_status = 'approved'
     else:
@@ -415,6 +461,34 @@ def create_skill():
         created_by = data['created_by']
     else:
         return jsonify({'error': '未认证请求必须提供 created_by 字段，请在 Header 中携带 Authorization: Bearer {TOKEN}'}), 401
+
+    existing = Skill.query.filter_by(name=data['name']).first()
+    if existing and not existing.is_deleted:
+        return jsonify({'error': f'Skill "{data["name"]}" 已存在'}), 409
+    if existing and existing.is_deleted:
+        if not _can_edit(user, existing):
+            return jsonify({'error': f'Skill "{data["name"]}" 已被删除且你无权恢复'}), 403
+        skill = existing
+        skill.display_name = data['display_name']
+        skill.description = data.get('description')
+        skill.category = data.get('category', 'custom')
+        skill.trigger_phrase = data.get('trigger_phrase')
+        skill.template_content = data.get('template_content')
+        skill.scope = data.get('scope') or 'global'
+        skill.applicable_projects = data.get('applicable_projects')
+        skill.applicable_modules = data.get('applicable_modules')
+        skill.created_by = skill.created_by or created_by
+        skill.is_standard = bool(data.get('is_standard', False))
+        skill.review_status = review_status
+        skill.review_comment = None
+        skill.is_deleted = False
+        skill.deleted_at = None
+        _apply_skill_visibility(skill, 'private' if is_private else 'public', user, data)
+        skill.last_modified_by = created_by
+        skill.last_modified_source = 'openclaw' if getattr(user, '_claw_name', None) else 'web'
+        skill.last_modified_at = _now()
+        db.session.commit()
+        return jsonify(skill.to_dict()), 200
 
     skill = Skill(
         name=data['name'],
@@ -430,7 +504,7 @@ def create_skill():
         is_standard=bool(data.get('is_standard', False)),
         review_status=review_status,
         visibility='private' if is_private else 'public',
-        owner_claw_id=data.get('owner_claw_id') if is_private else None,
+        owner_claw_id=(data.get('owner_claw_id') or _current_claw_id(user)) if is_private else None,
     )
 
     # 进化技能额外字段
@@ -798,9 +872,12 @@ def update_skill(skill_id):
     from app.api.auth_utils import get_current_claw
     caller_claw = get_current_claw()
 
-    data = request.get_json(silent=True) or {}
+    data = normalize_skill_payload(request.get_json(silent=True) or {})
     if not isinstance(data, dict):
         return jsonify({'error': '请求体必须是 JSON 对象'}), 400
+    vis_info = normalize_skill_visibility(data)
+    data = vis_info['data']
+    requested_visibility = vis_info['visibility']
     old_review_status = skill.review_status
     # admin role（含 admin claw）等同 super_admin：直接覆盖 + 跳过镜像
     # 修复 MEMORY #132：admin 是审核人，自己改自己写镜像就死锁
@@ -846,13 +923,16 @@ def update_skill(skill_id):
         for field in meta_fields:
             if field in data:
                 setattr(skill, field, data[field])
+        visibility_changed = _apply_skill_visibility(
+            skill, requested_visibility, user, data)
         notified_ids = _notify_admin_claws('Skill', '更新', skill.display_name,
-                            f'更新字段: {", ".join(data.keys())}')
+                            f'更新字段: {", ".join(list(data.keys()) + (["visibility"] if visibility_changed else []))}')
     elif skill.visibility == 'private':
         # 私有 Skill：作者可直接修改，无需镜像/审核
         for field in content_fields + meta_fields:
             if field in data:
                 setattr(skill, field, data[field])
+        _apply_skill_visibility(skill, requested_visibility, user, data)
         notified_ids = []
     else:
         # 非超级管理员：内容字段写入镜像，元数据字段直接改
@@ -865,13 +945,19 @@ def update_skill(skill_id):
             or 'unknown'
         )
         mirror_data = {}
-        for field in content_fields:
-            if field in data:
-                mirror_data[field] = data[field]
         # 元数据字段直接修改（不需要审核）
         for field in meta_fields:
             if field in data:
                 setattr(skill, field, data[field])
+        _apply_skill_visibility(skill, requested_visibility, user, data)
+        if skill.visibility == 'private':
+            for field in content_fields:
+                if field in data:
+                    setattr(skill, field, data[field])
+        else:
+            for field in content_fields:
+                if field in data:
+                    mirror_data[field] = data[field]
         # 非内容字段（如 is_standard）也可以直接改
         # 内容字段写入镜像
         if mirror_data:
@@ -881,14 +967,16 @@ def update_skill(skill_id):
             skill.mirror_updated_by = modifier
             skill.mirror_updated_at = _now()
 
-        # 非管理员编辑后，自动重置为待评审状态
-        if old_review_status != 'pending':
+        # 公开内容才进入审核；仅切换为私有可由作者直接维护。
+        if mirror_data and skill.visibility != 'private' and old_review_status != 'pending':
             skill.review_status = 'pending'
             skill.review_comment = None
-        # 通知龙虾王有待审核的 Skill
-        notified_ids = _notify_admin_claws('Skill', '待审核（修改后重新提交）', skill.display_name,
-                            f'类型: {skill.category}, 作用域: {skill.scope}, 提交人: {modifier}\n请审核后通过或拒绝。')
-        _create_review_todo_for_admin_claws('Skill', skill.display_name, modifier, skill.category, skill.scope)
+        if mirror_data and skill.visibility != 'private':
+            notified_ids = _notify_admin_claws('Skill', '待审核（修改后重新提交）', skill.display_name,
+                                f'类型: {skill.category}, 作用域: {skill.scope}, 提交人: {modifier}\n请审核后通过或拒绝。')
+            _create_review_todo_for_admin_claws('Skill', skill.display_name, modifier, skill.category, skill.scope)
+        else:
+            notified_ids = []
 
 
     # 记录最后修改人 + 来源（不论镜像/直改路径，只要有内容/元数据变更就写入）
@@ -1088,6 +1176,10 @@ def install_skill(claw_id):
     if not user or getattr(user, 'role', '') not in ('super_admin', 'admin'):
         return jsonify({'error': '仅支持 Hub 管理员（Web 登录或 admin 级 Bearer Token）分配 Skill'}), 403
 
+    denied = _reject_self_skill_mutation_via_token(claw_id)
+    if denied:
+        return denied
+
     claw = OpenClawInstance.query.get_or_404(claw_id)
     data = request.get_json()
     skill_id = data.get('skill_id')
@@ -1221,6 +1313,12 @@ def batch_assign_skill(skill_id):
 
     data = request.get_json() or {}
     openclaw_ids = data.get('openclaw_ids', [])
+    from app.api.auth_utils import get_current_claw
+    token_claw = get_current_claw() if not session.get('user_id') else None
+    if token_claw and int(token_claw.id) in [int(value) for value in openclaw_ids]:
+        return jsonify({
+            'error': '批量分配不可包含 Token 所属本机；请 Web 登录操作或从列表中移除本机 ID。'
+        }), 403
     if not openclaw_ids:
         return jsonify({'error': 'openclaw_ids 为必填项'}), 400
 
@@ -1330,6 +1428,10 @@ def uninstall_skill(claw_id, skill_id):
         user = _get_current_user()
         if not user or getattr(user, 'role', '') not in ('super_admin', 'admin'):
             return jsonify({'error': '仅支持 Hub 管理员（Web 登录或 admin 级 Bearer Token）卸载 Skill'}), 403
+
+    denied = _reject_self_skill_mutation_via_token(claw_id)
+    if denied:
+        return denied
 
     link = OpenClawSkill.query.filter_by(
         openclaw_id=claw_id, skill_id=skill_id
