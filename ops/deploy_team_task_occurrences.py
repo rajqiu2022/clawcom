@@ -31,14 +31,24 @@ _candidate = release.candidate
 def _occurrence_candidate(path, live):
     if path == 'static/js/agent_team_plans.js' and live is not None:
         live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
-        previous = subprocess.check_output(
-            ['git', 'show',
-             'fd88c1c:web/static/js/agent_team_plans.js'],
-            cwd=str(release.ROOT)).replace(b'\r\n', b'\n')
-        if live != previous:
-            return _candidate(path, live)
-        return (release.ROOT / 'web' / path).read_bytes().replace(
+        replacements = (
+            (b"        $('at-task-conclusion').hidden = true;",
+             b"        if ($('at-task-conclusion')) $('at-task-conclusion').hidden = true;"),
+            (b"            if (conclusion) {",
+             b"            if (conclusion && $('at-task-conclusion')) {"),
+            (b"    $('at-task-conclusion-save').addEventListener('click',saveTaskConclusion);",
+             b"    $('at-task-conclusion-save')?.addEventListener('click',saveTaskConclusion);"),
+        )
+        changed = False
+        for old, new in replacements:
+            if old in live:
+                live = live.replace(old, new, 1)
+                changed = True
+        if changed:
+            return live
+        local = (release.ROOT / 'web' / path).read_bytes().replace(
             b'\r\n', b'\n')
+        return local if live == local else _candidate(path, live)
     if path != 'templates/agent_teams.html' or live is None:
         return _candidate(path, live)
     live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
