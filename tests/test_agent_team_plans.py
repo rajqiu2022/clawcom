@@ -139,7 +139,10 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(week['summary']['blocked'],1)
         all_tasks = self.client.get(self.url+'?period=all',headers=self._headers()).json
         self.assertEqual(all_tasks['summary']['total'],6)
-        self.assertEqual(len(all_tasks['items'][0]['tasks']),5)
+        self.assertEqual(len(all_tasks['items'][0]['tasks']),6)
+        self.assertEqual(
+            {task['name'] for task in all_tasks['items'][0]['tasks']},
+            {'daily', 'spanning', 'sunday', 'next week', 'undated', 'deadline only'})
         self.assertEqual(all_tasks['items'][0]['url'],'/testplans?plan_id=%s' % plan['id'])
 
     def test_overview_exposes_report_count_and_legacy_report(self):

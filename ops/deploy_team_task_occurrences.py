@@ -33,7 +33,7 @@ def _occurrence_candidate(path, live):
     live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
     pattern = rb"(filename='js/agent_team_plans\.js'\) }}\?v=)[^\"<]+"
     merged, count = re.subn(
-        pattern, rb'\g<1>20260923occurrences', live, count=1)
+        pattern, rb'\g<1>20260923alltasks', live, count=1)
     if count != 1:
         raise RuntimeError(
             'Expected exactly one agent_team_plans.js script reference')

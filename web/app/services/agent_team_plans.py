@@ -146,10 +146,13 @@ def overview(team, period, raw_date, limit, offset):
     previews, preview_task_ids = {}, []
     for plan in rows:
         selected = tasks.filter(TestTask.plan_id == plan.id)
-        # Bounded preview queries (6 plans per page), no large task/case serialization.
+        # Return every task in the selected date window.  The team page keeps
+        # the first five visible and expands the rest on demand; truncating the
+        # API here made the remaining tasks impossible to inspect in-place.
+        # This still serializes task summaries only, never task cases.
         preview = selected.outerjoin(OpenClawInstance, TestTask.assignee_claw_id == OpenClawInstance.id).with_entities(
             TestTask, OpenClawInstance.name).order_by(TestTask.end_date.is_(None), TestTask.end_date,
-                                                   TestTask.priority, TestTask.id).limit(5).all()
+                                                   TestTask.priority, TestTask.id).all()
         previews[plan.id] = preview
         preview_task_ids.extend(t.id for t, _ in preview)
     legacy_task_report_counts = dict(db.session.query(
