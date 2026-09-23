@@ -178,7 +178,7 @@ with app.app_context():
             time.sleep(1)
         else:
             raise RuntimeError('HTTP readiness did not recover')
-        assert '20260923occurrences' in response.text
+        assert '20260923alltasks' in response.text
         assert requests.get(
             'http://127.0.0.1:18800/testplans', headers=headers,
             timeout=15, allow_redirects=False).status_code == 200
