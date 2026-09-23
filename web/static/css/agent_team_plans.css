@@ -23,6 +23,6 @@
 .at-plan-task-id{display:inline-block;margin-right:9px;color:var(--at-accent);font-size:10px;font-weight:700;letter-spacing:.07em;white-space:nowrap;font-variant-numeric:tabular-nums}
 .at-plan-card .at-help{font-size:11px;overflow-wrap:anywhere}.at-plan-card .at-progress{margin-top:9px}.at-plan-card .at-progress>span{white-space:nowrap}
 .at-plan-state{display:inline-block;border:1px solid var(--at-line);border-radius:4px;padding:2px 7px;font-size:10px;white-space:nowrap;color:var(--at-muted)}
-.at-plan-state.in_progress,.at-plan-state.active{color:#70a9e8;border-color:#3f6188}.at-plan-state.completed{color:#66b48a;border-color:#447158}.at-plan-state.blocked,.at-plan-alert{color:#e58b87}
-.at-plan-state.blocked{border-color:#774443}#at-plan-dialog{width:min(600px,94vw)}#at-plan-dialog [hidden]{display:none!important}
+.at-plan-state.in_progress,.at-plan-state.running,.at-plan-state.active{color:#70a9e8;border-color:#3f6188}.at-plan-state.completed{color:#66b48a;border-color:#447158}.at-plan-state.scheduled{color:#b5aa91;border-color:#5d574b}.at-plan-state.ready,.at-plan-state.dispatched{color:#e2a15b;border-color:#80562f}.at-plan-state.blocked,.at-plan-state.failed,.at-plan-alert{color:#e58b87}
+.at-plan-state.blocked,.at-plan-state.failed{border-color:#774443}#at-plan-dialog{width:min(600px,94vw)}#at-plan-dialog [hidden]{display:none!important}
 @media(max-width:720px){.at-plan-workspace{padding:18px}.at-plan-summary>div{padding:12px 7px}.at-plan-summary strong{font-size:20px}.at-detail-tabs{padding:0 18px}.at-plan-toolbar>div:last-child{display:flex;gap:8px;flex-wrap:wrap}.at-plan-reports-list,.at-plan-report-preview-body{padding:16px}.at-plan-report-card>header{align-items:flex-start;flex-direction:column;gap:4px}}

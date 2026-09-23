@@ -3,7 +3,7 @@ const AgentTeamPlans = (() => {
     'use strict';
     const $ = id => document.getElementById(id);
     const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    const labels = {draft:'草稿',active:'进行中',completed:'已完成',archived:'归档',assigned:'已指派',pending:'待开始',in_progress:'执行中',blocked:'阻塞',skipped:'已跳过'};
+    const labels = {draft:'草稿',active:'进行中',completed:'已完成',archived:'归档',assigned:'已指派',pending:'待开始',in_progress:'执行中',scheduled:'等待到点',ready:'待派发',dispatched:'待领取',running:'执行中',failed:'失败',cancelled:'已取消',blocked:'阻塞',skipped:'已跳过'};
     let team = null, epoch = 0, requestId = 0, reportRequestId = 0, reportContext = null, period = 'week', day = '', offset = 0, mode = 'new', saving = false;
     function today() { return new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Shanghai'}).format(new Date()); }
     function reset() { ++epoch; ++requestId; ++reportRequestId; team = null; $('at-plan-dialog').close(); $('at-plan-reports-dialog').close(); }
@@ -22,7 +22,11 @@ const AgentTeamPlans = (() => {
         return `<p class="at-help">监管 ${esc(s.status)} · 经理 #${esc(s.orchestrator_claw_id)} · Mission #${esc(s.mission_id)}${s.next_check_at?' · 下次 '+esc(s.next_check_at):''}</p>`;
     }
     function task(t, planId) {
-        return `<li><div class="at-plan-task-title"><span><span class="at-plan-task-id">任务 #${esc(t.id)}</span>${esc(t.name)}</span><span class="at-plan-task-actions"><button type="button" class="at-task-report" data-task-reports="${esc(t.id)}" data-plan-id="${esc(planId)}" data-task-name="${esc(t.name)}" aria-label="查看任务 #${esc(t.id)} 的关联报告">📄 报告 <b data-report-count ${t.report_count?'':'hidden'}>${esc(t.report_count || 0)}</b></button>${badge(t.status)}</span></div><p class="at-help">${esc(t.priority)} · ${esc(t.assignee)} · ${esc(t.start_date || t.end_date || '未排期')}${t.end_date && t.end_date!==t.start_date?' → '+esc(t.end_date):''}${t.overdue?' · <span class="at-plan-alert">已逾期</span>':''}</p><div class="at-progress"><progress max="100" value="${t.progress}" aria-label="任务上报进度"></progress><span>${t.progress}%</span></div></li>`;
+        const occurrence = t.occurrence || null, execution = occurrence && occurrence.execution;
+        const executionMeta = occurrence
+            ? `<p class="at-help">执行实例 #${esc(occurrence.id)} · ${esc(occurrence.occurrence_date)}${execution?` · AgentTask #${esc(execution.agent_task_row_id)} / ${esc(execution.agent_task_id)} · 尝试 ${esc(execution.attempt_no || 1)}${execution.last_heartbeat_at?` · 心跳 ${esc(execution.last_heartbeat_at)}`:''}`:''}${occurrence.next_action?` · 下一步 ${esc(occurrence.next_action)}`:''}${occurrence.next_check_at?` · 检查 ${esc(occurrence.next_check_at)}`:''}${execution && execution.lease_expired?' · <span class="at-plan-alert">租约已超时，等待 Hub 回队</span>':''}</p>`
+            : (t.schedule_enabled ? '<p class="at-help">当前日期尚未生成执行实例</p>' : '');
+        return `<li><div class="at-plan-task-title"><span><span class="at-plan-task-id">任务 #${esc(t.id)}</span>${esc(t.name)}</span><span class="at-plan-task-actions"><button type="button" class="at-task-report" data-task-reports="${esc(t.id)}" data-plan-id="${esc(planId)}" data-task-name="${esc(t.name)}" aria-label="查看任务 #${esc(t.id)} 的关联报告">📄 报告 <b data-report-count ${t.report_count?'':'hidden'}>${esc(t.report_count || 0)}</b></button>${badge(t.status || 'scheduled')}</span></div><p class="at-help">${esc(t.priority)} · ${esc(t.assignee)} · ${esc(t.start_date || t.end_date || '未排期')}${t.end_date && t.end_date!==t.start_date?' → '+esc(t.end_date):''}${t.schedule_enabled?` · ${esc(t.recurrence_type==='daily'?'每日':t.recurrence_type==='weekly'?'每周':'单次')}`:''}${t.overdue?' · <span class="at-plan-alert">已逾期</span>':''}</p>${executionMeta}<div class="at-progress"><progress max="100" value="${t.progress}" aria-label="任务上报进度"></progress><span>${t.progress}%</span></div></li>`;
     }
     function reportCard(r) {
         const global = r.kind === 'global';

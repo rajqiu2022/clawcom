@@ -9,7 +9,7 @@ from datetime import datetime, date
 from flask import request, jsonify, session
 from sqlalchemy import func
 from app import db
-from app.models import (TestPlan, TestPlanReport, TestTask, TestTaskCase, TestIteration,
+from app.models import (TestPlan, TestPlanReport, TestTask, TestTaskCase, TestTaskOccurrence, TestIteration,
                         TestIterationTab,
                         TestTaskChain, TestTaskChainStep,
                         TestTaskReport, TestTaskBugReport,
@@ -979,7 +979,11 @@ def delete_test_plan_report(plan_id, report_id):
 def list_task_reports(plan_id, task_id):
     """获取测试任务的报告列表"""
     task = TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
-    reports = TestTaskReport.query.filter_by(task_id=task_id).order_by(
+    query = TestTaskReport.query.filter_by(task_id=task_id)
+    occurrence_id = request.args.get('occurrence_id', type=int)
+    if occurrence_id:
+        query = query.filter_by(occurrence_id=occurrence_id)
+    reports = query.order_by(
         TestTaskReport.created_at.desc()
     ).all()
     return jsonify({'items': [r.to_dict() for r in reports], 'total': len(reports)})
@@ -1006,8 +1010,20 @@ def create_task_report(plan_id, task_id):
     if user:
         user_name = getattr(user, 'username', '') or getattr(user, 'name', '') or getattr(user, '_claw_name', '') or ''
 
+    occurrence_id = data.get('occurrence_id')
+    occurrence = None
+    if occurrence_id is not None:
+        if type(occurrence_id) is not int:
+            return jsonify({'error': 'occurrence_id 必须为整数'}), 400
+        occurrence = TestTaskOccurrence.query.filter_by(
+            id=occurrence_id, plan_id=plan_id,
+            test_task_id=task_id).first()
+        if not occurrence:
+            return jsonify({'error': '执行实例不存在或不属于该任务'}), 400
+
     report = TestTaskReport(
         task_id=task_id,
+        occurrence_id=occurrence.id if occurrence else None,
         title=data['title'],
         content=data['content'],
         format=report_format,
@@ -1128,6 +1144,63 @@ def _recalc_plan_stats(plan):
     plan.resolved_bugs = sum(t.bug_count for t in tasks if t.status == 'completed')
 
 
+def _normalize_task_schedule(data, plan, current=None):
+    """Validate the opt-in Hub-owned recurring execution contract."""
+    enabled = data.get(
+        'schedule_enabled', current.schedule_enabled if current else False)
+    if type(enabled) is not bool:
+        raise ValueError('schedule_enabled 必须为布尔值')
+    recurrence = str(data.get(
+        'recurrence_type', current.recurrence_type if current else 'once')
+                     or 'once').strip().lower()
+    if recurrence not in ('once', 'daily', 'weekly'):
+        raise ValueError('recurrence_type 仅支持 once/daily/weekly')
+    timezone_name = str(data.get(
+        'schedule_timezone', current.schedule_timezone if current
+        else 'Asia/Shanghai') or 'Asia/Shanghai').strip()
+    if timezone_name != 'Asia/Shanghai':
+        raise ValueError('当前仅支持 Asia/Shanghai 时区')
+
+    def clock(name, default=''):
+        value = str(data.get(name, getattr(current, name, default)
+                             if current else default) or '').strip()
+        if value and not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', value):
+            raise ValueError('%s 必须为 HH:MM' % name)
+        return value
+
+    weekdays = data.get(
+        'recurrence_weekdays', current.recurrence_weekdays_json
+        if current else []) or []
+    if (not isinstance(weekdays, list)
+            or any(type(value) is not int or value < 0 or value > 6
+                   for value in weekdays)):
+        raise ValueError('recurrence_weekdays 必须为 0-6 的数组')
+    weekdays = sorted(set(weekdays))
+    if enabled and recurrence == 'weekly' and not weekdays:
+        raise ValueError('每周任务至少选择一个星期')
+    auto_dispatch = data.get(
+        'auto_dispatch', current.auto_dispatch if current else False)
+    if type(auto_dispatch) is not bool:
+        raise ValueError('auto_dispatch 必须为布尔值')
+    if not enabled:
+        auto_dispatch = False
+    execution_role = str(data.get(
+        'execution_role', current.execution_role if current
+        else 'member_work') or 'member_work').strip()
+    if execution_role not in ('member_work', 'manager_work'):
+        raise ValueError('execution_role 仅支持 member_work/manager_work')
+    return {
+        'schedule_enabled': enabled,
+        'recurrence_type': recurrence,
+        'recurrence_weekdays_json': weekdays,
+        'schedule_timezone': timezone_name,
+        'not_before_time': clock('not_before_time', '00:00'),
+        'due_time': clock('due_time', '23:59'),
+        'auto_dispatch': auto_dispatch,
+        'execution_role': execution_role,
+    }
+
+
 # ==================== 测试任务 CRUD ====================
 
 @api_bp.route('/test-plans/<int:plan_id>/tasks', methods=['GET'])
@@ -1192,6 +1265,17 @@ def create_test_task(plan_id):
         except (ValueError, TypeError):
             pass
 
+    try:
+        schedule = _normalize_task_schedule(data, plan)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    resolved_assignee_claw_id = _resolve_assignee_claw_id(data)
+    if schedule['schedule_enabled'] and not resolved_assignee_claw_id:
+        return jsonify({'error': 'Hub 周期调度必须指派团队 Agent'}), 400
+    if schedule['schedule_enabled']:
+        start_date = start_date or plan.start_date
+        end_date = end_date or plan.end_date or start_date
+
     normalized_case_filter = enrich_case_filter(
         data.get('library_id'), data.get('case_filter'))
     task = TestTask(
@@ -1199,7 +1283,7 @@ def create_test_task(plan_id):
         name=data['name'],
         description=data.get('description', ''),
         task_type=data.get('task_type', 'functional'),
-        assignee_claw_id=_resolve_assignee_claw_id(data),
+        assignee_claw_id=resolved_assignee_claw_id,
         assignee_username=_resolve_assignee_username(data),
         start_date=start_date,
         end_date=end_date,
@@ -1208,6 +1292,7 @@ def create_test_task(plan_id):
         case_filter=normalized_case_filter,
         status=data.get('status', 'assigned'),
         created_by=created_by,
+        **schedule,
     )
     db.session.add(task)
     db.session.flush()
@@ -1234,7 +1319,7 @@ def create_test_task(plan_id):
 
     from app.models_plan_supervision import PlanSupervisor
     from app.services import plan_supervision as plan_guard
-    supervisor = db.session.get(PlanSupervisor, plan.id)
+    supervisor = plan_guard.locked(plan.id)
     if supervisor:
         plan_guard.sync_plan_stages(supervisor)
 
@@ -1264,15 +1349,30 @@ def update_test_task(plan_id, task_id):
                         'priority', 'status', 'progress',
                         'result_summary', 'bug_count']
     old_status = task.status
+    try:
+        schedule = _normalize_task_schedule(data, TestPlan.query.get(plan_id), task)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    assignment_changed = any(
+        key in data for key in (
+            'assignee_claw_id', 'assignee_owner', 'assignee_username'))
+    proposed_assignee_claw_id = (
+        _resolve_assignee_claw_id(data) if assignment_changed
+        else task.assignee_claw_id)
+    proposed_assignee_username = (
+        _resolve_assignee_username(data) if assignment_changed
+        else task.assignee_username)
+    if schedule['schedule_enabled'] and not proposed_assignee_claw_id:
+        return jsonify({'error': 'Hub 周期调度必须指派团队 Agent'}), 400
     if data.get('status') == 'in_progress' and old_status != 'in_progress':
         from app.services import plan_supervision as plan_guard
         plan_guard.require_task_dispatch_receipt(task)
     for field in updatable_fields:
         if field in data:
             setattr(task, field, data[field])
-    if any(k in data for k in ('assignee_claw_id', 'assignee_owner', 'assignee_username')):
-        task.assignee_claw_id = _resolve_assignee_claw_id(data)
-        task.assignee_username = _resolve_assignee_username(data)
+    if assignment_changed:
+        task.assignee_claw_id = proposed_assignee_claw_id
+        task.assignee_username = proposed_assignee_username
 
     # Notify agent on status change
     new_status = data.get('status')
@@ -1302,6 +1402,12 @@ def update_test_task(plan_id, task_id):
             task.end_date = date_type.fromisoformat(data['end_date']) if data['end_date'] else None
         except (ValueError, TypeError):
             pass
+    if schedule['schedule_enabled']:
+        plan_for_schedule = TestPlan.query.get(plan_id)
+        task.start_date = task.start_date or plan_for_schedule.start_date
+        task.end_date = task.end_date or plan_for_schedule.end_date or task.start_date
+    for field, value in schedule.items():
+        setattr(task, field, value)
 
     # tapd_bug_ids
     if 'tapd_bug_ids' in data:
@@ -1329,8 +1435,30 @@ def update_test_task(plan_id, task_id):
     if plan:
         _recalc_plan_stats(plan)
 
+    from app.models_plan_supervision import PlanSupervisor
+    from app.services import plan_supervision as plan_guard
+    supervisor = plan_guard.locked(plan_id)
+    if supervisor:
+        plan_guard.sync_plan_stages(supervisor)
+
     db.session.commit()
     return jsonify(task.to_dict(with_cases=True))
+
+
+@api_bp.route(
+    '/test-plans/<int:plan_id>/tasks/<int:task_id>/occurrences',
+    methods=['GET'])
+def list_test_task_occurrences(plan_id, task_id):
+    """Return immutable dated executions, newest first."""
+    TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
+    limit = max(1, min(request.args.get('limit', 30, type=int), 100))
+    rows = (TestTaskOccurrence.query.filter_by(
+        plan_id=plan_id, test_task_id=task_id)
+        .order_by(TestTaskOccurrence.occurrence_date.desc(),
+                  TestTaskOccurrence.id.desc()).limit(limit).all())
+    return jsonify({'items': [row.to_dict() for row in rows],
+                    'total': TestTaskOccurrence.query.filter_by(
+                        plan_id=plan_id, test_task_id=task_id).count()})
 
 
 def _task_case_sync_payload(task, sync_plan):

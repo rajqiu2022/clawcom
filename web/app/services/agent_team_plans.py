@@ -3,6 +3,7 @@ from datetime import date, timedelta
 from sqlalchemy import and_, or_, func
 from app import db
 from app.models import (TestPlan, TestPlanReport, TestReport, TestTask,
+                        TestTaskOccurrence,
                         TestTaskReport, TestIteration, OpenClawInstance, _now)
 from app.services.agent_teams import TeamError, load_team, integer
 
@@ -171,6 +172,14 @@ def overview(team, period, raw_date, limit, offset):
         TestReport.is_hidden.is_(False),
         TestReport.is_deleted.is_(False)).group_by(
         TestTaskReport.task_id).all()) if preview_task_ids else {}
+    occurrence_rows = (TestTaskOccurrence.query.filter(
+        TestTaskOccurrence.test_task_id.in_(preview_task_ids),
+        TestTaskOccurrence.occurrence_date == anchor,
+    ).order_by(TestTaskOccurrence.id.desc()).all()) if preview_task_ids else []
+    current_occurrences = {}
+    for occurrence in occurrence_rows:
+        current_occurrences.setdefault(
+            occurrence.test_task_id, occurrence.to_dict())
     items = []
     for plan in rows:
         all_counts = stats.get(plan.id, {})
@@ -205,8 +214,23 @@ def overview(team, period, raw_date, limit, offset):
                 'lease_expires_at': (
                     (supervisor_data.get('manager_lease') or {}).get('expires_at')),
             } if supervisor_data else None),
-            'tasks': [{'id': t.id, 'name': t.name, 'status': t.status, 'priority': t.priority,
-                       'progress': max(0, min(100, t.progress or 0)),
+            'tasks': [{'id': t.id, 'name': t.name,
+                       'status': ((current_occurrences.get(t.id) or {}).get('status')
+                                  if t.schedule_enabled else t.status),
+                       'template_status': t.status,
+                       'schedule_enabled': bool(t.schedule_enabled),
+                       'recurrence_type': t.recurrence_type or 'once',
+                       'occurrence': current_occurrences.get(t.id),
+                       'priority': t.priority,
+                       'progress': (
+                           100 if t.schedule_enabled and
+                           (current_occurrences.get(t.id) or {}).get('status')
+                           in ('completed', 'skipped') else
+                           1 if t.schedule_enabled and
+                           (current_occurrences.get(t.id) or {}).get('status')
+                           == 'running' else
+                           0 if t.schedule_enabled else
+                           max(0, min(100, t.progress or 0))),
                        'assignee': name or t.assignee_username or '未指派',
                        'report_count': (legacy_task_report_counts.get(t.id, 0)
                                         + global_task_report_counts.get(t.id, 0)

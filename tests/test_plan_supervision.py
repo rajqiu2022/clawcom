@@ -1,13 +1,14 @@
 """Plan wake/lease/receipt contract, including actual Mission dispatch fencing."""
 import json
 import unittest
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from unittest.mock import patch
 
 import test_workflow_missions_api as fixtures
 from app import db
 from app.models import (AgentTask, AgentTeam, AgentTeamMember, AgentTeamMission, MissionStage,
-                        TestPlan, TestTask, ClawMessage, WorkflowRun, WorkflowRunStep,
+                        TestPlan, TestTask, TestTaskOccurrence, ClawMessage,
+                        WorkflowRun, WorkflowRunStep,
                         WorkflowMission, WorkflowMissionDispatch, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
 from app.services import plan_supervision as svc
@@ -544,6 +545,119 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(task.status, 'blocked')
         self.assertEqual(stage.state, 'failed')
         self.assertEqual(svc.reconcile_ordinary_task_truth(self.sup()), 0)
+
+    def test_daily_occurrences_dispatch_at_time_and_retry_result_invalid(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['ios']))
+        self.plan.team_id = team.id
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'daily-task-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+
+        task = TestTask(
+            plan_id=self.plan.id, name='每日客户端性能检查', status='assigned',
+            assignee_claw_id=self.other_claw.id, task_type='performance',
+            start_date=self.plan.start_date, end_date=self.plan.end_date,
+            schedule_enabled=True, recurrence_type='daily',
+            not_before_time='10:00', due_time='18:00', auto_dispatch=True,
+            execution_role='member_work')
+        db.session.add(task)
+        db.session.flush()
+        first_day = self.plan.start_date
+        before = datetime.combine(first_day, time(9, 59))
+        svc.sync_plan_stages(self.sup(), now=before)
+        db.session.commit()
+        occurrence = TestTaskOccurrence.query.filter_by(
+            test_task_id=task.id, occurrence_date=first_day).one()
+        self.assertEqual(occurrence.status, 'scheduled')
+        self.assertEqual(AgentTask.query.count(), 0)
+        self.assertEqual(
+            svc.promote_and_dispatch_due_occurrences(self.sup(), now=before), [])
+
+        due = datetime.combine(first_day, time(10, 0))
+        self.assertEqual(
+            svc.promote_and_dispatch_due_occurrences(self.sup(), now=due),
+            [self.other_claw.id])
+        db.session.commit()
+        agent_task = AgentTask.query.one()
+        db.session.refresh(occurrence)
+        self.assertEqual(occurrence.status, 'dispatched')
+        self.assertEqual(occurrence.agent_task_id, agent_task.id)
+        self.assertEqual(task.status, 'assigned')
+
+        agent_task = claim_pending_tasks(self.other_claw.id, now=due)[0]
+        self.assertEqual(occurrence.status, 'running')
+        outcome = complete_task(agent_task, {
+            'claim_token': agent_task.claim_token,
+            'attempt_no': agent_task.attempt_no,
+            'fencing_token': agent_task.fencing_token,
+            'status': 'failed',
+            'result': {
+                'status': 'failed', 'error_code': 'result_invalid',
+                'reason': '结构化结果暂不可解析',
+            },
+        }, now=due + timedelta(minutes=1))
+        self.assertEqual(outcome, 'retried')
+        self.assertEqual(agent_task.status, 'pending')
+        self.assertEqual(occurrence.status, 'dispatched')
+        self.assertEqual(task.status, 'assigned')
+
+        agent_task = claim_pending_tasks(
+            self.other_claw.id, now=due + timedelta(minutes=2))[0]
+        complete_task(agent_task, {
+            'claim_token': agent_task.claim_token,
+            'attempt_no': agent_task.attempt_no,
+            'fencing_token': agent_task.fencing_token,
+            'status': 'completed',
+            'result': {'status': 'passed', 'summary': '今日检查通过'},
+        }, now=due + timedelta(minutes=3))
+        self.assertEqual(occurrence.status, 'completed')
+        self.assertEqual(occurrence.result_summary, '今日检查通过')
+        self.assertEqual(task.status, 'assigned')
+
+        second_day = first_day + timedelta(days=1)
+        svc.sync_plan_stages(
+            self.sup(), now=datetime.combine(second_day, time(9, 0)))
+        wake_ids = svc.promote_and_dispatch_due_occurrences(
+            self.sup(), now=datetime.combine(second_day, time(10, 0)))
+        db.session.commit()
+        self.assertEqual(wake_ids, [self.other_claw.id])
+        self.assertEqual(TestTaskOccurrence.query.filter_by(
+            test_task_id=task.id).count(), 2)
+        self.assertEqual(AgentTask.query.filter_by(
+            task_type='test_plan_agent_task').count(), 2)
+        self.assertEqual(TestTaskOccurrence.query.filter_by(
+            test_task_id=task.id, occurrence_date=first_day).one().status,
+            'completed')
+
+    def test_manager_work_occurrence_is_explicitly_assignable(self):
+        team = self.scoped_team()
+        self.plan.team_id = team.id
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'manager-task-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        task = TestTask(
+            plan_id=self.plan.id, name='每日风险复盘', status='assigned',
+            assignee_claw_id=self.main_claw.id, task_type='other',
+            start_date=self.plan.start_date, end_date=self.plan.end_date,
+            schedule_enabled=True, recurrence_type='daily',
+            not_before_time='09:00', auto_dispatch=False,
+            execution_role='manager_work')
+        db.session.add(task)
+        db.session.flush()
+        svc.sync_plan_stages(
+            self.sup(), now=datetime.combine(self.plan.start_date, time(9, 0)))
+        db.session.commit()
+        occurrence = TestTaskOccurrence.query.filter_by(
+            test_task_id=task.id).one()
+        stage = db.session.get(MissionStage, occurrence.mission_stage_id)
+        self.assertEqual(stage.assigned_claw_id, self.main_claw.id)
+        self.assertEqual(stage.role_key, 'test_manager')
+        self.assertEqual(stage.state, 'ready')
 
     def test_timer_restarts_and_unchanged_watchdog_stays_quiet(self):
         self.start()

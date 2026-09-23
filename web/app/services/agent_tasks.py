@@ -18,6 +18,10 @@ AGENT_TASK_LEASE_SECONDS = 300
 AGENT_TASK_MAX_LEASE_SECONDS = 1800
 AGENT_TASK_UNLEASED_TIMEOUT_SECONDS = 600
 AGENT_TASK_MAX_RETRIES = 5
+HUB_RETRYABLE_RESULT_CODES = frozenset((
+    'result_invalid', 'provider_transport', 'provider_transport_error',
+    'provider_timeout', 'provider_busy',
+))
 DEPLOYMENT_KINDS = frozenset((
     'hub_application', 'worker_release', 'agent_instance'))
 WORKER_PLATFORMS = frozenset(('linux-x86_64', 'windows-x86_64'))
@@ -328,6 +332,8 @@ def heartbeat_task(task, data, now=None):
     task.lease_expires_at = now + timedelta(
         seconds=_lease_seconds(data.get('lease_seconds')))
     task.version = int(task.version or 0) + 1
+    from app.services import plan_supervision
+    plan_supervision.record_agent_task_heartbeat(task, now=now)
     db.session.commit()
     return duplicate
 
@@ -376,8 +382,11 @@ def complete_task(task, data, now=None):
         raise AgentTaskContractError(
             'AGENT_TASK_STATUS_INVALID',
             'status must be completed, failed or blocked', 400)
-    retryable = result.get('retryable') is True
-    if status == 'failed' and retryable and int(task.retry_count or 0) < int(task.retry_max or 0):
+    error_code = str(result.get('error_code') or '').strip().lower()
+    retryable = (result.get('retryable') is True
+                 or error_code in HUB_RETRYABLE_RESULT_CODES)
+    if (status in ('failed', 'blocked') and retryable
+            and int(task.retry_count or 0) < int(task.retry_max or 0)):
         task.status = 'pending'
         task.retry_count = int(task.retry_count or 0) + 1
         task.claim_token = None
@@ -386,6 +395,9 @@ def complete_task(task, data, now=None):
         task.assigned_at = None
         task.version = int(task.version or 0) + 1
         task.error = str(result.get('reason') or data.get('error') or '')[:2000]
+        from app.services import plan_supervision
+        plan_supervision.record_agent_task_retry_pending(
+            task, now=now)
         db.session.commit()
         return 'retried'
     task.status = status

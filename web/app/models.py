@@ -5561,6 +5561,26 @@ class TestTask(db.Model):
     # 排期
     start_date = db.Column(db.Date, comment='开始日期')
     end_date = db.Column(db.Date, comment='截止日期')
+    # 新版团队计划调度合同。默认关闭以保持存量 TestTask/Stage 行为；只有
+    # 用户或经理显式配置后，Hub 才按模板生成不可变 occurrence。
+    schedule_enabled = db.Column(db.Boolean, nullable=False, default=False)
+    recurrence_type = db.Column(
+        db.String(16), nullable=False, default='once',
+        comment='once/daily/weekly')
+    recurrence_weekdays_json = db.Column(
+        db.JSON, comment='weekly 使用，0=周一…6=周日')
+    schedule_timezone = db.Column(
+        db.String(64), nullable=False, default='Asia/Shanghai')
+    not_before_time = db.Column(
+        db.String(5), default='', comment='HH:MM，到点前不得派发')
+    due_time = db.Column(
+        db.String(5), default='', comment='HH:MM，当日建议截止时间')
+    auto_dispatch = db.Column(
+        db.Boolean, nullable=False, default=False,
+        comment='到点后由 Hub 向固定执行人创建 AgentTask')
+    execution_role = db.Column(
+        db.String(32), nullable=False, default='member_work',
+        comment='member_work/manager_work')
 
     # 优先级
     priority = db.Column(db.Enum('P0', 'P1', 'P2', 'P3'), default='P2', comment='优先级')
@@ -5643,6 +5663,14 @@ class TestTask(db.Model):
             'assignee_owner_wecom_userid': self.assignee.owner_wecom_userid if self.assignee else '',
             'start_date': str(self.start_date) if self.start_date else None,
             'end_date': str(self.end_date) if self.end_date else None,
+            'schedule_enabled': bool(self.schedule_enabled),
+            'recurrence_type': self.recurrence_type or 'once',
+            'recurrence_weekdays': self.recurrence_weekdays_json or [],
+            'schedule_timezone': self.schedule_timezone or 'Asia/Shanghai',
+            'not_before_time': self.not_before_time or '',
+            'due_time': self.due_time or '',
+            'auto_dispatch': bool(self.auto_dispatch),
+            'execution_role': self.execution_role or 'member_work',
             'priority': self.priority,
             'library_id': self.library_id,
             'library_name': self.library.name if self.library else None,
@@ -5670,9 +5698,121 @@ class TestTask(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
+        if self.schedule_enabled:
+            occurrence = self.occurrences.order_by(
+                TestTaskOccurrence.occurrence_date.desc(),
+                TestTaskOccurrence.id.desc()).first()
+            data['current_occurrence'] = (
+                occurrence.to_dict() if occurrence else None)
         if with_cases:
             data['task_cases'] = [tc.to_dict() for tc in self.task_cases]
         return data
+
+
+class TestTaskOccurrence(db.Model):
+    """One immutable scheduled execution of a TestTask template.
+
+    A recurring TestTask is configuration.  Execution truth lives here so a
+    previous day's terminal state/report can never be reused as today's work.
+    """
+    __tablename__ = 'test_task_occurrences'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    plan_id = db.Column(
+        db.Integer, db.ForeignKey('test_plans.id'), nullable=False, index=True)
+    test_task_id = db.Column(
+        db.Integer, db.ForeignKey('test_tasks.id'), nullable=False, index=True)
+    occurrence_date = db.Column(db.Date, nullable=False, index=True)
+    timezone = db.Column(
+        db.String(64), nullable=False, default='Asia/Shanghai')
+    not_before_at = db.Column(db.DateTime, nullable=False, index=True)
+    due_at = db.Column(db.DateTime)
+    status = db.Column(
+        db.String(24), nullable=False, default='scheduled', index=True)
+    assignee_claw_id = db.Column(
+        db.Integer, db.ForeignKey('openclaw_instances.id'), nullable=False,
+        index=True)
+    mission_stage_id = db.Column(
+        db.Integer, db.ForeignKey('mission_stages.id'), index=True)
+    agent_task_id = db.Column(
+        db.Integer, db.ForeignKey('agent_tasks.id'), index=True)
+    workflow_run_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_runs.id'), index=True)
+    attempt_count = db.Column(db.Integer, nullable=False, default=0)
+    next_action = db.Column(db.String(64), default='wait_not_before')
+    next_check_at = db.Column(db.DateTime, index=True)
+    last_heartbeat_at = db.Column(db.DateTime)
+    result_summary = db.Column(db.Text)
+    evidence_refs_json = db.Column(db.JSON)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    updated_at = db.Column(
+        db.DateTime, default=_now, onupdate=_now, nullable=False)
+
+    task = db.relationship('TestTask', backref=db.backref(
+        'occurrences', lazy='dynamic', cascade='all, delete-orphan'))
+    assignee = db.relationship('OpenClawInstance')
+    agent_task = db.relationship('AgentTask')
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'plan_id', 'test_task_id', 'occurrence_date',
+            name='uq_test_task_occurrence_date'),
+        db.Index(
+            'ix_test_task_occurrence_dispatch',
+            'plan_id', 'status', 'not_before_at'),
+    )
+
+    def to_dict(self):
+        agent = self.agent_task
+        lease_expired = bool(
+            agent and agent.status == 'running'
+            and agent.lease_expires_at
+            and agent.lease_expires_at <= _now())
+        return {
+            'id': self.id,
+            'plan_id': self.plan_id,
+            'test_task_id': self.test_task_id,
+            'occurrence_date': str(self.occurrence_date),
+            'timezone': self.timezone or 'Asia/Shanghai',
+            'not_before_at': (
+                self.not_before_at.isoformat() + '+08:00'
+                if self.not_before_at else None),
+            'due_at': (
+                self.due_at.isoformat() + '+08:00' if self.due_at else None),
+            'status': self.status,
+            'assignee_claw_id': self.assignee_claw_id,
+            'mission_stage_id': self.mission_stage_id,
+            'agent_task_id': self.agent_task_id,
+            'workflow_run_id': self.workflow_run_id,
+            'attempt_count': int(self.attempt_count or 0),
+            'next_action': self.next_action or '',
+            'next_check_at': (
+                self.next_check_at.isoformat() + '+08:00'
+                if self.next_check_at else None),
+            'last_heartbeat_at': (
+                self.last_heartbeat_at.isoformat() + '+08:00'
+                if self.last_heartbeat_at else None),
+            'result_summary': self.result_summary or '',
+            'evidence_refs': self.evidence_refs_json or [],
+            'execution': ({
+                'agent_task_row_id': agent.id,
+                'agent_task_id': agent.task_id,
+                'status': agent.status,
+                'attempt_no': int(agent.attempt_no or 0),
+                'retry_count': int(agent.retry_count or 0),
+                'retry_max': int(agent.retry_max or 0),
+                'last_heartbeat_at': (
+                    str(agent.last_heartbeat_at)
+                    if agent.last_heartbeat_at else None),
+                'lease_expires_at': (
+                    str(agent.lease_expires_at)
+                    if agent.lease_expires_at else None),
+                'lease_expired': lease_expired,
+                'terminal_reason': agent.terminal_reason or '',
+            } if agent else None),
+            'created_at': str(self.created_at) if self.created_at else None,
+            'updated_at': str(self.updated_at) if self.updated_at else None,
+        }
 
 
 class TestTaskReport(db.Model):
@@ -5682,6 +5822,9 @@ class TestTaskReport(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     task_id = db.Column(db.Integer, db.ForeignKey('test_tasks.id'),
                         nullable=False, comment='所属测试任务ID')
+    occurrence_id = db.Column(
+        db.Integer, db.ForeignKey('test_task_occurrences.id'),
+        nullable=True, index=True, comment='周期任务执行实例ID')
     title = db.Column(db.String(200), nullable=False, comment='报告标题')
     content = db.Column(db.Text, comment='报告内容（markdown/html）')
     format = db.Column(db.String(20), default='markdown',
@@ -5722,6 +5865,7 @@ class TestTaskReport(db.Model):
         return {
             'id': self.id,
             'task_id': self.task_id,
+            'occurrence_id': self.occurrence_id,
             'linked_test_report_id': self.linked_test_report_id,
             'title': self.title,
             'content': content,

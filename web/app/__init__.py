@@ -791,6 +791,66 @@ def create_app(config_name=None):
                     except Exception:
                         pass
 
+                    # Hub-owned recurring task templates. Defaults preserve
+                    # every existing TestTask as a one-off legacy task.
+                    for col, coltype in [
+                        ('schedule_enabled', 'BOOLEAN NOT NULL DEFAULT FALSE'),
+                        ('recurrence_type', "VARCHAR(16) NOT NULL DEFAULT 'once'"),
+                        ('recurrence_weekdays_json', 'LONGTEXT DEFAULT NULL'),
+                        ('schedule_timezone', "VARCHAR(64) NOT NULL DEFAULT 'Asia/Shanghai'"),
+                        ('not_before_time', "VARCHAR(5) DEFAULT ''"),
+                        ('due_time', "VARCHAR(5) DEFAULT ''"),
+                        ('auto_dispatch', 'BOOLEAN NOT NULL DEFAULT FALSE'),
+                        ('execution_role', "VARCHAR(32) NOT NULL DEFAULT 'member_work'"),
+                    ]:
+                        try:
+                            conn.execute(text(
+                                f'ALTER TABLE test_tasks ADD COLUMN {col} {coltype}'))
+                            logger.info(f'已添加 test_tasks.{col} 列')
+                        except Exception:
+                            pass
+
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS test_task_occurrences (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                plan_id INTEGER NOT NULL,
+                                test_task_id INTEGER NOT NULL,
+                                occurrence_date DATE NOT NULL,
+                                timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Shanghai',
+                                not_before_at DATETIME NOT NULL,
+                                due_at DATETIME,
+                                status VARCHAR(24) NOT NULL DEFAULT 'scheduled',
+                                assignee_claw_id INTEGER NOT NULL,
+                                mission_stage_id INTEGER,
+                                agent_task_id INTEGER,
+                                workflow_run_id INTEGER,
+                                attempt_count INTEGER NOT NULL DEFAULT 0,
+                                next_action VARCHAR(64) DEFAULT 'wait_not_before',
+                                next_check_at DATETIME,
+                                last_heartbeat_at DATETIME,
+                                result_summary LONGTEXT,
+                                evidence_refs_json LONGTEXT,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                                UNIQUE KEY uq_test_task_occurrence_date
+                                    (plan_id, test_task_id, occurrence_date),
+                                INDEX ix_test_task_occurrence_dispatch
+                                    (plan_id, status, not_before_at),
+                                INDEX ix_test_task_occurrence_task (test_task_id),
+                                INDEX ix_test_task_occurrence_agent_task (agent_task_id),
+                                FOREIGN KEY (plan_id) REFERENCES test_plans(id),
+                                FOREIGN KEY (test_task_id) REFERENCES test_tasks(id),
+                                FOREIGN KEY (assignee_claw_id) REFERENCES openclaw_instances(id),
+                                FOREIGN KEY (mission_stage_id) REFERENCES mission_stages(id),
+                                FOREIGN KEY (agent_task_id) REFERENCES agent_tasks(id),
+                                FOREIGN KEY (workflow_run_id) REFERENCES workflow_runs(id)
+                            )
+                        """))
+                        logger.info('test_task_occurrences 表已创建')
+                    except Exception as e:
+                        logger.info(f'test_task_occurrences 表创建跳过: {e}')
+
                     # test_task_chains 表迁移：任务链执行结论字段（支持富文本）
                     for col, coltype in [
                         ('execution_conclusion', 'LONGTEXT DEFAULT NULL'),
@@ -822,6 +882,26 @@ def create_app(config_name=None):
                         logger.info('test_task_reports 表已创建')
                     except Exception as e:
                         logger.info(f'test_task_reports 表创建跳过: {e}')
+
+                    try:
+                        conn.execute(text(
+                            'ALTER TABLE test_task_reports ADD COLUMN occurrence_id INTEGER DEFAULT NULL'))
+                        logger.info('已添加 test_task_reports.occurrence_id 列')
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute(text(
+                            'ALTER TABLE test_task_reports ADD INDEX '
+                            'ix_test_task_reports_occurrence_id (occurrence_id)'))
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute(text(
+                            'ALTER TABLE test_task_reports ADD CONSTRAINT '
+                            'fk_test_task_reports_occurrence FOREIGN KEY '
+                            '(occurrence_id) REFERENCES test_task_occurrences(id)'))
+                    except Exception:
+                        pass
 
                     # 测试任务Bug上报表
                     try:

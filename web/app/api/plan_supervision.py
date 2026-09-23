@@ -99,7 +99,10 @@ def dispatch_plan_agent_task(plan_id):
     if not claw:
         svc.fail('PLAN_MANAGER_AGENT_REQUIRED', '仅团队主 Agent 可以直接派发执行任务', 403)
     body = payload()
-    allowed = {'command_key', 'test_task_id', 'instruction', 'retry_max'}
+    allowed = {
+        'command_key', 'test_task_id', 'occurrence_id',
+        'instruction', 'retry_max',
+    }
     if set(body) - allowed:
         svc.fail('PLAN_BODY_INVALID', '直接派发包含不支持的字段', 400)
     task_id = body.get('test_task_id')

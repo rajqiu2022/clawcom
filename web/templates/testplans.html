@@ -3296,6 +3296,49 @@ async function openTaskModal(planId, taskId) {
                 <input type="date" id="tm-end" value="${task.end_date || ''}">
             </div>
         </div>
+        <div class="tp-form-group" style="border:1px solid var(--border-color);border-radius:10px;padding:12px 14px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="tm-schedule-enabled" ${task.schedule_enabled?'checked':''} onchange="toggleTaskScheduleFields()">
+                Hub 周期调度
+            </label>
+            <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">启用后每个执行日期生成独立实例；历史结果不会被下一次执行复用。</div>
+            <div id="tm-schedule-fields" style="display:${task.schedule_enabled?'block':'none'};margin-top:12px">
+                <div class="tp-form-row">
+                    <div class="tp-form-group">
+                        <label>重复方式</label>
+                        <select id="tm-recurrence" onchange="toggleTaskScheduleFields()">
+                            <option value="once" ${(task.recurrence_type||'once')==='once'?'selected':''}>单次</option>
+                            <option value="daily" ${task.recurrence_type==='daily'?'selected':''}>每日</option>
+                            <option value="weekly" ${task.recurrence_type==='weekly'?'selected':''}>每周</option>
+                        </select>
+                    </div>
+                    <div class="tp-form-group">
+                        <label>执行职责</label>
+                        <select id="tm-execution-role">
+                            <option value="member_work" ${(task.execution_role||'member_work')==='member_work'?'selected':''}>成员执行</option>
+                            <option value="manager_work" ${task.execution_role==='manager_work'?'selected':''}>测试经理分析/复查</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="tp-form-row">
+                    <div class="tp-form-group">
+                        <label>最早派发时间</label>
+                        <input type="time" id="tm-not-before" value="${task.not_before_time || '00:00'}">
+                    </div>
+                    <div class="tp-form-group">
+                        <label>建议截止时间</label>
+                        <input type="time" id="tm-due-time" value="${task.due_time || '23:59'}">
+                    </div>
+                </div>
+                <div id="tm-weekdays" style="display:${task.recurrence_type==='weekly'?'flex':'none'};gap:10px;flex-wrap:wrap;margin-bottom:10px">
+                    ${['一','二','三','四','五','六','日'].map((label,index)=>`<label style="display:flex;align-items:center;gap:4px;font-size:0.78rem"><input type="checkbox" class="tm-weekday" value="${index}" ${(task.recurrence_weekdays||[]).includes(index)?'checked':''}> 周${label}</label>`).join('')}
+                </div>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                    <input type="checkbox" id="tm-auto-dispatch" ${task.auto_dispatch?'checked':''}>
+                    到点后由 Hub 自动创建 AgentTask 并通知固定执行人
+                </label>
+            </div>
+        </div>
         <div class="tp-form-row">
             <div class="tp-form-group">
                 <label>状态</label>
@@ -3320,6 +3363,17 @@ async function openTaskModal(planId, taskId) {
         if (cb) cb.checked = true;
     });
     if (task.library_id) onLibraryChangeForTask(true);
+    toggleTaskScheduleFields();
+}
+
+function toggleTaskScheduleFields() {
+    const enabled = document.getElementById('tm-schedule-enabled');
+    const fields = document.getElementById('tm-schedule-fields');
+    const recurrence = document.getElementById('tm-recurrence');
+    const weekdays = document.getElementById('tm-weekdays');
+    if (!enabled || !fields) return;
+    fields.style.display = enabled.checked ? 'block' : 'none';
+    if (weekdays) weekdays.style.display = enabled.checked && recurrence && recurrence.value === 'weekly' ? 'flex' : 'none';
 }
 
 async function previewAndSyncTaskCases(planId, taskId) {
@@ -3393,6 +3447,14 @@ async function saveTask(planId, taskId) {
         end_date: document.getElementById('tm-end').value || null,
         status: document.getElementById('tm-status').value,
         progress: parseInt(document.getElementById('tm-progress').value) || 0,
+        schedule_enabled: document.getElementById('tm-schedule-enabled').checked,
+        recurrence_type: document.getElementById('tm-recurrence').value,
+        recurrence_weekdays: Array.from(document.querySelectorAll('.tm-weekday:checked')).map(node => parseInt(node.value)),
+        schedule_timezone: 'Asia/Shanghai',
+        not_before_time: document.getElementById('tm-not-before').value || '00:00',
+        due_time: document.getElementById('tm-due-time').value || '23:59',
+        auto_dispatch: document.getElementById('tm-auto-dispatch').checked,
+        execution_role: document.getElementById('tm-execution-role').value,
     };
 
     try {

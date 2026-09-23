@@ -12,7 +12,8 @@ from app.models import (AgentTask, AgentTeam, AgentTeamMemberStatus,
                         AnalysisRefreshBatch, AuditLog, CapabilityGap,
                         ClawMessage, MissionStage, OpenClawInstance,
                         RequirementItem, TestIteration, TestPlan, TestReport,
-                        TestTask, WorkflowMission, WorkflowMissionDispatch,
+                        TestTask, TestTaskOccurrence, WorkflowMission,
+                        WorkflowMissionDispatch,
                         WorkflowRun, WorkflowRunStep, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
 
@@ -32,6 +33,8 @@ DEFAULT_SCHEDULE = {
     'progress_summaries': ['13:30'],
     'day_close': '18:30',
 }
+TASK_RECURRENCES = {'once', 'daily', 'weekly'}
+OCCURRENCE_TERMINAL = {'completed', 'blocked', 'failed', 'skipped', 'cancelled'}
 
 
 def enabled():
@@ -134,6 +137,82 @@ def schedule_policy(sup):
 def _clock_at(day, value):
     hour, minute = (int(part) for part in str(value).split(':', 1))
     return datetime.combine(day, time(hour=hour, minute=minute))
+
+
+def _task_clock(value, default='00:00'):
+    """Parse persisted HH:MM values; invalid legacy values fail safely."""
+    raw = str(value or default)
+    try:
+        hour, minute = (int(part) for part in raw.split(':', 1))
+        if hour not in range(24) or minute not in range(60):
+            raise ValueError()
+        return time(hour=hour, minute=minute)
+    except (TypeError, ValueError):
+        return _task_clock(default, '00:00') if raw != default else time.min
+
+
+def _task_occurs_on(task, day):
+    if not task.schedule_enabled:
+        return False
+    start = task.start_date or day
+    end = task.end_date or start
+    if day < start or day > end:
+        return False
+    recurrence = task.recurrence_type or 'once'
+    if recurrence == 'once':
+        return day == start
+    if recurrence == 'daily':
+        return True
+    if recurrence == 'weekly':
+        weekdays = task.recurrence_weekdays_json or [start.weekday()]
+        return day.weekday() in {
+            value for value in weekdays if type(value) is int and 0 <= value <= 6}
+    return False
+
+
+def materialize_task_occurrences(sup, now=None):
+    """Create today's immutable occurrences once, without dispatching early."""
+    if not sup:
+        return []
+    now = now or _now()
+    day = now.date()
+    created = []
+    tasks = TestTask.query.filter_by(plan_id=sup.plan_id).order_by(TestTask.id).all()
+    for task in tasks:
+        if not _task_occurs_on(task, day) or not task.assignee_claw_id:
+            continue
+        occurrence = TestTaskOccurrence.query.filter_by(
+            plan_id=sup.plan_id, test_task_id=task.id,
+            occurrence_date=day).first()
+        if occurrence:
+            continue
+        not_before = datetime.combine(
+            day, _task_clock(task.not_before_time, '00:00'))
+        due_at = (datetime.combine(day, _task_clock(task.due_time, '23:59'))
+                  if task.due_time else datetime.combine(day, time(23, 59)))
+        if due_at < not_before:
+            due_at = datetime.combine(day, time(23, 59))
+        occurrence = TestTaskOccurrence(
+            plan_id=sup.plan_id, test_task_id=task.id,
+            occurrence_date=day,
+            timezone=task.schedule_timezone or 'Asia/Shanghai',
+            not_before_at=not_before, due_at=due_at,
+            status='scheduled', assignee_claw_id=task.assignee_claw_id,
+            next_action='wait_not_before', next_check_at=not_before,
+            evidence_refs_json=[])
+        db.session.add(occurrence)
+        db.session.flush()
+        add_event(sup.plan_id, 'task_occurrence_created', [
+            'task-occurrence', task.id, day.isoformat(),
+        ], {
+            'test_task_id': task.id,
+            'occurrence_id': occurrence.id,
+            'occurrence_date': day.isoformat(),
+            'not_before_at': not_before.isoformat() + '+08:00',
+            'assignee_claw_id': task.assignee_claw_id,
+        }, now)
+        created.append(occurrence)
+    return created
 
 
 def next_schedule_at(sup, now=None):
@@ -315,9 +394,10 @@ def _task_assignment(team, task):
         return None
     if task.assignee_claw_id in (
             team.primary_manager_claw_id, team.backup_manager_claw_id):
-        # A test manager owns orchestration and review, never an execution
-        # Stage.  Historical plans may still point a task at the manager; keep
-        # that visible as an assignment gap so it can be reassigned explicitly.
+        # Managers may execute only an explicitly classified analysis/review
+        # occurrence.  Generic execution work remains fenced from the manager.
+        if task.execution_role == 'manager_work':
+            return {'role_key': 'test_manager', 'specialty': 'analysis'}
         return None
     members = [row for row in team.members
                if row.claw_id == task.assignee_claw_id]
@@ -346,8 +426,8 @@ def _task_assignment(team, task):
     return {'role_key': 'test_executor', 'specialty': specialty}
 
 
-def _stage_snapshot(team, task, assignment):
-    return {
+def _stage_snapshot(team, task, assignment, occurrence=None):
+    snapshot = {
         'test_plan_id': task.plan_id,
         'test_task_id': task.id,
         'test_task_name': task.name,
@@ -362,9 +442,20 @@ def _stage_snapshot(team, task, assignment):
             'specialty': assignment['specialty'],
         },
     }
+    if occurrence:
+        snapshot.update({
+            'test_task_occurrence_id': occurrence.id,
+            'occurrence_date': str(occurrence.occurrence_date),
+            'not_before_at': occurrence.not_before_at.isoformat() + '+08:00',
+            'due_at': (occurrence.due_at.isoformat() + '+08:00'
+                       if occurrence.due_at else None),
+            'recurrence_type': task.recurrence_type or 'once',
+            'execution_role': task.execution_role or 'member_work',
+        })
+    return snapshot
 
 
-def sync_plan_stages(sup):
+def sync_plan_stages(sup, now=None):
     """Append immutable stages for newly assigned non-terminal TestTasks."""
     if not sup or not sup.mission_id or not sup.team_id:
         return 0
@@ -373,13 +464,22 @@ def sync_plan_stages(sup):
     binding = db.session.get(AgentTeamMission, sup.mission_id)
     if not team or not mission or not binding:
         fail('PLAN_MISSION_INCOMPLETE', '计划 Mission 缺少团队绑定', 409)
+    now = now or _now()
+    materialize_task_occurrences(sup, now)
     existing = {}
+    existing_occurrences = {}
     for stage in MissionStage.query.filter_by(mission_id=mission.id).all():
-        task_id = (stage.input_snapshot_json or {}).get('test_task_id')
+        snapshot = stage.input_snapshot_json or {}
+        task_id = snapshot.get('test_task_id')
+        occurrence_id = snapshot.get('test_task_occurrence_id')
+        if type(occurrence_id) is int:
+            existing_occurrences[occurrence_id] = stage
         if type(task_id) is int:
             existing[task_id] = stage
     created = 0
     for task in TestTask.query.filter_by(plan_id=sup.plan_id).order_by(TestTask.id).all():
+        if task.schedule_enabled:
+            continue
         if task.id in existing or task.status in ('completed', 'skipped'):
             continue
         assignment = _task_assignment(team, task)
@@ -409,6 +509,57 @@ def sync_plan_stages(sup):
                       'assigned_claw_id': task.assignee_claw_id,
                   })
         created += 1
+    occurrences = (TestTaskOccurrence.query.filter_by(plan_id=sup.plan_id)
+                   .order_by(TestTaskOccurrence.occurrence_date,
+                             TestTaskOccurrence.id).all())
+    for occurrence in occurrences:
+        if occurrence.id in existing_occurrences:
+            occurrence.mission_stage_id = existing_occurrences[occurrence.id].id
+            continue
+        task = db.session.get(TestTask, occurrence.test_task_id)
+        if not task:
+            continue
+        assignment = _task_assignment(team, task)
+        if not assignment:
+            reason = ('manager_work_required'
+                      if task.assignee_claw_id in (
+                          team.primary_manager_claw_id,
+                          team.backup_manager_claw_id)
+                      else 'missing_or_invalid_team_member')
+            add_event(sup.plan_id, 'task_assignment_gap', [
+                'task-occurrence-assignment-gap', occurrence.id,
+                task.assignee_claw_id,
+            ], {
+                'task_id': task.id, 'occurrence_id': occurrence.id,
+                'assignee_claw_id': task.assignee_claw_id, 'reason': reason,
+            })
+            continue
+        snapshot = _stage_snapshot(team, task, assignment, occurrence)
+        stage = MissionStage(
+            mission_id=mission.id,
+            stage_key='test_task_%s_occ_%s' % (
+                task.id, occurrence.occurrence_date.strftime('%Y%m%d')),
+            stage_version=1, role_key=assignment['role_key'],
+            assigned_claw_id=occurrence.assignee_claw_id,
+            state=('ready' if occurrence.not_before_at <= now else 'scheduled'),
+            input_snapshot_json=snapshot, evidence_refs_json=[])
+        db.session.add(stage)
+        db.session.flush()
+        occurrence.mission_stage_id = stage.id
+        if stage.state == 'ready':
+            occurrence.status = 'ready'
+            occurrence.next_action = (
+                'auto_dispatch' if task.auto_dispatch else 'manager_dispatch')
+            occurrence.next_check_at = now
+        add_event(sup.plan_id, 'task_stage_created', [
+            'task-occurrence-stage', occurrence.id,
+        ], {
+            'task_id': task.id, 'occurrence_id': occurrence.id,
+            'stage_key': stage.stage_key,
+            'state': stage.state,
+            'assigned_claw_id': occurrence.assignee_claw_id,
+        })
+        created += 1
     if created:
         db.session.flush()
         stages = MissionStage.query.filter_by(mission_id=mission.id).order_by(
@@ -422,10 +573,10 @@ def sync_plan_stages(sup):
         binding.plan_sha256 = digest(manifest)
         mission.version = int(mission.version or 1) + 1
         context = dict(mission.context_json or {})
-        context['test_task_ids'] = sorted(
+        context['test_task_ids'] = sorted({
             (stage.input_snapshot_json or {}).get('test_task_id')
             for stage in stages
-            if type((stage.input_snapshot_json or {}).get('test_task_id')) is int)
+            if type((stage.input_snapshot_json or {}).get('test_task_id')) is int})
         context['stage_count'] = len(stages)
         mission.context_json = context
     return created
@@ -851,6 +1002,7 @@ def undispatched_stages(sup):
         items.append({
             'stage_key': stage.stage_key,
             'test_task_id': _stage_task_id(stage),
+            'test_task_occurrence_id': _stage_occurrence_id(stage),
             'test_task_name': snapshot.get('test_task_name') or '',
             'executor_claw_id': stage.assigned_claw_id,
             'role_key': stage.role_key,
@@ -874,13 +1026,17 @@ def _agent_task_plan_link(agent_task):
             or payload.get('contract') != _PLAN_AGENT_TASK_CONTRACT):
         return None
     try:
-        return {
+        link = {
             'plan_id': int(payload['test_plan_id']),
             'test_task_id': int(payload['test_task_id']),
             'mission_id': int(payload['mission_id']),
             'mission_stage_id': int(payload['mission_stage_id']),
             'stage_key': str(payload['stage_key']),
         }
+        occurrence_id = payload.get('test_task_occurrence_id')
+        link['occurrence_id'] = (
+            int(occurrence_id) if occurrence_id is not None else None)
+        return link
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -900,6 +1056,137 @@ def _plan_agent_tasks(sup):
                 and link['mission_id'] == sup.mission_id):
             indexed.setdefault(link['mission_stage_id'], row)
     return indexed
+
+
+def _linked_occurrence(link):
+    occurrence_id = link.get('occurrence_id') if link else None
+    if occurrence_id is None:
+        return None
+    occurrence = db.session.get(TestTaskOccurrence, occurrence_id)
+    if (not occurrence or occurrence.plan_id != link['plan_id']
+            or occurrence.test_task_id != link['test_task_id']
+            or occurrence.mission_stage_id != link['mission_stage_id']):
+        fail('PLAN_AGENT_TASK_LINK_INVALID',
+             'AgentTask 与周期执行实例绑定不一致', 409)
+    return occurrence
+
+
+def _create_plan_agent_task(sup, task, stage, command_key, instruction,
+                            retry_max, occurrence=None):
+    """Create one bounded ordinary AgentTask and project dispatch truth."""
+    executor_claw_id = (
+        occurrence.assignee_claw_id if occurrence else task.assignee_claw_id)
+    suffix_seed = '%s:%s' % (command_key, occurrence.id if occurrence else '')
+    task_id = 'plan_%s_test_task_%s_%s' % (
+        sup.plan_id, task.id,
+        hashlib.sha256(suffix_seed.encode()).hexdigest()[:16])
+    payload = {
+        'contract': _PLAN_AGENT_TASK_CONTRACT,
+        'test_plan_id': sup.plan_id,
+        'test_task_id': task.id,
+        'mission_id': sup.mission_id,
+        'mission_stage_id': stage.id,
+        'stage_key': stage.stage_key,
+        'objective': task.name,
+        'description': task.description or '',
+        'instruction': instruction,
+        'priority': task.priority,
+        'task_type': task.task_type,
+        'execution_role': task.execution_role or 'member_work',
+        'acceptance': {
+            'result_contract': 'ordinary_agent_task',
+            'report_to_hub': True,
+        },
+    }
+    if occurrence:
+        payload.update({
+            'test_task_occurrence_id': occurrence.id,
+            'occurrence_date': str(occurrence.occurrence_date),
+            'not_before_at': occurrence.not_before_at.isoformat() + '+08:00',
+            'due_at': (occurrence.due_at.isoformat() + '+08:00'
+                       if occurrence.due_at else None),
+        })
+    agent_task = AgentTask(
+        task_id=task_id,
+        claw_id=executor_claw_id,
+        task_type='test_plan_agent_task',
+        command=instruction or (
+            ('以测试经理身份完成分析/复查，不执行成员型测试动作：'
+             if task.execution_role == 'manager_work' else
+             '执行固定分配的测试任务：')
+            + ('测试计划 #%s，任务 #%s「%s」。完成后返回结构化结论、'
+               'outputs 与 evidence。' % (sup.plan_id, task.id, task.name))),
+        payload=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        status='pending',
+        retry_max=retry_max,
+    )
+    db.session.add(agent_task)
+    db.session.flush()
+    stage.state = 'dispatched'
+    stage.last_reason_code = 'ordinary_agent_task_dispatched'
+    stage.fencing_token = int(stage.fencing_token or 0) + 1
+    stage.version = int(stage.version or 1) + 1
+    if occurrence:
+        occurrence.status = 'dispatched'
+        occurrence.agent_task_id = agent_task.id
+        occurrence.attempt_count = max(
+            int(occurrence.attempt_count or 0), 1)
+        occurrence.next_action = 'await_claim'
+        occurrence.next_check_at = agent_task.created_at or _now()
+    add_event(sup.plan_id, 'task_agent_dispatched', [
+        'task-agent-dispatched', task.id,
+        occurrence.id if occurrence else 0, agent_task.task_id,
+    ], {
+        'task_id': task.id,
+        'occurrence_id': occurrence.id if occurrence else None,
+        'stage_key': stage.stage_key,
+        'executor_claw_id': executor_claw_id,
+        'agent_task_id': agent_task.task_id,
+    })
+    return agent_task
+
+
+def promote_and_dispatch_due_occurrences(sup, now=None):
+    """Promote due instances and auto-dispatch only their fixed assignee."""
+    if not sup or not sup.mission_id:
+        return []
+    now = now or _now()
+    wake_ids = []
+    rows = (TestTaskOccurrence.query.filter(
+        TestTaskOccurrence.plan_id == sup.plan_id,
+        TestTaskOccurrence.status.in_(('scheduled', 'ready')),
+        TestTaskOccurrence.not_before_at <= now,
+    ).order_by(TestTaskOccurrence.id).with_for_update().all())
+    ordinary = _plan_agent_tasks(sup)
+    for occurrence in rows:
+        task = db.session.get(TestTask, occurrence.test_task_id)
+        stage = db.session.get(MissionStage, occurrence.mission_stage_id)
+        if not task or not stage or stage.mission_id != sup.mission_id:
+            continue
+        if occurrence.status == 'scheduled':
+            occurrence.status = 'ready'
+            occurrence.next_action = (
+                'auto_dispatch' if task.auto_dispatch else 'manager_dispatch')
+            occurrence.next_check_at = now
+            if stage.state == 'scheduled':
+                stage.state = 'ready'
+                stage.last_reason_code = 'occurrence_not_before_reached'
+                stage.version = int(stage.version or 1) + 1
+            add_event(sup.plan_id, 'task_occurrence_due', [
+                'task-occurrence-due', occurrence.id,
+            ], {'task_id': task.id, 'occurrence_id': occurrence.id}, now)
+        if not task.auto_dispatch or stage.state != 'ready':
+            continue
+        active = ordinary.get(stage.id)
+        if active and active.status in ('pending', 'running'):
+            continue
+        agent_task = _create_plan_agent_task(
+            sup, task, stage,
+            'auto-occurrence:%s' % occurrence.id,
+            '', 2, occurrence=occurrence)
+        ordinary[stage.id] = agent_task
+        wake_ids.append(occurrence.assignee_claw_id)
+    return sorted(set(wake_ids))
 
 
 def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
@@ -932,15 +1219,38 @@ def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
         id=test_task_id, plan_id=sup.plan_id).with_for_update().first()
     if not task:
         fail('TEST_TASK_NOT_FOUND', '测试任务不存在', 404)
-    if task.status not in ('assigned', 'pending'):
+    if (not task.schedule_enabled
+            and task.status not in ('assigned', 'pending')):
         fail('TEST_TASK_NOT_DISPATCHABLE', '仅新分配或待开始任务可直接派发', 409)
-    stage = MissionStage.query.filter_by(
-        mission_id=sup.mission_id,
-        stage_key='test_task_%s' % task.id,
-        stage_version=1,
-    ).with_for_update().first()
-    if (not stage or stage.assigned_claw_id != task.assignee_claw_id
-            or not task.assignee_claw_id):
+    occurrence = None
+    if task.schedule_enabled:
+        occurrence_id = body.get('occurrence_id')
+        if occurrence_id is None:
+            occurrence = (TestTaskOccurrence.query.filter_by(
+                plan_id=sup.plan_id, test_task_id=task.id,
+                occurrence_date=_now().date()).with_for_update().first())
+        elif type(occurrence_id) is int:
+            occurrence = TestTaskOccurrence.query.filter_by(
+                id=occurrence_id, plan_id=sup.plan_id,
+                test_task_id=task.id).with_for_update().first()
+        if not occurrence:
+            fail('TEST_TASK_OCCURRENCE_REQUIRED', '周期任务须指定有效执行实例', 409)
+        if occurrence.not_before_at > _now():
+            fail('TEST_TASK_NOT_DUE', '任务尚未到允许派发时间', 409)
+        if occurrence.status in OCCURRENCE_TERMINAL:
+            fail('TEST_TASK_OCCURRENCE_TERMINAL', '该执行实例已经结束', 409)
+        stage = db.session.get(MissionStage, occurrence.mission_stage_id)
+    else:
+        stage = MissionStage.query.filter_by(
+            mission_id=sup.mission_id,
+            stage_key='test_task_%s' % task.id,
+            stage_version=1,
+        ).with_for_update().first()
+    expected_assignee = (
+        occurrence.assignee_claw_id if occurrence else
+        task.assignee_claw_id if task else None)
+    if (not stage or stage.assigned_claw_id != expected_assignee
+            or not expected_assignee):
         fail('TEST_TASK_STAGE_INVALID', '任务缺少有效的团队执行阶段或执行 Agent', 409)
     if stage.workflow_run_id:
         fail('TEST_TASK_ALREADY_FLOW_DISPATCHED', '任务已经通过 Workflow 派发', 409)
@@ -954,59 +1264,17 @@ def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
         instruction = str(body.get('instruction') or '').strip()
         if len(instruction) > 4000:
             fail('TEST_TASK_INSTRUCTION_INVALID', '执行说明不能超过 4000 字', 400)
-        command_key = str(body.get('command_key') or '')
-        task_id = 'plan_%s_test_task_%s_%s' % (
-            sup.plan_id, task.id,
-            hashlib.sha256(command_key.encode()).hexdigest()[:16])
-        payload = {
-            'contract': _PLAN_AGENT_TASK_CONTRACT,
-            'test_plan_id': sup.plan_id,
-            'test_task_id': task.id,
-            'mission_id': sup.mission_id,
-            'mission_stage_id': stage.id,
-            'stage_key': stage.stage_key,
-            'objective': task.name,
-            'description': task.description or '',
-            'instruction': instruction,
-            'priority': task.priority,
-            'task_type': task.task_type,
-            'acceptance': {
-                'result_contract': 'ordinary_agent_task',
-                'report_to_hub': True,
-            },
-        }
-        agent_task = AgentTask(
-            task_id=task_id,
-            claw_id=task.assignee_claw_id,
-            task_type='test_plan_agent_task',
-            command=instruction or (
-                '执行测试计划 #%s 的任务 #%s：%s。完成后返回结构化结论、'
-                'outputs 与 evidence。' % (sup.plan_id, task.id, task.name)),
-            payload=json.dumps(payload, ensure_ascii=False, sort_keys=True),
-            status='pending',
-            retry_max=retry_max,
-        )
-        db.session.add(agent_task)
-        db.session.flush()
-        stage.state = 'dispatched'
-        stage.last_reason_code = 'ordinary_agent_task_dispatched'
-        stage.fencing_token = int(stage.fencing_token or 0) + 1
-        stage.version = int(stage.version or 1) + 1
-        add_event(sup.plan_id, 'task_agent_dispatched', [
-            'task-agent-dispatched', task.id, agent_task.task_id,
-        ], {
-            'task_id': task.id,
-            'stage_key': stage.stage_key,
-            'executor_claw_id': task.assignee_claw_id,
-            'agent_task_id': agent_task.task_id,
-        })
+        agent_task = _create_plan_agent_task(
+            sup, task, stage, str(body.get('command_key') or ''),
+            instruction, retry_max, occurrence=occurrence)
         return {
             'dispatched': True,
             'execution_mode': 'ordinary_agent_task',
             'test_task_id': task.id,
+            'occurrence_id': occurrence.id if occurrence else None,
             'stage_key': stage.stage_key,
             'agent_task': agent_task.to_dict(),
-            'wake_claw_id': task.assignee_claw_id,
+            'wake_claw_id': expected_assignee,
         }
 
     return receipt(sup, 'dispatch_agent_task', body, apply)
@@ -1019,14 +1287,28 @@ def record_agent_task_claim(agent_task, now=None):
     now = now or _now()
     task = db.session.get(TestTask, link['test_task_id'])
     stage = db.session.get(MissionStage, link['mission_stage_id'])
+    occurrence = _linked_occurrence(link)
     sup = locked(link['plan_id'])
+    expected_assignee = (
+        occurrence.assignee_claw_id if occurrence else
+        task.assignee_claw_id if task else None)
     if (not task or not stage or not sup
             or task.plan_id != link['plan_id']
             or stage.mission_id != link['mission_id']
-            or agent_task.claw_id != task.assignee_claw_id
+            or agent_task.claw_id != expected_assignee
             or stage.assigned_claw_id != agent_task.claw_id):
         fail('PLAN_AGENT_TASK_LINK_INVALID', 'AgentTask 与计划阶段绑定不一致', 409)
-    if task.status in ('assigned', 'pending'):
+    if occurrence:
+        occurrence.status = 'running'
+        occurrence.agent_task_id = agent_task.id
+        occurrence.attempt_count = max(
+            int(occurrence.attempt_count or 0),
+            int(agent_task.attempt_no or 0), 1)
+        occurrence.last_heartbeat_at = (
+            agent_task.last_heartbeat_at or now)
+        occurrence.next_action = 'await_result'
+        occurrence.next_check_at = agent_task.lease_expires_at
+    elif task.status in ('assigned', 'pending'):
         task.status = 'in_progress'
         task.progress = max(1, int(task.progress or 0))
     stage.state = 'running'
@@ -1037,6 +1319,7 @@ def record_agent_task_claim(agent_task, now=None):
         int(agent_task.attempt_no or 0),
     ], {
         'task_id': task.id,
+        'occurrence_id': occurrence.id if occurrence else None,
         'mission_id': sup.mission_id,
         'agent_task_id': agent_task.task_id,
         'executor_claw_id': agent_task.claw_id,
@@ -1057,18 +1340,34 @@ def record_agent_task_retry_pending(agent_task, now=None):
     now = now or _now()
     task = db.session.get(TestTask, link['test_task_id'])
     stage = db.session.get(MissionStage, link['mission_stage_id'])
+    occurrence = _linked_occurrence(link)
     sup = locked(link['plan_id'])
+    expected_assignee = (
+        occurrence.assignee_claw_id if occurrence else
+        task.assignee_claw_id if task else None)
     if (not task or not stage or not sup
             or task.plan_id != link['plan_id']
             or stage.mission_id != link['mission_id']
-            or agent_task.claw_id != task.assignee_claw_id
+            or agent_task.claw_id != expected_assignee
             or stage.assigned_claw_id != agent_task.claw_id):
         fail('PLAN_AGENT_TASK_LINK_INVALID',
              'AgentTask 与计划阶段绑定不一致', 409)
-    if task.status in ('completed', 'skipped'):
+    if occurrence and occurrence.status in ('completed', 'skipped'):
         return task
-    changed = task.status != 'pending' or stage.state != 'dispatched'
-    task.status = 'pending'
+    if not occurrence and task.status in ('completed', 'skipped'):
+        return task
+    changed = ((occurrence.status != 'dispatched' if occurrence else
+                task.status != 'pending') or stage.state != 'dispatched')
+    if occurrence:
+        occurrence.status = 'dispatched'
+        occurrence.attempt_count = max(
+            int(occurrence.attempt_count or 0),
+            int(agent_task.attempt_no or 0), 1)
+        occurrence.last_heartbeat_at = None
+        occurrence.next_action = 'retry_pending'
+        occurrence.next_check_at = now
+    else:
+        task.status = 'pending'
     stage.state = 'dispatched'
     stage.last_reason_code = 'ordinary_agent_task_retry_pending'
     if changed:
@@ -1078,12 +1377,30 @@ def record_agent_task_retry_pending(agent_task, now=None):
         int(agent_task.attempt_no or 0), int(agent_task.retry_count or 0),
     ], {
         'task_id': task.id,
+        'occurrence_id': occurrence.id if occurrence else None,
         'agent_task_id': agent_task.task_id,
         'executor_claw_id': agent_task.claw_id,
         'retry_count': int(agent_task.retry_count or 0),
         'retry_max': int(agent_task.retry_max or 0),
     }, now)
     return task
+
+
+def record_agent_task_heartbeat(agent_task, now=None):
+    """Refresh occurrence execution truth without emitting noisy events."""
+    link = _agent_task_plan_link(agent_task)
+    if not link or not link.get('occurrence_id'):
+        return None
+    occurrence = _linked_occurrence(link)
+    now = now or _now()
+    occurrence.status = 'running'
+    occurrence.last_heartbeat_at = agent_task.last_heartbeat_at or now
+    occurrence.next_action = 'await_result'
+    occurrence.next_check_at = agent_task.lease_expires_at
+    occurrence.attempt_count = max(
+        int(occurrence.attempt_count or 0),
+        int(agent_task.attempt_no or 0), 1)
+    return occurrence
 
 
 def record_agent_task_terminal(agent_task, result, status, now=None):
@@ -1093,22 +1410,45 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
     now = now or _now()
     task = db.session.get(TestTask, link['test_task_id'])
     stage = db.session.get(MissionStage, link['mission_stage_id'])
+    occurrence = _linked_occurrence(link)
     sup = locked(link['plan_id'])
-    if not task or not stage or not sup:
+    expected_assignee = (
+        occurrence.assignee_claw_id if occurrence else
+        task.assignee_claw_id if task else None)
+    if (not task or not stage or not sup
+            or task.plan_id != link['plan_id']
+            or stage.mission_id != link['mission_id']
+            or agent_task.claw_id != expected_assignee
+            or stage.assigned_claw_id != agent_task.claw_id):
         fail('PLAN_AGENT_TASK_LINK_INVALID', 'AgentTask 关联计划已不存在', 409)
     result = result if isinstance(result, dict) else {}
     provider_status = str(result.get('status') or '').lower()
     summary = str(result.get('summary') or result.get('reason') or '')[:8000]
     if status == 'completed' and provider_status == 'skipped':
-        task.status, stage.state = 'skipped', 'skipped'
+        projected, stage.state = 'skipped', 'skipped'
     elif status == 'completed':
-        task.status, stage.state = 'completed', 'completed'
-        task.progress = 100
+        projected, stage.state = 'completed', 'completed'
     elif status == 'blocked':
-        task.status, stage.state = 'blocked', 'blocked'
+        projected, stage.state = 'blocked', 'blocked'
     else:
-        task.status, stage.state = 'blocked', 'failed'
-    task.result_summary = summary
+        projected, stage.state = 'failed', 'failed'
+    if occurrence:
+        occurrence.status = projected
+        occurrence.result_summary = summary
+        occurrence.last_heartbeat_at = (
+            agent_task.last_heartbeat_at or now)
+        occurrence.next_action = (
+            'none' if projected in ('completed', 'skipped')
+            else 'manager_review')
+        occurrence.next_check_at = None
+        occurrence.attempt_count = max(
+            int(occurrence.attempt_count or 0),
+            int(agent_task.attempt_no or 0), 1)
+    else:
+        task.status = ('blocked' if projected == 'failed' else projected)
+        if projected == 'completed':
+            task.progress = 100
+        task.result_summary = summary
     stage.last_reason_code = str(
         result.get('error_code') or status or 'agent_task_terminal')[:80]
     evidence = result.get('evidence')
@@ -1120,15 +1460,19 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
             'sha256': digest(result),
         })
         stage.evidence_refs_json = refs[-100:]
+        if occurrence:
+            occurrence.evidence_refs_json = list(stage.evidence_refs_json)
     stage.version = int(stage.version or 1) + 1
     add_event(sup.plan_id, 'task_agent_terminal', [
         'task-agent-terminal', agent_task.task_id,
         int(agent_task.attempt_no or 0), status,
     ], {
         'task_id': task.id,
+        'occurrence_id': occurrence.id if occurrence else None,
         'agent_task_id': agent_task.task_id,
         'status': status,
         'test_task_status': task.status,
+        'occurrence_status': occurrence.status if occurrence else None,
         'summary': summary,
     }, now)
     return task
@@ -1146,10 +1490,15 @@ def reconcile_ordinary_task_truth(sup, now=None):
         agent_task = ordinary_tasks.get(stage.id)
         task_id = _stage_task_id(stage)
         task = db.session.get(TestTask, task_id) if task_id else None
+        occurrence_id = _stage_occurrence_id(stage)
+        occurrence = (db.session.get(TestTaskOccurrence, occurrence_id)
+                      if occurrence_id else None)
         if not agent_task or not task:
             continue
         if agent_task.status == 'pending':
-            if task.status == 'in_progress' or stage.state == 'running':
+            if ((occurrence and occurrence.status == 'running')
+                    or (not occurrence and task.status == 'in_progress')
+                    or stage.state == 'running'):
                 record_agent_task_retry_pending(agent_task, now=now)
                 count += 1
             continue
@@ -1157,7 +1506,9 @@ def reconcile_ordinary_task_truth(sup, now=None):
             if (agent_task.lease_expires_at
                     and agent_task.lease_expires_at <= now):
                 continue
-            if task.status != 'in_progress' or stage.state != 'running':
+            if ((occurrence and occurrence.status != 'running')
+                    or (not occurrence and task.status != 'in_progress')
+                    or stage.state != 'running'):
                 record_agent_task_claim(agent_task, now=now)
                 count += 1
             continue
@@ -1170,7 +1521,9 @@ def reconcile_ordinary_task_truth(sup, now=None):
         if not terminal:
             continue
         projected_status, task_status, stage_state = terminal
-        if task.status == task_status and stage.state == stage_state:
+        truth_status = occurrence.status if occurrence else task.status
+        expected_status = projected_status if occurrence else task_status
+        if truth_status == expected_status and stage.state == stage_state:
             continue
         try:
             result = json.loads(agent_task.result or '{}')
@@ -1350,6 +1703,12 @@ def _stage_task_id(stage):
     return value if type(value) is int and value > 0 else None
 
 
+def _stage_occurrence_id(stage):
+    value = ((stage.input_snapshot_json or {}).get(
+        'test_task_occurrence_id') if stage else None)
+    return value if type(value) is int and value > 0 else None
+
+
 def task_dispatch_receipts(sup):
     """Read authoritative Mission/Run/claim state for supervised TestTasks."""
     if not sup or not sup.mission_id:
@@ -1374,6 +1733,7 @@ def task_dispatch_receipts(sup):
             and ordinary.status != 'pending')
         items.append({
             'task_id': task_id,
+            'occurrence_id': _stage_occurrence_id(stage),
             'stage_key': stage.stage_key,
             'stage_state': stage.state,
             'executor_claw_id': stage.assigned_claw_id,
@@ -1403,8 +1763,9 @@ def task_dispatch_receipt(task):
     sup = locked(task.plan_id)
     if not sup:
         return None
-    return next((row for row in task_dispatch_receipts(sup)
-                 if row['task_id'] == task.id), None)
+    rows = [row for row in task_dispatch_receipts(sup)
+            if row['task_id'] == task.id]
+    return rows[-1] if rows else None
 
 
 def require_task_dispatch_receipt(task):
@@ -1412,8 +1773,9 @@ def require_task_dispatch_receipt(task):
     sup = locked(task.plan_id)
     if not sup:
         return None
-    receipt = next((row for row in task_dispatch_receipts(sup)
-                    if row['task_id'] == task.id), None)
+    rows = [row for row in task_dispatch_receipts(sup)
+            if row['task_id'] == task.id]
+    receipt = rows[-1] if rows else None
     if (not receipt or not receipt['claimed']
             or not (receipt['workflow_run_id'] or receipt['agent_task_id'])):
         fail('TEST_TASK_DISPATCH_RECEIPT_REQUIRED',
@@ -1427,14 +1789,28 @@ def record_workflow_claim(run_id, claw_id, worker_id, now=None):
     if not stage or stage.assigned_claw_id != claw_id:
         return None
     task_id = _stage_task_id(stage)
+    occurrence_id = _stage_occurrence_id(stage)
+    occurrence = (db.session.get(TestTaskOccurrence, occurrence_id)
+                  if occurrence_id else None)
     if not task_id:
         return None
     sup = PlanSupervisor.query.filter_by(mission_id=stage.mission_id).with_for_update().first()
     task = db.session.get(TestTask, task_id)
+    expected_assignee = (
+        occurrence.assignee_claw_id if occurrence else
+        task.assignee_claw_id if task else None)
     if (not sup or not task or task.plan_id != sup.plan_id
-            or task.assignee_claw_id != claw_id):
+            or expected_assignee != claw_id):
         return None
-    if task.status in ('assigned', 'pending'):
+    if occurrence:
+        occurrence.status = 'running'
+        occurrence.workflow_run_id = run_id
+        occurrence.attempt_count = max(
+            int(occurrence.attempt_count or 0), 1)
+        occurrence.last_heartbeat_at = now or _now()
+        occurrence.next_action = 'await_result'
+        occurrence.next_check_at = None
+    elif task.status in ('assigned', 'pending'):
         task.status = 'in_progress'
         task.progress = max(1, int(task.progress or 0))
     if stage.state in ('ready', 'dispatched'):
@@ -1444,6 +1820,7 @@ def record_workflow_claim(run_id, claw_id, worker_id, now=None):
     add_event(sup.plan_id, 'task_claimed',
               ['task-claimed', task.id, run_id, claw_id, worker_id], {
                   'task_id': task.id,
+                  'occurrence_id': occurrence.id if occurrence else None,
                   'mission_id': sup.mission_id,
                   'run_id': run_id,
                   'executor_claw_id': claw_id,
@@ -1462,6 +1839,9 @@ def record_workflow_terminal(run_id, now=None):
     if not stage:
         return None
     task_id = _stage_task_id(stage)
+    occurrence_id = _stage_occurrence_id(stage)
+    occurrence = (db.session.get(TestTaskOccurrence, occurrence_id)
+                  if occurrence_id else None)
     sup = PlanSupervisor.query.filter_by(
         mission_id=stage.mission_id).with_for_update().first()
     task = db.session.get(TestTask, task_id) if task_id else None
@@ -1477,16 +1857,30 @@ def record_workflow_terminal(run_id, now=None):
     }
     stage_state, task_status, progress = mapping.get(
         run.status, ('failed', 'blocked', int(task.progress or 0)))
-    changed = (stage.state != stage_state or task.status != task_status
-               or (progress == 100 and int(task.progress or 0) != 100))
+    changed = (stage.state != stage_state
+               or (occurrence.status != stage_state if occurrence else
+                   task.status != task_status)
+               or (not occurrence and progress == 100
+                   and int(task.progress or 0) != 100))
     stage.state = stage_state
     stage.last_reason_code = ('workflow_run_%s' % run.status)[:80]
     if changed:
         stage.version = int(stage.version or 1) + 1
-    task.status = task_status
-    task.progress = progress
-    if run.summary:
-        task.result_summary = str(run.summary)[:8000]
+    if occurrence:
+        occurrence.status = stage_state
+        occurrence.workflow_run_id = run.id
+        occurrence.next_action = (
+            'none' if stage_state in ('completed', 'skipped')
+            else 'manager_review')
+        occurrence.next_check_at = None
+        occurrence.last_heartbeat_at = now
+        if run.summary:
+            occurrence.result_summary = str(run.summary)[:8000]
+    else:
+        task.status = task_status
+        task.progress = progress
+        if run.summary:
+            task.result_summary = str(run.summary)[:8000]
     refs = list(stage.evidence_refs_json or [])
     marker = {'type': 'workflow_run_terminal', 'run_id': run.id,
               'status': run.status}
@@ -1495,12 +1889,16 @@ def record_workflow_terminal(run_id, now=None):
                for row in refs if isinstance(row, dict)):
         refs.append(marker)
         stage.evidence_refs_json = refs[-100:]
+        if occurrence:
+            occurrence.evidence_refs_json = list(stage.evidence_refs_json)
     add_event(sup.plan_id, 'workflow_terminal_projected', [
         'workflow-terminal-projected', run.id, run.status,
     ], {
         'run_id': run.id, 'stage_key': stage.stage_key,
         'stage_state': stage.state, 'task_id': task.id,
         'test_task_status': task.status,
+        'occurrence_id': occurrence.id if occurrence else None,
+        'occurrence_status': occurrence.status if occurrence else None,
     }, now)
     return task
 
@@ -1529,15 +1927,34 @@ def stage_truth_snapshot(sup):
                 'allowed_actions': [], 'next_check_at': None}
     stages = MissionStage.query.filter_by(mission_id=sup.mission_id).order_by(
         MissionStage.id).all()
+    ordinary_tasks = _plan_agent_tasks(sup)
     rows, gaps = [], []
     for stage in stages:
         task_id = _stage_task_id(stage)
         task = db.session.get(TestTask, task_id) if task_id else None
+        occurrence_id = _stage_occurrence_id(stage)
+        occurrence = (db.session.get(TestTaskOccurrence, occurrence_id)
+                      if occurrence_id else None)
+        ordinary = ordinary_tasks.get(stage.id)
         item = {
             'stage_key': stage.stage_key, 'state': stage.state,
             'test_task_id': task_id,
             'test_task_status': task.status if task else None,
+            'occurrence_id': occurrence_id,
+            'occurrence_status': occurrence.status if occurrence else None,
+            'occurrence_date': (str(occurrence.occurrence_date)
+                                if occurrence else None),
             'workflow_run_id': stage.workflow_run_id,
+            'agent_task_id': ordinary.task_id if ordinary else None,
+            'agent_task_status': ordinary.status if ordinary else None,
+            'attempt_no': int(ordinary.attempt_no or 0) if ordinary else None,
+            'last_heartbeat_at': (
+                str(ordinary.last_heartbeat_at)
+                if ordinary and ordinary.last_heartbeat_at else None),
+            'next_action': occurrence.next_action if occurrence else None,
+            'next_check_at': (
+                str(occurrence.next_check_at)
+                if occurrence and occurrence.next_check_at else None),
             'executor_claw_id': stage.assigned_claw_id,
             'reason_code': stage.last_reason_code or '',
         }
@@ -1599,6 +2016,7 @@ def sweep(now=None):
     for plan_id in ids:
         sup = locked(plan_id)
         plan = db.session.get(TestPlan, plan_id)
+        member_wake_ids = []
         repair_recoverable_state(sup, now)
         # Ordinary AgentTasks can become terminal in the timeout watcher rather
         # than through the result endpoint.  Reconcile them even while the
@@ -1606,6 +2024,12 @@ def sweep(now=None):
         reconcile_ordinary_task_truth(sup, now)
         if available(sup, now):
             ensure_manager_tenure(sup, now)
+            # Scheduling is Hub-owned: materialize exactly one dated instance,
+            # enforce not_before, then create a durable AgentTask for templates
+            # that explicitly opted into automatic dispatch.
+            sync_plan_stages(sup, now=now)
+            member_wake_ids = promote_and_dispatch_due_occurrences(
+                sup, now=now)
             enqueue_schedule_ticks(sup, now)
             reconcile_plan_truth(sup, now)
             observations = dict(sup.observations_json or {})
@@ -1648,6 +2072,9 @@ def sweep(now=None):
         if target:
             count += 1
             wake(target)
+        for member_claw_id in member_wake_ids:
+            count += 1
+            wake(member_claw_id)
     return count
 
 
