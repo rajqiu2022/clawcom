@@ -5,7 +5,8 @@ from unittest.mock import patch
 import test_agent_teams_api as fixtures
 from app import db
 from app.models import (AgentTeam, ClawMessage, MissionStage, TestPlan,
-                        TestTask, WorkflowRun, WorkflowMission)
+                        TestPlanReport, TestReport, TestTask, WorkflowRun,
+                        WorkflowMission)
 from app.models_plan_supervision import PlanSupervisor
 
 
@@ -129,6 +130,9 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(day['items'][0]['total_tasks'],6)
         self.assertEqual(day['items'][0]['completed_tasks'],1)
         self.assertEqual(day['items'][0]['progress'],17)
+        self.assertEqual(day['items'][0]['report_count'], 0)
+        self.assertEqual(day['items'][0]['report_url'],
+                         '/testplans?plan_id=%s&report=1' % plan['id'])
         self.assertIsNone(day['items'][0]['supervision'])
         week = self.client.get(self.url+'?period=week&date=2026-09-27',headers=self._headers()).json
         self.assertEqual(week['start_date'],'2026-09-21')
@@ -138,6 +142,25 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(all_tasks['summary']['total'],6)
         self.assertEqual(len(all_tasks['items'][0]['tasks']),5)
         self.assertEqual(all_tasks['items'][0]['url'],'/testplans?plan_id=%s' % plan['id'])
+
+    def test_overview_exposes_report_count_and_legacy_report(self):
+        first = self.create(name='has report rows')
+        second = self.create(name='legacy report only')
+        db.session.add_all([
+            TestPlanReport(plan_id=first['id'], title='报告一', content='one'),
+            TestPlanReport(plan_id=first['id'], title='报告二', content='two'),
+            TestReport(title='全局报告', content='three', report_type='functional',
+                       project_id=self.project.id,
+                       source_ref_type='test_plan', source_ref_id=first['id']),
+        ])
+        legacy = db.session.get(TestPlan, second['id'])
+        legacy.report_content = '# 旧版报告'
+        db.session.commit()
+
+        items = self.client.get(self.url+'?period=all', headers=self._headers()).json['items']
+        counts = {item['id']: item['report_count'] for item in items}
+        self.assertEqual(counts[first['id']], 3)
+        self.assertEqual(counts[second['id']], 1)
 
     def test_other_team_unbound_plans_pagination_and_input_errors(self):
         for i in range(7): self.create(name='plan '+str(i))

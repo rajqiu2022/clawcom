@@ -2,7 +2,8 @@
 from datetime import date, timedelta
 from sqlalchemy import and_, or_, func
 from app import db
-from app.models import TestPlan, TestTask, TestIteration, OpenClawInstance, _now
+from app.models import (TestPlan, TestPlanReport, TestReport, TestTask,
+                        TestIteration, OpenClawInstance, _now)
 from app.services.agent_teams import TeamError, load_team, integer
 
 
@@ -116,6 +117,16 @@ def overview(team, period, raw_date, limit, offset):
     unscheduled = dict(db.session.query(TestTask.plan_id, func.count(TestTask.id)).filter(
         TestTask.plan_id.in_(ids), TestTask.start_date.is_(None), TestTask.end_date.is_(None)).group_by(
             TestTask.plan_id).all()) if ids else {}
+    legacy_report_counts = dict(db.session.query(
+        TestPlanReport.plan_id, func.count(TestPlanReport.id)
+    ).filter(TestPlanReport.plan_id.in_(ids)).group_by(
+        TestPlanReport.plan_id).all()) if ids else {}
+    global_report_counts = dict(db.session.query(
+        TestReport.source_ref_id, func.count(TestReport.id)
+    ).filter(TestReport.source_ref_type == 'test_plan',
+             TestReport.source_ref_id.in_(ids),
+             TestReport.is_deleted.is_(False)).group_by(
+        TestReport.source_ref_id).all()) if ids else {}
     grouped = db.session.query(TestTask.plan_id, TestTask.status, func.count(TestTask.id)).filter(
         TestTask.plan_id.in_(ids)).group_by(TestTask.plan_id, TestTask.status).all() if ids else []
     stats = {}
@@ -132,9 +143,17 @@ def overview(team, period, raw_date, limit, offset):
                                                    TestTask.priority, TestTask.id).limit(5).all()
         supervisor = supervisors.get(plan.id)
         supervisor_data = supervisor.to_dict() if supervisor else None
+        legacy_report_count = legacy_report_counts.get(plan.id, 0)
+        # Old plans may still carry their only report in TestPlan.report_content.
+        # Treat that as one report without mutating data during a read-only overview.
+        if not legacy_report_count and plan.report_content and plan.report_content.strip():
+            legacy_report_count = 1
+        report_count = legacy_report_count + global_report_counts.get(plan.id, 0)
         items.append({'id': plan.id, 'name': plan.name, 'status': plan.status,
             'team_id': team.id, 'start_date': str(plan.start_date), 'end_date': str(plan.end_date),
             'url': '/testplans?plan_id=%s' % plan.id,
+            'report_url': '/testplans?plan_id=%s&report=1' % plan.id,
+            'report_count': report_count,
             'total_tasks': plan_total, 'completed_tasks': all_counts.get('completed', 0),
             'progress': round(all_counts.get('completed', 0) / plan_total * 100) if plan_total else 0,
             'period_tasks': period_counts.get(plan.id, 0),
