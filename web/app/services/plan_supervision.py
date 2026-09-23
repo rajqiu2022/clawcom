@@ -1045,6 +1045,47 @@ def record_agent_task_claim(agent_task, now=None):
     return task
 
 
+def record_agent_task_retry_pending(agent_task, now=None):
+    """Project an expired attempt that has been requeued back to pending.
+
+    Team membership remains durable; this only reflects that no Worker owns
+    the current execution attempt while the same AgentTask waits for retry.
+    """
+    link = _agent_task_plan_link(agent_task)
+    if not link:
+        return None
+    now = now or _now()
+    task = db.session.get(TestTask, link['test_task_id'])
+    stage = db.session.get(MissionStage, link['mission_stage_id'])
+    sup = locked(link['plan_id'])
+    if (not task or not stage or not sup
+            or task.plan_id != link['plan_id']
+            or stage.mission_id != link['mission_id']
+            or agent_task.claw_id != task.assignee_claw_id
+            or stage.assigned_claw_id != agent_task.claw_id):
+        fail('PLAN_AGENT_TASK_LINK_INVALID',
+             'AgentTask 与计划阶段绑定不一致', 409)
+    if task.status in ('completed', 'skipped'):
+        return task
+    changed = task.status != 'pending' or stage.state != 'dispatched'
+    task.status = 'pending'
+    stage.state = 'dispatched'
+    stage.last_reason_code = 'ordinary_agent_task_retry_pending'
+    if changed:
+        stage.version = int(stage.version or 1) + 1
+    add_event(sup.plan_id, 'task_agent_retry_pending', [
+        'task-agent-retry-pending', agent_task.task_id,
+        int(agent_task.attempt_no or 0), int(agent_task.retry_count or 0),
+    ], {
+        'task_id': task.id,
+        'agent_task_id': agent_task.task_id,
+        'executor_claw_id': agent_task.claw_id,
+        'retry_count': int(agent_task.retry_count or 0),
+        'retry_max': int(agent_task.retry_max or 0),
+    }, now)
+    return task
+
+
 def record_agent_task_terminal(agent_task, result, status, now=None):
     link = _agent_task_plan_link(agent_task)
     if not link:
@@ -1091,6 +1132,59 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
         'summary': summary,
     }, now)
     return task
+
+
+def reconcile_ordinary_task_truth(sup, now=None):
+    """Repair TestTask/Stage projections from durable ordinary AgentTasks."""
+    if not sup or not sup.mission_id:
+        return 0
+    now = now or _now()
+    ordinary_tasks = _plan_agent_tasks(sup)
+    count = 0
+    for stage in MissionStage.query.filter_by(
+            mission_id=sup.mission_id).order_by(MissionStage.id).all():
+        agent_task = ordinary_tasks.get(stage.id)
+        task_id = _stage_task_id(stage)
+        task = db.session.get(TestTask, task_id) if task_id else None
+        if not agent_task or not task:
+            continue
+        if agent_task.status == 'pending':
+            if task.status == 'in_progress' or stage.state == 'running':
+                record_agent_task_retry_pending(agent_task, now=now)
+                count += 1
+            continue
+        if agent_task.status == 'running':
+            if (agent_task.lease_expires_at
+                    and agent_task.lease_expires_at <= now):
+                continue
+            if task.status != 'in_progress' or stage.state != 'running':
+                record_agent_task_claim(agent_task, now=now)
+                count += 1
+            continue
+        terminal = {
+            'completed': ('completed', 'completed', 'completed'),
+            'blocked': ('blocked', 'blocked', 'blocked'),
+            'failed': ('failed', 'blocked', 'failed'),
+            'cancelled': ('failed', 'blocked', 'failed'),
+        }.get(agent_task.status)
+        if not terminal:
+            continue
+        projected_status, task_status, stage_state = terminal
+        if task.status == task_status and stage.state == stage_state:
+            continue
+        try:
+            result = json.loads(agent_task.result or '{}')
+        except (TypeError, ValueError):
+            result = {}
+        if not isinstance(result, dict):
+            result = {'summary': str(result)}
+        result.setdefault('status', projected_status)
+        result.setdefault('error_code', agent_task.terminal_reason or '')
+        result.setdefault('reason', agent_task.error or '')
+        record_agent_task_terminal(
+            agent_task, result, projected_status, now=now)
+        count += 1
+    return count
 
 
 def recovery_snapshot(sup):
@@ -1506,6 +1600,10 @@ def sweep(now=None):
         sup = locked(plan_id)
         plan = db.session.get(TestPlan, plan_id)
         repair_recoverable_state(sup, now)
+        # Ordinary AgentTasks can become terminal in the timeout watcher rather
+        # than through the result endpoint.  Reconcile them even while the
+        # supervisor is waiting/blocked so stale "running" UI never persists.
+        reconcile_ordinary_task_truth(sup, now)
         if available(sup, now):
             ensure_manager_tenure(sup, now)
             enqueue_schedule_ticks(sup, now)

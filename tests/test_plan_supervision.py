@@ -11,7 +11,8 @@ from app.models import (AgentTask, AgentTeam, AgentTeamMember, AgentTeamMission,
                         WorkflowMission, WorkflowMissionDispatch, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
 from app.services import plan_supervision as svc
-from app.services.agent_tasks import claim_pending_tasks, complete_task
+from app.services.agent_tasks import (claim_pending_tasks, complete_task,
+                                      expire_stale_ordinary_tasks)
 
 
 class PlanSupervisionTest(unittest.TestCase):
@@ -490,6 +491,59 @@ class PlanSupervisionTest(unittest.TestCase):
         receipt = svc.task_dispatch_receipt(completed)
         self.assertEqual(receipt['execution_mode'], 'ordinary_agent_task')
         self.assertTrue(receipt['claimed'])
+
+    def test_direct_agent_task_timeout_projects_retry_and_terminal_state(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['ios']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='iOS 客户端性能测试', status='pending',
+            assignee_claw_id=self.other_claw.id, task_type='performance')
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'timeout-task-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.agent()
+        dispatched = self.client.post(self.base + '/agent-tasks', json={
+            'command_key': 'timeout-task-%s' % task.id,
+            'test_task_id': task.id,
+            'retry_max': 1,
+        }, headers=self._headers(self.main_token))
+        self.assertEqual(dispatched.status_code, 201, dispatched.json)
+        stage = MissionStage.query.filter_by(
+            mission_id=self.sup().mission_id,
+            stage_key='test_task_%s' % task.id).one()
+
+        agent_task = claim_pending_tasks(self.other_claw.id)[0]
+        self.assertEqual(task.status, 'in_progress')
+        agent_task.lease_expires_at = _now() - timedelta(seconds=1)
+        db.session.commit()
+        self.assertEqual(expire_stale_ordinary_tasks(), 1)
+        self.assertEqual(agent_task.status, 'pending')
+        self.assertEqual(task.status, 'pending')
+        self.assertEqual(stage.state, 'dispatched')
+        self.assertEqual(stage.last_reason_code, 'ordinary_agent_task_retry_pending')
+
+        agent_task = claim_pending_tasks(self.other_claw.id)[0]
+        agent_task.lease_expires_at = _now() - timedelta(seconds=1)
+        db.session.commit()
+        self.assertEqual(expire_stale_ordinary_tasks(), 1)
+        self.assertEqual(agent_task.status, 'failed')
+        self.assertEqual(task.status, 'blocked')
+        self.assertEqual(stage.state, 'failed')
+        self.assertEqual(stage.last_reason_code, 'agent_task_lease_expired')
+
+        # A process restart or an older Hub may leave terminal AgentTask truth
+        # unprojected.  The reconciliation path must repair it idempotently.
+        task.status, stage.state = 'in_progress', 'running'
+        db.session.commit()
+        self.assertEqual(svc.reconcile_ordinary_task_truth(self.sup()), 1)
+        self.assertEqual(task.status, 'blocked')
+        self.assertEqual(stage.state, 'failed')
+        self.assertEqual(svc.reconcile_ordinary_task_truth(self.sup()), 0)
 
     def test_timer_restarts_and_unchanged_watchdog_stays_quiet(self):
         self.start()

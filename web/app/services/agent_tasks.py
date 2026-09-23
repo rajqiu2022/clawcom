@@ -406,6 +406,8 @@ def complete_task(task, data, now=None):
 
 def expire_stale_ordinary_tasks(now=None, limit=500):
     """Expire or finitely retry ordinary tasks with invalid/stale contracts."""
+    from app.services import plan_supervision
+
     now = now or _now()
     rows = (AgentTask.query.filter(
         AgentTask.task_type != 'workflow_agent_task',
@@ -431,6 +433,12 @@ def expire_stale_ordinary_tasks(now=None, limit=500):
                 'code': exc.code,
                 'reason': exc.message,
             })
+            plan_supervision.record_agent_task_terminal(task, {
+                'status': 'failed',
+                'error_code': task.terminal_reason,
+                'reason': task.error,
+                'retryable': False,
+            }, 'failed', now=now)
             changed += 1
             continue
         expired = False
@@ -457,6 +465,8 @@ def expire_stale_ordinary_tasks(now=None, limit=500):
                 'retry_count': task.retry_count,
                 'retry_max': task.retry_max,
             })
+            plan_supervision.record_agent_task_retry_pending(
+                task, now=now)
         else:
             before = task.status
             task.status = 'failed'
@@ -471,6 +481,12 @@ def expire_stale_ordinary_tasks(now=None, limit=500):
                 'retry_count': task.retry_count,
                 'retry_max': task.retry_max,
             })
+            plan_supervision.record_agent_task_terminal(task, {
+                'status': 'failed',
+                'error_code': task.terminal_reason,
+                'reason': '执行心跳超时，任务未完成',
+                'retryable': False,
+            }, 'failed', now=now)
         task.version = int(task.version or 0) + 1
         changed += 1
     if changed:
