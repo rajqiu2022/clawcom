@@ -1,6 +1,7 @@
 """Deploy recurring team task occurrences; no Worker/DeepFlow/Run changes."""
 import deploy_team_activity_knowledge as deployment
 import re
+import subprocess
 
 
 release = deployment.release
@@ -28,6 +29,16 @@ _candidate = release.candidate
 
 
 def _occurrence_candidate(path, live):
+    if path == 'static/js/agent_team_plans.js' and live is not None:
+        live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
+        previous = subprocess.check_output(
+            ['git', 'show',
+             '3f9f8c4:web/static/js/agent_team_plans.js'],
+            cwd=str(release.ROOT)).replace(b'\r\n', b'\n')
+        if live != previous:
+            return _candidate(path, live)
+        return (release.ROOT / 'web' / path).read_bytes().replace(
+            b'\r\n', b'\n')
     if path != 'templates/agent_teams.html' or live is None:
         return _candidate(path, live)
     live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
