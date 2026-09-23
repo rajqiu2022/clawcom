@@ -4,9 +4,9 @@ window.AgentTeamActivity = (() => {
     const $ = id => document.getElementById(id);
     const labels = {idle:'空闲', working:'工作中', blocked:'阻塞', unknown:'尚未上报', stale:'上报已过期',
         completed:'已完成（自报）', failed:'失败（自报）', cancelled:'已取消（自报）'};
-    const roles = {primary_manager:'测试经理 · 主', backup_manager:'测试经理 · 备用', code_analyst:'代码分析员', test_executor:'测试执行员'};
+    const roles = {primary_manager:'测试经理 · 主', backup_manager:'测试经理 · 备用', project_assistant:'项目助理', code_analyst:'代码分析员', test_executor:'测试执行员'};
     const specialties = {editor:'编辑器', mobile_package:'手机包', client_performance:'客户端性能'};
-    const kinds = {flow:'Flow 执行', bug_regression:'Bug 回归', code_analysis:'代码分析', other:'其他任务'};
+    const kinds = {flow:'Flow 执行', bug_regression:'Bug 回归', code_analysis:'代码分析', version_data:'版本数据收集', other:'其他任务'};
     let teamId = null, epoch = 0, timer = null, loading = false, members = [], selected = null, offset = 0, detailEpoch = 0;
     const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const label = state => labels[state] || '未知';

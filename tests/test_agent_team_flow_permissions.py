@@ -152,6 +152,73 @@ class TeamFlowPermissionsTest(unittest.TestCase):
             'definition_id': self.flow_a.id, 'worker_claw_id': self.other_claw.id})
         self.assertEqual(result.status_code, 201, result.get_json())
 
+    def test_project_assistant_gets_execution_and_identity_but_not_manager_authority(self):
+        self.setup_grants()
+        assistant_token = 'mission-assistant-token'
+        from app.models import hash_token
+        assistant = OpenClawInstance(
+            name='项目助理', safe_name='mission-assistant', claw_tag='mission-assistant',
+            owner='assistant', project_id=self.project.id,
+            api_token_hash=hash_token(assistant_token), status='工作')
+        db.session.add(assistant)
+        db.session.flush()
+        db.session.add(ClawSidecarConfig(
+            claw_id=assistant.id, agent_type='codebuddy', config_owner='worker',
+            runtime_config_json={
+                'schema': 1, 'kind': 'claw_worker', 'provider': 'codebuddy',
+                'runtime_mode': 'agent_direct', 'platform': 'windows',
+                'provider_version': 'codebuddy-cli', 'source': 'worker',
+            }))
+        db.session.commit()
+        members = copy.deepcopy(self.config['members']) + [{
+            'claw_id': assistant.id, 'role_key': 'project_assistant',
+            'specialties': [],
+        }]
+        self.save_team(members=members)
+
+        response = self.client.get(
+            '/api/v1/workflow-definitions/%s' % self.flow_a.id,
+            headers=self._headers(assistant_token))
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()['can_execute'])
+        self.assertFalse(response.get_json()['can_edit'])
+        self.assertTrue(can_dispatch_to(
+            self.main_claw.id, assistant.id, self.flow_a))
+        self.assertFalse(can_dispatch_to(
+            assistant.id, self.other_claw.id, self.flow_a))
+
+        sidecar = self.client.get(
+            '/api/openclaws/%s/sidecar-config' % assistant.id,
+            headers=self._headers(assistant_token))
+        self.assertEqual(sidecar.status_code, 200, sidecar.get_json())
+        team = next(item for item in sidecar.get_json()['agent_teams']
+                    if item['team_id'] == self.team_id)
+        self.assertEqual(team['self']['effective_role_key'], 'project_assistant')
+        self.assertIn('version_data', team['activity_reporting']['task_types'])
+        contract = team['role_contracts']['project_assistant']
+        self.assertIn('版本', contract['purpose'])
+        self.assertTrue(any('调度' in item for item in contract['forbidden']))
+
+        activity = self.client.post(
+            '/api/v1/agent-teams/%s/members/%s/activity' % (
+                self.team_id, assistant.id),
+            headers=self._headers(assistant_token), json={
+                'event_id': 'assistant-version-data-1',
+                'expected_version': 0,
+                'state': 'working',
+                'summary': '正在收集版本数据',
+                'task': {
+                    'task_key': 'release-20260924',
+                    'title': '收集版本与构建信息',
+                    'task_type': 'version_data',
+                    'reference': 'release:20260924',
+                    'status': 'working',
+                    'progress_percent': 20,
+                    'progress_message': '已取得提交号',
+                },
+            })
+        self.assertEqual(activity.status_code, 200, activity.get_json())
+
     def test_codex_sidecar_team_grant_bypasses_old_ceiling_but_not_orchestrator_policy(self):
         self.setup_grants()
         db.session.add(ClawSidecarConfig(claw_id=self.main_claw.id, agent_type='codex',

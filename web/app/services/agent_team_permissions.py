@@ -39,7 +39,7 @@ def _includes(team, definition_id):
 
 
 def flow_grants(claw, definitions=None):
-    """Managers may start/dispatch; analysts and executors may execute."""
+    """Managers may start/dispatch; assistants, analysts and executors may execute."""
     teams = active_teams(claw)
     if not teams:
         return []
@@ -70,6 +70,7 @@ def can_dispatch_to(claw_id, worker_claw_id, definition):
         claw.id in (team.primary_manager_claw_id, team.backup_manager_claw_id)
         and _includes(team, definition.id)
         and any(member.claw_id == worker.id
-                and member.role_key in ('code_analyst', 'test_executor')
+                and member.role_key in (
+                    'project_assistant', 'code_analyst', 'test_executor')
                 for member in team.members)
         for team in active_teams(claw))

@@ -2,7 +2,7 @@
 from sqlalchemy.orm import selectinload
 
 from app.models import AgentTeam, OpenClawInstance
-from app.services.agent_team_activity import roster
+from app.services.agent_team_activity import TASK_TYPES, roster
 from app.services.agent_teams import TeamError, require_team_project
 from app.services.agent_context_snapshots import ROLE_CONTRACTS
 
@@ -24,6 +24,8 @@ def team_snapshot(team, claw_id, names):
                 'primary' if 'primary_manager' in roles else 'backup')
             value['has_manager_authority'] = team.has_manager_authority(
                 person_id)
+        elif 'project_assistant' in roles:
+            value['effective_role_key'] = 'project_assistant'
         elif 'code_analyst' in roles:
             value['effective_role_key'] = 'code_analyst'
         elif 'test_executor' in roles:
@@ -40,13 +42,18 @@ def team_snapshot(team, claw_id, names):
         'members_truncated': len(selected) < len(ids),
         'definition_api': '/api/v1/agent-teams/%s' % team.id,
         'activity_api': '/api/v1/agent-teams/%s/members/activity' % team.id,
+        'activity_reporting': {
+            'self_only': True,
+            'task_types': list(TASK_TYPES),
+            'project_assistant_default_task_type': 'version_data',
+        },
         'workflow_permissions': {
             'source': 'active_team_selection',
             'allowed_definition_ids': list((team.policy_json or {}).get(
                 'allowed_definition_ids', [])) if team.status == 'active' else [],
             'can_dispatch_members': team.status == 'active' and claw_id in (
                 team.primary_manager_claw_id, team.backup_manager_claw_id),
-            'note': '勾选 Flow 自动授予经理调度、成员执行权限，不授予编辑权限；'
+            'note': '勾选 Flow 自动授予经理调度、项目助理及其他成员执行权限，不授予编辑权限；'
                     '经理权限随团队角色持续有效，Mission 仍须阶段绑定和可信 Runtime。',
         },
         'plan_supervision': team_capability(team.id),

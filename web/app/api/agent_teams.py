@@ -426,7 +426,9 @@ def list_team_member_activity(team_id):
             tasks.get(status.current_task_id) if status else None, team=team))
     return jsonify({'team_id':team.id, 'items':items, 'stale_after_seconds':activity.STALE_SECONDS,
         'report_contract': {'method':'POST', 'path':'/api/v1/agent-teams/%d/members/{claw_id}/activity' % team.id,
-                            'self_only':True, 'recommended_interval_seconds':60, 'requires_expected_version':True}})
+                            'self_only':True, 'recommended_interval_seconds':60,
+                            'requires_expected_version':True,
+                            'task_types':list(activity.TASK_TYPES)}})
 
 
 @api_bp.route('/agent-teams/<int:team_id>/members/<int:claw_id>/activity', methods=['GET', 'POST'])

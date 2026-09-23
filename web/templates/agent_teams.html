@@ -16,7 +16,7 @@
 <div class="at-shell">
     <nav class="at-tabs" aria-label="自动化工作区"><a id="at-loop-link" href="/automation-closed-loop">闭环态势</a><span aria-current="page">Agent 团队</span></nav>
     <section class="at-intro">
-        <div><div class="at-eyebrow">TEAM OPERATIONS / 团队编制</div><h2>一个项目，多支协作团队。</h2><p>每个团队各有一名在任测试经理；代码分析员和测试执行员可配置多名。团队分工独立于 Claw 原有角色。</p></div>
+        <div><div class="at-eyebrow">TEAM OPERATIONS / 团队编制</div><h2>一个项目，多支协作团队。</h2><p>每个团队各有一名在任测试经理；项目助理、代码分析员和测试执行员可配置多名。团队分工独立于 Claw 原有角色。</p></div>
         <div class="at-count"><strong id="at-total">—</strong><span>当前项目团队</span></div>
     </section>
     <div id="at-notice" class="at-notice" role="status" aria-live="polite" hidden></div>
@@ -28,7 +28,7 @@
         </aside>
         <section id="at-detail" class="at-panel at-detail" aria-label="团队详情" aria-live="polite"><div class="at-empty at-start">团队的角色、经理权限和任务将在这里展示。</div></section>
     </div>
-    <p class="at-footnote">团队勾选的 Flow 自动授予经理调度、代码分析员和测试执行员执行权限；不会自动启动 Workflow。</p>
+    <p class="at-footnote">团队勾选的 Flow 自动授予经理调度、项目助理及其他成员执行权限；不会自动启动 Workflow。</p>
 </div>
 <dialog id="at-editor" class="at-dialog" aria-labelledby="at-editor-title">
     <form id="at-form">
@@ -46,8 +46,8 @@
             </fieldset>
             <fieldset class="at-fieldset"><legend><span>03</span> 团队成员 <small>支持多名、跨团队复用</small></legend>
                 <div id="at-members"></div>
-                <div class="at-member-actions"><button type="button" id="at-add-analyst" class="btn btn-secondary btn-sm">＋ 代码分析员</button><button type="button" id="at-add-executor" class="btn btn-secondary btn-sm">＋ 测试执行员</button></div>
-                <p class="at-help">执行员至少选择一项二级角色，可同时负责编辑器、手机包和客户端性能。</p>
+                <div class="at-member-actions"><button type="button" id="at-add-assistant" class="btn btn-secondary btn-sm">＋ 项目助理</button><button type="button" id="at-add-analyst" class="btn btn-secondary btn-sm">＋ 代码分析员</button><button type="button" id="at-add-executor" class="btn btn-secondary btn-sm">＋ 测试执行员</button></div>
+                <p class="at-help">项目助理负责版本数据收集与团队信息整理，不代替测试经理调度或验收；执行员至少选择一项二级角色。</p>
             </fieldset>
             <fieldset class="at-fieldset"><legend><span>04</span> 调度范围</legend>
                 <label class="at-field">筛选 Flow<input id="at-flow-search" type="search" class="form-input" placeholder="按名称或 ID 筛选"></label>
@@ -103,4 +103,4 @@
     </div>
 </dialog>
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script><script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script><script src="{{ url_for('static', filename='js/agent_team_activity.js') }}?v=20260921plans"></script><script src="{{ url_for('static', filename='js/agent_team_resources.js') }}?v=20260922teamlib"></script><script src="{{ url_for('static', filename='js/agent_team_chat.js') }}?v=20260923clipboardimages"></script><script src="{{ url_for('static', filename='js/agent_team_plans.js') }}?v=20260923taskconclusion2"></script><script src="{{ url_for('static', filename='js/agent_teams.js') }}?v=20260923durablemanager"></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script><script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script><script src="{{ url_for('static', filename='js/agent_team_activity.js') }}?v=20260924projectassistant"></script><script src="{{ url_for('static', filename='js/agent_team_resources.js') }}?v=20260922teamlib"></script><script src="{{ url_for('static', filename='js/agent_team_chat.js') }}?v=20260923clipboardimages"></script><script src="{{ url_for('static', filename='js/agent_team_plans.js') }}?v=20260923taskconclusion2"></script><script src="{{ url_for('static', filename='js/agent_teams.js') }}?v=20260924projectassistant"></script>{% endblock %}

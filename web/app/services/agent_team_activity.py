@@ -12,6 +12,7 @@ from app.services.agent_teams import TeamError, integer
 
 STALE_SECONDS = 180
 TASK_STATES = {'working', 'blocked', 'completed', 'failed', 'cancelled'}
+TASK_TYPES = ('flow', 'bug_regression', 'code_analysis', 'version_data', 'other')
 TERMINAL = {'completed', 'failed', 'cancelled'}
 
 
@@ -174,7 +175,8 @@ def ingest(team, claw_id, data):
         title = _text(payload.get('title'), 'title', 240, True)
         kind = payload.get('task_type')
         task_state = payload.get('status')
-        if not isinstance(kind, str) or not isinstance(task_state, str) or kind not in ('flow', 'bug_regression', 'code_analysis', 'other') or task_state not in TASK_STATES:
+        if (not isinstance(kind, str) or not isinstance(task_state, str)
+                or kind not in TASK_TYPES or task_state not in TASK_STATES):
             raise TeamError('TEAM_ACTIVITY_INVALID', '无效的任务类型/状态', 400)
         reference = _text(payload.get('reference', ''), 'reference', 240)
         progress = payload.get('progress_percent')

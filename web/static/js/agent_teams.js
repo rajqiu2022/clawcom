@@ -9,7 +9,7 @@
     const $ = id => document.getElementById(id);
     const state = { project: '', options: null, teams: [], total: 0, selected: null,
         loadEpoch: 0, missionEpoch: 0, missionOffset: 0, editing: null, saving: false };
-    const roleLabels = {test_manager: '测试经理', code_analyst: '代码分析员', test_executor: '测试执行员'};
+    const roleLabels = {test_manager: '测试经理', project_assistant: '项目助理', code_analyst: '代码分析员', test_executor: '测试执行员'};
     const statusLabels = {active: '启用', paused: '暂停', archived: '归档', ready: '待派发',
         running: '执行中', completed: '已完成', cancelled: '已取消', expired: '已过期', failed: '失败',
         blocked: '阻塞', submitted: '待复核', accepted: '已验收', rejected: '已驳回', superseded: '已替代',
@@ -50,7 +50,7 @@
             return `<button class="at-team" type="button" data-team="${team.id}" aria-pressed="${team.id === state.selected}">
                 <span class="at-team-head"><span class="at-team-name">${esc(team.name)}</span>${badge(team.status)}</span>
                 <div class="at-team-meta">经理 · ${esc(agentName(team.primary_manager_claw_id))}</div>
-                <div class="at-team-counts"><span>分析员 ${count('code_analyst')}</span><span>执行员 ${count('test_executor')}</span><span>v${team.version}</span></div></button>`;
+                <div class="at-team-counts"><span>助理 ${count('project_assistant')}</span><span>分析员 ${count('code_analyst')}</span><span>执行员 ${count('test_executor')}</span><span>v${team.version}</span></div></button>`;
         }).join('') : '<p class="at-empty">这个项目还没有团队。<br>可为不同目标创建多支团队。</p>';
     }
     async function reloadProject(preferredTeam = null) {
@@ -244,6 +244,7 @@
         else if (action) changeStatus(action.dataset.action);
         const page = event.target.closest('[data-page]'); if (page && !page.disabled) loadMissions(Number(page.dataset.page));
     });
+    $('at-add-assistant').addEventListener('click', () => addMember('project_assistant'));
     $('at-add-analyst').addEventListener('click', () => addMember('code_analyst'));
     $('at-add-executor').addEventListener('click', () => addMember('test_executor'));
     $('at-members').addEventListener('click', event => { const button = event.target.closest('.at-remove-member'); if (button) button.closest('.at-member').remove(); });

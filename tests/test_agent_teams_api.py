@@ -234,11 +234,32 @@ class AgentTeamsApiTest(unittest.TestCase):
             {'claw_id': self.other_claw.id, 'role_key': 'test_executor', 'specialties': []},
             {'claw_id': self.other_claw.id, 'role_key': 'test_executor', 'specialties': ['admin']},
             {'claw_id': self.other_claw.id, 'role_key': 'code_analyst', 'specialties': ['editor']},
+            {'claw_id': self.other_claw.id, 'role_key': 'project_assistant', 'specialties': ['editor']},
         ):
             data = dict(self.config, name='bad', members=[member])
             response = self.client.post('/api/v1/agent-teams', json=data)
             self.assertEqual(response.status_code, 400, response.get_json())
         self.assertEqual(AgentTeam.query.count(), 1)
+
+    def test_project_assistant_is_a_repeatable_member_without_executor_specialty(self):
+        self._setup_team()
+        data = copy.deepcopy(self.config)
+        data['name'] = '带项目助理的团队'
+        data['members'].append({
+            'claw_id': self.other_claw.id,
+            'role_key': 'project_assistant',
+            'specialties': [],
+        })
+        response = self.client.post('/api/v1/agent-teams', json=data)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        assistant = next(item for item in response.get_json()['members']
+                         if item['role_key'] == 'project_assistant')
+        self.assertEqual(assistant['claw_id'], self.other_claw.id)
+        self.assertEqual(assistant['specialties'], [])
+        roles = self.client.get(
+            '/api/v1/agent-teams/roles?project_id=%s' % self.project.id)
+        self.assertEqual(roles.status_code, 200, roles.get_json())
+        self.assertEqual(roles.get_json()['roles']['project_assistant'], '项目助理')
 
     def test_project_gate_and_admin_boundary(self):
         response = self.client.post('/api/v1/agent-teams', json={'project_id': self.project.id})

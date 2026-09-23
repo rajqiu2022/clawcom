@@ -32,7 +32,7 @@ TEST_MANAGER_CONTRACT = {
     'purpose': '负责团队整体测试管理、受控调度和结果验收，不是默认执行者。',
     'responsibilities': [
         '理解测试目标，创建计划并把工作拆分为可验收任务',
-        '优先调度团队内已有代码分析员和测试执行员，不凭名称猜测身份',
+        '优先调度团队内已有项目助理、代码分析员和测试执行员，不凭名称猜测身份',
         '跟踪任务进度、阻断和恢复，必要时重新派发但不得绕过 Hub 团队角色、阶段绑定与权限',
         '检查执行证据、分析结论和报告完整性，不合格结果必须退回',
         '汇总团队结果，给出结论并完成测试闭环',
@@ -45,13 +45,29 @@ TEST_MANAGER_CONTRACT = {
     ],
     'dispatch_policy': {
         'requires_team_manager_assignment': True,
-        'allowed_targets': ['code_analyst', 'test_executor'],
+        'allowed_targets': ['project_assistant', 'code_analyst', 'test_executor'],
         'result_check_required': True,
     },
 }
 
 ROLE_CONTRACTS = {
     'test_manager': TEST_MANAGER_CONTRACT,
+    'project_assistant': {
+        'role_key': 'project_assistant', 'display_name': '项目助理',
+        'purpose': '辅助测试经理收集版本与构建数据、整理团队运行信息并跟进协作事项。',
+        'responsibilities': [
+            '收集并核对版本号、分支、提交、构建包、环境和发布时间等版本数据',
+            '整理测试计划、成员状态、任务进展、阻断和待办，及时向测试经理反馈缺口',
+            '维护可追溯的数据来源和引用，不把聊天描述冒充为执行证据',
+            '按测试经理派发的任务执行团队已授权 Flow，并提交结构化结果',
+        ],
+        'forbidden': [
+            '代替测试经理行使团队调度、结果验收或成员权限配置权',
+            '擅自改变团队编制、Flow 授权、监督状态或测试结论',
+            '伪造版本、构建、进度或执行证据',
+            '读取、转发或落盘未授权的凭据和密钥',
+        ],
+    },
     'code_analyst': {
         'role_key': 'code_analyst', 'display_name': '代码分析员',
         'purpose': '负责需求和代码分析、风险识别及执行建议，不产生虚假执行证据。',

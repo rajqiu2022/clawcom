@@ -1,6 +1,6 @@
 # Agent 团队首批实现与接入合同
 
-依据：知识库 #455 revision 1，以及用户确认的固定三角色方案。
+依据：知识库 #455 revision 1，以及用户确认的固定团队角色方案。2026-09-24 增加项目助理角色。
 本批包含 Hub 后端基础与团队管理页面，不宣称已完成常驻自治、真实手机验收或生产部署。
 
 ## 一、角色边界
@@ -8,13 +8,15 @@
 | 一级角色 | 标识 | 人数 | 二级角色 |
 | --- | --- | --- | --- |
 | 测试经理 | `test_manager` | 一名在任；可配一名备用 | 无 |
+| 项目助理 | `project_assistant` | 多名 | 无 |
 | 代码分析员 | `code_analyst` | 多名 | 无 |
 | 测试执行员 | `test_executor` | 多名 | `editor` 编辑器、`mobile_package` 手机包、`client_performance` 客户端性能 |
 
+项目助理协助测试经理收集版本/构建数据、整理计划、成员状态、阻断和待办；可接受经理派发并执行团队已授权 Flow，但不获得经理的调度、验收或团队配置权限。
 一个执行员可具备多个二级角色；一个 Claw 可加入多个团队，亦可兼任不同团队岗位。
 新角色仅保存在 `agent_teams/agent_team_members`，不修改 Claw.role、AgentPost、Profile、现有 Flow ACL。
 经理在主备字段配置，不能通过 members 塞入第二个经理。主备只有一份有效 lease，按 Hub 时间判定。
-角色与运行能力分离。2026-09-21 起，管理员勾选的 Flow 自动授予经理调度、代码分析员/测试执行员执行权限，不授予编辑权限，也不伪造 Worker Runtime。详见 `agent_team_flow_permissions.md`。
+角色与运行能力分离。2026-09-21 起，管理员勾选的 Flow 自动授予经理调度、项目助理/代码分析员/测试执行员执行权限，不授予编辑权限，也不伪造 Worker Runtime。详见 `agent_team_flow_permissions.md`。
 
 ## 二、本批已实现的行为
 
@@ -48,6 +50,7 @@
   "primary_manager_claw_id": 201,
   "backup_manager_claw_id": 202,
   "members": [
+    {"claw_id": 206, "role_key": "project_assistant"},
     {"claw_id": 203, "role_key": "code_analyst"},
     {"claw_id": 204, "role_key": "test_executor", "specialties": ["editor"]},
     {"claw_id": 205, "role_key": "test_executor", "specialties": ["mobile_package", "client_performance"]}

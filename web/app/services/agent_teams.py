@@ -8,6 +8,7 @@ from app.models import AgentTeam, AgentTeamMission, OpenClawInstance, WorkflowDe
 
 TEAM_ROLES = {
     'test_manager': '测试经理',
+    'project_assistant': '项目助理',
     'code_analyst': '代码分析员',
     'test_executor': '测试执行员',
 }
@@ -83,13 +84,17 @@ def normalize_config(data, project_id):
         claw_id = integer(item.get('claw_id'), 'claw_id')
         scoped_claw(claw_id, project_id)
         role, specialties = item.get('role_key'), item.get('specialties', [])
-        if role not in ('code_analyst', 'test_executor'):
-            raise TeamError('TEAM_ROLE_INVALID', '成员仅允许代码分析员或测试执行员；经理在主备字段配置', 400)
+        if role not in ('project_assistant', 'code_analyst', 'test_executor'):
+            raise TeamError(
+                'TEAM_ROLE_INVALID',
+                '成员仅允许项目助理、代码分析员或测试执行员；经理在主备字段配置', 400)
         if (not isinstance(specialties, list)
                 or any(not isinstance(value, str) or value not in EXECUTOR_SPECIALTIES for value in specialties)
-                or (role == 'code_analyst' and specialties)
+                or (role != 'test_executor' and specialties)
                 or (role == 'test_executor' and not specialties)):
-            raise TeamError('TEAM_SPECIALTY_INVALID', '执行员须指定合法二级角色，分析员不使用二级角色', 400)
+            raise TeamError(
+                'TEAM_SPECIALTY_INVALID',
+                '执行员须指定合法二级角色，项目助理和分析员不使用二级角色', 400)
         if (claw_id, role) in seen:
             raise TeamError('TEAM_MEMBER_DUPLICATE', '同一团队角色不可重复添加同一 Agent', 400)
         seen.add((claw_id, role))

@@ -21,15 +21,18 @@ class AgentTeamsUiTest(unittest.TestCase):
         self.assertIn('id="at-project"', rendered)
         self.assertIn('aria-labelledby="at-editor-title"', rendered)
 
-    def test_navigation_and_all_three_roles_are_wired(self):
+    def test_navigation_and_all_four_roles_are_wired(self):
         base = (ROOT / 'web/templates/base.html').read_text(encoding='utf-8')
         views = (ROOT / 'web/app/views/__init__.py').read_text(encoding='utf-8')
         self.assertIn('href="/agent-teams"', base)
         self.assertIn("@views_bp.route('/agent-teams')", views)
         self.assertIn('id="acl-teams-link"', (ROOT / 'web/templates/automation_closed_loop.html').read_text(encoding='utf-8'))
-        for key in ('test_manager', 'code_analyst', 'test_executor'):
+        for key in ('test_manager', 'project_assistant', 'code_analyst', 'test_executor'):
             self.assertIn(key, self.js)
         self.assertIn('executor_specialties', self.js)
+        self.assertIn('id="at-add-assistant"', self.html)
+        self.assertIn('版本数据收集', (
+            ROOT / 'web/static/js/agent_team_activity.js').read_text(encoding='utf-8'))
 
     def test_versioning_safe_rendering_and_no_scheduler_side_effects(self):
         for marker in ('expected_version', 'TEAM_VERSION_CONFLICT', 'AGENT_TEAMS_DISABLED',
