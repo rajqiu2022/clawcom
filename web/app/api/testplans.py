@@ -1238,11 +1238,24 @@ def _normalize_task_schedule(data, plan, current=None):
         else 'member_work') or 'member_work').strip()
     if execution_role not in ('member_work', 'manager_work'):
         raise ValueError('execution_role 仅支持 member_work/manager_work')
+    effective_raw = data.get(
+        'schedule_effective_from', current.schedule_effective_from
+        if current else None)
+    try:
+        effective_from = (
+            effective_raw if isinstance(effective_raw, date)
+            else date.fromisoformat(str(effective_raw))
+            if effective_raw else None)
+    except (TypeError, ValueError):
+        raise ValueError('schedule_effective_from 必须为 YYYY-MM-DD')
+    if effective_from and plan and plan.end_date and effective_from > plan.end_date:
+        raise ValueError('schedule_effective_from 不能晚于计划结束日期')
     return {
         'schedule_enabled': enabled,
         'recurrence_type': recurrence,
         'recurrence_weekdays_json': weekdays,
         'schedule_timezone': timezone_name,
+        'schedule_effective_from': effective_from,
         'not_before_time': clock('not_before_time', '00:00'),
         'due_time': clock('due_time', '23:59'),
         'auto_dispatch': auto_dispatch,

@@ -798,6 +798,7 @@ def create_app(config_name=None):
                         ('recurrence_type', "VARCHAR(16) NOT NULL DEFAULT 'once'"),
                         ('recurrence_weekdays_json', 'LONGTEXT DEFAULT NULL'),
                         ('schedule_timezone', "VARCHAR(64) NOT NULL DEFAULT 'Asia/Shanghai'"),
+                        ('schedule_effective_from', 'DATE DEFAULT NULL'),
                         ('not_before_time', "VARCHAR(5) DEFAULT ''"),
                         ('due_time', "VARCHAR(5) DEFAULT ''"),
                         ('auto_dispatch', 'BOOLEAN NOT NULL DEFAULT FALSE'),
@@ -826,8 +827,19 @@ def create_app(config_name=None):
                                 agent_task_id INTEGER,
                                 workflow_run_id INTEGER,
                                 attempt_count INTEGER NOT NULL DEFAULT 0,
+                                action_attempt_count INTEGER NOT NULL DEFAULT 0,
+                                recommended_action VARCHAR(64) DEFAULT '',
                                 next_action VARCHAR(64) DEFAULT 'wait_not_before',
                                 next_check_at DATETIME,
+                                owner_gate BOOLEAN NOT NULL DEFAULT FALSE,
+                                action_metadata_json LONGTEXT,
+                                execution_goal_json LONGTEXT,
+                                checkpoint_json LONGTEXT,
+                                resume_contract_json LONGTEXT,
+                                condition_state VARCHAR(32) NOT NULL DEFAULT '',
+                                next_probe_at DATETIME,
+                                last_condition_event_at DATETIME,
+                                resume_fencing_token INTEGER NOT NULL DEFAULT 0,
                                 last_heartbeat_at DATETIME,
                                 result_summary LONGTEXT,
                                 evidence_refs_json LONGTEXT,
@@ -850,6 +862,26 @@ def create_app(config_name=None):
                         logger.info('test_task_occurrences 表已创建')
                     except Exception as e:
                         logger.info(f'test_task_occurrences 表创建跳过: {e}')
+
+                    for col, coltype in [
+                        ('action_attempt_count', 'INTEGER NOT NULL DEFAULT 0'),
+                        ('recommended_action', "VARCHAR(64) DEFAULT ''"),
+                        ('owner_gate', 'BOOLEAN NOT NULL DEFAULT FALSE'),
+                        ('action_metadata_json', 'LONGTEXT DEFAULT NULL'),
+                        ('execution_goal_json', 'LONGTEXT DEFAULT NULL'),
+                        ('checkpoint_json', 'LONGTEXT DEFAULT NULL'),
+                        ('resume_contract_json', 'LONGTEXT DEFAULT NULL'),
+                        ('condition_state', "VARCHAR(32) NOT NULL DEFAULT ''"),
+                        ('next_probe_at', 'DATETIME DEFAULT NULL'),
+                        ('last_condition_event_at', 'DATETIME DEFAULT NULL'),
+                        ('resume_fencing_token', 'INTEGER NOT NULL DEFAULT 0'),
+                    ]:
+                        try:
+                            conn.execute(text(
+                                f'ALTER TABLE test_task_occurrences ADD COLUMN {col} {coltype}'))
+                            logger.info(f'已添加 test_task_occurrences.{col} 列')
+                        except Exception:
+                            pass
 
                     # test_task_chains 表迁移：任务链执行结论字段（支持富文本）
                     for col, coltype in [

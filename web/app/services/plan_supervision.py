@@ -3,16 +3,17 @@ import copy
 import hashlib
 import json
 import re
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from flask import current_app
 from app import db
-from app.models import (AgentTask, AgentTeam, AgentTeamMemberStatus,
+from app.models import (AgentTask, AgentTeam, AgentTeamMember,
+                        AgentTeamMemberStatus,
                         AgentTeamMemberTask, AgentTeamMission,
                         AnalysisRefreshBatch, AuditLog, CapabilityGap,
                         ClawMessage, MissionStage, OpenClawInstance,
                         RequirementItem, TestIteration, TestPlan, TestReport,
-                        TestTask, TestTaskOccurrence, WorkflowMission,
+                        TestPlanReport, TestTask, TestTaskOccurrence, WorkflowMission,
                         WorkflowMissionDispatch,
                         WorkflowRun, WorkflowRunStep, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
@@ -34,7 +35,10 @@ DEFAULT_SCHEDULE = {
     'day_close': '18:30',
 }
 TASK_RECURRENCES = {'once', 'daily', 'weekly'}
-OCCURRENCE_TERMINAL = {'completed', 'blocked', 'failed', 'skipped', 'cancelled'}
+OCCURRENCE_TERMINAL = {
+    'completed', 'blocked', 'failed', 'skipped', 'cancelled',
+    'blocked_terminal', 'analysis_incomplete',
+}
 
 
 def enabled():
@@ -65,7 +69,9 @@ def team_capability(team_id):
     return {'enabled': team_enabled(team_id), 'contract': 'hub.plan_supervision.v1',
             'contract_extensions': [
                 'recoverable_states_v2', 'persistent_schedule_v1',
-                'terminal_projection_v1', 'authoritative_execution_v1'],
+                'terminal_projection_v1', 'authoritative_execution_v1',
+                'execution_goal_resume_v1', 'condition_probe_v1',
+                'control_action_dispatch_v1', 'fact_freshness_v1'],
             'start_requires': ['team_id', 'orchestrator_claw_id', 'command_key'],
             'supervisor_api': '/api/v1/test-plans/{plan_id}/supervision',
             'direct_task_dispatch_api': (
@@ -88,7 +94,10 @@ def team_capability(team_id):
                 'enabled': True,
                 'delivery': 'agent_wecom',
                 'fallback': 'hub_receipt_only',
-                'notify_on': ['blocked', 'run_terminal', 'heartbeat_anomaly', 'stale'],
+                'notify_on': [
+                    'blocked', 'run_terminal', 'heartbeat_anomaly', 'stale',
+                    'occurrence_owner_gate', 'occurrence_due_unresolved',
+                    'supervision_report_updated', 'control_action_terminal'],
                 'quiet_on': ['heartbeat', 'unchanged', 'ordinary_progress'],
             }}
 
@@ -154,7 +163,7 @@ def _task_clock(value, default='00:00'):
 def _task_occurs_on(task, day):
     if not task.schedule_enabled:
         return False
-    start = task.start_date or day
+    start = task.schedule_effective_from or task.start_date or day
     end = task.end_date or start
     if day < start or day > end:
         return False
@@ -199,6 +208,18 @@ def materialize_task_occurrences(sup, now=None):
             not_before_at=not_before, due_at=due_at,
             status='scheduled', assignee_claw_id=task.assignee_claw_id,
             next_action='wait_not_before', next_check_at=not_before,
+            execution_goal_json={
+                'objective': task.name,
+                'description': task.description or '',
+                'occurrence_date': day.isoformat(),
+                'due_at': due_at.isoformat() + '+08:00',
+                'closeout_policy': 'publish_completed_and_missing_scope',
+            },
+            checkpoint_json={
+                'completed_scope': [], 'remaining_steps': [],
+                'side_effect_receipts': [],
+            },
+            resume_contract_json={}, condition_state='',
             evidence_refs_json=[])
         db.session.add(occurrence)
         db.session.flush()
@@ -213,6 +234,130 @@ def materialize_task_occurrences(sup, now=None):
         }, now)
         created.append(occurrence)
     return created
+
+
+def migrate_schedule_templates(sup, body, now=None):
+    """Idempotently activate existing tasks as dated schedule templates.
+
+    This deliberately changes only scheduling metadata. Historical TestTask
+    status, reports and already materialized occurrences remain immutable.
+    """
+    now = now or _now()
+    templates = body.get('templates')
+    if not isinstance(templates, list) or not templates:
+        fail('PLAN_SCHEDULE_TEMPLATES_REQUIRED',
+             'templates 必须为非空数组', 400)
+    raw_effective = body.get('effective_from')
+    try:
+        effective_from = (date.fromisoformat(str(raw_effective))
+                          if raw_effective else now.date() + timedelta(days=1))
+    except (TypeError, ValueError):
+        fail('PLAN_SCHEDULE_EFFECTIVE_DATE_INVALID',
+             'effective_from 必须为 YYYY-MM-DD', 400)
+    plan = db.session.get(TestPlan, sup.plan_id)
+    if not plan or effective_from < now.date() or (
+            plan.end_date and effective_from > plan.end_date):
+        fail('PLAN_SCHEDULE_EFFECTIVE_DATE_INVALID',
+             '生效日期不得早于今天，且必须位于计划周期内', 400)
+    report_id = body.get('report_id')
+    if report_id is not None:
+        if isinstance(report_id, bool) or not isinstance(report_id, int):
+            fail('PLAN_REPORT_INVALID', 'report_id 必须为正整数', 400)
+        report = db.session.get(TestReport, report_id)
+        if (not report or report.is_deleted
+                or report.project_id != plan.project_id):
+            fail('PLAN_REPORT_INVALID', '质量看板报告不存在或不属于当前项目', 400)
+
+    seen = set()
+    normalized = []
+    for row in templates:
+        if not isinstance(row, dict):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID', '模板项必须为对象', 400)
+        task_id = row.get('test_task_id')
+        if (isinstance(task_id, bool) or not isinstance(task_id, int)
+                or task_id <= 0 or task_id in seen):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'test_task_id 必须为不重复的正整数', 400)
+        seen.add(task_id)
+        task = TestTask.query.filter_by(
+            id=task_id, plan_id=sup.plan_id).with_for_update().first()
+        if not task:
+            fail('TEST_TASK_NOT_FOUND', '测试任务 #%s 不存在' % task_id, 404)
+        recurrence = str(row.get('recurrence_type') or 'daily').strip()
+        if recurrence not in ('daily', 'weekly'):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 '迁移模板仅支持 daily/weekly', 400)
+        not_before = str(row.get('not_before_time') or '00:00')
+        due_time = str(row.get('due_time') or '23:59')
+        if (not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', not_before)
+                or not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d', due_time)):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'not_before_time/due_time 必须为 HH:MM', 400)
+        if _task_clock(due_time) < _task_clock(not_before):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'due_time 不得早于 not_before_time', 400)
+        execution_role = str(row.get('execution_role') or 'member_work')
+        if execution_role not in ('member_work', 'manager_work'):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'execution_role 仅支持 member_work/manager_work', 400)
+        weekdays = row.get('recurrence_weekdays') or []
+        if recurrence == 'weekly' and (not isinstance(weekdays, list)
+                or not weekdays or any(type(value) is not int or value < 0
+                                       or value > 6 for value in weekdays)):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'weekly 模板必须提供 0..6 的 recurrence_weekdays', 400)
+        normalized.append((task, {
+            'recurrence_type': recurrence,
+            'recurrence_weekdays': sorted(set(weekdays)),
+            'not_before_time': not_before,
+            'due_time': due_time,
+            'auto_dispatch': row.get('auto_dispatch') is not False,
+            'execution_role': execution_role,
+        }))
+
+    def apply():
+        changed = []
+        for task, config in normalized:
+            before = {
+                'schedule_enabled': bool(task.schedule_enabled),
+                'recurrence_type': task.recurrence_type or 'once',
+                'schedule_effective_from': str(task.schedule_effective_from)
+                    if task.schedule_effective_from else None,
+            }
+            task.schedule_enabled = True
+            task.recurrence_type = config['recurrence_type']
+            task.recurrence_weekdays_json = config['recurrence_weekdays']
+            task.schedule_timezone = 'Asia/Shanghai'
+            task.schedule_effective_from = effective_from
+            task.not_before_time = config['not_before_time']
+            task.due_time = config['due_time']
+            task.auto_dispatch = config['auto_dispatch']
+            task.execution_role = config['execution_role']
+            changed.append({
+                'test_task_id': task.id, 'before': before,
+                'after': {
+                    **config, 'schedule_enabled': True,
+                    'schedule_effective_from': effective_from.isoformat(),
+                },
+            })
+        observations = dict(sup.observations_json or {})
+        if report_id is not None:
+            observations['supervision_report_id'] = report_id
+        observations['schedule_migration'] = {
+            'effective_from': effective_from.isoformat(),
+            'task_ids': sorted(seen), 'at': now.isoformat() + '+08:00',
+        }
+        sup.observations_json = observations
+        add_event(sup.plan_id, 'schedule_templates_migrated', [
+            'schedule-templates-migrated', body.get('command_key'),
+        ], {
+            'effective_from': effective_from.isoformat(),
+            'task_ids': sorted(seen), 'report_id': report_id,
+        }, now)
+        return {'effective_from': effective_from.isoformat(),
+                'templates': changed, 'report_id': report_id}
+
+    return receipt(sup, 'migrate_schedule_templates', body, apply)
 
 
 def next_schedule_at(sup, now=None):
@@ -251,6 +396,34 @@ def enqueue_schedule_ticks(sup, now=None):
     return scheduled
 
 
+def _freshness(observed_at, now, threshold_seconds):
+    if not observed_at:
+        return {
+            'status': 'unavailable', 'observed_at': None,
+            'age_seconds': None, 'threshold_seconds': threshold_seconds,
+            'usable_for_current_decision': False,
+        }
+    if isinstance(observed_at, str):
+        try:
+            observed_at = datetime.fromisoformat(observed_at)
+        except ValueError:
+            observed_at = None
+    if not observed_at:
+        return _freshness(None, now, threshold_seconds)
+    if observed_at.tzinfo is not None:
+        observed_at = observed_at.astimezone(
+            timezone(timedelta(hours=8))).replace(tzinfo=None)
+    age = max(0, int((now - observed_at).total_seconds()))
+    status = 'fresh' if age <= threshold_seconds else 'stale'
+    return {
+        'status': status,
+        'observed_at': observed_at.isoformat() + '+08:00',
+        'age_seconds': age,
+        'threshold_seconds': threshold_seconds,
+        'usable_for_current_decision': status == 'fresh',
+    }
+
+
 def project_portfolio_snapshot(sup, now=None):
     """Bounded authoritative facts for one manager turn, never full documents."""
     now = now or _now()
@@ -286,6 +459,7 @@ def project_portfolio_snapshot(sup, now=None):
                   AnalysisRefreshBatch.id.desc()).first())
     team = db.session.get(AgentTeam, sup.team_id) if sup.team_id else None
     member_execution = []
+    member_freshness = []
     if team:
         from app.services import agent_team_activity as activity
         people = activity.roster(team)
@@ -308,6 +482,35 @@ def project_portfolio_snapshot(sup, now=None):
                 'authoritative_execution': summary['authoritative_execution'],
                 'self_report': summary['self_report'],
             })
+            member_freshness.append({
+                'claw_id': claw_id,
+                **_freshness(status.reported_at if status else None,
+                             now, 120),
+            })
+    code_freshness = _freshness(
+        recent_code.updated_at if recent_code else None, now, 86400)
+    report_freshness = _freshness(
+        recent_reports[0].updated_at if recent_reports else None,
+        now, 86400)
+    iteration_freshness = _freshness(
+        active_iteration.updated_at if active_iteration else None,
+        now, 7 * 86400)
+    workflow_freshness = _freshness(
+        max((row.updated_at for row in runs if row.updated_at), default=None),
+        now, 900)
+    freshness = {
+        'code_change': code_freshness,
+        'version_iteration': iteration_freshness,
+        'reports': report_freshness,
+        'workflow_runs': workflow_freshness,
+        'team_members': member_freshness,
+        'device_status': _freshness(None, now, 120),
+    }
+    stale_sources = [
+        key for key, value in freshness.items()
+        if key != 'team_members' and value['status'] != 'fresh']
+    if any(row['status'] != 'fresh' for row in member_freshness):
+        stale_sources.append('team_members')
     return {
         'captured_at': now.isoformat() + '+08:00',
         'project_id': plan.project_id,
@@ -336,6 +539,15 @@ def project_portfolio_snapshot(sup, now=None):
         } for row in recent_reports],
         'capability_gap_status_counts': gap_counts,
         'team_member_execution': member_execution,
+        'freshness': freshness,
+        'stale_sources': sorted(set(stale_sources)),
+        'decision_guard': {
+            'stale_facts_must_not_be_used_as_current': True,
+            'refresh_required': bool(stale_sources),
+            'prohibited_claims': (
+                ['current_version_risk_is_known'] if code_freshness['status'] != 'fresh'
+                else []),
+        },
         'schedule': schedule_policy(sup),
     }
 
@@ -852,6 +1064,11 @@ def pump(sup, now=None):
         PlanSupervisorEvent.sequence > sup.acknowledged_cursor,
         PlanSupervisorEvent.kind.in_(['run_terminal', 'heartbeat_anomaly', 'stale',
                                       'supervisor_lease_expired', 'plan_started',
+                                      'occurrence_owner_gate',
+                                      'occurrence_recovery_failed',
+                                      'occurrence_due_unresolved',
+                                      'supervision_report_updated',
+                                      'control_action_terminal',
                                       'run_recovery_required',
                                       'run_reconciliation_resolved'])).first()
     if not due and not urgent and sup.last_wake_at and now < sup.last_wake_at + timedelta(seconds=60):
@@ -995,10 +1212,16 @@ def undispatched_stages(sup):
         return []
     items = []
     rows = MissionStage.query.filter_by(
-        mission_id=sup.mission_id, state='ready', workflow_run_id=None,
+        mission_id=sup.mission_id, state='ready',
     ).order_by(MissionStage.id).all()
     for stage in rows:
         snapshot = stage.input_snapshot_json or {}
+        control_kind = snapshot.get('kind')
+        if (stage.workflow_run_id is not None
+                and control_kind not in (
+                    'workflow_execution_reconciliation',
+                    'environment_repair', 'evidence_review')):
+            continue
         items.append({
             'stage_key': stage.stage_key,
             'test_task_id': _stage_task_id(stage),
@@ -1006,6 +1229,7 @@ def undispatched_stages(sup):
             'test_task_name': snapshot.get('test_task_name') or '',
             'executor_claw_id': stage.assigned_claw_id,
             'role_key': stage.role_key,
+            'control_action': control_kind or None,
             'agent_task_dispatch_api': (
                 '/api/v1/test-plans/%s/supervision/agent-tasks'
                 % sup.plan_id),
@@ -1014,6 +1238,12 @@ def undispatched_stages(sup):
 
 
 _PLAN_AGENT_TASK_CONTRACT = 'hub.plan_test_task.agent_task.v1'
+_PLAN_CONTROL_TASK_CONTRACT = 'hub.plan_control_action.agent_task.v1'
+RESUME_CONDITION_TYPES = {
+    'build_changed', 'login_session_ready', 'device_ready', 'wda_ready',
+    'account_available', 'server_ready', 'resource_released',
+    'unity_ready', 'bridge_ready', 'custom_ready',
+}
 
 
 def _agent_task_plan_link(agent_task):
@@ -1041,6 +1271,29 @@ def _agent_task_plan_link(agent_task):
         return None
 
 
+def _agent_task_control_link(agent_task):
+    try:
+        payload = json.loads(agent_task.payload or '{}')
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(payload, dict)
+            or payload.get('contract') != _PLAN_CONTROL_TASK_CONTRACT):
+        return None
+    try:
+        return {
+            'plan_id': int(payload['test_plan_id']),
+            'mission_id': int(payload['mission_id']),
+            'mission_stage_id': int(payload['mission_stage_id']),
+            'stage_key': str(payload['stage_key']),
+            'action_kind': str(payload['action_kind']),
+            'source_occurrence_id': (
+                int(payload['source_occurrence_id'])
+                if payload.get('source_occurrence_id') is not None else None),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _plan_agent_tasks(sup):
     """Index the bounded ordinary task history belonging to one Plan Mission."""
     if not sup or not sup.mission_id:
@@ -1056,6 +1309,86 @@ def _plan_agent_tasks(sup):
                 and link['mission_id'] == sup.mission_id):
             indexed.setdefault(link['mission_stage_id'], row)
     return indexed
+
+
+def _plan_control_tasks(sup):
+    if not sup or not sup.mission_id:
+        return {}
+    rows = (AgentTask.query.filter(
+        AgentTask.task_type == 'plan_control_action',
+        AgentTask.task_id.like('plan_%s_control_%%' % sup.plan_id))
+        .order_by(AgentTask.id.desc()).limit(1000).all())
+    indexed = {}
+    for row in rows:
+        link = _agent_task_control_link(row)
+        if (link and link['plan_id'] == sup.plan_id
+                and link['mission_id'] == sup.mission_id):
+            indexed.setdefault(link['mission_stage_id'], row)
+    return indexed
+
+
+def pump_agent_task_plan(agent_task, now=None):
+    """After result commit, promptly wake the manager for meaningful changes."""
+    link = (_agent_task_plan_link(agent_task)
+            or _agent_task_control_link(agent_task))
+    if not link:
+        return None
+    sup = locked(link['plan_id'])
+    if not sup:
+        return None
+    refresh_supervision_report(sup, now=now)
+    target = pump(sup, now=now)
+    db.session.commit()
+    if target:
+        wake(target)
+    return target
+
+
+def _create_control_agent_task(sup, stage, action_kind, instruction,
+                               source_occurrence_id=None):
+    if not stage.assigned_claw_id:
+        fail('PLAN_CONTROL_OWNER_REQUIRED',
+             '控制阶段缺少明确执行 Agent', 409)
+    seed = '%s:%s:%s:%s' % (
+        sup.plan_id, stage.id, action_kind, int(stage.fencing_token or 0) + 1)
+    task_id = 'plan_%s_control_%s_%s' % (
+        sup.plan_id, stage.id,
+        hashlib.sha256(seed.encode()).hexdigest()[:16])
+    payload = {
+        'contract': _PLAN_CONTROL_TASK_CONTRACT,
+        'test_plan_id': sup.plan_id,
+        'mission_id': sup.mission_id,
+        'mission_stage_id': stage.id,
+        'stage_key': stage.stage_key,
+        'action_kind': action_kind,
+        'source_occurrence_id': source_occurrence_id,
+        'input_snapshot': stage.input_snapshot_json or {},
+        'instruction': instruction,
+        'acceptance': {
+            'result_contract': 'plan_control_action',
+            'evidence_required': True,
+        },
+    }
+    task = AgentTask(
+        task_id=task_id, claw_id=stage.assigned_claw_id,
+        task_type='plan_control_action', command=instruction,
+        payload=json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        status='pending', retry_max=2)
+    db.session.add(task)
+    db.session.flush()
+    stage.state = 'dispatched'
+    stage.last_reason_code = 'plan_control_task_dispatched'
+    stage.fencing_token = int(stage.fencing_token or 0) + 1
+    stage.version = int(stage.version or 1) + 1
+    add_event(sup.plan_id, 'control_action_dispatched', [
+        'control-action-dispatched', stage.id, task.task_id,
+    ], {
+        'stage_key': stage.stage_key, 'action_kind': action_kind,
+        'agent_task_id': task.task_id,
+        'executor_claw_id': task.claw_id,
+        'source_occurrence_id': source_occurrence_id,
+    })
+    return task
 
 
 def _linked_occurrence(link):
@@ -1105,6 +1438,11 @@ def _create_plan_agent_task(sup, task, stage, command_key, instruction,
             'not_before_at': occurrence.not_before_at.isoformat() + '+08:00',
             'due_at': (occurrence.due_at.isoformat() + '+08:00'
                        if occurrence.due_at else None),
+            'execution_goal': occurrence.execution_goal_json or {},
+            'checkpoint': occurrence.checkpoint_json or {},
+            'resume_contract': occurrence.resume_contract_json or {},
+            'resume_fencing_token': int(
+                occurrence.resume_fencing_token or 0),
         })
     agent_task = AgentTask(
         task_id=task_id,
@@ -1280,7 +1618,96 @@ def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
     return receipt(sup, 'dispatch_agent_task', body, apply)
 
 
+def _record_control_claim(agent_task, link, now):
+    sup = locked(link['plan_id'])
+    stage = db.session.get(MissionStage, link['mission_stage_id'])
+    if (not sup or not stage or stage.mission_id != link['mission_id']
+            or stage.assigned_claw_id != agent_task.claw_id):
+        fail('PLAN_CONTROL_TASK_LINK_INVALID',
+             '控制 AgentTask 与阶段绑定不一致', 409)
+    stage.state = 'running'
+    stage.last_reason_code = 'plan_control_task_claimed'
+    stage.version = int(stage.version or 1) + 1
+    add_event(sup.plan_id, 'control_action_claimed', [
+        'control-action-claimed', agent_task.task_id,
+        int(agent_task.attempt_no or 0),
+    ], {
+        'stage_key': stage.stage_key,
+        'action_kind': link['action_kind'],
+        'agent_task_id': agent_task.task_id,
+        'executor_claw_id': agent_task.claw_id,
+    }, now)
+    return stage
+
+
+def _record_control_terminal(agent_task, link, result, status, now):
+    sup = locked(link['plan_id'])
+    stage = db.session.get(MissionStage, link['mission_stage_id'])
+    if (not sup or not stage or stage.mission_id != link['mission_id']
+            or stage.assigned_claw_id != agent_task.claw_id):
+        fail('PLAN_CONTROL_TASK_LINK_INVALID',
+             '控制 AgentTask 与阶段绑定不一致', 409)
+    result = result if isinstance(result, dict) else {}
+    completed = status == 'completed'
+    if (link['action_kind'] == 'workflow_execution_reconciliation'
+            and completed and stage.state != 'completed'):
+        # The dedicated resolve API is the canonical verifier. A model result
+        # that merely repeats the three assertions is not a trusted receipt.
+        completed = False
+        stage.last_reason_code = 'RECONCILIATION_RECEIPT_MISSING'
+    if completed:
+        stage.state = 'completed'
+        stage.last_reason_code = 'plan_control_task_completed'
+    else:
+        stage.state = 'blocked'
+        stage.last_reason_code = str(
+            result.get('error_code') or stage.last_reason_code
+            or status or 'plan_control_task_failed')[:80]
+    stage.version = int(stage.version or 1) + 1
+    source_id = link.get('source_occurrence_id')
+    source = (db.session.get(TestTaskOccurrence, source_id)
+              if source_id else None)
+    wake_id = None
+    if completed and source and link['action_kind'] == 'environment_repair':
+        task = db.session.get(TestTask, source.test_task_id)
+        original = db.session.get(MissionStage, source.mission_stage_id)
+        if task and original and source.due_at and source.due_at > now:
+            source.status = 'recovery_ready'
+            source.condition_state = 'recovery_ready'
+            source.resume_fencing_token = int(
+                source.resume_fencing_token or 0) + 1
+            source.owner_gate = False
+            source.next_action = 'auto_resume'
+            source.recommended_action = 'resume_from_checkpoint'
+            original.state = 'ready'
+            original.last_reason_code = 'environment_repair_completed'
+            original.version = int(original.version or 1) + 1
+            resumed = _create_plan_agent_task(
+                sup, task, original,
+                'repair-resume:%s:%s' % (
+                    source.id, source.resume_fencing_token),
+                '环境修复已完成，从 checkpoint 继续剩余步骤。',
+                2, occurrence=source)
+            source.condition_state = 'resuming'
+            source.next_action = 'await_resume_claim'
+            wake_id = resumed.claw_id
+    add_event(sup.plan_id, 'control_action_terminal', [
+        'control-action-terminal', agent_task.task_id,
+        int(agent_task.attempt_no or 0), status,
+    ], {
+        'stage_key': stage.stage_key,
+        'action_kind': link['action_kind'],
+        'agent_task_id': agent_task.task_id,
+        'status': stage.state,
+        'source_occurrence_id': source_id,
+    }, now)
+    return {'stage': stage, 'wake_claw_id': wake_id} if wake_id else stage
+
+
 def record_agent_task_claim(agent_task, now=None):
+    control = _agent_task_control_link(agent_task)
+    if control:
+        return _record_control_claim(agent_task, control, now or _now())
     link = _agent_task_plan_link(agent_task)
     if not link:
         return None
@@ -1300,6 +1727,7 @@ def record_agent_task_claim(agent_task, now=None):
         fail('PLAN_AGENT_TASK_LINK_INVALID', 'AgentTask 与计划阶段绑定不一致', 409)
     if occurrence:
         occurrence.status = 'running'
+        occurrence.condition_state = 'running'
         occurrence.agent_task_id = agent_task.id
         occurrence.attempt_count = max(
             int(occurrence.attempt_count or 0),
@@ -1334,6 +1762,12 @@ def record_agent_task_retry_pending(agent_task, now=None):
     Team membership remains durable; this only reflects that no Worker owns
     the current execution attempt while the same AgentTask waits for retry.
     """
+    control = _agent_task_control_link(agent_task)
+    if control:
+        stage = _record_control_claim(agent_task, control, now or _now())
+        stage.state = 'dispatched'
+        stage.last_reason_code = 'plan_control_task_retry_pending'
+        return stage
     link = _agent_task_plan_link(agent_task)
     if not link:
         return None
@@ -1388,6 +1822,12 @@ def record_agent_task_retry_pending(agent_task, now=None):
 
 def record_agent_task_heartbeat(agent_task, now=None):
     """Refresh occurrence execution truth without emitting noisy events."""
+    control = _agent_task_control_link(agent_task)
+    if control:
+        stage = db.session.get(MissionStage, control['mission_stage_id'])
+        if stage and stage.assigned_claw_id == agent_task.claw_id:
+            stage.state = 'running'
+        return stage
     link = _agent_task_plan_link(agent_task)
     if not link or not link.get('occurrence_id'):
         return None
@@ -1403,7 +1843,483 @@ def record_agent_task_heartbeat(agent_task, now=None):
     return occurrence
 
 
+def _apply_terminal_action(occurrence, error_code, summary, now):
+    text = ('%s %s' % (error_code or '', summary or '')).lower()
+    occurrence.owner_gate = False
+    if re.search(r'credential|permission|password|login required|账号登录|凭据|权限|人工', text):
+        action, owner_gate = 'owner_action_required', True
+    elif re.search(r'webdriveragent|\bwda\b|device|adb|设备|手机连接', text):
+        action, owner_gate = 'create_environment_repair', False
+    elif re.search(r'evidence|manifest|receipt missing|证据|回执缺失', text):
+        action, owner_gate = 'create_evidence_review', False
+    elif re.search(r'timeout|transport|result_invalid|lease_expired|provider_', text):
+        action, owner_gate = 'reassign_stage', False
+    else:
+        action, owner_gate = 'manager_review', False
+    occurrence.recommended_action = action
+    occurrence.next_action = action
+    occurrence.owner_gate = owner_gate
+    occurrence.next_check_at = None if owner_gate else now
+    metadata = dict(occurrence.action_metadata_json or {})
+    metadata.update({
+        'error_code': str(error_code or '')[:128],
+        'classified_at': now.isoformat() + '+08:00',
+    })
+    occurrence.action_metadata_json = metadata
+    return action
+
+
+def _normalize_resume_contract(result, occurrence, now):
+    contract = result.get('resume_contract')
+    if not isinstance(contract, dict):
+        fail('RESUME_CONTRACT_REQUIRED',
+             'waiting_condition 必须提供 resume_contract', 400)
+    conditions = contract.get('conditions')
+    if not isinstance(conditions, list) or not conditions or len(conditions) > 10:
+        fail('RESUME_CONTRACT_INVALID',
+             'resume_contract.conditions 必须为 1 到 10 项', 400)
+    normalized = []
+    for row in conditions:
+        if not isinstance(row, dict):
+            fail('RESUME_CONTRACT_INVALID', '恢复条件必须为对象', 400)
+        condition_type = str(row.get('condition_type') or '').strip()
+        scope = row.get('condition_scope')
+        operation = str(row.get('probe_operation') or '').strip()
+        if condition_type not in RESUME_CONDITION_TYPES:
+            fail('RESUME_CONTRACT_INVALID',
+                 '不支持的 condition_type: %s' % condition_type, 400)
+        if not isinstance(scope, dict) or not scope:
+            fail('RESUME_CONTRACT_INVALID',
+                 'condition_scope 必须为非空对象', 400)
+        if (not operation or len(operation) > 120
+                or not re.fullmatch(r'[a-z0-9_.:-]+', operation)):
+            fail('RESUME_CONTRACT_INVALID',
+                 'probe_operation 必须为 allowlist operation 名称', 400)
+        normalized.append({
+            'condition_type': condition_type,
+            'condition_scope': scope,
+            'probe_operation': operation,
+            'ready': False,
+        })
+    interval = contract.get('probe_interval_seconds', 120)
+    if (isinstance(interval, bool) or not isinstance(interval, int)
+            or interval < 60 or interval > 1800):
+        fail('RESUME_CONTRACT_INVALID',
+             'probe_interval_seconds 必须为 60 到 1800', 400)
+    checkpoint = result.get('checkpoint')
+    if not isinstance(checkpoint, dict):
+        fail('CHECKPOINT_REQUIRED',
+             'waiting_condition 必须提供结构化 checkpoint', 400)
+    owner_gate = contract.get('owner_gate') is True
+    human_action = str(contract.get('human_action') or '').strip()
+    if owner_gate and not human_action:
+        fail('RESUME_CONTRACT_INVALID',
+             'owner_gate=true 时必须说明 human_action', 400)
+    due_at = occurrence.due_at
+    next_probe_at = now + timedelta(seconds=interval)
+    if due_at and next_probe_at > due_at:
+        next_probe_at = due_at
+    return ({
+        'schema_version': 1,
+        'conditions': normalized,
+        'probe_interval_seconds': interval,
+        'next_probe_at': next_probe_at.isoformat() + '+08:00',
+        'resume_from_checkpoint': contract.get('resume_from_checkpoint'),
+        'owner_gate': owner_gate,
+        'human_action': human_action,
+        'due_at': due_at.isoformat() + '+08:00' if due_at else None,
+        'timeout_report_policy': str(
+            contract.get('timeout_report_policy')
+            or 'publish_completed_and_missing_scope'),
+    }, checkpoint, next_probe_at)
+
+
+def record_agent_task_waiting_condition(agent_task, result, now=None):
+    """Persist a non-terminal external-condition wait for one occurrence."""
+    link = _agent_task_plan_link(agent_task)
+    if not link or not link.get('occurrence_id'):
+        fail('WAITING_CONDITION_OCCURRENCE_REQUIRED',
+             'waiting_condition 仅支持周期任务实例', 409)
+    now = now or _now()
+    task = db.session.get(TestTask, link['test_task_id'])
+    stage = db.session.get(MissionStage, link['mission_stage_id'])
+    occurrence = _linked_occurrence(link)
+    sup = locked(link['plan_id'])
+    if (not task or not stage or not sup
+            or agent_task.claw_id != occurrence.assignee_claw_id
+            or stage.assigned_claw_id != agent_task.claw_id):
+        fail('PLAN_AGENT_TASK_LINK_INVALID',
+             'AgentTask 与周期任务实例绑定不一致', 409)
+    contract, checkpoint, next_probe_at = _normalize_resume_contract(
+        result, occurrence, now)
+    occurrence.status = 'waiting_condition'
+    occurrence.condition_state = 'waiting_condition'
+    occurrence.resume_contract_json = contract
+    occurrence.checkpoint_json = checkpoint
+    occurrence.next_probe_at = next_probe_at
+    occurrence.next_check_at = next_probe_at
+    occurrence.last_condition_event_at = now
+    occurrence.owner_gate = bool(contract['owner_gate'])
+    occurrence.recommended_action = (
+        'owner_action_then_auto_resume' if occurrence.owner_gate
+        else 'local_probe_then_auto_resume')
+    occurrence.next_action = (
+        'wait_owner_and_probe' if occurrence.owner_gate
+        else 'wait_condition_probe')
+    occurrence.result_summary = str(
+        result.get('summary') or result.get('reason') or '')[:8000]
+    stage.state = 'waiting_condition'
+    stage.last_reason_code = 'waiting_condition'
+    stage.version = int(stage.version or 1) + 1
+    event_kind = ('occurrence_owner_gate'
+                  if occurrence.owner_gate else 'occurrence_waiting_condition')
+    add_event(sup.plan_id, event_kind, [
+        event_kind, occurrence.id, int(occurrence.resume_fencing_token or 0),
+    ], {
+        'occurrence_id': occurrence.id,
+        'test_task_id': task.id,
+        'condition_types': [row['condition_type']
+                            for row in contract['conditions']],
+        'owner_gate': occurrence.owner_gate,
+        'human_action': contract['human_action'],
+        'next_probe_at': contract['next_probe_at'],
+        'due_at': contract['due_at'],
+    }, now)
+    return occurrence
+
+
+def record_condition_probe(sup, claw_id, occurrence_id, body, now=None):
+    """Accept one no-LLM probe fact and atomically resume when ready."""
+    now = now or _now()
+    key = body.get('command_key')
+    if isinstance(key, str):
+        old = PlanSupervisorReceipt.query.filter_by(
+            plan_id=sup.plan_id, action='condition_probe',
+            command_key=key).first()
+        if old:
+            if old.request_hash != digest(body):
+                fail('PLAN_COMMAND_CONFLICT',
+                     '同一 command_key 不得改变请求')
+            return dict(old.response_json, replayed=True)
+    occurrence = TestTaskOccurrence.query.filter_by(
+        id=occurrence_id, plan_id=sup.plan_id).with_for_update().first()
+    if not occurrence:
+        fail('TEST_TASK_OCCURRENCE_NOT_FOUND', '周期任务实例不存在', 404)
+    if occurrence.assignee_claw_id != claw_id:
+        fail('TEST_TASK_OCCURRENCE_FORBIDDEN',
+             '仅当前执行 Agent 可上报恢复条件', 403)
+    expected = body.get('expected_resume_fencing_token')
+    if (isinstance(expected, bool) or not isinstance(expected, int)
+            or expected != int(occurrence.resume_fencing_token or 0)):
+        fail('RESUME_CONDITION_FENCED', '恢复条件版本已变化', 409)
+    condition_type = str(body.get('condition_type') or '').strip()
+    ready = body.get('condition_ready')
+    if type(ready) is not bool:
+        fail('RESUME_CONDITION_INVALID', 'condition_ready 必须为布尔值', 400)
+    contract = dict(occurrence.resume_contract_json or {})
+    conditions = [dict(row) for row in list(contract.get('conditions') or [])]
+    matched = False
+    for row in conditions:
+        if row.get('condition_type') == condition_type:
+            row['ready'] = ready
+            row['observed_at'] = now.isoformat() + '+08:00'
+            facts = body.get('facts')
+            if isinstance(facts, dict):
+                row['facts_digest'] = digest(facts)
+            matched = True
+    if not matched:
+        fail('RESUME_CONDITION_INVALID',
+             'condition_type 不属于当前 ResumeContract', 400)
+
+    def apply():
+        occurrence.resume_contract_json = dict(contract, conditions=conditions)
+        occurrence.last_condition_event_at = now
+        metadata = dict(occurrence.action_metadata_json or {})
+        probe_count = int(metadata.get('probe_count') or 0) + 1
+        metadata['probe_count'] = probe_count
+        metadata['last_probe_type'] = condition_type
+        metadata['last_probe_ready'] = ready
+        occurrence.action_metadata_json = metadata
+        all_ready = bool(conditions and all(row.get('ready') is True
+                                            for row in conditions))
+        if not all_ready:
+            delays = (60, 120, 300, 600, 1800)
+            delay = delays[min(probe_count - 1, len(delays) - 1)]
+            next_probe = now + timedelta(seconds=delay)
+            if occurrence.due_at and next_probe > occurrence.due_at:
+                next_probe = occurrence.due_at
+            occurrence.next_probe_at = next_probe
+            occurrence.next_check_at = next_probe
+            occurrence.resume_contract_json = dict(
+                occurrence.resume_contract_json or {},
+                next_probe_at=next_probe.isoformat() + '+08:00')
+            return {'condition_ready': False,
+                    'next_probe_at': next_probe.isoformat() + '+08:00'}
+        if occurrence.status != 'waiting_condition':
+            fail('RESUME_CONDITION_STATE_CONFLICT',
+                 '当前实例不在 waiting_condition', 409)
+        task = db.session.get(TestTask, occurrence.test_task_id)
+        stage = db.session.get(MissionStage, occurrence.mission_stage_id)
+        if not task or not stage or stage.mission_id != sup.mission_id:
+            fail('TEST_TASK_STAGE_INVALID', '恢复目标阶段不存在', 409)
+        occurrence.status = 'recovery_ready'
+        occurrence.condition_state = 'recovery_ready'
+        occurrence.resume_fencing_token = int(
+            occurrence.resume_fencing_token or 0) + 1
+        occurrence.next_probe_at = None
+        occurrence.next_check_at = now
+        occurrence.owner_gate = False
+        occurrence.next_action = 'auto_resume'
+        occurrence.recommended_action = 'resume_from_checkpoint'
+        stage.state = 'ready'
+        stage.last_reason_code = 'resume_condition_satisfied'
+        stage.version = int(stage.version or 1) + 1
+        add_event(sup.plan_id, 'occurrence_recovery_ready', [
+            'occurrence-recovery-ready', occurrence.id,
+            occurrence.resume_fencing_token,
+        ], {
+            'occurrence_id': occurrence.id,
+            'test_task_id': task.id,
+            'resume_fencing_token': occurrence.resume_fencing_token,
+        }, now)
+        agent_task = _create_plan_agent_task(
+            sup, task, stage,
+            'resume:%s:%s' % (
+                occurrence.id, occurrence.resume_fencing_token),
+            ('恢复条件已满足。使用 payload.checkpoint 和 '
+             'payload.resume_contract，从未完成步骤继续；禁止重复已登记副作用。'),
+            2, occurrence=occurrence)
+        occurrence.condition_state = 'resuming'
+        occurrence.next_action = 'await_resume_claim'
+        return {
+            'condition_ready': True,
+            'resumed': True,
+            'resume_fencing_token': occurrence.resume_fencing_token,
+            'agent_task': agent_task.to_dict(),
+            'wake_claw_id': occurrence.assignee_claw_id,
+        }
+
+    return receipt(sup, 'condition_probe', body, apply)
+
+
+def guard_execution_goals(sup, now=None):
+    """Close overdue goals and expose stalled probes without invoking an LLM."""
+    if not sup:
+        return 0
+    now = now or _now()
+    changed = 0
+    rows = (TestTaskOccurrence.query.filter(
+        TestTaskOccurrence.plan_id == sup.plan_id,
+        TestTaskOccurrence.status.in_((
+            'waiting_condition', 'recovery_ready', 'dispatched', 'running')),
+    ).order_by(TestTaskOccurrence.id).all())
+    for occurrence in rows:
+        if occurrence.due_at and occurrence.due_at <= now:
+            stage = db.session.get(MissionStage, occurrence.mission_stage_id)
+            latest_task = (_plan_agent_tasks(sup).get(stage.id)
+                           if stage else None)
+            if latest_task and latest_task.status == 'waiting_condition':
+                latest_task.status = 'blocked'
+                latest_task.terminal_reason = 'occurrence_due_elapsed'
+                latest_task.completed_at = now
+                latest_task.version = int(latest_task.version or 0) + 1
+            occurrence.status = 'analysis_incomplete'
+            occurrence.condition_state = 'due_elapsed'
+            occurrence.next_probe_at = None
+            occurrence.next_check_at = None
+            occurrence.owner_gate = False
+            occurrence.recommended_action = 'publish_partial_closeout'
+            occurrence.next_action = 'none'
+            if stage:
+                stage.state = 'blocked'
+                stage.last_reason_code = 'occurrence_due_elapsed'
+                stage.version = int(stage.version or 1) + 1
+            add_event(sup.plan_id, 'occurrence_due_unresolved', [
+                'occurrence-due-unresolved', occurrence.id,
+                occurrence.due_at,
+            ], {
+                'occurrence_id': occurrence.id,
+                'test_task_id': occurrence.test_task_id,
+                'checkpoint': occurrence.checkpoint_json or {},
+                'resume_contract': occurrence.resume_contract_json or {},
+                'conclusion': 'ANALYSIS_INCOMPLETE',
+            }, now)
+            changed += 1
+            continue
+        if (occurrence.status == 'waiting_condition'
+                and occurrence.next_probe_at
+                and occurrence.next_probe_at <= now):
+            occurrence.recommended_action = (
+                'owner_action_then_auto_resume' if occurrence.owner_gate
+                else 'worker_probe_required')
+            occurrence.next_action = (
+                'wait_owner_and_probe' if occurrence.owner_gate
+                else 'await_probe_event')
+            add_event(sup.plan_id, 'occurrence_probe_overdue', [
+                'occurrence-probe-overdue', occurrence.id,
+                occurrence.next_probe_at,
+            ], {
+                'occurrence_id': occurrence.id,
+                'test_task_id': occurrence.test_task_id,
+                'next_probe_at': occurrence.next_probe_at.isoformat() + '+08:00',
+                'owner_gate': bool(occurrence.owner_gate),
+            }, now)
+    return changed
+
+
+def _alternate_executor(sup, stage, current_claw_id):
+    if not sup.team_id:
+        return None
+    rows = AgentTeamMember.query.filter_by(
+        team_id=sup.team_id, role_key=stage.role_key).order_by(
+            AgentTeamMember.claw_id).all()
+    candidates = sorted({row.claw_id for row in rows
+                         if row.claw_id != current_claw_id})
+    claws = {row.id: row for row in OpenClawInstance.query.filter(
+        OpenClawInstance.id.in_(candidates),
+        OpenClawInstance.status != 'deleted').all()} if candidates else {}
+    return next((claw_id for claw_id in candidates if claw_id in claws), None)
+
+
+def advance_occurrence_actions(sup, now=None):
+    """Execute deterministic recovery actions after ordinary retries exhaust."""
+    if not sup or not sup.mission_id:
+        return []
+    now = now or _now()
+    wake_ids = []
+    rows = (TestTaskOccurrence.query.filter(
+        TestTaskOccurrence.plan_id == sup.plan_id,
+        TestTaskOccurrence.status.in_(('blocked', 'failed')),
+        TestTaskOccurrence.owner_gate.is_(False),
+        TestTaskOccurrence.next_check_at.isnot(None),
+        TestTaskOccurrence.next_check_at <= now,
+    ).order_by(TestTaskOccurrence.id).with_for_update().all())
+    for occurrence in rows:
+        action = occurrence.next_action or occurrence.recommended_action
+        task = db.session.get(TestTask, occurrence.test_task_id)
+        stage = db.session.get(MissionStage, occurrence.mission_stage_id)
+        if not task or not stage:
+            continue
+        if action == 'reassign_stage':
+            alternate = _alternate_executor(
+                sup, stage, occurrence.assignee_claw_id)
+            if not alternate:
+                occurrence.owner_gate = True
+                occurrence.recommended_action = 'owner_select_executor'
+                occurrence.next_action = 'owner_select_executor'
+                occurrence.next_check_at = None
+                add_event(sup.plan_id, 'occurrence_owner_gate', [
+                    'occurrence-owner-gate-no-executor', occurrence.id,
+                ], {
+                    'occurrence_id': occurrence.id,
+                    'test_task_id': task.id,
+                    'reason': 'no_alternate_executor',
+                }, now)
+                continue
+            occurrence.action_attempt_count = int(
+                occurrence.action_attempt_count or 0) + 1
+            occurrence.assignee_claw_id = alternate
+            occurrence.status = 'ready'
+            occurrence.next_action = 'auto_dispatch'
+            occurrence.next_check_at = now
+            stage.assigned_claw_id = alternate
+            stage.state = 'ready'
+            stage.last_reason_code = 'occurrence_reassigned'
+            stage.version = int(stage.version or 1) + 1
+            dispatched = _create_plan_agent_task(
+                sup, task, stage,
+                'reassign:%s:%s' % (
+                    occurrence.id, occurrence.action_attempt_count),
+                '前一执行者已耗尽有界重试。继续同一当日目标，并保留已有证据。',
+                2, occurrence=occurrence)
+            wake_ids.append(dispatched.claw_id)
+            continue
+        if action not in ('create_environment_repair',
+                           'create_evidence_review'):
+            continue
+        occurrence.action_attempt_count = int(
+            occurrence.action_attempt_count or 0) + 1
+        kind = ('environment_repair' if action == 'create_environment_repair'
+                else 'evidence_review')
+        key = 'occurrence_%s_%s_%s' % (
+            occurrence.id, kind, occurrence.action_attempt_count)
+        control = MissionStage.query.filter_by(
+            mission_id=sup.mission_id, stage_key=key,
+            stage_version=1).first()
+        if not control:
+            control = MissionStage(
+                mission_id=sup.mission_id, stage_key=key,
+                stage_version=1,
+                role_key=stage.role_key,
+                assigned_claw_id=occurrence.assignee_claw_id,
+                state='ready',
+                input_snapshot_json={
+                    'kind': kind,
+                    'source_stage_id': stage.id,
+                    'source_occurrence_id': occurrence.id,
+                    'test_task_id': task.id,
+                    'checkpoint': occurrence.checkpoint_json or {},
+                    'failure': occurrence.action_metadata_json or {},
+                    'rule': ('repair_then_resume_same_occurrence'
+                             if kind == 'environment_repair'
+                             else 'supplement_evidence_without_rerun'),
+                },
+                evidence_refs_json=[])
+            db.session.add(control)
+            db.session.flush()
+        instruction = (
+            '执行受控环境修复并返回结构化证据；不得扩大到任意命令。'
+            if kind == 'environment_repair' else
+            '仅补齐或复核缺失证据，不重跑已通过范围。')
+        dispatched = _create_control_agent_task(
+            sup, control, kind, instruction,
+            source_occurrence_id=occurrence.id)
+        occurrence.next_action = 'await_%s' % kind
+        occurrence.next_check_at = dispatched.created_at or now
+        wake_ids.append(dispatched.claw_id)
+    return sorted(set(wake_ids))
+
+
+def dispatch_ready_control_stages(sup, now=None):
+    """Make recovery stages real work instead of data-only ready rows."""
+    if not sup or not sup.mission_id:
+        return []
+    active = _plan_control_tasks(sup)
+    wake_ids = []
+    rows = MissionStage.query.filter_by(
+        mission_id=sup.mission_id, state='ready').order_by(
+            MissionStage.id).with_for_update().all()
+    for stage in rows:
+        snapshot = stage.input_snapshot_json or {}
+        kind = snapshot.get('kind')
+        if kind not in ('workflow_execution_reconciliation',
+                        'environment_repair', 'evidence_review'):
+            continue
+        current = active.get(stage.id)
+        if current and current.status in (
+                'pending', 'running', 'waiting_condition'):
+            continue
+        instruction = {
+            'workflow_execution_reconciliation': (
+                '核对执行已停止、副作用已对账，并按 input_snapshot.resolve_api '
+                '提交 execution_stopped、side_effects_reconciled、receipt_ref；'
+                '成功后再调用 recover_api。'),
+            'environment_repair': '执行受控环境修复并返回结构化证据。',
+            'evidence_review': '补证或复核，不重跑已通过范围。',
+        }[kind]
+        task = _create_control_agent_task(
+            sup, stage, kind, instruction,
+            source_occurrence_id=snapshot.get('source_occurrence_id'))
+        active[stage.id] = task
+        wake_ids.append(task.claw_id)
+    return sorted(set(wake_ids))
+
+
 def record_agent_task_terminal(agent_task, result, status, now=None):
+    control = _agent_task_control_link(agent_task)
+    if control:
+        return _record_control_terminal(
+            agent_task, control, result, status, now or _now())
     link = _agent_task_plan_link(agent_task)
     if not link:
         return None
@@ -1434,13 +2350,20 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
         projected, stage.state = 'failed', 'failed'
     if occurrence:
         occurrence.status = projected
+        occurrence.condition_state = (
+            '' if projected in ('completed', 'skipped') else projected)
         occurrence.result_summary = summary
         occurrence.last_heartbeat_at = (
             agent_task.last_heartbeat_at or now)
-        occurrence.next_action = (
-            'none' if projected in ('completed', 'skipped')
-            else 'manager_review')
-        occurrence.next_check_at = None
+        if projected in ('completed', 'skipped'):
+            occurrence.recommended_action = 'none'
+            occurrence.next_action = 'none'
+            occurrence.next_check_at = None
+            occurrence.owner_gate = False
+        else:
+            _apply_terminal_action(
+                occurrence, result.get('error_code') or status,
+                summary, now)
         occurrence.attempt_count = max(
             int(occurrence.attempt_count or 0),
             int(agent_task.attempt_no or 0), 1)
@@ -1475,6 +2398,16 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
         'occurrence_status': occurrence.status if occurrence else None,
         'summary': summary,
     }, now)
+    if occurrence and occurrence.owner_gate:
+        add_event(sup.plan_id, 'occurrence_owner_gate', [
+            'occurrence-owner-gate-terminal', occurrence.id,
+            int(agent_task.attempt_no or 0),
+        ], {
+            'occurrence_id': occurrence.id,
+            'test_task_id': task.id,
+            'recommended_action': occurrence.recommended_action,
+            'summary': summary,
+        }, now)
     return task
 
 
@@ -1553,9 +2486,11 @@ def recovery_snapshot(sup):
     }
     if not sup or not sup.mission_id:
         return empty
-    stages = MissionStage.query.filter_by(
-        mission_id=sup.mission_id, state='ready').order_by(
-            MissionStage.id.desc()).all()
+    stages = MissionStage.query.filter(
+        MissionStage.mission_id == sup.mission_id,
+        MissionStage.state.in_((
+            'ready', 'dispatched', 'running', 'blocked')),
+    ).order_by(MissionStage.id.desc()).all()
     recovery_stage = next((stage for stage in stages
         if (stage.input_snapshot_json or {}).get('kind') ==
            'workflow_execution_reconciliation'), None)
@@ -1563,8 +2498,14 @@ def recovery_snapshot(sup):
         snapshot = recovery_stage.input_snapshot_json or {}
         owner = db.session.get(
             OpenClawInstance, recovery_stage.assigned_claw_id)
+        control = _plan_control_tasks(sup).get(recovery_stage.id)
         return {
-            'recovery_state': 'reconciliation_required',
+            'recovery_state': (
+                'reconciliation_running'
+                if recovery_stage.state == 'running'
+                else 'reconciliation_dispatched'
+                if recovery_stage.state == 'dispatched'
+                else 'reconciliation_required'),
             'reconciliation_owner': {
                 'claw_id': recovery_stage.assigned_claw_id,
                 'name': owner.name if owner else '',
@@ -1574,6 +2515,7 @@ def recovery_snapshot(sup):
             'next_check_at': empty['next_check_at'],
             'reconciliation_stage': recovery_stage.to_dict(
                 include_input=True),
+            'agent_task': control.to_dict() if control else None,
         }
     return empty
 
@@ -1634,7 +2576,10 @@ def decide(sup, claw_id, body, now=None):
         if outcome == 'blocked':
             notification_reasons.append('blocked')
         notification_reasons.extend(kind for kind in (
-            'run_terminal', 'heartbeat_anomaly', 'stale') if kind in event_kinds)
+            'run_terminal', 'heartbeat_anomaly', 'stale',
+            'occurrence_owner_gate', 'occurrence_due_unresolved',
+            'supervision_report_updated', 'control_action_terminal')
+            if kind in event_kinds)
         sup.acknowledged_cursor = sup.lease_cursor
         sup.last_decision_json = {
             'outcome': effective_outcome,
@@ -1714,11 +2659,46 @@ def task_dispatch_receipts(sup):
     if not sup or not sup.mission_id:
         return []
     ordinary_tasks = _plan_agent_tasks(sup)
+    control_tasks = _plan_control_tasks(sup)
     items = []
     for stage in MissionStage.query.filter_by(mission_id=sup.mission_id).order_by(
             MissionStage.id).all():
+        snapshot = stage.input_snapshot_json or {}
+        control = control_tasks.get(stage.id)
+        control_kind = snapshot.get('kind')
         task_id = _stage_task_id(stage)
-        if not task_id:
+        if control or control_kind in (
+                'workflow_execution_reconciliation',
+                'environment_repair', 'evidence_review'):
+            if not control and control_kind not in (
+                    'workflow_execution_reconciliation',
+                    'environment_repair', 'evidence_review'):
+                continue
+            control_claimed = bool(
+                control and control.assigned_at
+                and control.status != 'pending')
+            items.append({
+                'task_id': None,
+                'source_test_task_id': task_id,
+                'occurrence_id': snapshot.get('source_occurrence_id'),
+                'stage_key': stage.stage_key,
+                'stage_state': stage.state,
+                'control_action': control_kind,
+                'executor_claw_id': stage.assigned_claw_id,
+                'workflow_run_id': stage.workflow_run_id,
+                'agent_task_id': control.task_id if control else None,
+                'agent_task_status': control.status if control else None,
+                'execution_mode': 'plan_control_action' if control else None,
+                'claimed': control_claimed,
+                'claimed_by': (
+                    'claw:%s' % control.claw_id if control_claimed else ''),
+                'claimed_at': (
+                    str(control.assigned_at)
+                    if control_claimed and control.assigned_at else None),
+                'claim_fencing_token': (
+                    int(control.fencing_token or 0)
+                    if control_claimed else None),
+            })
             continue
         claim = None
         if stage.workflow_run_id:
@@ -1869,10 +2849,15 @@ def record_workflow_terminal(run_id, now=None):
     if occurrence:
         occurrence.status = stage_state
         occurrence.workflow_run_id = run.id
-        occurrence.next_action = (
-            'none' if stage_state in ('completed', 'skipped')
-            else 'manager_review')
-        occurrence.next_check_at = None
+        if stage_state in ('completed', 'skipped'):
+            occurrence.recommended_action = 'none'
+            occurrence.next_action = 'none'
+            occurrence.next_check_at = None
+            occurrence.owner_gate = False
+        else:
+            _apply_terminal_action(
+                occurrence, 'workflow_run_%s' % run.status,
+                str(run.summary or ''), now)
         occurrence.last_heartbeat_at = now
         if run.summary:
             occurrence.result_summary = str(run.summary)[:8000]
@@ -1900,6 +2885,15 @@ def record_workflow_terminal(run_id, now=None):
         'occurrence_id': occurrence.id if occurrence else None,
         'occurrence_status': occurrence.status if occurrence else None,
     }, now)
+    if occurrence and occurrence.owner_gate:
+        add_event(sup.plan_id, 'occurrence_owner_gate', [
+            'workflow-owner-gate', run.id, occurrence.id,
+        ], {
+            'run_id': run.id,
+            'occurrence_id': occurrence.id,
+            'test_task_id': task.id,
+            'recommended_action': occurrence.recommended_action,
+        }, now)
     return task
 
 
@@ -1921,6 +2915,106 @@ def reconcile_plan_truth(sup, now=None):
     return count
 
 
+def refresh_supervision_report(sup, now=None):
+    """Refresh the deterministic Plan dashboard only when truth changed."""
+    if not sup:
+        return False
+    now = now or _now()
+    plan = db.session.get(TestPlan, sup.plan_id)
+    if not plan:
+        return False
+    rows = (TestTaskOccurrence.query.filter_by(plan_id=sup.plan_id)
+            .order_by(TestTaskOccurrence.occurrence_date,
+                      TestTaskOccurrence.id).all())
+    today = [row for row in rows if row.occurrence_date == now.date()]
+    if not today:
+        return False
+    status_counts = {}
+    for row in today:
+        status_counts[row.status] = status_counts.get(row.status, 0) + 1
+    gaps = [{
+        'occurrence_id': row.id,
+        'task_id': row.test_task_id,
+        'status': row.status,
+        'recommended_action': row.recommended_action or '',
+        'next_action': row.next_action or '',
+        'next_check_at': str(row.next_check_at) if row.next_check_at else None,
+        'owner_gate': bool(row.owner_gate),
+    } for row in today if row.status not in ('completed', 'skipped')]
+    report_truth = {
+        'date': now.date().isoformat(),
+        'plan_id': plan.id,
+        'status_counts': status_counts,
+        'gaps': gaps,
+        'dispatches': task_dispatch_receipts(sup),
+    }
+    report_digest = digest(report_truth)
+    observations = dict(sup.observations_json or {})
+    if observations.get('supervision_report_digest') == report_digest:
+        return False
+    lines = [
+        '<!-- PLAN_SUPERVISION_AUTOGEN_START -->',
+        '## %s 自动监督快照' % now.date().isoformat(),
+        '',
+        '- 计划：#%s %s' % (plan.id, plan.name),
+        '- 生成时间：%s +08:00' % now.strftime('%Y-%m-%d %H:%M:%S'),
+        '- 当日实例：%s' % len(today),
+        '- 状态：%s' % (', '.join(
+            '%s=%s' % item for item in sorted(status_counts.items())) or '暂无'),
+        '',
+        '### 待处理项',
+    ]
+    if gaps:
+        for row in gaps:
+            lines.append(
+                '- occurrence #{occurrence_id} / task #{task_id}：{status}；'
+                'next={next_action}；owner_gate={owner_gate}'.format(**row))
+    else:
+        lines.append('- 无')
+    lines.append('<!-- PLAN_SUPERVISION_AUTOGEN_END -->')
+    section = '\n'.join(lines)
+
+    def merge(existing):
+        existing = existing or ''
+        pattern = re.compile(
+            r'<!-- PLAN_SUPERVISION_AUTOGEN_START -->.*?'
+            r'<!-- PLAN_SUPERVISION_AUTOGEN_END -->', re.S)
+        return (pattern.sub(section, existing) if pattern.search(existing)
+                else (existing.rstrip() + '\n\n' + section).strip())
+
+    legacy = TestPlanReport.query.filter_by(
+        plan_id=plan.id,
+        title='计划 #%s 自动监督看板' % plan.id).first()
+    if not legacy:
+        legacy = TestPlanReport(
+            plan_id=plan.id,
+            title='计划 #%s 自动监督看板' % plan.id,
+            content=section, format='markdown', created_by='Hub Supervisor')
+        db.session.add(legacy)
+    else:
+        legacy.content = merge(legacy.content)
+        legacy.updated_at = now
+    bound_id = observations.get('supervision_report_id')
+    bound = db.session.get(TestReport, bound_id) if bound_id else None
+    if bound and not bound.is_deleted and bound.project_id == plan.project_id:
+        bound.content = merge(bound.content)
+        bound.updated_at = now
+        legacy.linked_test_report_id = bound.id
+    db.session.flush()
+    observations['supervision_report_digest'] = report_digest
+    observations['supervision_report_updated_at'] = now.isoformat() + '+08:00'
+    sup.observations_json = observations
+    add_event(sup.plan_id, 'supervision_report_updated', [
+        'supervision-report-updated', report_digest,
+    ], {
+        'plan_report_id': legacy.id,
+        'test_report_id': bound.id if bound else None,
+        'status_counts': status_counts,
+        'gap_count': len(gaps),
+    }, now)
+    return True
+
+
 def stage_truth_snapshot(sup):
     if not sup or not sup.mission_id:
         return {'independent_stage_status': [], 'actionable_gaps': [],
@@ -1928,6 +3022,7 @@ def stage_truth_snapshot(sup):
     stages = MissionStage.query.filter_by(mission_id=sup.mission_id).order_by(
         MissionStage.id).all()
     ordinary_tasks = _plan_agent_tasks(sup)
+    control_tasks = _plan_control_tasks(sup)
     rows, gaps = [], []
     for stage in stages:
         task_id = _stage_task_id(stage)
@@ -1936,6 +3031,9 @@ def stage_truth_snapshot(sup):
         occurrence = (db.session.get(TestTaskOccurrence, occurrence_id)
                       if occurrence_id else None)
         ordinary = ordinary_tasks.get(stage.id)
+        control = control_tasks.get(stage.id)
+        active_task = ordinary or control
+        snapshot = stage.input_snapshot_json or {}
         item = {
             'stage_key': stage.stage_key, 'state': stage.state,
             'test_task_id': task_id,
@@ -1945,13 +3043,22 @@ def stage_truth_snapshot(sup):
             'occurrence_date': (str(occurrence.occurrence_date)
                                 if occurrence else None),
             'workflow_run_id': stage.workflow_run_id,
-            'agent_task_id': ordinary.task_id if ordinary else None,
-            'agent_task_status': ordinary.status if ordinary else None,
-            'attempt_no': int(ordinary.attempt_no or 0) if ordinary else None,
+            'control_action': snapshot.get('kind'),
+            'agent_task_id': active_task.task_id if active_task else None,
+            'agent_task_status': active_task.status if active_task else None,
+            'attempt_no': int(active_task.attempt_no or 0) if active_task else None,
             'last_heartbeat_at': (
-                str(ordinary.last_heartbeat_at)
-                if ordinary and ordinary.last_heartbeat_at else None),
+                str(active_task.last_heartbeat_at)
+                if active_task and active_task.last_heartbeat_at else None),
             'next_action': occurrence.next_action if occurrence else None,
+            'recommended_action': (
+                occurrence.recommended_action if occurrence else None),
+            'owner_gate': bool(occurrence.owner_gate) if occurrence else False,
+            'condition_state': (
+                occurrence.condition_state if occurrence else ''),
+            'next_probe_at': (
+                str(occurrence.next_probe_at)
+                if occurrence and occurrence.next_probe_at else None),
             'next_check_at': (
                 str(occurrence.next_check_at)
                 if occurrence and occurrence.next_check_at else None),
@@ -1959,7 +3066,11 @@ def stage_truth_snapshot(sup):
             'reason_code': stage.last_reason_code or '',
         }
         rows.append(item)
-        if stage.state in ('blocked', 'failed', 'cancelled'):
+        if (stage.state in ('blocked', 'failed', 'cancelled')
+                or (occurrence and occurrence.owner_gate)
+                or (occurrence and occurrence.status == 'waiting_condition'
+                    and occurrence.next_probe_at
+                    and occurrence.next_probe_at <= _now())):
             gaps.append(item)
     actions = ['wait', 'dispatch_ready_stage', 'recover_run']
     if sup.status in OWNER_GATE_STATUSES:
@@ -2022,6 +3133,7 @@ def sweep(now=None):
         # than through the result endpoint.  Reconcile them even while the
         # supervisor is waiting/blocked so stale "running" UI never persists.
         reconcile_ordinary_task_truth(sup, now)
+        guard_execution_goals(sup, now)
         if available(sup, now):
             ensure_manager_tenure(sup, now)
             # Scheduling is Hub-owned: materialize exactly one dated instance,
@@ -2030,8 +3142,12 @@ def sweep(now=None):
             sync_plan_stages(sup, now=now)
             member_wake_ids = promote_and_dispatch_due_occurrences(
                 sup, now=now)
+            member_wake_ids.extend(advance_occurrence_actions(sup, now=now))
+            member_wake_ids.extend(dispatch_ready_control_stages(sup, now=now))
+            member_wake_ids = sorted(set(member_wake_ids))
             enqueue_schedule_ticks(sup, now)
             reconcile_plan_truth(sup, now)
+            refresh_supervision_report(sup, now)
             observations = dict(sup.observations_json or {})
             for task in TestTask.query.filter_by(plan_id=plan_id).all():
                 payload = {'task_id': task.id, 'status': task.status}

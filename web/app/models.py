@@ -5571,6 +5571,8 @@ class TestTask(db.Model):
         db.JSON, comment='weekly 使用，0=周一…6=周日')
     schedule_timezone = db.Column(
         db.String(64), nullable=False, default='Asia/Shanghai')
+    schedule_effective_from = db.Column(
+        db.Date, comment='周期模板生效日期；为空沿用任务开始日期')
     not_before_time = db.Column(
         db.String(5), default='', comment='HH:MM，到点前不得派发')
     due_time = db.Column(
@@ -5667,6 +5669,9 @@ class TestTask(db.Model):
             'recurrence_type': self.recurrence_type or 'once',
             'recurrence_weekdays': self.recurrence_weekdays_json or [],
             'schedule_timezone': self.schedule_timezone or 'Asia/Shanghai',
+            'schedule_effective_from': (
+                str(self.schedule_effective_from)
+                if self.schedule_effective_from else None),
             'not_before_time': self.not_before_time or '',
             'due_time': self.due_time or '',
             'auto_dispatch': bool(self.auto_dispatch),
@@ -5739,8 +5744,23 @@ class TestTaskOccurrence(db.Model):
     workflow_run_id = db.Column(
         db.Integer, db.ForeignKey('workflow_runs.id'), index=True)
     attempt_count = db.Column(db.Integer, nullable=False, default=0)
+    action_attempt_count = db.Column(db.Integer, nullable=False, default=0)
+    recommended_action = db.Column(db.String(64), default='')
     next_action = db.Column(db.String(64), default='wait_not_before')
     next_check_at = db.Column(db.DateTime, index=True)
+    owner_gate = db.Column(db.Boolean, nullable=False, default=False)
+    action_metadata_json = db.Column(db.JSON)
+    execution_goal_json = db.Column(
+        db.JSON, comment='当日目标、截止时间与最终收口规则')
+    checkpoint_json = db.Column(
+        db.JSON, comment='已完成范围、剩余步骤与副作用收据')
+    resume_contract_json = db.Column(
+        db.JSON, comment='结构化恢复条件与 allowlist 探针合同')
+    condition_state = db.Column(
+        db.String(32), nullable=False, default='', index=True)
+    next_probe_at = db.Column(db.DateTime, index=True)
+    last_condition_event_at = db.Column(db.DateTime)
+    resume_fencing_token = db.Column(db.Integer, nullable=False, default=0)
     last_heartbeat_at = db.Column(db.DateTime)
     result_summary = db.Column(db.Text)
     evidence_refs_json = db.Column(db.JSON)
@@ -5785,6 +5805,8 @@ class TestTaskOccurrence(db.Model):
             'agent_task_id': self.agent_task_id,
             'workflow_run_id': self.workflow_run_id,
             'attempt_count': int(self.attempt_count or 0),
+            'action_attempt_count': int(self.action_attempt_count or 0),
+            'recommended_action': self.recommended_action or '',
             'next_action': self.next_action or '',
             'next_check_at': (
                 self.next_check_at.isoformat() + '+08:00'
@@ -5793,6 +5815,19 @@ class TestTaskOccurrence(db.Model):
                 self.last_heartbeat_at.isoformat() + '+08:00'
                 if self.last_heartbeat_at else None),
             'result_summary': self.result_summary or '',
+            'owner_gate': bool(self.owner_gate),
+            'action_metadata': self.action_metadata_json or {},
+            'execution_goal': self.execution_goal_json or {},
+            'checkpoint': self.checkpoint_json or {},
+            'resume_contract': self.resume_contract_json or {},
+            'condition_state': self.condition_state or '',
+            'next_probe_at': (
+                self.next_probe_at.isoformat() + '+08:00'
+                if self.next_probe_at else None),
+            'last_condition_event_at': (
+                self.last_condition_event_at.isoformat() + '+08:00'
+                if self.last_condition_event_at else None),
+            'resume_fencing_token': int(self.resume_fencing_token or 0),
             'evidence_refs': self.evidence_refs_json or [],
             'execution': ({
                 'agent_task_row_id': agent.id,

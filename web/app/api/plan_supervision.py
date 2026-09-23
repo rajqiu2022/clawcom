@@ -116,11 +116,57 @@ def dispatch_plan_agent_task(plan_id):
     return jsonify(result), (200 if result.get('replayed') else 201)
 
 
+@api_bp.route(
+    '/test-plans/<int:plan_id>/supervision/occurrences/'
+    '<int:occurrence_id>/condition-events', methods=['POST'])
+def report_occurrence_condition(plan_id, occurrence_id):
+    """Worker no-LLM probes report facts here; Hub owns resume fencing."""
+    _, sup, claw = load(plan_id)
+    if not claw:
+        svc.fail('PLAN_AGENT_REQUIRED', '条件事件必须由执行 Agent 上报', 403)
+    if not sup:
+        svc.fail('PLAN_SUPERVISION_NOT_STARTED', '计划尚未启动监督', 409)
+    body = payload()
+    if set(body) - {
+            'command_key', 'condition_type', 'condition_ready', 'facts',
+            'observed_at', 'expected_resume_fencing_token'}:
+        svc.fail('PLAN_BODY_INVALID', '条件事件包含不支持的字段', 400)
+    result = svc.record_condition_probe(
+        sup, claw.id, occurrence_id, body)
+    target = result.pop('wake_claw_id', None)
+    if result.get('replayed'):
+        target = None
+    db.session.commit()
+    if target:
+        svc.wake(target)
+    return jsonify(result), (200 if result.get('replayed') else 201)
+
+
 @api_bp.route('/test-plans/<int:plan_id>/supervision/receipts/<int:receipt_id>', methods=['GET'])
 def get_plan_supervision_receipt(plan_id, receipt_id):
     load(plan_id)
     record = PlanSupervisorReceipt.query.filter_by(plan_id=plan_id, id=receipt_id).first_or_404()
     return jsonify(record.response_json)
+
+
+@api_bp.route(
+    '/test-plans/<int:plan_id>/supervision/schedule-migration',
+    methods=['POST'])
+def migrate_plan_schedule_templates(plan_id):
+    """Explicitly activate recurring templates without rewriting history."""
+    _, sup, claw = load(plan_id, write=True)
+    if claw:
+        svc.fail('PLAN_HUMAN_MIGRATION_REQUIRED',
+                 '存量计划迁移须由登录的计划管理者发起', 403)
+    if not sup:
+        svc.fail('PLAN_SUPERVISION_NOT_STARTED', '计划尚未启动监督', 409)
+    body = payload()
+    if set(body) - {
+            'command_key', 'effective_from', 'report_id', 'templates'}:
+        svc.fail('PLAN_BODY_INVALID', '迁移请求包含不支持的字段', 400)
+    result = svc.migrate_schedule_templates(sup, body)
+    db.session.commit()
+    return jsonify(result), (200 if result.get('replayed') else 201)
 
 
 @api_bp.route('/test-plans/<int:plan_id>/supervision/start', methods=['POST'])

@@ -633,6 +633,189 @@ class PlanSupervisionTest(unittest.TestCase):
             test_task_id=task.id, occurrence_date=first_day).one().status,
             'completed')
 
+    def test_waiting_condition_probe_resumes_same_occurrence_with_new_fence(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['ios']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='当日 iOS 性能测试', status='assigned',
+            assignee_claw_id=self.other_claw.id, task_type='performance',
+            start_date=self.plan.start_date, end_date=self.plan.end_date,
+            schedule_enabled=True, recurrence_type='daily',
+            not_before_time='00:00', due_time='23:59', auto_dispatch=True,
+            execution_role='member_work')
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'condition-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        now = datetime.combine(self.plan.start_date, time(10, 0))
+        svc.sync_plan_stages(self.sup(), now=now)
+        self.assertEqual(
+            svc.promote_and_dispatch_due_occurrences(self.sup(), now=now),
+            [self.other_claw.id])
+        db.session.commit()
+        occurrence = TestTaskOccurrence.query.filter_by(
+            test_task_id=task.id).one()
+        first = claim_pending_tasks(self.other_claw.id, now=now)[0]
+        disposition = complete_task(first, {
+            'claim_token': first.claim_token,
+            'attempt_no': first.attempt_no,
+            'fencing_token': first.fencing_token,
+            'status': 'waiting_condition',
+            'result': {
+                'summary': 'WDA 已就绪，等待微信登录',
+                'checkpoint': {
+                    'completed_scope': ['device_ready', 'wda_ready'],
+                    'remaining_steps': ['collect_performance'],
+                    'side_effect_receipts': [],
+                },
+                'resume_contract': {
+                    'conditions': [{
+                        'condition_type': 'login_session_ready',
+                        'condition_scope': {'device_id': 'ios-1'},
+                        'probe_operation': 'ios.wecom.login_ready_v1',
+                    }],
+                    'probe_interval_seconds': 120,
+                    'resume_from_checkpoint': 'collect_performance',
+                    'owner_gate': True,
+                    'human_action': '在设备上完成登录',
+                },
+            },
+        }, now=now + timedelta(minutes=1))
+        self.assertEqual(disposition, 'waiting_condition')
+        db.session.refresh(occurrence)
+        self.assertEqual(first.status, 'waiting_condition')
+        self.assertEqual(occurrence.status, 'waiting_condition')
+        self.assertEqual(occurrence.condition_state, 'waiting_condition')
+        self.assertTrue(occurrence.owner_gate)
+        self.assertEqual(occurrence.checkpoint_json['completed_scope'], [
+            'device_ready', 'wda_ready'])
+        stage = db.session.get(MissionStage, occurrence.mission_stage_id)
+        self.assertEqual(stage.state, 'waiting_condition')
+
+        body = {
+            'command_key': 'condition-ready-1',
+            'condition_type': 'login_session_ready',
+            'condition_ready': True,
+            'expected_resume_fencing_token': 0,
+            'facts': {'page': 'home'},
+        }
+        result = svc.record_condition_probe(
+            self.sup(), self.other_claw.id, occurrence.id, body,
+            now=now + timedelta(minutes=30))
+        db.session.commit()
+        self.assertTrue(result['resumed'])
+        self.assertEqual(occurrence.resume_fencing_token, 1)
+        self.assertEqual(occurrence.condition_state, 'resuming')
+        self.assertFalse(occurrence.owner_gate)
+        self.assertEqual(AgentTask.query.filter_by(
+            task_type='test_plan_agent_task').count(), 2)
+        resumed = AgentTask.query.order_by(AgentTask.id.desc()).first()
+        payload = json.loads(resumed.payload)
+        self.assertEqual(payload['resume_fencing_token'], 1)
+        self.assertEqual(payload['checkpoint']['remaining_steps'], [
+            'collect_performance'])
+        replay = svc.record_condition_probe(
+            self.sup(), self.other_claw.id, occurrence.id, body,
+            now=now + timedelta(minutes=31))
+        self.assertTrue(replay['replayed'])
+        self.assertEqual(AgentTask.query.filter_by(
+            task_type='test_plan_agent_task').count(), 2)
+
+    def test_schedule_migration_is_idempotent_and_preserves_task_history(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['ios']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='历史每日任务', status='completed',
+            result_summary='昨日已完成', progress=100,
+            assignee_claw_id=self.other_claw.id, task_type='performance',
+            start_date=self.plan.start_date, end_date=self.plan.end_date,
+            schedule_enabled=False, recurrence_type='once')
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'migration-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        effective = self.plan.start_date + timedelta(days=1)
+        body = {
+            'command_key': 'migrate-daily-v1',
+            'effective_from': effective.isoformat(),
+            'templates': [{
+                'test_task_id': task.id,
+                'recurrence_type': 'daily',
+                'not_before_time': '10:00',
+                'due_time': '18:00',
+                'auto_dispatch': True,
+                'execution_role': 'member_work',
+            }],
+        }
+        first = svc.migrate_schedule_templates(self.sup(), body)
+        db.session.commit()
+        self.assertFalse(first['replayed'])
+        self.assertTrue(task.schedule_enabled)
+        self.assertEqual(task.schedule_effective_from, effective)
+        self.assertEqual(task.status, 'completed')
+        self.assertEqual(task.result_summary, '昨日已完成')
+        replay = svc.migrate_schedule_templates(self.sup(), body)
+        self.assertTrue(replay['replayed'])
+        self.assertEqual(PlanSupervisorReceipt.query.filter_by(
+            action='migrate_schedule_templates').count(), 1)
+
+    def test_reconciliation_stage_becomes_claimable_control_agent_task(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'control-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        stage = MissionStage(
+            mission_id=self.sup().mission_id,
+            stage_key='recover_run_844_test_a1', stage_version=1,
+            role_key='test_executor', assigned_claw_id=self.other_claw.id,
+            state='ready', input_snapshot_json={
+                'kind': 'workflow_execution_reconciliation',
+                'workflow_run_id': 844,
+                'resolve_api': '/resolve', 'recover_api': '/recover',
+            }, evidence_refs_json=[])
+        db.session.add(stage)
+        db.session.commit()
+        self.assertEqual(svc.dispatch_ready_control_stages(self.sup()), [
+            self.other_claw.id])
+        db.session.commit()
+        control = AgentTask.query.filter_by(
+            task_type='plan_control_action').one()
+        self.assertEqual(stage.state, 'dispatched')
+        self.assertEqual(svc.task_dispatch_receipts(self.sup())[-1][
+            'execution_mode'], 'plan_control_action')
+        claimed = claim_pending_tasks(self.other_claw.id)[0]
+        self.assertEqual(claimed.id, control.id)
+        self.assertEqual(stage.state, 'running')
+        # The dedicated execution-reconciliation API verifies the receipt and
+        # marks the stage completed before the AgentTask closes.
+        stage.state = 'completed'
+        db.session.commit()
+        complete_task(claimed, {
+            'claim_token': claimed.claim_token,
+            'attempt_no': claimed.attempt_no,
+            'fencing_token': claimed.fencing_token,
+            'status': 'completed',
+            'result': {
+                'execution_stopped': True,
+                'side_effects_reconciled': True,
+                'receipt_ref': 'receipt://844/a1',
+            },
+        })
+        self.assertEqual(stage.state, 'completed')
+
     def test_manager_work_occurrence_is_explicitly_assignable(self):
         team = self.scoped_team()
         self.plan.team_id = team.id

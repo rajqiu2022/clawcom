@@ -1,3 +1,8 @@
+---
+name: testplan-manager
+description: 管理 Hub 测试计划、周期任务、执行实例、用例进度、报告，以及 AgentTask 条件等待与自动续跑。
+---
+
 # 测试计划管理 (testplan-manager)
 
 ## 简介
@@ -145,6 +150,63 @@ POST /api/v1/test-plans/{PLAN_ID}/supervision/agent-tasks
   `pending/assigned` 进入 `in_progress`。
 - Worker 完成普通 `AgentTask` 后，Hub 自动同步测试任务和 Mission Stage 终态；不要让
   Agent 另行拼接进度/终态回写请求。
+
+#### 当日目标、条件等待与自动续跑
+
+周期任务派发的 payload 会包含 `test_task_occurrence_id`、`execution_goal`、
+`checkpoint`、`resume_contract`、`resume_fencing_token`。执行 Agent 对这个当日
+occurrence 持续负责，直到完成、到达 `due_at`，或进入真正需要人工决策的终态。
+
+登录态、设备、WDA、构建、账号池、服务器或资源租约暂时未就绪时，不要返回
+`blocked`。通过普通 AgentTask 结果接口返回 `waiting_condition`：
+
+```json
+{
+  "status": "waiting_condition",
+  "result": {
+    "summary": "设备与 WDA 已就绪，等待微信登录态恢复",
+    "checkpoint": {
+      "completed_scope": ["device_ready", "wda_ready"],
+      "remaining_steps": ["enter_minigame", "collect_performance"],
+      "side_effect_receipts": []
+    },
+    "resume_contract": {
+      "conditions": [{
+        "condition_type": "login_session_ready",
+        "condition_scope": {"device_id": "...", "app": "wecom"},
+        "probe_operation": "ios.wecom.login_session_ready_v1"
+      }],
+      "probe_interval_seconds": 120,
+      "resume_from_checkpoint": "enter_minigame",
+      "owner_gate": true,
+      "human_action": "请在测试设备上完成微信登录"
+    }
+  }
+}
+```
+
+- `waiting_condition` 是非终态；Hub 保存 Checkpoint/ResumeContract，Worker 启动
+  allowlist 内的无 LLM 轻量探针。不要用 Codex/Hermes 轮询。
+- `owner_gate=true` 仅表示需要一次人工动作通知；人工完成后不需要经理重新下令。
+- 探针发现条件变化后调用：
+
+```
+POST /api/v1/test-plans/{PLAN_ID}/supervision/occurrences/{OCCURRENCE_ID}/condition-events
+
+{
+  "command_key": "occ-301-login-ready-observation-17",
+  "condition_type": "login_session_ready",
+  "condition_ready": true,
+  "expected_resume_fencing_token": 0,
+  "observed_at": "2026-09-23T23:30:00+08:00",
+  "facts": {"page": "home", "entry_visible": true}
+}
+```
+
+条件全部满足后，Hub 会递增 `resume_fencing_token`，创建同一 occurrence 的新
+AgentTask attempt，并把 Checkpoint 注入 payload。只能在新 claim/fence 下继续；旧
+attempt 不得再产生副作用。到 `due_at` 仍未恢复时，Hub 以已完成范围和缺失范围收口为
+`ANALYSIS_INCOMPLETE`，次日 occurrence 独立开始。
 
 ### 用例执行记录 (TestTaskCase)
 
