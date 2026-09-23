@@ -26,7 +26,7 @@
             <div id="at-list" class="at-list"><p class="at-empty">选择项目，查看独立团队。</p></div>
             <button id="at-more" class="btn btn-secondary at-more" type="button" hidden>加载更多团队</button>
         </aside>
-        <section id="at-detail" class="at-panel at-detail" aria-label="团队详情" aria-live="polite"><div class="at-empty at-start">团队的角色、任期和任务将在这里展示。</div></section>
+        <section id="at-detail" class="at-panel at-detail" aria-label="团队详情" aria-live="polite"><div class="at-empty at-start">团队的角色、经理权限和任务将在这里展示。</div></section>
     </div>
     <p class="at-footnote">团队勾选的 Flow 自动授予经理调度、代码分析员和测试执行员执行权限；不会自动启动 Workflow。</p>
 </div>
@@ -35,14 +35,14 @@
         <header class="at-dialog-head"><div><span class="at-eyebrow">TEAM CONFIGURATION</span><h2 id="at-editor-title">创建团队</h2></div><button type="button" id="at-close" class="btn btn-ghost" aria-label="关闭团队配置">关闭</button></header>
         <div class="at-form-body">
             <div id="at-form-error" class="at-notice at-error" role="alert" hidden></div>
-            <p id="at-edit-warning" class="at-warning" hidden>保存后将撤销当前经理任期，经理需重新申请任期；不会取消已运行的任务。</p>
+            <p id="at-edit-warning" class="at-warning" hidden>保存后将按最新团队角色立即更新调度权限；不会取消已运行的任务。</p>
             <fieldset class="at-fieldset"><legend><span>01</span> 团队目标</legend>
                 <label class="at-field">团队名称<input id="at-name" class="form-input" required maxlength="160" placeholder="例如：手机包回归团队"></label>
                 <label class="at-field">目标与范围<textarea id="at-objective" class="form-input" required maxlength="16000" rows="3" placeholder="描述该团队负责什么，以及完成目标的标准"></textarea></label>
             </fieldset>
             <fieldset class="at-fieldset"><legend><span>02</span> 测试经理 <small>每个团队一名在任</small></legend>
                 <div class="at-two-cols"><label class="at-field">主经理<select id="at-primary" class="form-select" required></select></label><label class="at-field">备用经理（可选）<select id="at-backup" class="form-select"></select></label></div>
-                <p class="at-help">主备不能为同一 Agent。备用经理仅在接管有效任期后参与调度。</p>
+                <p class="at-help">主备不能为同一 Agent。主经理和备用经理的权限均随团队角色持续有效，移出团队后立即撤回。</p>
             </fieldset>
             <fieldset class="at-fieldset"><legend><span>03</span> 团队成员 <small>支持多名、跨团队复用</small></legend>
                 <div id="at-members"></div>
@@ -52,7 +52,7 @@
             <fieldset class="at-fieldset"><legend><span>04</span> 调度范围</legend>
                 <label class="at-field">筛选 Flow<input id="at-flow-search" type="search" class="form-input" placeholder="按名称或 ID 筛选"></label>
                 <div id="at-flows" class="at-flow-picker" aria-label="允许调度的 Flow"></div>
-                <p class="at-help">至少选一个 Flow。保存后经理可调度、成员可执行；取消勾选或移出团队会撤回团队授权，不影响手工授权。实际派发仍校验经理租约、阶段绑定和可信 Runtime。</p>
+                <p class="at-help">至少选一个 Flow。保存后经理可持续调度、成员可执行；取消勾选或移出团队会撤回团队授权，不影响手工授权。实际派发仍校验阶段绑定和可信 Runtime。</p>
                 <label class="at-field at-budget">每个 Mission 最多创建 Run 数<input id="at-budget" class="form-input" type="number" min="1" max="100" step="1" required value="20"></label>
             </fieldset>
         </div>
@@ -89,4 +89,4 @@
     </div>
 </dialog>
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='js/agent_team_activity.js') }}?v=20260921plans"></script><script src="{{ url_for('static', filename='js/agent_team_resources.js') }}?v=20260922teamlib"></script><script src="{{ url_for('static', filename='js/agent_team_chat.js') }}?v=20260923teamimages"></script><script src="{{ url_for('static', filename='js/agent_team_plans.js') }}?v=20260923teamchat"></script><script src="{{ url_for('static', filename='js/agent_teams.js') }}?v=20260923teamchat"></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='js/agent_team_activity.js') }}?v=20260921plans"></script><script src="{{ url_for('static', filename='js/agent_team_resources.js') }}?v=20260922teamlib"></script><script src="{{ url_for('static', filename='js/agent_team_chat.js') }}?v=20260923teamimages"></script><script src="{{ url_for('static', filename='js/agent_team_plans.js') }}?v=20260923durablemanager"></script><script src="{{ url_for('static', filename='js/agent_teams.js') }}?v=20260923durablemanager"></script>{% endblock %}

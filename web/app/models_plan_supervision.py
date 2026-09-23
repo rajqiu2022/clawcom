@@ -35,17 +35,20 @@ class PlanSupervisor(db.Model):
         if self.team_id:
             team = db.session.get(AgentTeam, self.team_id)
             if team:
+                active = team.has_manager_authority(
+                    self.orchestrator_claw_id)
                 manager = {
-                    'active': bool(
-                        team.status == 'active'
-                        and team.active_manager_claw_id == self.orchestrator_claw_id
-                        and team.manager_session_id
-                        and team.manager_lease_expires_at
-                        and team.manager_lease_expires_at > _now()),
+                    'active': active,
                     'epoch': int(team.manager_epoch or 0),
-                    'manager_claw_id': team.active_manager_claw_id,
-                    'session_id': team.manager_session_id or '',
-                    'expires_at': stamp(team.manager_lease_expires_at),
+                    'manager_claw_id': (
+                        self.orchestrator_claw_id if active else None),
+                    'session_id': (
+                        'team-manager:%s:%s:%s' % (
+                            team.id, int(team.version or 1),
+                            self.orchestrator_claw_id)
+                        if active else ''),
+                    'expires_at': None,
+                    'mode': 'team_role_assignment',
                 }
         payload = {name: getattr(self, name) for name in (
             'plan_id', 'team_id', 'orchestrator_claw_id', 'mission_id', 'status', 'cursor',

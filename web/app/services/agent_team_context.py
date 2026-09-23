@@ -22,8 +22,8 @@ def team_snapshot(team, claw_id, names):
             value['effective_role_key'] = 'test_manager'
             value['manager_kind'] = (
                 'primary' if 'primary_manager' in roles else 'backup')
-            value['is_active_manager'] = (
-                person_id == team.active_manager_claw_id)
+            value['has_manager_authority'] = team.has_manager_authority(
+                person_id)
         elif 'code_analyst' in roles:
             value['effective_role_key'] = 'code_analyst'
         elif 'test_executor' in roles:
@@ -47,7 +47,7 @@ def team_snapshot(team, claw_id, names):
             'can_dispatch_members': team.status == 'active' and claw_id in (
                 team.primary_manager_claw_id, team.backup_manager_claw_id),
             'note': '勾选 Flow 自动授予经理调度、成员执行权限，不授予编辑权限；'
-                    'Mission 仍须有效经理租约、阶段绑定和可信 Runtime。',
+                    '经理权限随团队角色持续有效，Mission 仍须阶段绑定和可信 Runtime。',
         },
         'plan_supervision': team_capability(team.id),
         'test_plans': {'api': '/api/v1/agent-teams/%s/test-plans' % team.id,

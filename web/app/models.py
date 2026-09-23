@@ -1392,16 +1392,34 @@ class AgentTeam(db.Model):
     updated_at = db.Column(db.DateTime, default=_now, onupdate=_now, nullable=False)
     __table_args__ = (db.UniqueConstraint('project_id', 'name', name='uq_agent_team_project_name'),)
 
+    def has_manager_authority(self, claw_id):
+        """Return durable authority granted by an active team role."""
+        return bool(
+            self.status == 'active'
+            and claw_id in (
+                self.primary_manager_claw_id,
+                self.backup_manager_claw_id,
+            )
+        )
+
     def to_dict(self):
+        authority_active = bool(
+            self.status == 'active' and self.primary_manager_claw_id)
+        effective_manager_id = (
+            self.primary_manager_claw_id if authority_active else None)
         return {
             'id': self.id, 'project_id': self.project_id, 'name': self.name,
             'objective': self.objective, 'status': self.status, 'version': self.version,
             'primary_manager_claw_id': self.primary_manager_claw_id,
             'backup_manager_claw_id': self.backup_manager_claw_id,
-            'active_manager_claw_id': self.active_manager_claw_id,
+            # Compatibility fields project durable manager assignment. They no
+            # longer represent a five-minute authorization lease.
+            'active_manager_claw_id': effective_manager_id,
             'manager_epoch': self.manager_epoch,
-            'manager_lease_expires_at': str(self.manager_lease_expires_at) if self.manager_lease_expires_at else None,
-            'manager_lease_active': bool(self.manager_lease_expires_at and self.manager_lease_expires_at > _now()),
+            'manager_lease_expires_at': None,
+            'manager_lease_active': authority_active,
+            'manager_authority_active': authority_active,
+            'manager_authority_mode': 'team_role_assignment',
             'policy': self.policy_json or {},
             'members': [member.to_dict() for member in sorted(self.members, key=lambda row: row.id or 0)],
             'updated_at': str(self.updated_at),

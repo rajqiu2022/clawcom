@@ -14,10 +14,8 @@ def access(team, write=False):
     if not _can_access_project(actor, team.project_id):
         raise TeamError('TEAM_ACCESS_DENIED', '无权访问团队项目', 403)
     manager = (actor['type'] == 'user' and _can_administer(actor, team.project_id)) or (
-        actor['type'] == 'claw' and actor['claw'].project_id == team.project_id and (
-            actor['id'] == team.primary_manager_claw_id or (
-                actor['id'] == team.backup_manager_claw_id == team.active_manager_claw_id
-                and team.manager_lease_expires_at and team.manager_lease_expires_at > _now())))
+        actor['type'] == 'claw' and actor['claw'].project_id == team.project_id
+        and team.has_manager_authority(actor['id']))
     if write and not manager:
         raise TeamError('TEAM_PLAN_MANAGER_REQUIRED', '仅团队测试经理或项目管理员可管理团队计划', 403)
     return actor, bool(manager)
@@ -147,6 +145,8 @@ def overview(team, period, raw_date, limit, offset):
                 'mission_id': supervisor_data['mission_id'],
                 'next_check_at': supervisor_data['next_check_at'],
                 'manager_lease_active': bool(
+                    (supervisor_data.get('manager_lease') or {}).get('active')),
+                'manager_authority_active': bool(
                     (supervisor_data.get('manager_lease') or {}).get('active')),
                 'lease_expires_at': (
                     (supervisor_data.get('manager_lease') or {}).get('expires_at')),

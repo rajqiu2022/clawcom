@@ -188,11 +188,16 @@ def _mission_payload(mission, with_dispatches=False):
     if team:
         payload['team_id'] = team.id
         payload['team_version'] = binding.team_version
-        payload['active_manager_claw_id'] = team.active_manager_claw_id
+        payload['active_manager_claw_id'] = (
+            team.primary_manager_claw_id if team.status == 'active' else None)
         payload['manager_epoch'] = team.manager_epoch
         payload['dispatch_contract'].update({
             'decision_owner': 'team_manager',
-            'required_fields': ['workflow_definition_id', 'stage_key', 'manager_epoch', 'manager_session_id'],
+            'required_fields': ['workflow_definition_id', 'stage_key'],
+            'optional_fields': list(dict.fromkeys(
+                payload['dispatch_contract']['optional_fields']
+                + ['manager_epoch', 'manager_session_id'])),
+            'manager_authority': 'team_role_assignment',
             'default_worker_claw_id': None,
         })
     from app.models_plan_supervision import PlanSupervisor

@@ -116,10 +116,10 @@
         const actions = manage ? `<button class="btn btn-secondary btn-sm" data-action="edit" type="button">编辑配置</button>
             ${team.status !== 'archived' ? `<button class="btn btn-secondary btn-sm" data-action="${team.status === 'paused' ? 'active' : 'paused'}" type="button">${team.status === 'paused' ? '恢复' : '暂停'}</button>` : ''}
             <button class="btn btn-ghost btn-sm" data-action="${team.status === 'archived' ? 'active' : 'archived'}" type="button">${team.status === 'archived' ? '恢复团队' : '归档'}</button>` : '';
-        const lease = team.manager_lease_active ? `在任：${agentLabel(team.active_manager_claw_id)}` : '暂无有效调度任期';
+        const authority = team.manager_authority_active ? `主测试经理：${agentLabel(team.primary_manager_claw_id)}` : '当前未启用经理调度权限';
         $('at-detail').innerHTML = `<header class="at-detail-head"><div class="at-detail-title"><div><span class="at-eyebrow">TEAM #${team.id} / CONFIG v${team.version}</span><h2>${esc(team.name)}</h2></div><div class="at-detail-actions">${actions}</div></div>
-            <p class="at-detail-goal">${esc(team.objective)}</p><div class="at-lease">${badge(team.status)}<strong>${esc(lease)}</strong><span>任期 #${team.manager_epoch}</span></div>
-            <p class="at-help">任期状态为本次读取快照，不等同于 Agent 在线状态。${team.manager_lease_expires_at ? '到期时间：' + esc(team.manager_lease_expires_at) : '经理接入团队合同并申请任期后才可调度。'}</p></header>
+            <p class="at-detail-goal">${esc(team.objective)}</p><div class="at-lease">${badge(team.status)}<strong>${esc(authority)}</strong><span>持续授权</span></div>
+            <p class="at-help">测试经理的调度权限随团队角色持续有效；仅在管理员将其移出、替换或暂停团队时撤回。Supervisor 短锁只防止并发回合，不影响经理权限。</p></header>
             <div class="at-detail-tabs" role="tablist" aria-label="团队工作视图"><button id="at-tab-members" role="tab" aria-selected="true" aria-controls="at-members-panel" data-team-tab="members" type="button">团队成员</button><button id="at-tab-chat" role="tab" aria-selected="false" aria-controls="at-chat-panel" data-team-tab="chat" tabindex="-1" type="button">团队聊天室</button><button id="at-tab-plans" role="tab" aria-selected="false" aria-controls="at-plans-panel" data-team-tab="plans" tabindex="-1" type="button">任务计划</button><button id="at-tab-knowledge" role="tab" aria-selected="false" aria-controls="at-knowledge-panel" data-team-tab="knowledge" tabindex="-1" type="button">共享知识库</button><button id="at-tab-skills" role="tab" aria-selected="false" aria-controls="at-skills-panel" data-team-tab="skills" tabindex="-1" type="button">共享 Skills</button></div>
             <div id="at-members-panel" role="tabpanel" aria-labelledby="at-tab-members"><section class="at-activity"><header class="at-activity-head"><div><h3>团队成员 <span class="at-muted">Agent 自报状态</span></h3><p class="at-help">状态与进度由成员自行上报；超过 3 分钟未更新标为过期，不推断为空闲。</p></div><button type="button" class="btn btn-secondary btn-sm" id="at-activity-refresh">刷新状态</button></header><p id="at-activity-note" class="at-help" role="status"></p><div id="at-activity-cards" class="at-activity-grid"><p class="at-empty">正在读取成员状态…</p></div></section>
             <div class="at-policy">允许调度：${team.policy.allowed_definition_ids.map(flowId => `<a href="/workflows?definition_id=${flowId}">Flow #${flowId}</a>`).join('')}<br>每个 Mission 最多 ${team.policy.max_child_runs} 个 Run；经理自动获得调度权限，成员自动获得执行权限，不授予 Flow 编辑权限。</div>
@@ -213,7 +213,7 @@
         try {
             const result = state.editing ? await API.put(`/agent-teams/${state.editing.id}`, config) : await API.post('/agent-teams', config);
             $('at-editor').close(); await reloadProject(result.id);
-            if (state.options) notice('团队配置已保存。未启动 Workflow；经理需自行申请有效调度任期。');
+            if (state.options) notice('团队配置已保存。未启动 Workflow；测试经理的调度权限已按团队角色生效。');
         } catch (error) {
             formError(error.code === 'TEAM_VERSION_CONFLICT' ? '配置已被其他人修改，本次没有覆盖。请保留你的修改内容，关闭弹窗并刷新后重新编辑。' : messageFor(error));
         } finally { state.saving = false; $('at-save').disabled = false; $('at-save').textContent = '保存团队'; }
@@ -222,7 +222,7 @@
         const team = state.teams.find(t => t.id === state.selected);
         if (!team || !state.options.can_manage || state.saving) return;
         const epoch = state.loadEpoch;
-        const prompt = `${statusLabels[status]}团队「${team.name}」？这会撤销当前经理任期，但不会取消已经运行的任务。`;
+        const prompt = `${statusLabels[status]}团队「${team.name}」？${status === 'paused' || status === 'archived' ? '这会暂停团队经理的新调度权限，' : ''}不会取消已经运行的任务。`;
         const confirmed = typeof customConfirm === 'function' ? await customConfirm(prompt) : window.confirm(prompt);
         if (!confirmed || epoch !== state.loadEpoch || state.saving) return;
         state.saving = true;

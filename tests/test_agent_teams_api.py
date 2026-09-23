@@ -98,7 +98,9 @@ class AgentTeamsApiTest(unittest.TestCase):
         self.assertEqual(self.other_claw.role, old_role)
         self.assertEqual(AgentTeamMember.query.filter_by(claw_id=self.other_claw.id).count(), 4)
         self.assertEqual(team['manager_epoch'], 0)
-        self.assertFalse(team['manager_lease_active'])
+        self.assertTrue(team['manager_authority_active'])
+        self.assertTrue(team['manager_lease_active'])  # compatibility alias
+        self.assertIsNone(team['manager_lease_expires_at'])
 
     def test_team_shared_resources_reuse_canonical_content_and_agent_can_curate(self):
         self._setup_team()
@@ -254,14 +256,19 @@ class AgentTeamsApiTest(unittest.TestCase):
         response = self.client.post('/api/v1/agent-teams', json=dict(self.config, name='bad'))
         self.assertEqual(response.status_code, 400)
 
-    def test_lease_rejects_parallel_session_and_stale_renewal(self):
+    def test_manager_role_authority_is_durable_for_primary_and_backup(self):
         self._setup_team()
         first = self._lease()
         self.assertEqual(first.status_code, 200)
-        self.assertEqual(self._lease(session='second-process').status_code, 409)
-        self.assertEqual(self._lease(self.backup_token, session='backup').status_code, 409)
-        self.assertEqual(self._lease(epoch=0).get_json()['code'], 'STALE_MANAGER_EPOCH')
-        self.assertEqual(self._lease().get_json()['manager_epoch'], first.get_json()['manager_epoch'])
+        self.assertEqual(self._lease(session='second-process').status_code, 200)
+        backup = self._lease(self.backup_token, session='backup')
+        self.assertEqual(backup.status_code, 200)
+        self.assertEqual(self._lease(epoch=999).status_code, 200)
+        self.assertEqual(self._lease().get_json()['manager_epoch'],
+                         first.get_json()['manager_epoch'])
+        self.assertEqual(backup.get_json()['manager_authority']['mode'],
+                         'team_role_assignment')
+        self.assertIsNone(backup.get_json()['manager_authority']['expires_at'])
 
     def test_immutable_plan_and_dispatch_are_idempotent_and_bound_to_stage(self):
         self._setup_team()
@@ -280,7 +287,7 @@ class AgentTeamsApiTest(unittest.TestCase):
         self.assertEqual(stage.workflow_run_id, first.get_json()['workflow_run_id'])
         self.assertEqual(first.get_json()['run']['context']['mission']['team_id'], self.team_id)
 
-    def test_backup_takes_over_mission_and_old_manager_cannot_dispatch(self):
+    def test_primary_and_backup_keep_authority_until_removed(self):
         self._setup_team()
         mission_id = self._mission()
         self.assertEqual(self._plan(mission_id).status_code, 201)
@@ -289,10 +296,10 @@ class AgentTeamsApiTest(unittest.TestCase):
         db.session.commit()
         takeover = self._lease(self.backup_token, session='backup')
         self.assertEqual(takeover.status_code, 200, takeover.get_json())
-        self.assertGreater(takeover.get_json()['manager_epoch'], old_epoch)
-        self.assertEqual(self._dispatch(mission_id, manager_epoch=old_epoch, manager_session_id='primary-process').status_code, 403)
+        self.assertEqual(takeover.get_json()['manager_epoch'], old_epoch)
         response = self._dispatch(mission_id, token=self.backup_token, **self._auth(session='backup'))
         self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(self._lease(session='primary-again').status_code, 200)
 
     def test_team_selection_grants_flow_execution_without_manual_acl(self):
         self._setup_team()

@@ -1,7 +1,5 @@
 """Team configuration, manager fencing and immutable membership contracts."""
 import re
-from datetime import datetime
-
 from flask import current_app
 
 from app import db
@@ -162,16 +160,15 @@ def require_manager(team, actor, data, allow_paused=False):
     if team.status != 'active' and not (allow_paused and team.status == 'paused'):
         raise TeamError('TEAM_NOT_ACTIVE', '团队暂停或归档，不接受新调度')
     if (not actor or actor['type'] != 'claw'
-            or actor['id'] != team.active_manager_claw_id):
-        raise TeamError('TEAM_MANAGER_REQUIRED', '必须由在任测试经理操作', 403)
+            or actor['id'] not in (
+                team.primary_manager_claw_id,
+                team.backup_manager_claw_id)):
+        raise TeamError(
+            'TEAM_MANAGER_REQUIRED',
+            '必须由团队配置的测试经理操作', 403)
     scoped_claw(actor['id'], team.project_id)
-    if (data.get('manager_epoch') != team.manager_epoch
-            or type(data.get('manager_epoch')) is not int
-            or not data.get('manager_session_id')
-            or data.get('manager_session_id') != team.manager_session_id
-            or not team.manager_lease_expires_at
-            or team.manager_lease_expires_at <= datetime.now()):
-        raise TeamError('STALE_MANAGER_EPOCH', '测试经理任期或会话已失效，禁止继续派发')
+    # Legacy manager_epoch / manager_session_id receipts remain accepted, but
+    # role assignment is now the only manager authorization boundary.
 
 
 def mission_team(mission, lock=False, require_enabled=True):

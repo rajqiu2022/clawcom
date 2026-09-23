@@ -83,7 +83,7 @@ def queue_join_notifications(team, previous_member_ids=()):
             '已有 Worker 自动上报时复用其队列，勿启第二个写入者。'
             '未完成安装或上报不得声称已完成。\n'
             '这是入队与安装提醒，不是任务派发，不要求抢占正在运行的任务。'
-            '不因此启动 Flow、领取经理任期、修改 ACL 或升级 Worker。'
+            '不因此启动 Flow、修改团队角色、修改 ACL 或升级 Worker。'
             '处理前请 GET /api/v1/agent-teams/%s 核实最新成员关系；若已退队，不再执行本通知。'
         ) % (team.id, team.name, team.project_id, team.version, roles,
              ('；细分：' + specialties) if specialties else '', claw_id, roster_text, team.project_id,

@@ -18,8 +18,7 @@ const AgentTeamPlans = (() => {
         if (p.status !== 'active') return '';
         const s = p.supervision;
         if (!s) return '<p class="at-help at-plan-alert">监管未启动 · 尚无 Supervisor/Mission</p>';
-        if (!s.manager_lease_active && !['waiting','stopped'].includes(s.status)) return `<p class="at-help at-plan-alert">监管 ${esc(s.status)} · 经理任期无效 · Mission ${s.mission_id ? '#'+esc(s.mission_id) : '未创建'}</p>`;
-        if (!s.manager_lease_active) return `<p class="at-help">监管等待唤醒 · Mission #${esc(s.mission_id)}${s.next_check_at?' · 下次 '+esc(s.next_check_at):''}</p>`;
+        if (!s.manager_authority_active) return `<p class="at-help at-plan-alert">监管 ${esc(s.status)} · 测试经理已被移出或团队已暂停 · Mission ${s.mission_id ? '#'+esc(s.mission_id) : '未创建'}</p>`;
         return `<p class="at-help">监管 ${esc(s.status)} · 经理 #${esc(s.orchestrator_claw_id)} · Mission #${esc(s.mission_id)}${s.next_check_at?' · 下次 '+esc(s.next_check_at):''}</p>`;
     }
     function task(t) {

@@ -587,7 +587,8 @@ def build_agent_system_context(
             'content': (
                 '当前身份仅以 system_context.identity.claw_id 为准。'
                 '团队岗位独立于 Claw 显示名、旧 role 和 Profile；以以下团队配置为准，'
-                '不得由名字推断经理。配置经理不等于已持有经理任期，派发仍须校验 lease。'
+                '不得由名字推断经理。团队配置中的测试经理持续拥有调度权限，'
+                '直到被管理员移出或团队暂停；Supervisor 短租约仅用于回合并发 fencing。'
                 '使用当前实例受控 Hub 工具；工具缺失或身份不一致应停止并报告，'
                 '禁止从 ~/.qclaw、其他实例配置、历史消息或记忆搜寻凭据替代当前身份。'
                 '仅能上报自身状态。操作前回读 definition_api 和 activity_api；'

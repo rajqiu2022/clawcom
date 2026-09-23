@@ -3,8 +3,6 @@ import copy
 import hashlib
 import json
 import re
-from datetime import datetime, timedelta
-
 from flask import current_app, jsonify, request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
@@ -469,12 +467,17 @@ def update_agent_team(team_id):
     previous_member_ids = set(activity.roster(team))
     _apply_config(team, config)
     team.version += 1
-    # Any config change revokes the old planner. Existing executions keep their
-    # immutable Stage/Run and fencing tokens; pause never cancels a running task.
+    # Configuration generation remains auditable, but manager authorization is
+    # the team role itself. Existing executions keep immutable Stage/Run and
+    # fencing tokens; pause never cancels a running task.
     team.manager_epoch += 1
-    team.manager_session_id = ''
+    team.manager_session_id = (
+        'team-manager:%s:%s:%s' % (
+            team.id, team.version, team.primary_manager_claw_id)
+        if team.status == 'active' else '')
     team.manager_lease_expires_at = None
-    team.active_manager_claw_id = None
+    team.active_manager_claw_id = (
+        team.primary_manager_claw_id if team.status == 'active' else None)
     _audit(team, actor, 'update', dict(config, version=team.version, manager_epoch=team.manager_epoch))
     try:
         if current_app.config.get('CHAT_ROOM_ENABLED', False):
@@ -490,38 +493,28 @@ def update_agent_team(team_id):
 
 @api_bp.route('/agent-teams/<int:team_id>/manager-lease', methods=['POST'])
 def acquire_team_manager_lease(team_id):
+    """Compatibility endpoint returning durable role authority without TTL."""
     team = load_team(team_id, lock=True)
     actor = _access(team.project_id)
     data = _body()
     if set(data) - {'expected_epoch', 'manager_session_id', 'ttl_seconds'}:
         raise TeamError('TEAM_VALIDATION_FAILED', '未知任期请求字段', 400)
     if actor['type'] != 'claw' or actor['id'] not in (team.primary_manager_claw_id, team.backup_manager_claw_id):
-        raise TeamError('TEAM_MANAGER_REQUIRED', '仅配置的主备经理可申请任期', 403)
+        raise TeamError('TEAM_MANAGER_REQUIRED', '仅配置的主备测试经理可读取调度授权', 403)
     scoped_claw(actor['id'], team.project_id)
     if team.status != 'active':
-        raise TeamError('TEAM_NOT_ACTIVE', '暂停/归档的团队不能申请调度任期')
-    expected = integer(data.get('expected_epoch'), 'expected_epoch', 0)
-    ttl = integer(data.get('ttl_seconds', 120), 'ttl_seconds', 30, 300)
-    session = data.get('manager_session_id')
-    if not isinstance(session, str) or not session.strip() or len(session) > 128:
-        raise TeamError('TEAM_VALIDATION_FAILED', 'manager_session_id 必须为 1–128 字符', 400)
-    if expected != team.manager_epoch:
-        raise TeamError('STALE_MANAGER_EPOCH', '经理任期已变化')
-    now = datetime.now()
-    live = team.manager_lease_expires_at and team.manager_lease_expires_at > now
-    if live:
-        if team.active_manager_claw_id != actor['id'] or team.manager_session_id != session:
-            raise TeamError('TEAM_MANAGER_LEASE_HELD', '另一经理或会话仍持有有效任期')
-    else:
-        team.manager_epoch += 1
-        team.active_manager_claw_id = actor['id']
-        team.manager_session_id = session
-    team.manager_lease_expires_at = now + timedelta(seconds=ttl)
-    _audit(team, actor, 'manager_renew' if live else 'manager_acquire', {
-        'manager_epoch': team.manager_epoch, 'active_manager_claw_id': actor['id'],
-        'expires_at': str(team.manager_lease_expires_at)})
+        raise TeamError('TEAM_NOT_ACTIVE', '暂停/归档的团队不提供新调度授权')
+    _audit(team, actor, 'manager_authority_read', {
+        'manager_epoch': team.manager_epoch,
+        'manager_claw_id': actor['id'],
+        'authority_mode': 'team_role_assignment'})
     db.session.commit()
-    return jsonify(team.to_dict())
+    return jsonify(dict(team.to_dict(), manager_authority={
+        'active': True,
+        'manager_claw_id': actor['id'],
+        'mode': 'team_role_assignment',
+        'expires_at': None,
+    }))
 
 
 @api_bp.route('/agent-teams/<int:team_id>/missions', methods=['GET'])

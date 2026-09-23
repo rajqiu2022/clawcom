@@ -67,7 +67,7 @@ class AgentTeamsUiTest(unittest.TestCase):
             self.assertIn(marker, self.js)
         for marker in ('data-period', 'period=','esc(p.name)', 'esc(t.name)', 'generation!==epoch',
                        'can_manage', "status:'draft'", 'ArrowLeft', 'requestId',
-                       '监管未启动', '经理任期无效', 'Mission #'):
+                       '监管未启动', '测试经理已被移出', 'Mission #'):
             self.assertIn(marker, js)
         for forbidden in ('/dispatch', '/supervision/start', 'setInterval('):
             self.assertNotIn(forbidden, js)

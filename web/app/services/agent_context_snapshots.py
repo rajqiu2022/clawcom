@@ -33,7 +33,7 @@ TEST_MANAGER_CONTRACT = {
     'responsibilities': [
         '理解测试目标，创建计划并把工作拆分为可验收任务',
         '优先调度团队内已有代码分析员和测试执行员，不凭名称猜测身份',
-        '跟踪任务进度、阻断和恢复，必要时重新派发但不得绕过 Hub 租约与权限',
+        '跟踪任务进度、阻断和恢复，必要时重新派发但不得绕过 Hub 团队角色、阶段绑定与权限',
         '检查执行证据、分析结论和报告完整性，不合格结果必须退回',
         '汇总团队结果，给出结论并完成测试闭环',
     ],
@@ -44,7 +44,7 @@ TEST_MANAGER_CONTRACT = {
         '仅凭聊天回复把任务判定为完成',
     ],
     'dispatch_policy': {
-        'requires_active_manager_lease': True,
+        'requires_team_manager_assignment': True,
         'allowed_targets': ['code_analyst', 'test_executor'],
         'result_check_required': True,
     },
@@ -302,8 +302,11 @@ def freeze_run_context(run, *, team=None, manager_claw_id=None):
             'objective': team.objective,
             'primary_manager_claw_id': team.primary_manager_claw_id,
             'backup_manager_claw_id': team.backup_manager_claw_id,
-            'active_manager_claw_id': team.active_manager_claw_id,
+            'active_manager_claw_id': (
+                team.primary_manager_claw_id
+                if team.status == 'active' else None),
             'manager_epoch': int(team.manager_epoch or 0),
+            'manager_authority_mode': 'team_role_assignment',
             'roster': roster,
         } if team else None),
         'assignment': assignment,

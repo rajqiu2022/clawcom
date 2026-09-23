@@ -266,36 +266,37 @@ def locked(plan_id):
 
 
 def manager_lease_payload(sup, now=None):
-    """Return the manager fencing receipt paired with a Supervisor lease."""
+    """Return durable manager authority in the legacy response envelope.
+
+    The PlanSupervisor still owns a short-lived turn lease/fencing token so
+    concurrent turns cannot mutate one plan. That runtime lock is deliberately
+    separate from the test manager's role authorization.
+    """
     if not sup or not sup.team_id:
         return None
     now = now or _now()
     team = db.session.get(AgentTeam, sup.team_id)
     if not team:
         return None
-    active = bool(
-        team.status == 'active'
-        and team.active_manager_claw_id == sup.orchestrator_claw_id
-        and team.manager_session_id
-        and team.manager_lease_expires_at
-        and team.manager_lease_expires_at > now)
+    active = team.has_manager_authority(sup.orchestrator_claw_id)
     return {
         'active': active,
         'epoch': int(team.manager_epoch or 0),
-        'manager_claw_id': team.active_manager_claw_id,
-        'session_id': team.manager_session_id or '',
-        'expires_at': (
-            team.manager_lease_expires_at.isoformat() + '+08:00'
-            if team.manager_lease_expires_at else None),
+        'manager_claw_id': sup.orchestrator_claw_id if active else None,
+        'session_id': (
+            'team-manager:%s:%s:%s' % (
+                team.id, int(team.version or 1), sup.orchestrator_claw_id)
+            if active else ''),
+        'expires_at': None,
+        'mode': 'team_role_assignment',
     }
 
 
 def ensure_manager_tenure(sup, now=None, ttl_seconds=300):
-    """Acquire/renew the team manager lease for one fenced plan Supervisor.
+    """Validate durable team-manager authority for this Supervisor.
 
-    A live lease held by another manager is never stolen.  An expired lease is
-    reacquired with a stable plan-scoped session so Worker restarts can recover
-    from Hub state instead of chat history.
+    ``ttl_seconds`` remains in the signature for old callers but no longer
+    creates or renews an authorization lease.
     """
     if not sup.team_id:
         return None
@@ -306,25 +307,6 @@ def ensure_manager_tenure(sup, now=None, ttl_seconds=300):
             or team.project_id != db.session.get(TestPlan, sup.plan_id).project_id
             or team.primary_manager_claw_id != sup.orchestrator_claw_id):
         fail('PLAN_TEAM_NOT_ENABLED', '团队已失效，或计划监督者不再是主测试经理', 409)
-    live = bool(team.manager_lease_expires_at and team.manager_lease_expires_at > now)
-    if live and team.active_manager_claw_id != sup.orchestrator_claw_id:
-        fail('PLAN_MANAGER_LEASE_HELD', '另一测试经理仍持有有效调度任期', 409)
-    acquired = not live
-    if acquired:
-        team.manager_epoch = int(team.manager_epoch or 0) + 1
-        team.active_manager_claw_id = sup.orchestrator_claw_id
-        team.manager_session_id = 'plan-supervisor:%s:%s' % (
-            sup.plan_id, team.manager_epoch)
-    elif not team.manager_session_id:
-        fail('PLAN_MANAGER_LEASE_INVALID', '当前经理任期缺少会话凭据', 409)
-    team.manager_lease_expires_at = now + timedelta(
-        seconds=max(30, min(int(ttl_seconds or 300), 300)))
-    if acquired:
-        add_event(sup.plan_id, 'manager_lease_acquired',
-                  ['manager-lease', team.manager_epoch], {
-                      'manager_claw_id': sup.orchestrator_claw_id,
-                      'manager_epoch': team.manager_epoch,
-                  }, now)
     return manager_lease_payload(sup, now)
 
 
