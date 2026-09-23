@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS chat_room_images (
   content_type VARCHAR(50) NOT NULL,
   file_size INT NOT NULL,
   sha256 VARCHAR(64) NOT NULL,
-  storage_key VARCHAR(255) NOT NULL,
+  storage_key VARCHAR(180) NOT NULL,
   status VARCHAR(20) NOT NULL DEFAULT 'pending',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   attached_at DATETIME NULL,

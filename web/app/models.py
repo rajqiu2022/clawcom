@@ -4152,7 +4152,7 @@ class ChatRoomImage(db.Model):
     content_type = db.Column(db.String(50), nullable=False)
     file_size = db.Column(db.Integer, nullable=False)
     sha256 = db.Column(db.String(64), nullable=False)
-    storage_key = db.Column(db.String(255), nullable=False, unique=True)
+    storage_key = db.Column(db.String(180), nullable=False, unique=True)
     status = db.Column(db.String(20), nullable=False, default='pending', index=True)
     created_at = db.Column(db.DateTime, default=_now, nullable=False)
     attached_at = db.Column(db.DateTime)
