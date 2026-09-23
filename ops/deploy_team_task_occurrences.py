@@ -1,5 +1,6 @@
 """Deploy recurring team task occurrences; no Worker/DeepFlow/Run changes."""
 import deploy_team_activity_knowledge as deployment
+import re
 
 
 release = deployment.release
@@ -18,6 +19,28 @@ release.FILES = (
     'static/js/agent_team_plans.js',
 )
 release.MIGRATIONS = ('20260923_test_task_occurrences.sql',)
+
+# The production template carries an independently deployed chat image
+# lightbox cache key on the same one-line script block.  This release changes
+# only the team-plan bundle key, so preserve every other live script key rather
+# than forcing the generic three-way merge to choose between the two changes.
+_candidate = release.candidate
+
+
+def _occurrence_candidate(path, live):
+    if path != 'templates/agent_teams.html' or live is None:
+        return _candidate(path, live)
+    live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
+    pattern = rb"(filename='js/agent_team_plans\.js'\) }}\?v=)[^\"<]+"
+    merged, count = re.subn(
+        pattern, rb'\g<1>20260923occurrences', live, count=1)
+    if count != 1:
+        raise RuntimeError(
+            'Expected exactly one agent_team_plans.js script reference')
+    return merged
+
+
+release.candidate = _occurrence_candidate
 
 release.SCHEMA = r'''
 from app import create_app, db
