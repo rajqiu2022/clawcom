@@ -5520,6 +5520,7 @@ class TestPlanReport(db.Model):
         return {
             'id': self.id,
             'plan_id': self.plan_id,
+            'linked_test_report_id': self.linked_test_report_id,
             'title': self.title,
             'content': content,
             'format': self.format or 'markdown',
@@ -5721,6 +5722,7 @@ class TestTaskReport(db.Model):
         return {
             'id': self.id,
             'task_id': self.task_id,
+            'linked_test_report_id': self.linked_test_report_id,
             'title': self.title,
             'content': content,
             'format': self.format or 'markdown',

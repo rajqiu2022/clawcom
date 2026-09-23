@@ -5,8 +5,8 @@ from unittest.mock import patch
 import test_agent_teams_api as fixtures
 from app import db
 from app.models import (AgentTeam, ClawMessage, MissionStage, TestPlan,
-                        TestPlanReport, TestReport, TestTask, WorkflowRun,
-                        WorkflowMission)
+                        TestPlanReport, TestReport, TestTask, TestTaskReport,
+                        WorkflowRun, WorkflowMission)
 from app.models_plan_supervision import PlanSupervisor
 
 
@@ -131,6 +131,7 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(day['items'][0]['completed_tasks'],1)
         self.assertEqual(day['items'][0]['progress'],17)
         self.assertEqual(day['items'][0]['report_count'], 0)
+        self.assertTrue(all(task['report_count'] == 0 for task in day['items'][0]['tasks']))
         self.assertIsNone(day['items'][0]['supervision'])
         week = self.client.get(self.url+'?period=week&date=2026-09-27',headers=self._headers()).json
         self.assertEqual(week['start_date'],'2026-09-21')
@@ -159,6 +160,34 @@ class AgentTeamPlansTest(unittest.TestCase):
         counts = {item['id']: item['report_count'] for item in items}
         self.assertEqual(counts[first['id']], 3)
         self.assertEqual(counts[second['id']], 1)
+
+    def test_overview_exposes_deduplicated_task_report_count(self):
+        plan = self.create(name='task reports')
+        task = TestTask(plan_id=plan['id'], name='客户端性能测试',
+                        start_date=date(2026, 9, 23), end_date=date(2026, 9, 23),
+                        status='in_progress')
+        db.session.add(task)
+        db.session.flush()
+        global_report = TestReport(
+            title='任务全局报告', content='global', report_type='performance',
+            project_id=self.project.id, source_ref_type='test_task',
+            source_ref_id=task.id)
+        db.session.add(global_report)
+        db.session.flush()
+        linked = TestTaskReport(
+            task_id=task.id, title='已迁移旧报告', content='linked',
+            linked_test_report_id=global_report.id)
+        db.session.add_all([
+            linked,
+            TestTaskReport(task_id=task.id, title='独立旧报告', content='legacy'),
+        ])
+        db.session.commit()
+
+        items = self.client.get(self.url+'?period=all', headers=self._headers()).json['items']
+        task_data = next(item for item in items if item['id'] == plan['id'])['tasks'][0]
+        self.assertEqual(task_data['id'], task.id)
+        self.assertEqual(task_data['report_count'], 2)
+        self.assertEqual(linked.to_dict()['linked_test_report_id'], global_report.id)
 
     def test_other_team_unbound_plans_pagination_and_input_errors(self):
         for i in range(7): self.create(name='plan '+str(i))
