@@ -42,9 +42,20 @@ def _occurrence_candidate(path, live):
     if path != 'templates/agent_teams.html' or live is None:
         return _candidate(path, live)
     live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
+    if b'id="at-task-conclusion"' not in live:
+        marker = b'    <p id="at-plan-reports-count"'
+        section = (
+            b'    <section id="at-task-conclusion" class="at-task-conclusion" hidden>\n'
+            b'        <header><div><strong>\xe4\xbb\xbb\xe5\x8a\xa1\xe7\xbb\x93\xe8\xae\xba</strong><span>\xe5\x9b\xba\xe5\xae\x9a\xe4\xb8\x80\xe4\xbb\xbd\xef\xbc\x8c\xe5\x8f\xaf\xe9\x9a\x8f\xe6\x97\xb6\xe6\x9b\xb4\xe6\x96\xb0\xef\xbc\x9b\xe4\xb8\x8d\xe4\xbc\x9a\xe7\x94\x9f\xe6\x88\x90\xe6\xb5\x8b\xe8\xaf\x95\xe6\x8a\xa5\xe5\x91\x8a</span></div><button id="at-task-conclusion-save" type="button" class="btn btn-primary btn-sm">\xe4\xbf\x9d\xe5\xad\x98\xe7\xbb\x93\xe8\xae\xba</button></header>\n'
+            b'        <textarea id="at-task-conclusion-content" class="form-input" maxlength="20000" rows="4" placeholder="\xe7\xae\x80\xe5\x8d\x95\xe8\xae\xb0\xe5\xbd\x95\xe6\x9c\xac\xe4\xbb\xbb\xe5\x8a\xa1\xe7\x9a\x84\xe7\xbb\x93\xe6\x9e\x9c\xe3\x80\x81\xe9\xa3\x8e\xe9\x99\xa9\xe6\x88\x96\xe5\x90\x8e\xe7\xbb\xad\xe4\xba\x8b\xe9\xa1\xb9"></textarea>\n'
+            b'        <p id="at-task-conclusion-meta" class="at-help"></p>\n'
+            b'    </section>\n')
+        if live.count(marker) != 1:
+            raise RuntimeError('Expected report-count marker for task conclusion')
+        live = live.replace(marker, section + marker, 1)
     pattern = rb"(filename='js/agent_team_plans\.js'\) }}\?v=)[^\"<]+"
     merged, count = re.subn(
-        pattern, rb'\g<1>20260923taskconclusion', live, count=1)
+        pattern, rb'\g<1>20260923taskconclusion2', live, count=1)
     if count != 1:
         raise RuntimeError(
             'Expected exactly one agent_team_plans.js script reference')

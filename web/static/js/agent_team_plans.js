@@ -65,7 +65,7 @@ const AgentTeamPlans = (() => {
         $('at-plan-reports-eyebrow').textContent = context.scope === 'task' ? 'TASK REPORTS / 任务报告' : 'PLAN REPORTS / 计划报告';
         $('at-plan-reports-title').textContent = `${context.name} · 报告`;
         $('at-plan-reports-count').textContent = '正在读取关联报告…';
-        $('at-task-conclusion').hidden = true;
+        if ($('at-task-conclusion')) $('at-task-conclusion').hidden = true;
         $('at-plan-reports-list').innerHTML = '<div class="at-empty">加载中…</div>';
         $('at-plan-report-preview').hidden = true;
         $('at-plan-reports-list').hidden = false;
@@ -83,7 +83,7 @@ const AgentTeamPlans = (() => {
             if (context.scope === 'task') requests.push(API.get(`/test-plans/${context.planId}/tasks/${context.taskId}/conclusion`));
             const [legacy, global, conclusion] = await Promise.all(requests);
             if (turn !== reportRequestId || reportContextKey(reportContext) !== key) return;
-            if (conclusion) {
+            if (conclusion && $('at-task-conclusion')) {
                 $('at-task-conclusion').hidden = false;
                 $('at-task-conclusion-content').value = conclusion.content || '';
                 $('at-task-conclusion-content').readOnly = !conclusion.can_edit;
@@ -213,7 +213,7 @@ const AgentTeamPlans = (() => {
     $('at-plan-reports-close').addEventListener('click',()=>$('at-plan-reports-dialog').close());
     $('at-plan-reports-fullscreen').addEventListener('click',()=>setReportsFullscreen(!$('at-plan-reports-dialog').classList.contains('is-fullscreen')));
     $('at-plan-report-back').addEventListener('click',()=>{$('at-plan-report-preview').hidden=true;$('at-plan-reports-list').hidden=false;});
-    $('at-task-conclusion-save').addEventListener('click',saveTaskConclusion);
+    $('at-task-conclusion-save')?.addEventListener('click',saveTaskConclusion);
     $('at-plan-reports-dialog').addEventListener('close',()=>{++reportRequestId;reportContext=null;setReportsFullscreen(false);});
     $('at-plan-reports-dialog').addEventListener('click',event=>{const button=event.target.closest('button[data-report-kind]');if(button)previewReport(button.dataset.reportKind,button.dataset.reportId,button.dataset.reportTitle,button.dataset.reportFormat);});
     function tab(value) {
