@@ -99,17 +99,21 @@ class AgentTeamsUiTest(unittest.TestCase):
         plans = (ROOT / 'web/static/js/agent_team_plans.js').read_text(encoding='utf-8')
         for marker in ('at-tab-chat', 'at-chat-panel', 'AgentTeamChat.mount(team)'):
             self.assertIn(marker, self.js)
-        for marker in ('agent_team_chat.js', '20260923teamimages'):
+        for marker in ('agent_team_chat.js', '20260923imagelightbox'):
             self.assertIn(marker, self.html)
         for marker in ('mention_claw_ids', 'mention_all', 'Idempotency-Key',
                        'expected_count', 'replied_count', 'setTimeout',
                        'image_ids', 'FormData', 'at-chat-image-preview'):
             self.assertIn(marker, chat)
+        for marker in ('at-chat-lightbox', 'data-chat-image', 'showModal()', 'data-chat-lightbox-close'):
+            self.assertIn(marker, chat)
+        self.assertNotIn('target="_blank" rel="noopener"><img', chat)
         self.assertIn("['members','chat','plans','knowledge','skills']", plans)
         for forbidden in ('/dispatch', '/workflow-runs', '/send-to-claw', 'setInterval('):
             self.assertNotIn(forbidden, chat)
         self.assertIn('.at-chat-layout', self.css)
         self.assertIn('.at-chat-images', self.css)
+        self.assertIn('.at-chat-lightbox::backdrop', self.css)
 
 
 if __name__ == '__main__':

@@ -10,6 +10,7 @@ const AgentTeamChat = (() => {
     const deliveryLabels = {unread:'待送达',delivered:'已送达',processing:'处理中',replied:'已回复',done:'已完成',failed:'失败',missing:'成员已变化'};
     function visible() { return team && !$('at-chat-panel')?.hidden && !document.hidden; }
     function reset() {
+        closeImagePreview();
         ++epoch; ++requestId; team = null; roomId = null; selected.clear(); clearPendingImages(); rendered = ''; firstLoad = true;
         if (timer) clearTimeout(timer); timer = null;
     }
@@ -19,7 +20,11 @@ const AgentTeamChat = (() => {
             <div class="at-chat-layout"><main class="at-chat-main"><div id="at-chat-stream" class="at-chat-stream" tabindex="0" aria-label="团队聊天室消息"><p class="at-empty">正在读取团队聊天室…</p></div>
             <form id="at-chat-form" class="at-chat-compose"><div id="at-chat-mentions" class="at-chat-mentions"></div><div id="at-chat-image-preview" class="at-chat-image-preview" hidden></div><textarea id="at-chat-input" rows="3" maxlength="20000" placeholder="输入讨论内容；需要 Agent 回复时先选择 @成员"></textarea><footer><span id="at-chat-compose-note">Enter 发送 · Shift+Enter 换行</span><div class="at-chat-actions"><input id="at-chat-image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden><button class="btn btn-secondary btn-sm" id="at-chat-image-button" type="button">图片</button><button class="btn btn-primary btn-sm" id="at-chat-send" type="submit">发送</button></div></footer></form></main>
             <aside class="at-chat-side"><header><strong>在场成员</strong><span id="at-chat-member-count">—</span></header><div id="at-chat-members"></div><div class="at-chat-rule"><b>频道边界</b><span>讨论、问答和结论确认留在这里。</span><span>真正开工、重试、取消仍必须走 Stage / Run。</span></div></aside></div>
-            <p id="at-chat-note" class="at-help" role="status"></p></section>`;
+            <p id="at-chat-note" class="at-help" role="status"></p></section>
+            <dialog id="at-chat-lightbox" class="at-chat-lightbox" aria-labelledby="at-chat-lightbox-caption">
+                <button type="button" class="at-chat-lightbox-close" data-chat-lightbox-close aria-label="关闭图片预览">×</button>
+                <figure><img id="at-chat-lightbox-image" alt=""><figcaption id="at-chat-lightbox-caption"></figcaption></figure>
+            </dialog>`;
         $('at-chat-form').addEventListener('submit', send);
         $('at-chat-input').addEventListener('keydown', event => {
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('at-chat-form').requestSubmit(); }
@@ -32,6 +37,14 @@ const AgentTeamChat = (() => {
             if (item?.preview) URL.revokeObjectURL(item.preview);
             pendingImages.splice(index, 1); renderPendingImages();
         });
+        $('at-chat-stream').addEventListener('click', event => {
+            const button = event.target.closest('[data-chat-image]');
+            if (button) openImagePreview(button.dataset.chatImage, button.dataset.chatImageAlt);
+        });
+        $('at-chat-lightbox').addEventListener('click', event => {
+            if (event.target === event.currentTarget || event.target.closest('[data-chat-lightbox-close]')) closeImagePreview();
+        });
+        $('at-chat-lightbox').addEventListener('close', clearImagePreview);
         $('at-chat-mentions').addEventListener('click', event => {
             const button = event.target.closest('[data-chat-mention]'); if (!button) return;
             const value = button.dataset.chatMention;
@@ -39,6 +52,24 @@ const AgentTeamChat = (() => {
             else { selected.delete('all'); selected.has(value) ? selected.delete(value) : selected.add(value); }
             renderMentionSelection();
         });
+    }
+    function openImagePreview(url, label) {
+        const dialog = $('at-chat-lightbox'), image = $('at-chat-lightbox-image'), caption = $('at-chat-lightbox-caption');
+        if (!dialog || !image || !url) return;
+        const text = label || '聊天室图片';
+        image.src = url; image.alt = text;
+        if (caption) caption.textContent = text;
+        if (!dialog.open) dialog.showModal();
+    }
+    function clearImagePreview() {
+        const image = $('at-chat-lightbox-image'), caption = $('at-chat-lightbox-caption');
+        if (image) { image.removeAttribute('src'); image.alt = ''; }
+        if (caption) caption.textContent = '';
+    }
+    function closeImagePreview() {
+        const dialog = $('at-chat-lightbox');
+        if (dialog?.open) dialog.close();
+        else clearImagePreview();
     }
     function clearPendingImages() {
         pendingImages.forEach(item => { if (item.preview) URL.revokeObjectURL(item.preview); });
@@ -100,7 +131,7 @@ const AgentTeamChat = (() => {
             const mine = message.sender_member_id === me, sender = message.sender || {}, round = rounds.get(message.id);
             const mentionText = (message.mentions || []).map(item => item.type === 'all' ? '@所有人' : `@${members.find(member => member.id === item.member_id)?.display_name || '成员'}`).join(' ');
             const roundHtml = round ? `<div class="at-chat-round ${esc(round.status)}"><header><strong>${esc(roundLabels[round.status] || round.status)}</strong><span>${round.replied_count}/${round.expected_count} 已回复</span><time>截止 ${esc(time(round.deadline_at))}</time></header><div>${round.members.map(item => `<span class="${esc(item.status)}"><i></i>${esc(item.name)} · ${esc(deliveryLabels[item.status] || item.status)}</span>`).join('')}</div></div>` : '';
-            const images = (message.images || []).map(image => `<a class="at-chat-image" href="${esc(image.url)}" target="_blank" rel="noopener"><img src="${esc(image.url)}" alt="${esc(image.name || '聊天室图片')}" loading="lazy"></a>`).join('');
+            const images = (message.images || []).map(image => `<button type="button" class="at-chat-image" data-chat-image="${esc(image.url)}" data-chat-image-alt="${esc(image.name || '聊天室图片')}" aria-label="放大查看 ${esc(image.name || '聊天室图片')}"><img src="${esc(image.url)}" alt="${esc(image.name || '聊天室图片')}" loading="lazy"></button>`).join('');
             return `<article class="at-chat-message ${mine ? 'mine' : ''}" data-message-id="${message.id}"><span class="at-chat-avatar ${esc(sender.member_type || '')}">${sender.member_type === 'agent' ? 'AI' : esc((sender.display_name || '?').slice(0,1))}</span><div class="at-chat-bubble"><header><strong>${esc(sender.display_name || '未知成员')}</strong><time>${esc(time(message.created_at))}</time></header>${mentionText ? `<div class="at-chat-mentioned">${esc(mentionText)}</div>` : ''}${message.content ? `<p>${esc(message.content)}</p>` : ''}${images ? `<div class="at-chat-images">${images}</div>` : ''}${roundHtml}</div></article>`;
         }).join('') : '<div class="at-empty">频道已经建立。发送第一条消息开始团队协作。</div>';
         if (firstLoad || nearBottom) stream.scrollTop = stream.scrollHeight;

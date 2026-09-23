@@ -3,7 +3,7 @@
 {% block page_title %}Agent 团队{% endblock %}
 {% block body_class %}agent-teams-page{% endblock %}
 {% block nav_agent_teams %}active{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_teams.css') }}?v=20260923teamimages"><link rel="stylesheet" href="{{ url_for('static', filename='css/agent_team_plans.css') }}?v=20260923taskid">{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_teams.css') }}?v=20260923imagelightbox"><link rel="stylesheet" href="{{ url_for('static', filename='css/agent_team_plans.css') }}?v=20260923taskid">{% endblock %}
 {% block top_actions %}
 <div class="at-toolbar">
     <label for="at-project">项目</label>
@@ -89,4 +89,4 @@
     </div>
 </dialog>
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='js/agent_team_activity.js') }}?v=20260921plans"></script><script src="{{ url_for('static', filename='js/agent_team_resources.js') }}?v=20260922teamlib"></script><script src="{{ url_for('static', filename='js/agent_team_chat.js') }}?v=20260923teamimages"></script><script src="{{ url_for('static', filename='js/agent_team_plans.js') }}?v=20260923taskid"></script><script src="{{ url_for('static', filename='js/agent_teams.js') }}?v=20260923durablemanager"></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='js/agent_team_activity.js') }}?v=20260921plans"></script><script src="{{ url_for('static', filename='js/agent_team_resources.js') }}?v=20260922teamlib"></script><script src="{{ url_for('static', filename='js/agent_team_chat.js') }}?v=20260923imagelightbox"></script><script src="{{ url_for('static', filename='js/agent_team_plans.js') }}?v=20260923taskid"></script><script src="{{ url_for('static', filename='js/agent_teams.js') }}?v=20260923durablemanager"></script>{% endblock %}
