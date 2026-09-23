@@ -192,6 +192,42 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(task_data['report_count'], 2)
         self.assertEqual(linked.to_dict()['linked_test_report_id'], global_report.id)
 
+    def test_assigned_agent_replaces_single_conclusion_without_creating_report(self):
+        plan = self.create(name='lightweight conclusion')
+        created = self.client.post(
+            '/api/v1/test-plans/%s/tasks' % plan['id'],
+            headers=self._headers(), json={
+                'name': '简单巡检',
+                'assignee_claw_id': self.other_claw.id,
+            })
+        self.assertEqual(created.status_code, 201, created.json)
+        path = '/api/v1/test-plans/%s/tasks/%s/conclusion' % (
+            plan['id'], created.json['id'])
+        with self.client.session_transaction() as session:
+            session.clear()
+
+        saved = self.client.put(
+            path, headers=self._headers(self.other_token),
+            json={'content': '检查完成，无阻断问题'})
+        self.assertEqual(saved.status_code, 200, saved.json)
+        self.assertEqual(saved.json['content'], '检查完成，无阻断问题')
+        self.assertFalse(saved.json['report_created'])
+        self.assertTrue(saved.json['can_edit'])
+        self.assertEqual(TestTaskReport.query.count(), 0)
+        self.assertEqual(TestReport.query.count(), 0)
+
+        replaced = self.client.put(
+            path, headers=self._headers(self.other_token),
+            json={'content': '补充：后续关注性能趋势'})
+        self.assertEqual(replaced.status_code, 200, replaced.json)
+        self.assertEqual(db.session.get(
+            TestTask, created.json['id']).result_summary,
+            '补充：后续关注性能趋势')
+        self.assertEqual(TestTaskReport.query.count(), 0)
+        self.assertEqual(self.client.put(
+            path, headers=self._headers(self.other_token),
+            json={'content': 'x' * 20001}).status_code, 400)
+
     def test_other_team_unbound_plans_pagination_and_input_errors(self):
         for i in range(7): self.create(name='plan '+str(i))
         db.session.add(TestPlan(name='Unbound',project_id=self.project.id,start_date=date(2026,9,21),end_date=date(2026,9,27)))

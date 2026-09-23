@@ -74,14 +74,19 @@ class AgentTeamsUiTest(unittest.TestCase):
                        'linked_test_report_id', 'setReportsFullscreen', 'is-fullscreen',
                        'Promise.all', 'renderReportContent', 'data-report-format',
                        '/html-preview', 'data-plan-task-toggle', '查看全部',
-                       'data-plan-extra-task', 'aria-expanded'):
+                       'data-plan-extra-task', 'aria-expanded',
+                       '/conclusion', 'saveTaskConclusion'):
             self.assertIn(marker, js)
         plan_css = (ROOT / 'web/static/css/agent_team_plans.css').read_text(encoding='utf-8')
         self.assertIn('.at-plan-task-id', plan_css)
         self.assertIn('.at-task-report', plan_css)
         self.assertIn('.at-plan-reports-dialog.is-fullscreen', plan_css)
         self.assertIn('.at-plan-report', plan_css)
-        self.assertIn('20260923alltasks', self.html)
+        self.assertIn('20260923taskconclusion', self.html)
+        self.assertIn('id="at-task-conclusion"', self.html)
+        self.assertIn('不会生成测试报告', self.html)
+        self.assertIn('/conclusion', plans)
+        self.assertIn('saveTaskConclusion', plans)
         for forbidden in ('/dispatch', '/supervision/start', 'setInterval('):
             self.assertNotIn(forbidden, js)
         self.assertIn('aria-labelledby="at-plan-dialog-title"', self.html)

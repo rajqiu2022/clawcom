@@ -33,7 +33,7 @@ def _occurrence_candidate(path, live):
         live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
         previous = subprocess.check_output(
             ['git', 'show',
-             '3f9f8c4:web/static/js/agent_team_plans.js'],
+             'fd88c1c:web/static/js/agent_team_plans.js'],
             cwd=str(release.ROOT)).replace(b'\r\n', b'\n')
         if live != previous:
             return _candidate(path, live)
@@ -44,7 +44,7 @@ def _occurrence_candidate(path, live):
     live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
     pattern = rb"(filename='js/agent_team_plans\.js'\) }}\?v=)[^\"<]+"
     merged, count = re.subn(
-        pattern, rb'\g<1>20260923alltasks', live, count=1)
+        pattern, rb'\g<1>20260923taskconclusion', live, count=1)
     if count != 1:
         raise RuntimeError(
             'Expected exactly one agent_team_plans.js script reference')
@@ -178,7 +178,7 @@ with app.app_context():
             time.sleep(1)
         else:
             raise RuntimeError('HTTP readiness did not recover')
-        assert '20260923alltasks' in response.text
+        assert '20260923taskconclusion' in response.text
         assert requests.get(
             'http://127.0.0.1:18800/testplans', headers=headers,
             timeout=15, allow_redirects=False).status_code == 200

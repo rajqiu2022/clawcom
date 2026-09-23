@@ -3,7 +3,7 @@
 {% block page_title %}Agent 团队{% endblock %}
 {% block body_class %}agent-teams-page{% endblock %}
 {% block nav_agent_teams %}active{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_teams.css') }}?v=20260923imagelightbox"><link rel="stylesheet" href="{{ url_for('static', filename='css/agent_team_plans.css') }}?v=20260923planreports">{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/agent_teams.css') }}?v=20260923imagelightbox"><link rel="stylesheet" href="{{ url_for('static', filename='css/agent_team_plans.css') }}?v=20260923taskconclusion">{% endblock %}
 {% block top_actions %}
 <div class="at-toolbar">
     <label for="at-project">项目</label>
@@ -82,6 +82,11 @@
 </dialog>
 <dialog id="at-plan-reports-dialog" class="at-dialog at-plan-reports-dialog" aria-labelledby="at-plan-reports-title">
     <header class="at-dialog-head"><div><span id="at-plan-reports-eyebrow" class="at-eyebrow">PLAN REPORTS / 计划报告</span><h2 id="at-plan-reports-title">关联报告</h2></div><div class="at-dialog-actions"><button id="at-plan-reports-fullscreen" class="btn btn-secondary" type="button" aria-pressed="false">⛶ 全屏</button><button id="at-plan-reports-close" class="btn btn-ghost" type="button">关闭</button></div></header>
+    <section id="at-task-conclusion" class="at-task-conclusion" hidden>
+        <header><div><strong>任务结论</strong><span>固定一份，可随时更新；不会生成测试报告</span></div><button id="at-task-conclusion-save" type="button" class="btn btn-primary btn-sm">保存结论</button></header>
+        <textarea id="at-task-conclusion-content" class="form-input" maxlength="20000" rows="4" placeholder="简单记录本任务的结果、风险或后续事项"></textarea>
+        <p id="at-task-conclusion-meta" class="at-help"></p>
+    </section>
     <p id="at-plan-reports-count" class="at-help at-plan-reports-count">正在读取关联报告…</p>
     <div id="at-plan-reports-list" class="at-plan-reports-list"></div>
     <section id="at-plan-report-preview" class="at-plan-report-preview" hidden>
@@ -98,4 +103,4 @@
     </div>
 </dialog>
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script><script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script><script src="{{ url_for('static', filename='js/agent_team_activity.js') }}?v=20260921plans"></script><script src="{{ url_for('static', filename='js/agent_team_resources.js') }}?v=20260922teamlib"></script><script src="{{ url_for('static', filename='js/agent_team_chat.js') }}?v=20260923clipboardimages"></script><script src="{{ url_for('static', filename='js/agent_team_plans.js') }}?v=20260923alltasks"></script><script src="{{ url_for('static', filename='js/agent_teams.js') }}?v=20260923durablemanager"></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script><script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script><script src="{{ url_for('static', filename='js/agent_team_activity.js') }}?v=20260921plans"></script><script src="{{ url_for('static', filename='js/agent_team_resources.js') }}?v=20260922teamlib"></script><script src="{{ url_for('static', filename='js/agent_team_chat.js') }}?v=20260923clipboardimages"></script><script src="{{ url_for('static', filename='js/agent_team_plans.js') }}?v=20260923taskconclusion"></script><script src="{{ url_for('static', filename='js/agent_teams.js') }}?v=20260923durablemanager"></script>{% endblock %}

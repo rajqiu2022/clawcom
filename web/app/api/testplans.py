@@ -95,6 +95,21 @@ def _can_edit_plan(user, plan):
     return plan.created_by == user.username
 
 
+def _can_edit_task_conclusion(user, plan, task):
+    """A plan editor or the assigned executor may maintain the one-line truth."""
+    from app.api.auth_utils import get_current_claw
+    claw = get_current_claw()
+    if claw and task.assignee_claw_id == claw.id:
+        return True
+    if _can_edit_plan(user, plan):
+        return True
+    claw_id = getattr(user, '_claw_id', None) if user else None
+    if claw_id and task.assignee_claw_id == claw_id:
+        return True
+    username = getattr(user, 'username', '') if user else ''
+    return bool(username and task.assignee_username == username)
+
+
 def _resolve_assignee_claw_id(data):
     """支持按 Claw ID 或 Claw 对应用户指派测试任务。
     返回 claw_id 或 None（直接分配给人时由 assignee_username 处理）。
@@ -974,6 +989,40 @@ def delete_test_plan_report(plan_id, report_id):
 
 
 # ==================== 测试任务报告 ====================
+
+@api_bp.route(
+    '/test-plans/<int:plan_id>/tasks/<int:task_id>/conclusion',
+    methods=['GET', 'PUT'])
+def task_conclusion(plan_id, task_id):
+    """Read or replace the task's single lightweight conclusion.
+
+    This updates TestTask.result_summary only.  It intentionally does not
+    create TestTaskReport/TestReport rows; callers needing multiple immutable
+    documents must use the report APIs instead.
+    """
+    plan = TestPlan.query.get_or_404(plan_id)
+    task = TestTask.query.filter_by(
+        plan_id=plan_id, id=task_id).first_or_404()
+    user = _get_current_user()
+    can_edit = _can_edit_task_conclusion(user, plan, task)
+    if request.method == 'PUT':
+        if not can_edit:
+            return jsonify({'error': '仅计划管理者或任务执行人可更新任务结论'}), 403
+        data = request.get_json(silent=True)
+        content = data.get('content') if isinstance(data, dict) else None
+        if not isinstance(content, str):
+            return jsonify({'error': 'content 必须为字符串'}), 400
+        if len(content) > 20000:
+            return jsonify({'error': '任务结论不能超过 20000 字符'}), 400
+        task.result_summary = content
+        db.session.commit()
+    return jsonify({
+        'task_id': task.id,
+        'content': task.result_summary or '',
+        'updated_at': str(task.updated_at) if task.updated_at else None,
+        'can_edit': can_edit,
+        'report_created': False,
+    })
 
 @api_bp.route('/test-plans/<int:plan_id>/tasks/<int:task_id>/reports', methods=['GET'])
 def list_task_reports(plan_id, task_id):

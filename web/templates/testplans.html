@@ -3940,13 +3940,24 @@ async function _loadTaskReportList(overlay, planId, taskId) {
            前往全局测试报告 →</a>
     </div>`;
     try {
-        const data = await API.get(`/test-plans/${planId}/tasks/${taskId}/reports`);
+        const [data, conclusion] = await Promise.all([
+            API.get(`/test-plans/${planId}/tasks/${taskId}/reports`),
+            API.get(`/test-plans/${planId}/tasks/${taskId}/conclusion`),
+        ]);
         const items = data.items || [];
+        const conclusionPanel = `<section data-task-conclusion style="border:1px solid var(--accent);background:color-mix(in srgb,var(--accent) 6%,transparent);border-radius:8px;padding:14px;margin-bottom:14px">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px">
+                <div><strong style="font-size:.9rem">任务结论</strong><div style="font-size:.75rem;color:var(--text-muted);margin-top:2px">固定一份，可随时更新；不会生成或计入测试报告</div></div>
+                ${conclusion.can_edit?`<button class="btn btn-primary" style="padding:5px 12px;font-size:.78rem" onclick="saveTaskConclusion(this,${planId},${taskId})">保存结论</button>`:''}
+            </div>
+            <textarea class="form-input" rows="4" maxlength="20000" style="width:100%;resize:vertical;line-height:1.6" placeholder="简单记录本任务的结果、风险或后续事项" ${conclusion.can_edit?'':'readonly'}>${esc(conclusion.content || '')}</textarea>
+            <div data-conclusion-meta style="font-size:.72rem;color:var(--text-muted);margin-top:6px">${conclusion.updated_at?`最近更新：${esc(conclusion.updated_at)}`:'尚未填写任务结论'}</div>
+        </section>`;
         if (!items.length) {
-            body.innerHTML = banner + '<div style="color:var(--text-muted);text-align:center;padding:30px">本任务暂无旧版报告，请使用上方"全局测试报告中心"创建</div>';
+            body.innerHTML = conclusionPanel + banner + '<div style="color:var(--text-muted);text-align:center;padding:30px">本任务暂无旧版报告；需要多份正式记录时，请使用上方“全局测试报告中心”创建</div>';
             return;
         }
-        body.innerHTML = banner + `<table style="width:100%;border-collapse:collapse;font-size:0.82rem;margin:0">
+        body.innerHTML = conclusionPanel + banner + `<table style="width:100%;border-collapse:collapse;font-size:0.82rem;margin:0">
             <thead><tr>
                 <th style="text-align:left;padding:8px;border-bottom:1px solid var(--border)">标题</th>
                 <th style="text-align:left;padding:8px;border-bottom:1px solid var(--border)">创建人</th>
@@ -3968,6 +3979,25 @@ async function _loadTaskReportList(overlay, planId, taskId) {
         </table>`;
     } catch (e) {
         body.innerHTML = `<div style="color:var(--red);text-align:center;padding:30px">加载失败: ${esc(e.message)}</div>`;
+    }
+}
+
+async function saveTaskConclusion(button, planId, taskId) {
+    const panel = button.closest('[data-task-conclusion]');
+    const textarea = panel.querySelector('textarea');
+    const meta = panel.querySelector('[data-conclusion-meta]');
+    button.disabled = true;
+    try {
+        const result = await API.put(`/test-plans/${planId}/tasks/${taskId}/conclusion`, {
+            content: textarea.value,
+        });
+        meta.textContent = result.updated_at ? `已保存 · ${result.updated_at}` : '已保存';
+        showToast('任务结论已保存', 'success');
+    } catch (e) {
+        meta.textContent = `保存失败：${e.message || '请稍后重试'}`;
+        showToast('保存任务结论失败: ' + e.message, 'error');
+    } finally {
+        button.disabled = false;
     }
 }
 

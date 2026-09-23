@@ -65,6 +65,7 @@ const AgentTeamPlans = (() => {
         $('at-plan-reports-eyebrow').textContent = context.scope === 'task' ? 'TASK REPORTS / 任务报告' : 'PLAN REPORTS / 计划报告';
         $('at-plan-reports-title').textContent = `${context.name} · 报告`;
         $('at-plan-reports-count').textContent = '正在读取关联报告…';
+        $('at-task-conclusion').hidden = true;
         $('at-plan-reports-list').innerHTML = '<div class="at-empty">加载中…</div>';
         $('at-plan-report-preview').hidden = true;
         $('at-plan-reports-list').hidden = false;
@@ -75,11 +76,22 @@ const AgentTeamPlans = (() => {
                 : `/test-plans/${context.planId}/reports`;
             const sourceType = context.scope === 'task' ? 'test_task' : 'test_plan';
             const sourceId = context.scope === 'task' ? context.taskId : context.planId;
-            const [legacy, global] = await Promise.all([
+            const requests = [
                 API.get(legacyPath),
                 API.get(`/test-reports?source_ref_type=${sourceType}&source_ref_id=${sourceId}&page_size=100`),
-            ]);
+            ];
+            if (context.scope === 'task') requests.push(API.get(`/test-plans/${context.planId}/tasks/${context.taskId}/conclusion`));
+            const [legacy, global, conclusion] = await Promise.all(requests);
             if (turn !== reportRequestId || reportContextKey(reportContext) !== key) return;
+            if (conclusion) {
+                $('at-task-conclusion').hidden = false;
+                $('at-task-conclusion-content').value = conclusion.content || '';
+                $('at-task-conclusion-content').readOnly = !conclusion.can_edit;
+                $('at-task-conclusion-save').hidden = !conclusion.can_edit;
+                $('at-task-conclusion-meta').textContent = conclusion.updated_at
+                    ? `最近更新：${conclusion.updated_at}`
+                    : '尚未填写任务结论';
+            }
             const globalItems = global.items || [], globalIds = new Set(globalItems.map(item=>Number(item.id)));
             const legacyItems = (legacy.items || []).filter(item=>!item.linked_test_report_id || !globalIds.has(Number(item.linked_test_report_id)));
             const scopeLabel = context.scope === 'task' ? '任务报告' : '计划报告';
@@ -118,6 +130,20 @@ const AgentTeamPlans = (() => {
         } catch (error) {
             if (turn === reportRequestId) $('at-plan-report-preview-body').innerHTML = `<div class="at-empty at-plan-alert">${esc(error.message || '报告读取失败')}</div>`;
         }
+    }
+    async function saveTaskConclusion() {
+        if (!reportContext || reportContext.scope !== 'task') return;
+        const button = $('at-task-conclusion-save');
+        button.disabled = true;
+        try {
+            const data = await API.put(
+                `/test-plans/${reportContext.planId}/tasks/${reportContext.taskId}/conclusion`,
+                {content:$('at-task-conclusion-content').value});
+            $('at-task-conclusion-meta').textContent = data.updated_at
+                ? `已保存 · ${data.updated_at}` : '已保存';
+        } catch (error) {
+            $('at-task-conclusion-meta').textContent = `保存失败：${error.message || '请稍后重试'}`;
+        } finally { button.disabled = false; }
     }
     async function load(page = 0) {
         if (!team) return;
@@ -187,6 +213,7 @@ const AgentTeamPlans = (() => {
     $('at-plan-reports-close').addEventListener('click',()=>$('at-plan-reports-dialog').close());
     $('at-plan-reports-fullscreen').addEventListener('click',()=>setReportsFullscreen(!$('at-plan-reports-dialog').classList.contains('is-fullscreen')));
     $('at-plan-report-back').addEventListener('click',()=>{$('at-plan-report-preview').hidden=true;$('at-plan-reports-list').hidden=false;});
+    $('at-task-conclusion-save').addEventListener('click',saveTaskConclusion);
     $('at-plan-reports-dialog').addEventListener('close',()=>{++reportRequestId;reportContext=null;setReportsFullscreen(false);});
     $('at-plan-reports-dialog').addEventListener('click',event=>{const button=event.target.closest('button[data-report-kind]');if(button)previewReport(button.dataset.reportKind,button.dataset.reportId,button.dataset.reportTitle,button.dataset.reportFormat);});
     function tab(value) {
