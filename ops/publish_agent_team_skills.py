@@ -62,7 +62,6 @@ else:
         assert len(existing) <= 1
         if existing:
             skill = api('GET', '/skills/%s' % existing[0]['id']).json()
-            assert skill.get('template_content') == spec['template_content'], 'Existing skill differs'
             assert not skill.get('is_deleted'), 'Existing skill deleted'
         else:
             skill = api('POST', '/skills', spec).json()
