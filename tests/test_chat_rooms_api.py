@@ -190,12 +190,15 @@ class ChatRoomsApiTest(unittest.TestCase):
         sent = self.client.post(
             f"/api/v1/chat-rooms/{room['id']}/messages",
             json={
-                'content': '', 'image_ids': [image['id']],
+                'content': '请结合截图确认状态', 'image_ids': [image['id']],
                 'mentions': [{'type': 'member', 'member_id': agent_member['id']}],
-            }, headers={'Idempotency-Key': 'image-only-1'})
+            }, headers={'Idempotency-Key': 'image-and-text-1'})
         self.assertEqual(sent.status_code, 201, sent.get_json())
-        self.assertEqual(sent.get_json()['message_type'], 'image')
+        self.assertEqual(sent.get_json()['message_type'], 'mixed')
         self.assertEqual(sent.get_json()['images'][0]['id'], image['id'])
+        self.assertEqual(
+            sent.get_json()['images'][0]['agent_url'],
+            'http://clawteam.woa.com:18800' + image['url'])
         row = db.session.get(ChatRoomImage, image['id'])
         self.assertEqual(row.message_id, sent.get_json()['id'])
         self.assertEqual(row.status, 'active')
@@ -207,6 +210,10 @@ class ChatRoomsApiTest(unittest.TestCase):
         event = next(payload for name, payload in pending_agent_events(self.agent.id)
                      if name == 'room_message')
         self.assertEqual(event['message']['images'][0]['sha256'], image['sha256'])
+        self.assertEqual(
+            event['message']['images'][0]['agent_url'],
+            sent.get_json()['images'][0]['agent_url'])
+        self.assertEqual(event['message']['content'], '请结合截图确认状态')
 
     def test_room_image_cannot_cross_room_or_bind_twice(self):
         room_a, _ = self._create_room()

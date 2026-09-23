@@ -18,7 +18,7 @@ const AgentTeamChat = (() => {
         $('at-chat-root').innerHTML = `<section class="at-chat-workspace">
             <header class="at-chat-head"><div><span class="at-eyebrow">TEAM CHANNEL</span><h3>固定团队聊天室</h3><p>同一团队始终使用这个房间。@ 才会唤醒 Agent；普通消息只沉淀上下文。</p></div><div class="at-chat-signal"><i></i><span id="at-chat-room-state">正在连接</span></div></header>
             <div class="at-chat-layout"><main class="at-chat-main"><div id="at-chat-stream" class="at-chat-stream" tabindex="0" aria-label="团队聊天室消息"><p class="at-empty">正在读取团队聊天室…</p></div>
-            <form id="at-chat-form" class="at-chat-compose"><div id="at-chat-mentions" class="at-chat-mentions"></div><div id="at-chat-image-preview" class="at-chat-image-preview" hidden></div><textarea id="at-chat-input" rows="3" maxlength="20000" placeholder="输入讨论内容；需要 Agent 回复时先选择 @成员"></textarea><footer><span id="at-chat-compose-note">Enter 发送 · Shift+Enter 换行</span><div class="at-chat-actions"><input id="at-chat-image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden><button class="btn btn-secondary btn-sm" id="at-chat-image-button" type="button">图片</button><button class="btn btn-primary btn-sm" id="at-chat-send" type="submit">发送</button></div></footer></form></main>
+            <form id="at-chat-form" class="at-chat-compose"><div id="at-chat-mentions" class="at-chat-mentions"></div><div id="at-chat-image-preview" class="at-chat-image-preview" hidden></div><textarea id="at-chat-input" rows="3" maxlength="20000" placeholder="输入讨论内容；可直接 Ctrl+V 粘贴图片，需要 Agent 回复时先选择 @成员"></textarea><footer><span id="at-chat-compose-note">Enter 发送 · Shift+Enter 换行 · Ctrl+V 粘贴图片</span><div class="at-chat-actions"><input id="at-chat-image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden><button class="btn btn-secondary btn-sm" id="at-chat-image-button" type="button">图片</button><button class="btn btn-primary btn-sm" id="at-chat-send" type="submit">发送</button></div></footer></form></main>
             <aside class="at-chat-side"><header><strong>在场成员</strong><span id="at-chat-member-count">—</span></header><div id="at-chat-members"></div><div class="at-chat-rule"><b>频道边界</b><span>讨论、问答和结论确认留在这里。</span><span>真正开工、重试、取消仍必须走 Stage / Run。</span></div></aside></div>
             <p id="at-chat-note" class="at-help" role="status"></p></section>
             <dialog id="at-chat-lightbox" class="at-chat-lightbox" aria-labelledby="at-chat-lightbox-caption">
@@ -29,6 +29,7 @@ const AgentTeamChat = (() => {
         $('at-chat-input').addEventListener('keydown', event => {
             if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('at-chat-form').requestSubmit(); }
         });
+        $('at-chat-input').addEventListener('paste', pasteImages);
         $('at-chat-image-button').addEventListener('click', () => $('at-chat-image-input').click());
         $('at-chat-image-input').addEventListener('change', chooseImages);
         $('at-chat-image-preview').addEventListener('click', event => {
@@ -75,15 +76,34 @@ const AgentTeamChat = (() => {
         pendingImages.forEach(item => { if (item.preview) URL.revokeObjectURL(item.preview); });
         pendingImages = [];
     }
-    function chooseImages(event) {
+    function queueImages(files, source = 'picker') {
         const allowed = new Set(['image/png','image/jpeg','image/gif','image/webp']);
-        const files = [...(event.target.files || [])];
+        let added = 0;
         for (const file of files) {
             if (pendingImages.length >= 4) { $('at-chat-note').textContent = '每条消息最多发送 4 张图片。'; break; }
             if (!allowed.has(file.type) || file.size > 8 * 1024 * 1024) { $('at-chat-note').textContent = '仅支持 PNG、JPEG、GIF、WebP，单张不超过 8 MB。'; continue; }
             pendingImages.push({file, preview:URL.createObjectURL(file), id:null, uploadKey:(crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`)});
+            added += 1;
         }
-        event.target.value = ''; renderPendingImages();
+        renderPendingImages();
+        if (source === 'clipboard' && added) $('at-chat-note').textContent = `已从剪贴板添加 ${added} 张图片，可继续输入文字后一起发送。`;
+        return added;
+    }
+    function chooseImages(event) {
+        queueImages([...(event.target.files || [])]);
+        event.target.value = '';
+    }
+    function pasteImages(event) {
+        const clipboard = event.clipboardData;
+        if (!clipboard) return;
+        const files = [...(clipboard.items || [])]
+            .filter(item => item.kind === 'file' && String(item.type || '').startsWith('image/'))
+            .map(item => item.getAsFile()).filter(Boolean);
+        if (!files.length) return;
+        // 纯截图剪贴板不应在 textarea 中留下浏览器生成的无意义占位；若同时
+        // 带有文字则保留浏览器默认的文字粘贴，并把图片作为同一条消息附件。
+        if (!clipboard.getData('text/plain')) event.preventDefault();
+        queueImages(files, 'clipboard');
     }
     function renderPendingImages() {
         const box = $('at-chat-image-preview'); if (!box) return;
@@ -106,7 +126,7 @@ const AgentTeamChat = (() => {
             button.classList.toggle('selected', selected.has(button.dataset.chatMention));
         });
         const count = selected.has('all') ? '将唤醒全部 Agent' : selected.size ? `将唤醒 ${selected.size} 个 Agent` : '未 @ Agent，本条仅记录';
-        if ($('at-chat-compose-note')) $('at-chat-compose-note').textContent = `${count} · Enter 发送`;
+        if ($('at-chat-compose-note')) $('at-chat-compose-note').textContent = `${count} · Enter 发送 · Ctrl+V 粘贴图片`;
     }
     function time(value) {
         if (!value) return '';

@@ -5,6 +5,7 @@
 """
 
 import hashlib
+import os
 import secrets
 from datetime import datetime, timedelta, timezone
 
@@ -218,8 +219,21 @@ def room_mentions(message_id):
 
 def serialize_message(message):
     payload = message.to_dict(mentions=room_mentions(message.id))
-    payload['images'] = [row.to_dict() for row in ChatRoomImage.query.filter_by(
-        message_id=message.id, status='active').order_by(ChatRoomImage.id.asc()).all()]
+    public_base = str(
+        current_app.config.get('HUB_PUBLIC_URL')
+        or os.getenv('HUB_PUBLIC_URL')
+        or 'http://clawteam.woa.com:18800'
+    ).rstrip('/')
+    images = []
+    for row in ChatRoomImage.query.filter_by(
+            message_id=message.id, status='active').order_by(
+                ChatRoomImage.id.asc()).all():
+        item = row.to_dict()
+        # 浏览器继续使用同源相对 URL，避免 HTTPS 页面加载 HTTP 资源被拦截；
+        # Agent SSE 载荷同时携带可直接通过 Hub Token 请求的稳定完整地址。
+        item['agent_url'] = public_base + item['url']
+        images.append(item)
+    payload['images'] = images
     return payload
 
 
