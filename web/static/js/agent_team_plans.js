@@ -91,11 +91,12 @@ const AgentTeamPlans = (() => {
     $('at-plan-close').addEventListener('click',()=>{if(!saving)$('at-plan-dialog').close();});
     $('at-plan-dialog').addEventListener('cancel',event=>{if(saving)event.preventDefault();});
     function tab(value) {
-        ['members','plans','knowledge','skills'].forEach(key=>{const selected=key===value; $(`at-tab-${key}`).setAttribute('aria-selected',String(selected)); $(`at-tab-${key}`).tabIndex=selected?0:-1; $(`at-${key}-panel`).hidden=!selected;});
+        ['members','chat','plans','knowledge','skills'].forEach(key=>{const selected=key===value; $(`at-tab-${key}`).setAttribute('aria-selected',String(selected)); $(`at-tab-${key}`).tabIndex=selected?0:-1; $(`at-${key}-panel`).hidden=!selected;});
         if(value==='members') AgentTeamActivity.refresh(true);
+        if(value==='chat') AgentTeamChat.refresh();
         if(value==='knowledge' || value==='skills') AgentTeamResources.refresh();
     }
-    $('at-detail').addEventListener('keydown',event=>{if(event.target.matches('[data-team-tab]') && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const keys=['members','plans','knowledge','skills'], current=keys.indexOf(event.target.dataset.teamTab);const next=event.key==='Home'?keys[0]:event.key==='End'?keys[keys.length-1]:keys[(current+(event.key==='ArrowRight'?1:-1)+keys.length)%keys.length];tab(next);$(`at-tab-${next}`).focus();}});
+    $('at-detail').addEventListener('keydown',event=>{if(event.target.matches('[data-team-tab]') && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const keys=['members','chat','plans','knowledge','skills'], current=keys.indexOf(event.target.dataset.teamTab);const next=event.key==='Home'?keys[0]:event.key==='End'?keys[keys.length-1]:keys[(current+(event.key==='ArrowRight'?1:-1)+keys.length)%keys.length];tab(next);$(`at-tab-${next}`).focus();}});
     $('at-detail').addEventListener('change',event=>{if(event.target.id==='at-plan-date' && event.target.value){day=event.target.value;load();}});
     $('at-detail').addEventListener('click',event=>{
         const button=event.target.closest('button'); if(!button || button.disabled) return;

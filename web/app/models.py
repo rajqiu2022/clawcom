@@ -3997,6 +3997,9 @@ class ChatRoom(db.Model):
     __tablename__ = 'chat_rooms'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    team_id = db.Column(
+        db.Integer, db.ForeignKey('agent_teams.id'), nullable=True,
+        unique=True, index=True)
     project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=True, index=True)
     title = db.Column(db.String(160), nullable=False)
     description = db.Column(db.Text)
@@ -4019,6 +4022,7 @@ class ChatRoom(db.Model):
     def to_dict(self):
         return {
             'id': self.id,
+            'team_id': self.team_id,
             'project_id': self.project_id,
             'title': self.title,
             'description': self.description or '',
@@ -4174,6 +4178,33 @@ class ChatRoomDelivery(db.Model):
     __table_args__ = (
         db.UniqueConstraint('message_id', 'member_id', name='uq_chat_room_delivery_member'),
         db.Index('ix_chat_room_delivery_member_status', 'member_id', 'status'),
+    )
+
+
+class AgentTeamChatRound(db.Model):
+    """One manager question and the exact Agent replies it is waiting for."""
+    __tablename__ = 'agent_team_chat_rounds'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    team_id = db.Column(
+        db.Integer, db.ForeignKey('agent_teams.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    room_id = db.Column(
+        db.Integer, db.ForeignKey('chat_rooms.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    question_message_id = db.Column(
+        db.Integer, db.ForeignKey('chat_room_messages.id', ondelete='CASCADE'),
+        nullable=False, unique=True, index=True)
+    created_by_member_id = db.Column(
+        db.Integer, db.ForeignKey('chat_room_members.id'), nullable=False)
+    expected_claw_ids_json = db.Column(db.JSON, nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='open', index=True)
+    deadline_at = db.Column(db.DateTime, nullable=False, index=True)
+    completed_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+
+    __table_args__ = (
+        db.Index('ix_agent_team_chat_round_team_status', 'team_id', 'status'),
     )
 
 

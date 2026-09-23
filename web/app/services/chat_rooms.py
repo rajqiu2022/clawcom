@@ -220,7 +220,8 @@ def serialize_message(message):
 
 
 def post_message(room, sender, content, client_message_id, mentions=None,
-                 reply_to_message_id=None, origin_delivery_id=None):
+                 reply_to_message_id=None, origin_delivery_id=None,
+                 commit=True):
     room_id = int(room.id)
     sender_id = int(sender.id)
     content = str(content or '').strip()
@@ -320,7 +321,10 @@ def post_message(room, sender, content, client_message_id, mentions=None,
           {'mentions': normalized, 'automation_depth': automation_depth,
            'agent_notification_suppressed': not allow_agent_notifications})
     try:
-        db.session.commit()
+        if commit:
+            db.session.commit()
+        else:
+            db.session.flush()
         return message, True
     except IntegrityError:
         # 并发重放也必须返回第一次落库的消息，而不是把唯一键冲突暴露成 500/400。
@@ -517,20 +521,37 @@ def pending_agent_events(claw_id, limit=50):
                       .filter(
                           ChatRoomMember.claw_id == int(claw_id),
                           ChatRoomDelivery.notify_agent.is_(True),
-                          ChatRoomDelivery.status == 'unread',
+                          ChatRoomDelivery.status.in_(('unread', 'delivered', 'processing')),
                           ChatRoom.status == 'active',
                           ChatRoomMessage.status == 'active',
                       )
                       .order_by(ChatRoomDelivery.id.asc()).limit(remaining).all())
         for delivery in deliveries:
             message = db.session.get(ChatRoomMessage, delivery.message_id)
+            history = []
+            room = db.session.get(ChatRoom, delivery.room_id)
+            if room.team_id:
+                history_rows = (ChatRoomMessage.query.filter(
+                    ChatRoomMessage.room_id == room.id,
+                    ChatRoomMessage.id < message.id,
+                    ChatRoomMessage.status == 'active').order_by(
+                        ChatRoomMessage.id.desc()).limit(12).all())
+                history_rows.reverse()
+                history = [serialize_message(row) for row in history_rows]
             events.append(('room_message', {
                 'delivery_id': delivery.id,
-                'room': db.session.get(ChatRoom, delivery.room_id).to_dict(),
+                'delivery': {
+                    'id': delivery.id, 'status': delivery.status,
+                    'processing_at': (str(delivery.processing_at)
+                                      if delivery.processing_at else None),
+                },
+                'room': room.to_dict(),
                 'message': serialize_message(message),
+                'history': history,
             }))
-            delivery.status = 'delivered'
-            delivery.delivered_at = now
+            if delivery.status == 'unread':
+                delivery.status = 'delivered'
+                delivery.delivered_at = now
     if events:
         db.session.commit()
     return events

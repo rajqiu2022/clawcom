@@ -91,6 +91,21 @@ class AgentTeamsUiTest(unittest.TestCase):
         self.assertIn('agent_team_resources.js', self.html)
         self.assertNotIn('template_content', resources)
 
+    def test_fixed_team_chat_is_mention_driven_and_does_not_dispatch_work(self):
+        chat = (ROOT / 'web/static/js/agent_team_chat.js').read_text(encoding='utf-8')
+        plans = (ROOT / 'web/static/js/agent_team_plans.js').read_text(encoding='utf-8')
+        for marker in ('at-tab-chat', 'at-chat-panel', 'AgentTeamChat.mount(team)'):
+            self.assertIn(marker, self.js)
+        for marker in ('agent_team_chat.js', '20260923teamchat'):
+            self.assertIn(marker, self.html)
+        for marker in ('mention_claw_ids', 'mention_all', 'Idempotency-Key',
+                       'expected_count', 'replied_count', 'setTimeout'):
+            self.assertIn(marker, chat)
+        self.assertIn("['members','chat','plans','knowledge','skills']", plans)
+        for forbidden in ('/dispatch', '/workflow-runs', '/send-to-claw', 'setInterval('):
+            self.assertNotIn(forbidden, chat)
+        self.assertIn('.at-chat-layout', self.css)
+
 
 if __name__ == '__main__':
     unittest.main()

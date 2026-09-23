@@ -211,6 +211,8 @@ def delete_chat_room(room_id):
         return error
     if member.role != 'owner':
         return _error(PermissionError('ROOM_DELETE_DENIED'))
+    if room.team_id:
+        return _error(PermissionError('TEAM_ROOM_DELETE_DENIED'))
     now = now_cst_naive()
     room.status = 'deleted'
     room.deleted_at = now
@@ -269,6 +271,8 @@ def remove_chat_room_member(room_id, member_id):
         return _error(LookupError('ROOM_MEMBER_NOT_FOUND'))
     if target.role == 'owner':
         return _error(PermissionError('ROOM_OWNER_CANNOT_REMOVE'))
+    if room.team_id and target.member_type == 'agent':
+        return _error(PermissionError('TEAM_ROOM_MEMBER_MANAGED_BY_TEAM'))
     now = now_cst_naive()
     target.status = 'removed'
     target.removed_at = now
@@ -493,7 +497,23 @@ def renew_chat_room_session():
         return _error(exc, 401 if isinstance(exc, PermissionError) else None)
 
 
-@api_bp.route('/chat-rooms/<int:room_id>/deliveries/<int:delivery_id>', methods=['PATCH'])
+def _delivery_payload(delivery):
+    response = (ChatRoomMessage.query.filter_by(
+        origin_delivery_id=delivery.id, status='active')
+        .order_by(ChatRoomMessage.id.asc()).first())
+    return {
+        'id': delivery.id, 'room_id': delivery.room_id,
+        'message_id': delivery.message_id, 'member_id': delivery.member_id,
+        'status': delivery.status,
+        'processing_at': (str(delivery.processing_at)
+                          if delivery.processing_at else None),
+        'done_at': str(delivery.done_at) if delivery.done_at else None,
+        'failed_reason': delivery.failed_reason,
+        'response_message_id': response.id if response else None,
+    }
+
+
+@api_bp.route('/chat-rooms/<int:room_id>/deliveries/<int:delivery_id>', methods=['GET', 'PATCH'])
 def update_chat_room_delivery(room_id, delivery_id):
     blocked = _disabled()
     if blocked:
@@ -507,12 +527,18 @@ def update_chat_room_delivery(room_id, delivery_id):
         id=delivery_id, room_id=room.id, member_id=member.id).first()
     if not delivery:
         return _error(LookupError('DELIVERY_NOT_FOUND'))
+    if request.method == 'GET':
+        return jsonify(_delivery_payload(delivery))
     data = request.get_json(silent=True) or {}
     target = data.get('status')
+    if target == delivery.status:
+        return jsonify(_delivery_payload(delivery))
     allowed = {
-        'delivered': ('processing', 'read'),
+        # A Worker may finish after losing the processing ACK.  Terminal
+        # transitions stay bounded to the same authenticated Agent/member.
+        'delivered': ('processing', 'read', 'done', 'failed'),
         'processing': ('done', 'failed'),
-        'unread': ('delivered',),
+        'unread': ('delivered', 'processing', 'done', 'failed'),
     }
     if target not in allowed.get(delivery.status, ()):
         return _error(ValueError('DELIVERY_TRANSITION_INVALID'))
@@ -527,4 +553,4 @@ def update_chat_room_delivery(room_id, delivery_id):
     elif target == 'read':
         delivery.read_at = now
     db.session.commit()
-    return jsonify({'id': delivery.id, 'status': delivery.status})
+    return jsonify(_delivery_payload(delivery))

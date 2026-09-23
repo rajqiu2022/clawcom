@@ -5,7 +5,7 @@ import json
 import re
 from datetime import datetime, timedelta
 
-from flask import jsonify, request
+from flask import current_app, jsonify, request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -27,6 +27,10 @@ from app.services.agent_teams import (
     mission_team, normalize_config, require_manager, require_stage_member,
     require_team_project, scoped_claw,
 )
+from app.services.agent_team_chat import (
+    create_team_message, serialize_round, sync_team_room, team_room_payload,
+)
+from app.services.chat_rooms import serialize_message
 
 
 @api_bp.errorhandler(TeamError)
@@ -133,6 +137,8 @@ def create_agent_team():
     db.session.add(team)
     try:
         db.session.flush()
+        if current_app.config.get('CHAT_ROOM_ENABLED', False):
+            sync_team_room(team)
         _audit(team, actor, 'create', config)
         notified_ids = queue_join_notifications(team)
         db.session.commit()
@@ -358,6 +364,44 @@ def get_agent_team(team_id):
     return jsonify(_team_read_payload(team))
 
 
+@api_bp.route('/agent-teams/<int:team_id>/chat-room', methods=['GET'])
+def get_agent_team_chat_room(team_id):
+    team = load_team(team_id)
+    actor = _access(team.project_id)
+    if not current_app.config.get('CHAT_ROOM_ENABLED', False):
+        raise TeamError('CHAT_ROOM_DISABLED', '聊天室能力尚未开启', 404)
+    limit = min(max(request.args.get('limit', 120, type=int), 1), 200)
+    return jsonify(team_room_payload(team, actor, limit=limit))
+
+
+@api_bp.route('/agent-teams/<int:team_id>/chat-room/messages', methods=['POST'])
+def post_agent_team_chat_message(team_id):
+    team = load_team(team_id, lock=True)
+    actor = _access(team.project_id)
+    if not current_app.config.get('CHAT_ROOM_ENABLED', False):
+        raise TeamError('CHAT_ROOM_DISABLED', '聊天室能力尚未开启', 404)
+    data = _body()
+    allowed = {
+        'content', 'mention_claw_ids', 'mention_all', 'timeout_seconds',
+        'client_message_id',
+    }
+    if set(data) - allowed:
+        raise TeamError('TEAM_CHAT_MESSAGE_INVALID', '包含未知聊天室消息字段', 400)
+    key = request.headers.get('Idempotency-Key') or data.get('client_message_id')
+    if not key or len(str(key)) > 100:
+        raise TeamError('IDEMPOTENCY_KEY_REQUIRED', '必须提供 Idempotency-Key', 400)
+    message, round_row, created = create_team_message(
+        team, actor, data.get('content'), str(key),
+        data.get('mention_claw_ids') or [], bool(data.get('mention_all')),
+        data.get('timeout_seconds', 300))
+    payload = {
+        'message': serialize_message(message),
+        'round': serialize_round(round_row) if round_row else None,
+    }
+    db.session.commit()
+    return jsonify(payload), 201 if created else 200
+
+
 def _activity_member(team, claw_id):
     person = activity.roster(team).get(claw_id)
     if not person:
@@ -433,6 +477,8 @@ def update_agent_team(team_id):
     team.active_manager_claw_id = None
     _audit(team, actor, 'update', dict(config, version=team.version, manager_epoch=team.manager_epoch))
     try:
+        if current_app.config.get('CHAT_ROOM_ENABLED', False):
+            sync_team_room(team)
         notified_ids = queue_join_notifications(team, previous_member_ids)
         db.session.commit()
     except IntegrityError:

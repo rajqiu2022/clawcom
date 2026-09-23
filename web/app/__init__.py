@@ -209,6 +209,56 @@ def create_app(config_name=None):
                             logger.info('%s 表已就绪', label)
                         except Exception as e:
                             logger.info('%s 表创建跳过: %s', label, e)
+                    # Every Agent Team owns one durable discussion room.  The
+                    # room reuses the existing ChatRoom message/delivery
+                    # tables; only the team binding and question-round facts
+                    # are new.
+                    try:
+                        conn.execute(text(
+                            'ALTER TABLE chat_rooms ADD COLUMN '
+                            'team_id INT DEFAULT NULL'))
+                        logger.info('已添加 chat_rooms.team_id')
+                    except Exception:
+                        pass
+                    for ddl in (
+                        'CREATE UNIQUE INDEX uq_chat_room_team '
+                        'ON chat_rooms (team_id)',
+                        'ALTER TABLE chat_rooms ADD CONSTRAINT '
+                        'fk_chat_room_team FOREIGN KEY (team_id) '
+                        'REFERENCES agent_teams(id) ON DELETE CASCADE',
+                    ):
+                        try:
+                            conn.execute(text(ddl))
+                        except Exception:
+                            pass
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS agent_team_chat_rounds (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                team_id INTEGER NOT NULL,
+                                room_id INTEGER NOT NULL,
+                                question_message_id INTEGER NOT NULL,
+                                created_by_member_id INTEGER NOT NULL,
+                                expected_claw_ids_json LONGTEXT NOT NULL,
+                                status VARCHAR(20) NOT NULL DEFAULT 'open',
+                                deadline_at DATETIME NOT NULL,
+                                completed_at DATETIME DEFAULT NULL,
+                                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                UNIQUE KEY uq_agent_team_chat_round_question (question_message_id),
+                                INDEX ix_agent_team_chat_round_team (team_id),
+                                INDEX ix_agent_team_chat_round_room (room_id),
+                                INDEX ix_agent_team_chat_round_status (status),
+                                INDEX ix_agent_team_chat_round_deadline (deadline_at),
+                                INDEX ix_agent_team_chat_round_team_status (team_id, status),
+                                FOREIGN KEY (team_id) REFERENCES agent_teams(id) ON DELETE CASCADE,
+                                FOREIGN KEY (room_id) REFERENCES chat_rooms(id) ON DELETE CASCADE,
+                                FOREIGN KEY (question_message_id) REFERENCES chat_room_messages(id) ON DELETE CASCADE,
+                                FOREIGN KEY (created_by_member_id) REFERENCES chat_room_members(id)
+                            )
+                        """))
+                        logger.info('agent_team_chat_rounds 表已就绪')
+                    except Exception as e:
+                        logger.info('agent_team_chat_rounds 表创建跳过: %s', e)
                     for table_name in ('workflow_runs', 'agent_tasks'):
                         for column_name, column_ddl in (
                             ('context_snapshot_id', 'VARCHAR(64) DEFAULT NULL'),

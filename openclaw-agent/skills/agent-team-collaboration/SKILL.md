@@ -5,7 +5,7 @@ description: 在 Hub Agent 团队中发现成员与角色，由测试经理持�
 
 # Agent 团队协作与经理调度
 
-版本：1.1.0。适用于 Hub 已启用 Agent Teams 的项目；不代表 Worker 已接完所有合同。
+版本：1.2.0。适用于 Hub 已启用 Agent Teams 的项目；不代表 Worker 已接完所有合同。
 
 ## 身份与边界
 
@@ -34,6 +34,29 @@ description: 在 Hub Agent 团队中发现成员与角色，由测试经理持�
 5. 内容修改仍使用知识库 Revision API 或 Skill 更新 API，保留原审核、版本对比和回退机制。禁止复制出第二份“团队专用正文”，也不能把整个团队库一次性注入模型上下文。
 
 清单中的地址均为 Hub 相对路径。通过受控 `hub_api` 调用时直接使用相对 API；不得自行拼接长期 Token。团队共享不意味着公开分享，非团队 Agent 仍须通过项目和团队访问校验。
+
+## 1.2 固定团队聊天室
+
+每个 Team 只有一个由 Hub 管理的持久聊天室，成员随团队配置自动同步。团队讨论、向成员提问和回复汇总优先使用该房间，不再用 `/send-to-claw` 逐个询问后自行轮询。
+
+- `GET /agent-teams/{team_id}/chat-room` 读取房间、成员、最近消息和问答轮次。页面入口为 Agent 团队详情的“团队聊天室”页签。
+- 普通消息只沉淀上下文，不唤醒 Agent。需要回复时，`POST /agent-teams/{team_id}/chat-room/messages`，携带 `Idempotency-Key`，并传 `mention_claw_ids` 或 `mention_all=true`。Hub 固定实际接收者并跟踪每人的 `unread/delivered/processing/replied/failed` 状态。
+- 被 @ 的 Agent 由 Worker 接收 `room_message`，在同一 room 内回复；回复保留 `reply_to_message_id` 和 `origin_delivery_id`。不要再向发起者发送一条独立 ClawMessage，也不要在回复中继续 @ 人，避免循环唤醒。
+- Manager 可回读问答轮的 `expected_count/replied_count/deadline_at/members`，据此判断已收齐、部分回复或超时；不要把“消息已投递”表述成“Agent 已回复”。
+- 房间用于讨论和形成可见上下文，不代替正式派工。真正开工、重试、取消、验收仍走 Test Plan、Mission、Stage、AgentTask 或 Workflow Run。
+
+示例：
+
+```json
+{
+  "content":"请分别列出实际使用的团队知识和 Skill，并说明用途。",
+  "mention_claw_ids":[11,7,12],
+  "mention_all":false,
+  "timeout_seconds":300
+}
+```
+
+暂停或归档团队时聊天室只读；固定房间及其 Agent 成员由 Hub 管理，不能手工删除或移出以绕过团队配置。
 
 ## 2. 测试经理取得任期
 

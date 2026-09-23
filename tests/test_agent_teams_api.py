@@ -7,10 +7,12 @@ from datetime import datetime, timedelta
 import test_workflow_missions_api as fixtures
 from app import db
 from app.models import (
-    AgentTeam, AgentTeamKnowledgeResource, AgentTeamMember, AgentTeamMission,
-    AgentTeamSkillResource, ClawSidecarConfig, KnowledgeEntry, MissionStage,
-    OpenClawInstance, Skill, WorkflowRun, hash_token,
+    AgentTeam, AgentTeamChatRound, AgentTeamKnowledgeResource, AgentTeamMember,
+    AgentTeamMission, AgentTeamSkillResource, ChatRoom, ChatRoomDelivery,
+    ChatRoomMember, ChatRoomMessage, ClawSidecarConfig, KnowledgeEntry,
+    MissionStage, OpenClawInstance, Skill, WorkflowRun, hash_token,
 )
+from app.services.chat_rooms import pending_agent_events
 
 
 class AgentTeamsApiTest(unittest.TestCase):
@@ -139,6 +141,89 @@ class AgentTeamsApiTest(unittest.TestCase):
             headers=self._headers(self.other_token))
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(db.session.get(KnowledgeEntry, knowledge.id))
+
+    def test_fixed_team_room_tracks_round_replies_and_reuses_one_room(self):
+        self._setup_team()
+        self.app.config['CHAT_ROOM_ENABLED'] = True
+
+        first = self.client.get(
+            f'/api/v1/agent-teams/{self.team_id}/chat-room')
+        self.assertEqual(first.status_code, 200, first.get_json())
+        payload = first.get_json()
+        room_id = payload['room']['id']
+        self.assertEqual(payload['room']['team_id'], self.team_id)
+        self.assertEqual(
+            {self.main_claw.id, self.backup.id, self.other_claw.id},
+            {row['claw_id'] for row in payload['members'] if row['member_type'] == 'agent'})
+        self.assertEqual(
+            self.client.get(f'/api/v1/agent-teams/{self.team_id}/chat-room')
+            .get_json()['room']['id'], room_id)
+        self.assertEqual(ChatRoom.query.filter_by(team_id=self.team_id).count(), 1)
+
+        question = self.client.post(
+            f'/api/v1/agent-teams/{self.team_id}/chat-room/messages',
+            headers={'Idempotency-Key': 'team-round-1'},
+            json={
+                'content': '请分别说明实际使用的知识库和 Skill。',
+                'mention_claw_ids': [self.other_claw.id, self.backup.id],
+                'timeout_seconds': 300,
+            })
+        self.assertEqual(question.status_code, 201, question.get_json())
+        body = question.get_json()
+        self.assertEqual(body['round']['expected_count'], 2)
+        self.assertEqual(body['round']['status'], 'open')
+        self.assertEqual(AgentTeamChatRound.query.count(), 1)
+
+        events = pending_agent_events(self.other_claw.id)
+        event = next(value for name, value in events if name == 'room_message')
+        self.assertEqual(event['message']['id'], body['message']['id'])
+        self.assertEqual(event['room']['team_id'], self.team_id)
+        self.assertIn('history', event)
+
+        for claw, token in ((self.other_claw, self.other_token),
+                            (self.backup, self.backup_token)):
+            delivery = (ChatRoomDelivery.query.join(
+                ChatRoomMember, ChatRoomMember.id == ChatRoomDelivery.member_id)
+                .filter(ChatRoomDelivery.message_id == body['message']['id'],
+                        ChatRoomMember.claw_id == claw.id).one())
+            transition = self.client.patch(
+                f'/api/v1/chat-rooms/{room_id}/deliveries/{delivery.id}',
+                headers=self._headers(token), json={'status': 'processing'})
+            self.assertEqual(transition.status_code, 200, transition.get_json())
+            reply = self.client.post(
+                f'/api/v1/chat-rooms/{room_id}/messages',
+                headers=dict(self._headers(token), **{
+                    'Idempotency-Key': f'team-round-reply-{claw.id}'}),
+                json={
+                    'content': f'{claw.name} 的实际资源清单',
+                    'reply_to_message_id': body['message']['id'],
+                    'origin_delivery_id': delivery.id,
+                })
+            self.assertEqual(reply.status_code, 201, reply.get_json())
+            done = self.client.patch(
+                f'/api/v1/chat-rooms/{room_id}/deliveries/{delivery.id}',
+                headers=self._headers(token), json={'status': 'done'})
+            self.assertEqual(done.status_code, 200, done.get_json())
+            # Terminal ACK replay is idempotent.
+            replay = self.client.patch(
+                f'/api/v1/chat-rooms/{room_id}/deliveries/{delivery.id}',
+                headers=self._headers(token), json={'status': 'done'})
+            self.assertEqual(replay.status_code, 200, replay.get_json())
+            self.assertIsNotNone(replay.get_json()['response_message_id'])
+
+        closed = self.client.get(
+            f'/api/v1/agent-teams/{self.team_id}/chat-room').get_json()
+        self.assertEqual(closed['rounds'][0]['status'], 'completed')
+        self.assertEqual(closed['rounds'][0]['replied_count'], 2)
+        self.assertEqual(ChatRoomMessage.query.filter_by(
+            room_id=room_id, origin_delivery_id=None).count(), 1)
+
+        with self.client.session_transaction() as session:
+            session.clear()
+        denied = self.client.delete(
+            f'/api/v1/chat-rooms/{room_id}', headers=self._headers())
+        self.assertEqual(denied.status_code, 403, denied.get_json())
+        self.assertEqual(denied.get_json()['code'], 'TEAM_ROOM_DELETE_DENIED')
 
     def test_members_cannot_introduce_second_manager_or_arbitrary_specialty(self):
         self._setup_team()
