@@ -22,7 +22,7 @@ const AgentTeamPlans = (() => {
         return `<p class="at-help">监管 ${esc(s.status)} · 经理 #${esc(s.orchestrator_claw_id)} · Mission #${esc(s.mission_id)}${s.next_check_at?' · 下次 '+esc(s.next_check_at):''}</p>`;
     }
     function task(t) {
-        return `<li><div class="at-plan-task-title"><span>${esc(t.name)}</span>${badge(t.status)}</div><p class="at-help">${esc(t.priority)} · ${esc(t.assignee)} · ${esc(t.start_date || t.end_date || '未排期')}${t.end_date && t.end_date!==t.start_date?' → '+esc(t.end_date):''}${t.overdue?' · <span class="at-plan-alert">已逾期</span>':''}</p><div class="at-progress"><progress max="100" value="${t.progress}" aria-label="任务上报进度"></progress><span>${t.progress}%</span></div></li>`;
+        return `<li><div class="at-plan-task-title"><span><span class="at-plan-task-id">任务 #${esc(t.id)}</span>${esc(t.name)}</span>${badge(t.status)}</div><p class="at-help">${esc(t.priority)} · ${esc(t.assignee)} · ${esc(t.start_date || t.end_date || '未排期')}${t.end_date && t.end_date!==t.start_date?' → '+esc(t.end_date):''}${t.overdue?' · <span class="at-plan-alert">已逾期</span>':''}</p><div class="at-progress"><progress max="100" value="${t.progress}" aria-label="任务上报进度"></progress><span>${t.progress}%</span></div></li>`;
     }
     async function load(page = 0) {
         if (!team) return;

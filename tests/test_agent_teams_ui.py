@@ -67,8 +67,11 @@ class AgentTeamsUiTest(unittest.TestCase):
             self.assertIn(marker, self.js)
         for marker in ('data-period', 'period=','esc(p.name)', 'esc(t.name)', 'generation!==epoch',
                        'can_manage', "status:'draft'", 'ArrowLeft', 'requestId',
-                       '监管未启动', '测试经理已被移出', 'Mission #'):
+                       '监管未启动', '测试经理已被移出', 'Mission #',
+                       '任务 #${esc(t.id)}', 'at-plan-task-id'):
             self.assertIn(marker, js)
+        self.assertIn('.at-plan-task-id', (ROOT / 'web/static/css/agent_team_plans.css').read_text(encoding='utf-8'))
+        self.assertIn('20260923taskid', self.html)
         for forbidden in ('/dispatch', '/supervision/start', 'setInterval('):
             self.assertNotIn(forbidden, js)
         self.assertIn('aria-labelledby="at-plan-dialog-title"', self.html)

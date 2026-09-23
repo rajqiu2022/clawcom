@@ -18,6 +18,7 @@
 .at-plan-section{display:flex;align-items:center;gap:8px;font-size:12px;margin-top:20px}.at-plan-section>span{margin-left:auto;color:var(--at-muted);font-size:10px}
 .at-plan-card ul{list-style:none;margin:8px 0 16px;padding:0}.at-plan-card li{padding:12px 0;border-top:1px solid var(--at-line)}
 .at-plan-task-title{display:flex;align-items:start;justify-content:space-between;gap:12px;font-size:13px;line-height:1.7;overflow-wrap:anywhere}
+.at-plan-task-id{display:inline-block;margin-right:9px;color:var(--at-accent);font-size:10px;font-weight:700;letter-spacing:.07em;white-space:nowrap;font-variant-numeric:tabular-nums}
 .at-plan-card .at-help{font-size:11px;overflow-wrap:anywhere}.at-plan-card .at-progress{margin-top:9px}.at-plan-card .at-progress>span{white-space:nowrap}
 .at-plan-state{display:inline-block;border:1px solid var(--at-line);border-radius:4px;padding:2px 7px;font-size:10px;white-space:nowrap;color:var(--at-muted)}
 .at-plan-state.in_progress,.at-plan-state.active{color:#70a9e8;border-color:#3f6188}.at-plan-state.completed{color:#66b48a;border-color:#447158}.at-plan-state.blocked,.at-plan-alert{color:#e58b87}
