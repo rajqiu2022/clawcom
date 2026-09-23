@@ -1,4 +1,6 @@
 import sys
+import io
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -39,6 +41,7 @@ from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
 from app.models import (  # noqa: E402
     ChatRoomDelivery,
+    ChatRoomImage,
     ChatRoomGuestSession,
     ChatRoomMember,
     ChatRoomMessage,
@@ -52,6 +55,7 @@ from app.services.chat_rooms import pending_agent_events  # noqa: E402
 
 class ChatRoomsApiTest(unittest.TestCase):
     def setUp(self):
+        self.image_dir = tempfile.TemporaryDirectory()
         self.app = Flask(__name__)
         self.app.config.update(
             SQLALCHEMY_DATABASE_URI='sqlite:///:memory:',
@@ -62,6 +66,9 @@ class ChatRoomsApiTest(unittest.TestCase):
             CHAT_ROOM_GUEST_TOKEN_MINUTES=2880,
             CHAT_ROOM_GUEST_TOKEN_MAX_MINUTES=10080,
             HUB_PUBLIC_URL='http://clawteam.woa.com:18800',
+            CHAT_ROOM_IMAGE_DIR=self.image_dir.name,
+            CHAT_ROOM_IMAGE_MAX_BYTES=8 * 1024 * 1024,
+            CHAT_ROOM_IMAGE_MAX_COUNT=4,
         )
         db.init_app(self.app)
         self.app.register_blueprint(api_bp, url_prefix='/api/v1')
@@ -76,6 +83,7 @@ class ChatRoomsApiTest(unittest.TestCase):
         db.session.remove()
         db.drop_all()
         self.ctx.pop()
+        self.image_dir.cleanup()
 
     def _seed(self):
         self.project = Project(name='RacingGO')
@@ -166,6 +174,64 @@ class ChatRoomsApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.get_json())
         self.assertEqual(ChatRoomDelivery.query.filter_by(
             message_id=response.get_json()['id'], member_id=agent_member['id']).count(), 1)
+
+    def test_room_image_upload_bind_read_and_agent_delivery(self):
+        room, agent_member = self._create_room()
+        png = b'\x89PNG\r\n\x1a\n' + b'test-image-payload'
+        uploaded = self.client.post(
+            f"/api/v1/chat-rooms/{room['id']}/images",
+            data={'file': (io.BytesIO(png), 'evidence.png')},
+            content_type='multipart/form-data')
+        self.assertEqual(uploaded.status_code, 201, uploaded.get_json())
+        image = uploaded.get_json()
+        self.assertEqual(image['content_type'], 'image/png')
+        self.assertEqual(image['size'], len(png))
+
+        sent = self.client.post(
+            f"/api/v1/chat-rooms/{room['id']}/messages",
+            json={
+                'content': '', 'image_ids': [image['id']],
+                'mentions': [{'type': 'member', 'member_id': agent_member['id']}],
+            }, headers={'Idempotency-Key': 'image-only-1'})
+        self.assertEqual(sent.status_code, 201, sent.get_json())
+        self.assertEqual(sent.get_json()['message_type'], 'image')
+        self.assertEqual(sent.get_json()['images'][0]['id'], image['id'])
+        row = db.session.get(ChatRoomImage, image['id'])
+        self.assertEqual(row.message_id, sent.get_json()['id'])
+        self.assertEqual(row.status, 'active')
+
+        fetched = self.client.get(image['url'])
+        self.assertEqual(fetched.status_code, 200)
+        self.assertEqual(fetched.data, png)
+        self.assertEqual(fetched.headers['X-Content-Type-Options'], 'nosniff')
+        event = next(payload for name, payload in pending_agent_events(self.agent.id)
+                     if name == 'room_message')
+        self.assertEqual(event['message']['images'][0]['sha256'], image['sha256'])
+
+    def test_room_image_cannot_cross_room_or_bind_twice(self):
+        room_a, _ = self._create_room()
+        room_b, _ = self._create_room()
+        png = b'\x89PNG\r\n\x1a\n' + b'private'
+        uploaded = self.client.post(
+            f"/api/v1/chat-rooms/{room_a['id']}/images",
+            data={'file': (io.BytesIO(png), 'private.png')},
+            content_type='multipart/form-data').get_json()
+        denied = self.client.post(
+            f"/api/v1/chat-rooms/{room_b['id']}/messages",
+            json={'content': 'wrong room', 'image_ids': [uploaded['id']]},
+            headers={'Idempotency-Key': 'cross-room-image'})
+        self.assertEqual(denied.status_code, 400, denied.get_json())
+        self.assertEqual(denied.get_json()['code'], 'MESSAGE_IMAGE_NOT_AVAILABLE')
+        first = self.client.post(
+            f"/api/v1/chat-rooms/{room_a['id']}/messages",
+            json={'content': 'first', 'image_ids': [uploaded['id']]},
+            headers={'Idempotency-Key': 'bind-image-once'})
+        self.assertEqual(first.status_code, 201, first.get_json())
+        second = self.client.post(
+            f"/api/v1/chat-rooms/{room_a['id']}/messages",
+            json={'content': 'second', 'image_ids': [uploaded['id']]},
+            headers={'Idempotency-Key': 'bind-image-twice'})
+        self.assertEqual(second.status_code, 400, second.get_json())
 
     def test_invites_are_unique_and_bound_to_each_room(self):
         room_a, _ = self._create_room()

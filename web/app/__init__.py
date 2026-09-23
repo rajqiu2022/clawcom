@@ -259,6 +259,36 @@ def create_app(config_name=None):
                         logger.info('agent_team_chat_rounds 表已就绪')
                     except Exception as e:
                         logger.info('agent_team_chat_rounds 表创建跳过: %s', e)
+                    try:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS chat_room_images (
+                                id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                                room_id INTEGER NOT NULL,
+                                message_id INTEGER DEFAULT NULL,
+                                uploaded_by_member_id INTEGER NOT NULL,
+                                client_upload_id VARCHAR(100) DEFAULT NULL,
+                                original_name VARCHAR(255) NOT NULL,
+                                content_type VARCHAR(50) NOT NULL,
+                                file_size INTEGER NOT NULL,
+                                sha256 VARCHAR(64) NOT NULL,
+                                storage_key VARCHAR(255) NOT NULL,
+                                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                attached_at DATETIME DEFAULT NULL,
+                                UNIQUE KEY uq_chat_room_image_storage_key (storage_key),
+                                UNIQUE KEY uq_chat_room_image_idempotency (room_id, uploaded_by_member_id, client_upload_id),
+                                INDEX ix_chat_room_images_room (room_id),
+                                INDEX ix_chat_room_images_message (message_id),
+                                INDEX ix_chat_room_images_uploader (uploaded_by_member_id),
+                                INDEX ix_chat_room_images_status (status),
+                                FOREIGN KEY (room_id) REFERENCES chat_rooms(id) ON DELETE CASCADE,
+                                FOREIGN KEY (message_id) REFERENCES chat_room_messages(id) ON DELETE CASCADE,
+                                FOREIGN KEY (uploaded_by_member_id) REFERENCES chat_room_members(id)
+                            )
+                        """))
+                        logger.info('chat_room_images 表已就绪')
+                    except Exception as e:
+                        logger.info('chat_room_images 表创建跳过: %s', e)
                     for table_name in ('workflow_runs', 'agent_tasks'):
                         for column_name, column_ddl in (
                             ('context_snapshot_id', 'VARCHAR(64) DEFAULT NULL'),

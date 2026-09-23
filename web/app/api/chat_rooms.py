@@ -1,9 +1,12 @@
 """Hub 主题聊天室 API。"""
 
 import os
+import hashlib
+import uuid
 from datetime import datetime
 
-from flask import current_app, jsonify, request
+from flask import current_app, jsonify, request, send_file
+from werkzeug.utils import secure_filename
 
 from app import db
 from app.api import api_bp
@@ -13,6 +16,7 @@ from app.models import (
     ChatRoomDelivery,
     ChatRoomGuestSession,
     ChatRoomInvite,
+    ChatRoomImage,
     ChatRoomMember,
     ChatRoomMessage,
     OpenClawInstance,
@@ -67,6 +71,32 @@ def _room_and_member(room_id, active_room=True):
     if not member:
         return None, None, _error(PermissionError('ROOM_ACCESS_DENIED'))
     return room, member, None
+
+
+def _image_kind(data):
+    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png', '.png'
+    if data.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg', '.jpg'
+    if data.startswith((b'GIF87a', b'GIF89a')):
+        return 'image/gif', '.gif'
+    if len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'image/webp', '.webp'
+    raise ValueError('ROOM_IMAGE_TYPE_NOT_ALLOWED')
+
+
+def _image_root():
+    configured = str(current_app.config.get('CHAT_ROOM_IMAGE_DIR') or '').strip()
+    root = configured or os.path.join(current_app.instance_path, 'chat-room-images')
+    return os.path.realpath(root)
+
+
+def _image_path(image):
+    root = _image_root()
+    target = os.path.realpath(os.path.join(root, image.storage_key))
+    if os.path.commonpath((root, target)) != root:
+        raise ValueError('ROOM_IMAGE_PATH_INVALID')
+    return target
 
 
 def _room_payload(room, member):
@@ -324,10 +354,97 @@ def create_chat_room_message(room_id):
     try:
         message, created = post_message(
             room, sender, data.get('content'), key, data.get('mentions'),
-            data.get('reply_to_message_id'), data.get('origin_delivery_id'))
+            data.get('reply_to_message_id'), data.get('origin_delivery_id'),
+            image_ids=data.get('image_ids') or [])
         return jsonify(serialize_message(message)), 201 if created else 200
     except Exception as exc:
         db.session.rollback()
+        return _error(exc)
+
+
+@api_bp.route('/chat-rooms/<int:room_id>/images', methods=['POST'])
+def upload_chat_room_image(room_id):
+    blocked = _disabled()
+    if blocked:
+        return blocked
+    room, sender, error = _room_and_member(room_id)
+    if error:
+        return error
+    upload = request.files.get('file')
+    if upload is None or not upload.filename:
+        return _error(ValueError('ROOM_IMAGE_FILE_REQUIRED'))
+    upload_key = str(request.headers.get('Idempotency-Key') or '').strip()
+    if len(upload_key) > 100:
+        return _error(ValueError('ROOM_IMAGE_IDEMPOTENCY_KEY_INVALID'))
+    if upload_key:
+        existing = ChatRoomImage.query.filter_by(
+            room_id=room.id, uploaded_by_member_id=sender.id,
+            client_upload_id=upload_key).first()
+        if existing:
+            return jsonify(existing.to_dict()), 200
+    max_bytes = max(1024, int(current_app.config.get(
+        'CHAT_ROOM_IMAGE_MAX_BYTES', 8 * 1024 * 1024)))
+    data = upload.stream.read(max_bytes + 1)
+    if not data:
+        return _error(ValueError('ROOM_IMAGE_EMPTY'))
+    if len(data) > max_bytes:
+        return _error(ValueError('ROOM_IMAGE_TOO_LARGE'), 413)
+    try:
+        content_type, extension = _image_kind(data)
+        original = secure_filename(upload.filename) or ('image' + extension)
+        storage_key = '%s/%s%s' % (room.id, uuid.uuid4().hex, extension)
+        image = ChatRoomImage(
+            room_id=room.id, uploaded_by_member_id=sender.id,
+            client_upload_id=upload_key or None,
+            original_name=original[:255], content_type=content_type,
+            file_size=len(data), sha256=hashlib.sha256(data).hexdigest(),
+            storage_key=storage_key, status='pending')
+        target = _image_path(image)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, 'xb') as handle:
+            handle.write(data)
+        db.session.add(image)
+        db.session.flush()
+        audit(room.id, 'image_uploaded', sender.id, 'image', image.id, {
+            'content_type': content_type, 'file_size': len(data),
+            'sha256': image.sha256})
+        db.session.commit()
+        return jsonify(image.to_dict()), 201
+    except Exception as exc:
+        db.session.rollback()
+        if 'target' in locals():
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+        return _error(exc)
+
+
+@api_bp.route('/chat-rooms/<int:room_id>/images/<int:image_id>', methods=['GET'])
+def get_chat_room_image(room_id, image_id):
+    blocked = _disabled()
+    if blocked:
+        return blocked
+    room, member, error = _room_and_member(room_id)
+    if error:
+        return error
+    image = ChatRoomImage.query.filter_by(id=image_id, room_id=room.id).first()
+    if not image or image.status not in ('pending', 'active'):
+        return _error(LookupError('ROOM_IMAGE_NOT_FOUND'))
+    if image.status == 'pending' and image.uploaded_by_member_id != member.id:
+        return _error(PermissionError('ROOM_IMAGE_ACCESS_DENIED'))
+    try:
+        path = _image_path(image)
+        if not os.path.isfile(path):
+            return _error(LookupError('ROOM_IMAGE_FILE_NOT_FOUND'))
+        response = send_file(
+            path, mimetype=image.content_type, as_attachment=False,
+            download_name=image.original_name, conditional=True, max_age=0)
+        response.headers['Cache-Control'] = 'private, max-age=300'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['Content-Security-Policy'] = "default-src 'none'; img-src 'self'"
+        return response
+    except Exception as exc:
         return _error(exc)
 
 

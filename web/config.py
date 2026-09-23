@@ -30,6 +30,9 @@ class Config:
     CHAT_ROOM_GUEST_TOKEN_MAX_MINUTES = int(os.getenv(
         'CHAT_ROOM_GUEST_TOKEN_MAX_MINUTES', '10080'))
     CHAT_ROOM_AGENT_MAX_DEPTH = int(os.getenv('CHAT_ROOM_AGENT_MAX_DEPTH', '5'))
+    CHAT_ROOM_IMAGE_MAX_BYTES = int(os.getenv('CHAT_ROOM_IMAGE_MAX_BYTES', str(8 * 1024 * 1024)))
+    CHAT_ROOM_IMAGE_MAX_COUNT = int(os.getenv('CHAT_ROOM_IMAGE_MAX_COUNT', '4'))
+    CHAT_ROOM_IMAGE_DIR = os.getenv('CHAT_ROOM_IMAGE_DIR', '')
 
     # Session（OA/WOA 单点登录后保持登录态）
     # SameSite=Lax 兼容 passport.woa.com 302 跳回我们的 callback。

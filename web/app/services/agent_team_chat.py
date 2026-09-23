@@ -144,7 +144,7 @@ def ensure_team_room(team, actor):
 
 def create_team_message(team, actor, content, client_message_id,
                         mention_claw_ids=None, mention_all=False,
-                        timeout_seconds=300):
+                        timeout_seconds=300, image_ids=None):
     if team.status != 'active':
         raise TeamError('TEAM_NOT_ACTIVE', '暂停或归档团队的聊天室只读', 409)
     room = sync_team_room(team)
@@ -177,7 +177,8 @@ def create_team_message(team, actor, content, client_message_id,
         raise TeamError('TEAM_CHAT_TIMEOUT_INVALID', '回复等待时间范围为 30–86400 秒', 400)
     try:
         message, created = post_message(
-            room, sender, content, client_message_id, mentions, commit=False)
+            room, sender, content, client_message_id, mentions,
+            image_ids=image_ids, commit=False)
     except (ValueError, PermissionError, LookupError) as exc:
         raise TeamError(str(exc), str(exc), 400)
     round_row = AgentTeamChatRound.query.filter_by(

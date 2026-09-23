@@ -20,6 +20,7 @@ from app.models import (
     ChatRoomGuestIdentity,
     ChatRoomGuestSession,
     ChatRoomInvite,
+    ChatRoomImage,
     ChatRoomMember,
     ChatRoomMention,
     ChatRoomMessage,
@@ -216,17 +217,32 @@ def room_mentions(message_id):
 
 
 def serialize_message(message):
-    return message.to_dict(mentions=room_mentions(message.id))
+    payload = message.to_dict(mentions=room_mentions(message.id))
+    payload['images'] = [row.to_dict() for row in ChatRoomImage.query.filter_by(
+        message_id=message.id, status='active').order_by(ChatRoomImage.id.asc()).all()]
+    return payload
 
 
 def post_message(room, sender, content, client_message_id, mentions=None,
                  reply_to_message_id=None, origin_delivery_id=None,
-                 commit=True):
+                 image_ids=None, commit=True):
     room_id = int(room.id)
     sender_id = int(sender.id)
     content = str(content or '').strip()
     client_message_id = str(client_message_id or '').strip()
-    if not content:
+    normalized_image_ids = []
+    for value in image_ids or []:
+        try:
+            image_id = int(value)
+        except (TypeError, ValueError):
+            raise ValueError('MESSAGE_IMAGE_INVALID')
+        if image_id <= 0 or image_id in normalized_image_ids:
+            raise ValueError('MESSAGE_IMAGE_INVALID')
+        normalized_image_ids.append(image_id)
+    max_images = max(1, int(current_app.config.get('CHAT_ROOM_IMAGE_MAX_COUNT', 4)))
+    if len(normalized_image_ids) > max_images:
+        raise ValueError('MESSAGE_IMAGE_TOO_MANY')
+    if not content and not normalized_image_ids:
         raise ValueError('MESSAGE_CONTENT_REQUIRED')
     if len(content) > 20000:
         raise ValueError('MESSAGE_CONTENT_TOO_LONG')
@@ -238,6 +254,19 @@ def post_message(room, sender, content, client_message_id, mentions=None,
         client_message_id=client_message_id).first()
     if existing:
         return existing, False
+
+    images = []
+    if normalized_image_ids:
+        images = ChatRoomImage.query.filter(
+            ChatRoomImage.id.in_(normalized_image_ids)).with_for_update().all()
+        images_by_id = {row.id: row for row in images}
+        if len(images_by_id) != len(normalized_image_ids) or any(
+                row.room_id != room_id
+                or row.uploaded_by_member_id != sender_id
+                or row.status != 'pending'
+                or row.message_id is not None
+                for row in images):
+            raise ValueError('MESSAGE_IMAGE_NOT_AVAILABLE')
 
     if reply_to_message_id:
         replied = ChatRoomMessage.query.filter_by(
@@ -286,6 +315,12 @@ def post_message(room, sender, content, client_message_id, mentions=None,
     )
     db.session.add(message)
     db.session.flush()
+    for image in images:
+        image.message_id = message.id
+        image.status = 'active'
+        image.attached_at = now_cst_naive()
+    if images:
+        message.message_type = 'image' if not content else 'mixed'
 
     if mention_all:
         db.session.add(ChatRoomMention(message_id=message.id, mention_type='all'))
@@ -319,6 +354,7 @@ def post_message(room, sender, content, client_message_id, mentions=None,
     room.updated_at = now_cst_naive()
     audit(room.id, 'message_created', sender.id, 'message', message.id,
           {'mentions': normalized, 'automation_depth': automation_depth,
+           'image_ids': normalized_image_ids,
            'agent_notification_suppressed': not allow_agent_notifications})
     try:
         if commit:

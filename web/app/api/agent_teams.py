@@ -383,7 +383,7 @@ def post_agent_team_chat_message(team_id):
     data = _body()
     allowed = {
         'content', 'mention_claw_ids', 'mention_all', 'timeout_seconds',
-        'client_message_id',
+        'client_message_id', 'image_ids',
     }
     if set(data) - allowed:
         raise TeamError('TEAM_CHAT_MESSAGE_INVALID', '包含未知聊天室消息字段', 400)
@@ -393,7 +393,7 @@ def post_agent_team_chat_message(team_id):
     message, round_row, created = create_team_message(
         team, actor, data.get('content'), str(key),
         data.get('mention_claw_ids') or [], bool(data.get('mention_all')),
-        data.get('timeout_seconds', 300))
+        data.get('timeout_seconds', 300), data.get('image_ids') or [])
     payload = {
         'message': serialize_message(message),
         'round': serialize_round(round_row) if round_row else None,

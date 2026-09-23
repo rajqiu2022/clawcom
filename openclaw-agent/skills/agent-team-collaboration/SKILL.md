@@ -5,7 +5,7 @@ description: 在 Hub Agent 团队中发现成员与角色，由测试经理持�
 
 # Agent 团队协作与经理调度
 
-版本：1.2.0。适用于 Hub 已启用 Agent Teams 的项目；不代表 Worker 已接完所有合同。
+版本：1.3.0。适用于 Hub 已启用 Agent Teams 的项目；不代表 Worker 已接完所有合同。
 
 ## 身份与边界
 
@@ -42,6 +42,8 @@ description: 在 Hub Agent 团队中发现成员与角色，由测试经理持�
 - `GET /agent-teams/{team_id}/chat-room` 读取房间、成员、最近消息和问答轮次。页面入口为 Agent 团队详情的“团队聊天室”页签。
 - 普通消息只沉淀上下文，不唤醒 Agent。需要回复时，`POST /agent-teams/{team_id}/chat-room/messages`，携带 `Idempotency-Key`，并传 `mention_claw_ids` 或 `mention_all=true`。Hub 固定实际接收者并跟踪每人的 `unread/delivered/processing/replied/failed` 状态。
 - 被 @ 的 Agent 由 Worker 接收 `room_message`，在同一 room 内回复；回复保留 `reply_to_message_id` 和 `origin_delivery_id`。不要再向发起者发送一条独立 ClawMessage，也不要在回复中继续 @ 人，避免循环唤醒。
+- 人和 Agent 均可在消息中附带图片。先以 `multipart/form-data`（字段名 `file`）调用 `POST /chat-rooms/{room_id}/images`，再把返回的图片 ID 放进消息的 `image_ids`。每条最多 4 张，单张最多 8 MiB，只接受 PNG、JPEG、GIF、WebP；消息可以仅含图片。图片读取地址来自消息 `images[].url`，必须继续使用当前成员或 Agent 身份访问，不能转成公开外链。
+- Worker 收到图片后会校验大小与 SHA-256、下载到受控本地路径，并在 `room_images[].local_path` 中交给 Agent。Agent 需要回图时在聊天室结果的 `image_paths` 中返回最多 4 个本地绝对路径；由 Worker 校验并上传。不要读取、索取或自行拼接 Hub Token，也不要用 Markdown 外链假装附件已经入库。
 - Manager 可回读问答轮的 `expected_count/replied_count/deadline_at/members`，据此判断已收齐、部分回复或超时；不要把“消息已投递”表述成“Agent 已回复”。
 - 房间用于讨论和形成可见上下文，不代替正式派工。真正开工、重试、取消、验收仍走 Test Plan、Mission、Stage、AgentTask 或 Workflow Run。
 
@@ -50,6 +52,7 @@ description: 在 Hub Agent 团队中发现成员与角色，由测试经理持�
 ```json
 {
   "content":"请分别列出实际使用的团队知识和 Skill，并说明用途。",
+  "image_ids":[101],
   "mention_claw_ids":[11,7,12],
   "mention_all":false,
   "timeout_seconds":300

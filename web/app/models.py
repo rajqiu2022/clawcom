@@ -4134,6 +4134,49 @@ class ChatRoomMessage(db.Model):
         }
 
 
+class ChatRoomImage(db.Model):
+    """Private image attachment owned by exactly one room message."""
+    __tablename__ = 'chat_room_images'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    room_id = db.Column(
+        db.Integer, db.ForeignKey('chat_rooms.id', ondelete='CASCADE'),
+        nullable=False, index=True)
+    message_id = db.Column(
+        db.Integer, db.ForeignKey('chat_room_messages.id', ondelete='CASCADE'),
+        nullable=True, index=True)
+    uploaded_by_member_id = db.Column(
+        db.Integer, db.ForeignKey('chat_room_members.id'), nullable=False, index=True)
+    client_upload_id = db.Column(db.String(100), nullable=True)
+    original_name = db.Column(db.String(255), nullable=False)
+    content_type = db.Column(db.String(50), nullable=False)
+    file_size = db.Column(db.Integer, nullable=False)
+    sha256 = db.Column(db.String(64), nullable=False)
+    storage_key = db.Column(db.String(255), nullable=False, unique=True)
+    status = db.Column(db.String(20), nullable=False, default='pending', index=True)
+    created_at = db.Column(db.DateTime, default=_now, nullable=False)
+    attached_at = db.Column(db.DateTime)
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            'room_id', 'uploaded_by_member_id', 'client_upload_id',
+            name='uq_chat_room_image_idempotency'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'room_id': self.room_id,
+            'message_id': self.message_id,
+            'name': self.original_name,
+            'content_type': self.content_type,
+            'size': self.file_size,
+            'sha256': self.sha256,
+            'status': self.status,
+            'url': '/api/v1/chat-rooms/%s/images/%s' % (self.room_id, self.id),
+        }
+
+
 class ChatRoomEvent(db.Model):
     """供 Agent SSE 消费的房间级可信事件。"""
     __tablename__ = 'chat_room_events'
