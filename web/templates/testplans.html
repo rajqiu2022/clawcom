@@ -635,7 +635,7 @@ function parseTestplanDeepLink() {
     const tabKey = (params.get('tab') || params.get('tab_key') || 'plans').trim() || 'plans';
     const rawPlan = params.get('plan_id');
     const planId = rawPlan && /^\d+$/.test(rawPlan) ? Number(rawPlan) : null;
-    return { iterationId, planId, tabKey, openReports: params.get('report') === '1', applied: false };
+    return { iterationId, planId, tabKey, applied: false };
 }
 
 function updateTestplanDeepLink(iterId = currentIterId, tabKey = currentIterTabKey, replace = false) {
@@ -800,10 +800,6 @@ async function loadIterations() {
     if (pendingTestplanDeepLink?.planId && !pendingTestplanDeepLink.applied) {
         pendingTestplanDeepLink.applied = true;
         await showLinkedPlan(pendingTestplanDeepLink.planId);
-        if (pendingTestplanDeepLink.openReports) {
-            pendingTestplanDeepLink.openReports = false;
-            await openPlanReport(pendingTestplanDeepLink.planId);
-        }
         return;
     }
     if (currentPlanId && !currentIterId) {

@@ -69,19 +69,22 @@ class AgentTeamsUiTest(unittest.TestCase):
                        'can_manage', "status:'draft'", 'ArrowLeft', 'requestId',
                        '监管未启动', '测试经理已被移出', 'Mission #',
                        '任务 #${esc(t.id)}', 'at-plan-task-id', 'at-plan-report',
-                       'p.report_url', 'p.report_count'):
+                       'data-plan-reports', 'p.report_count', '/test-reports?source_ref_type=test_plan',
+                       'Promise.all', 'renderReportContent', 'data-report-format',
+                       '/html-preview'):
             self.assertIn(marker, js)
         plan_css = (ROOT / 'web/static/css/agent_team_plans.css').read_text(encoding='utf-8')
         self.assertIn('.at-plan-task-id', plan_css)
         self.assertIn('.at-plan-report', plan_css)
-        self.assertIn('20260923planreports', self.html)
+        self.assertIn('20260923reportmodal2', self.html)
         for forbidden in ('/dispatch', '/supervision/start', 'setInterval('):
             self.assertNotIn(forbidden, js)
         self.assertIn('aria-labelledby="at-plan-dialog-title"', self.html)
         self.assertIn("params.get('plan_id')", plans)
         self.assertIn('async function showLinkedPlan', plans)
-        self.assertIn("params.get('report') === '1'", plans)
-        self.assertIn('await openPlanReport(pendingTestplanDeepLink.planId)', plans)
+        self.assertIn('id="at-plan-reports-dialog"', self.html)
+        self.assertIn('vendor/marked.min.js', self.html)
+        self.assertIn('vendor/purify.min.js', self.html)
         self.assertIn('未归属迭代', plans)
         views = (ROOT / 'web/app/views/__init__.py').read_text(encoding='utf-8')
         service = (ROOT / 'web/app/services/agent_team_plans.py').read_text(encoding='utf-8')

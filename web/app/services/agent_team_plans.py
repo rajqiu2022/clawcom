@@ -125,6 +125,7 @@ def overview(team, period, raw_date, limit, offset):
         TestReport.source_ref_id, func.count(TestReport.id)
     ).filter(TestReport.source_ref_type == 'test_plan',
              TestReport.source_ref_id.in_(ids),
+             TestReport.is_hidden.is_(False),
              TestReport.is_deleted.is_(False)).group_by(
         TestReport.source_ref_id).all()) if ids else {}
     grouped = db.session.query(TestTask.plan_id, TestTask.status, func.count(TestTask.id)).filter(
@@ -152,7 +153,6 @@ def overview(team, period, raw_date, limit, offset):
         items.append({'id': plan.id, 'name': plan.name, 'status': plan.status,
             'team_id': team.id, 'start_date': str(plan.start_date), 'end_date': str(plan.end_date),
             'url': '/testplans?plan_id=%s' % plan.id,
-            'report_url': '/testplans?plan_id=%s&report=1' % plan.id,
             'report_count': report_count,
             'total_tasks': plan_total, 'completed_tasks': all_counts.get('completed', 0),
             'progress': round(all_counts.get('completed', 0) / plan_total * 100) if plan_total else 0,

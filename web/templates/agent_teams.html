@@ -80,6 +80,15 @@
         <footer class="at-dialog-foot"><span class="at-muted">测试计划是任务的唯一来源</span><button id="at-plan-save" type="submit" class="btn btn-primary">保存草稿</button></footer>
     </form>
 </dialog>
+<dialog id="at-plan-reports-dialog" class="at-dialog at-plan-reports-dialog" aria-labelledby="at-plan-reports-title">
+    <header class="at-dialog-head"><div><span class="at-eyebrow">PLAN REPORTS / 计划报告</span><h2 id="at-plan-reports-title">关联报告</h2></div><button id="at-plan-reports-close" class="btn btn-ghost" type="button">关闭</button></header>
+    <p id="at-plan-reports-count" class="at-help at-plan-reports-count">正在读取关联报告…</p>
+    <div id="at-plan-reports-list" class="at-plan-reports-list"></div>
+    <section id="at-plan-report-preview" class="at-plan-report-preview" hidden>
+        <header class="at-plan-report-preview-head"><button id="at-plan-report-back" type="button" class="btn btn-secondary btn-sm">← 返回列表</button><h3 id="at-plan-report-preview-title">报告内容</h3></header>
+        <div id="at-plan-report-preview-body" class="at-plan-report-preview-body"></div>
+    </section>
+</dialog>
 <dialog id="at-resource-dialog" class="at-dialog at-resource-dialog" aria-labelledby="at-resource-dialog-title">
     <header class="at-dialog-head"><div><span class="at-eyebrow">TEAM LIBRARY</span><h2 id="at-resource-dialog-title">添加团队共享资源</h2></div><button id="at-resource-close" class="btn btn-ghost" type="button">关闭</button></header>
     <div class="at-form-body">
@@ -89,4 +98,4 @@
     </div>
 </dialog>
 {% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='js/agent_team_activity.js') }}?v=20260921plans"></script><script src="{{ url_for('static', filename='js/agent_team_resources.js') }}?v=20260922teamlib"></script><script src="{{ url_for('static', filename='js/agent_team_chat.js') }}?v=20260923imagelightbox"></script><script src="{{ url_for('static', filename='js/agent_team_plans.js') }}?v=20260923planreports"></script><script src="{{ url_for('static', filename='js/agent_teams.js') }}?v=20260923durablemanager"></script>{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script><script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script><script src="{{ url_for('static', filename='js/agent_team_activity.js') }}?v=20260921plans"></script><script src="{{ url_for('static', filename='js/agent_team_resources.js') }}?v=20260922teamlib"></script><script src="{{ url_for('static', filename='js/agent_team_chat.js') }}?v=20260923imagelightbox"></script><script src="{{ url_for('static', filename='js/agent_team_plans.js') }}?v=20260923reportmodal2"></script><script src="{{ url_for('static', filename='js/agent_teams.js') }}?v=20260923durablemanager"></script>{% endblock %}

@@ -4,9 +4,9 @@ const AgentTeamPlans = (() => {
     const $ = id => document.getElementById(id);
     const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const labels = {draft:'草稿',active:'进行中',completed:'已完成',archived:'归档',assigned:'已指派',pending:'待开始',in_progress:'执行中',blocked:'阻塞',skipped:'已跳过'};
-    let team = null, epoch = 0, requestId = 0, period = 'week', day = '', offset = 0, mode = 'new', saving = false;
+    let team = null, epoch = 0, requestId = 0, reportRequestId = 0, reportPlanId = null, period = 'week', day = '', offset = 0, mode = 'new', saving = false;
     function today() { return new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Shanghai'}).format(new Date()); }
-    function reset() { ++epoch; ++requestId; team = null; $('at-plan-dialog').close(); }
+    function reset() { ++epoch; ++requestId; ++reportRequestId; team = null; $('at-plan-dialog').close(); $('at-plan-reports-dialog').close(); }
     function frame() {
         $('at-plans-root').innerHTML = `<section class="at-plan-workspace"><header class="at-plan-toolbar"><div><span class="at-eyebrow">TEAM SCHEDULE</span><h3>测试计划与任务</h3></div><div><button type="button" class="btn btn-secondary btn-sm" id="at-plan-link" hidden>关联已有计划</button> <button type="button" class="btn btn-primary btn-sm" id="at-plan-create" hidden>＋ 新建计划</button></div></header>
         <div class="at-plan-filters"><div role="group" aria-label="排期范围">${[['day','每日'],['week','每周'],['all','全部']].map(([key,label])=>`<button type="button" data-period="${key}" aria-pressed="${key===period}">${label}</button>`).join('')}</div><label>基准日期 <input id="at-plan-date" type="date" class="form-input" value="${day}" ${period==='all'?'disabled':''}></label><button id="at-plan-today" type="button" class="btn btn-ghost btn-sm">回到今天</button><button id="at-plan-refresh" type="button" class="btn btn-secondary btn-sm">刷新</button></div>
@@ -24,6 +24,67 @@ const AgentTeamPlans = (() => {
     function task(t) {
         return `<li><div class="at-plan-task-title"><span><span class="at-plan-task-id">任务 #${esc(t.id)}</span>${esc(t.name)}</span>${badge(t.status)}</div><p class="at-help">${esc(t.priority)} · ${esc(t.assignee)} · ${esc(t.start_date || t.end_date || '未排期')}${t.end_date && t.end_date!==t.start_date?' → '+esc(t.end_date):''}${t.overdue?' · <span class="at-plan-alert">已逾期</span>':''}</p><div class="at-progress"><progress max="100" value="${t.progress}" aria-label="任务上报进度"></progress><span>${t.progress}%</span></div></li>`;
     }
+    function reportCard(r) {
+        const global = r.kind === 'global';
+        const meta = global
+            ? `${esc(r.report_type_label || '测试报告')} · ${esc(r.status_label || r.status || '未标记')} · ${esc(r.risk_level_label || '风险待定')}`
+            : `计划报告 · ${esc(r.format || 'markdown').toUpperCase()}`;
+        const author = r.submitter_name || r.created_by_name || r.created_by || '未知作者';
+        const summary = r.remark || r.summary || '';
+        return `<article class="at-plan-report-card"><header><span class="at-plan-report-kind ${global?'global':'legacy'}">${global?'GLOBAL REPORT':'PLAN REPORT'}</span><time>${esc((r.created_at || '').slice(0,16).replace('T',' '))}</time></header><h4>${esc(r.title || '未命名报告')}</h4><p class="at-plan-report-meta">${meta} · ${esc(author)}</p>${summary?`<p class="at-plan-report-summary">${esc(summary)}</p>`:''}<footer>${global && (r.attachments || []).length?`<span>${r.attachments.length} 个附件</span>`:'<span></span>'}<button type="button" class="btn btn-secondary btn-sm" data-report-kind="${global?'global':'legacy'}" data-report-id="${esc(r.id)}" data-report-format="${esc(r.format || 'markdown')}" data-report-title="${esc(r.title || '测试报告')}">查看报告</button></footer></article>`;
+    }
+    function renderReportContent(data) {
+        const content = data.content || '';
+        if (!content) return '<div class="at-empty">该报告暂无正文。</div>';
+        if (data.format === 'html') return DOMPurify.sanitize(content, {FORBID_TAGS:['script','style','iframe','object','embed'], FORBID_ATTR:['style','onerror','onload','onclick']});
+        return DOMPurify.sanitize(marked.parse(content));
+    }
+    async function openReports(plan) {
+        const id = Number(plan.id), turn = ++reportRequestId;
+        reportPlanId = id;
+        $('at-plan-reports-title').textContent = `${plan.name} · 报告`;
+        $('at-plan-reports-count').textContent = '正在读取关联报告…';
+        $('at-plan-reports-list').innerHTML = '<div class="at-empty">加载中…</div>';
+        $('at-plan-report-preview').hidden = true;
+        $('at-plan-reports-list').hidden = false;
+        $('at-plan-reports-dialog').showModal();
+        try {
+            const [legacy, global] = await Promise.all([
+                API.get(`/test-plans/${id}/reports`),
+                API.get(`/test-reports?source_ref_type=test_plan&source_ref_id=${id}&page_size=100`),
+            ]);
+            if (turn !== reportRequestId || reportPlanId !== id) return;
+            const items = [
+                ...(global.items || []).map(item=>({...item,kind:'global'})),
+                ...(legacy.items || []).map(item=>({...item,kind:'legacy'})),
+            ];
+            $('at-plan-reports-count').textContent = `共 ${items.length} 份 · 全局报告 ${(global.items || []).length} · 旧版计划报告 ${(legacy.items || []).length}`;
+            $('at-plan-reports-list').innerHTML = items.length ? items.map(reportCard).join('') : '<div class="at-empty">当前计划尚未关联报告。</div>';
+            document.querySelectorAll(`[data-plan-reports="${id}"] [data-report-count]`).forEach(node=>{node.textContent=items.length;node.hidden=!items.length;});
+        } catch (error) {
+            if (turn !== reportRequestId) return;
+            $('at-plan-reports-count').textContent = '关联报告读取失败';
+            $('at-plan-reports-list').innerHTML = `<div class="at-empty at-plan-alert">${esc(error.message || '请稍后重试')}</div>`;
+        }
+    }
+    async function previewReport(kind, id, title, format) {
+        const turn = ++reportRequestId;
+        $('at-plan-report-preview-title').textContent = title;
+        $('at-plan-report-preview-body').innerHTML = '<div class="at-empty">正在读取报告正文…</div>';
+        $('at-plan-reports-list').hidden = true;
+        $('at-plan-report-preview').hidden = false;
+        if (kind === 'global' && format === 'html') {
+            $('at-plan-report-preview-body').innerHTML = `<iframe class="at-plan-report-frame" sandbox="allow-scripts" src="/api/v1/test-reports/${encodeURIComponent(id)}/html-preview" title="${esc(title)}"></iframe>`;
+            return;
+        }
+        try {
+            const data = await API.get(kind === 'global' ? `/test-reports/${id}` : `/test-plans/${reportPlanId}/reports/${id}`);
+            if (turn !== reportRequestId) return;
+            $('at-plan-report-preview-body').innerHTML = renderReportContent(data);
+        } catch (error) {
+            if (turn === reportRequestId) $('at-plan-report-preview-body').innerHTML = `<div class="at-empty at-plan-alert">${esc(error.message || '报告读取失败')}</div>`;
+        }
+    }
     async function load(page = 0) {
         if (!team) return;
         const generation = epoch, turn = ++requestId, id = team.id;
@@ -38,7 +99,7 @@ const AgentTeamPlans = (() => {
             $('at-plan-range').textContent = period==='all'?'全部排期（含归档计划）':`${data.start_date} — ${data.end_date} · ${period==='week'?'周排期':'日排期'}`;
             const s = data.summary;
             $('at-plan-summary').innerHTML = [['范围内任务',s.total],['执行中',s.in_progress],['已完成',s.completed],['阻塞',s.blocked],['已逾期',s.overdue]].map(([label,count])=>`<div><strong>${count}</strong><span>${label}</span></div>`).join('');
-            $('at-plan-cards').innerHTML = data.items.length ? data.items.map(p=>`<article class="at-plan-card"><header><span class="at-eyebrow">PLAN #${p.id}</span>${badge(p.status)}</header><h4><a href="${esc(p.url)}">${esc(p.name)} ↗</a></h4><p class="at-help">${esc(p.start_date)} → ${esc(p.end_date)}</p>${supervision(p)}<div class="at-progress"><progress max="100" value="${p.progress}" aria-label="计划任务完成比例"></progress><span>${p.completed_tasks}/${p.total_tasks} 已完成</span></div><div class="at-plan-section">${period==='all'?'全部任务':'当前范围任务'} <strong>${p.period_tasks}</strong>${p.unscheduled_tasks?`<span>另有 ${p.unscheduled_tasks} 项未排期</span>`:''}</div><ul>${p.tasks.map(task).join('') || '<li class="at-help">当前范围暂无已排期任务</li>'}</ul><footer><span class="at-help">${p.period_tasks>p.tasks.length?`展示前 ${p.tasks.length} 项，共 ${p.period_tasks} 项`: '进度来自测试计划记录'}</span><div class="at-plan-actions"><a class="at-plan-report" href="${esc(p.report_url)}" aria-label="查看计划 #${esc(p.id)} 的关联报告">📄 报告${p.report_count?` <b>${esc(p.report_count)}</b>`:''}</a><a href="${esc(p.url)}">查看计划详情 →</a></div></footer></article>`).join('') : '<div class="at-empty">当前范围暂无团队计划。<br>可切换日期、“全部”，或由测试经理新建 / 关联已有计划。</div>';
+            $('at-plan-cards').innerHTML = data.items.length ? data.items.map(p=>`<article class="at-plan-card"><header><span class="at-eyebrow">PLAN #${p.id}</span>${badge(p.status)}</header><h4><a href="${esc(p.url)}">${esc(p.name)} ↗</a></h4><p class="at-help">${esc(p.start_date)} → ${esc(p.end_date)}</p>${supervision(p)}<div class="at-progress"><progress max="100" value="${p.progress}" aria-label="计划任务完成比例"></progress><span>${p.completed_tasks}/${p.total_tasks} 已完成</span></div><div class="at-plan-section">${period==='all'?'全部任务':'当前范围任务'} <strong>${p.period_tasks}</strong>${p.unscheduled_tasks?`<span>另有 ${p.unscheduled_tasks} 项未排期</span>`:''}</div><ul>${p.tasks.map(task).join('') || '<li class="at-help">当前范围暂无已排期任务</li>'}</ul><footer><span class="at-help">${p.period_tasks>p.tasks.length?`展示前 ${p.tasks.length} 项，共 ${p.period_tasks} 项`: '进度来自测试计划记录'}</span><div class="at-plan-actions"><button type="button" class="at-plan-report" data-plan-reports="${esc(p.id)}" data-plan-name="${esc(p.name)}" aria-label="查看计划 #${esc(p.id)} 的关联报告">📄 报告 <b data-report-count ${p.report_count?'':'hidden'}>${esc(p.report_count)}</b></button><a href="${esc(p.url)}">查看计划详情 →</a></div></footer></article>`).join('') : '<div class="at-empty">当前范围暂无团队计划。<br>可切换日期、“全部”，或由测试经理新建 / 关联已有计划。</div>';
             $('at-plan-pages').innerHTML = `<span class="at-muted">${data.total?page+1:0}–${page+data.items.length} / ${data.total} 个计划</span><button type="button" class="btn btn-secondary btn-sm" data-plan-page="${Math.max(0,page-6)}" ${page===0?'disabled':''}>上一页</button><button type="button" class="btn btn-secondary btn-sm" data-plan-page="${page+6}" ${page+data.items.length>=data.total?'disabled':''}>下一页</button>`;
             $('at-plan-note').textContent = data.can_manage?'可创建草稿计划，或将同项目已有计划关联到本团队。':'计划由团队测试经理或项目管理员维护。';
         } catch (error) {
@@ -89,6 +150,10 @@ const AgentTeamPlans = (() => {
     });
     $('at-plan-close').addEventListener('click',()=>{if(!saving)$('at-plan-dialog').close();});
     $('at-plan-dialog').addEventListener('cancel',event=>{if(saving)event.preventDefault();});
+    $('at-plan-reports-close').addEventListener('click',()=>$('at-plan-reports-dialog').close());
+    $('at-plan-report-back').addEventListener('click',()=>{$('at-plan-report-preview').hidden=true;$('at-plan-reports-list').hidden=false;});
+    $('at-plan-reports-dialog').addEventListener('close',()=>{++reportRequestId;reportPlanId=null;});
+    $('at-plan-reports-dialog').addEventListener('click',event=>{const button=event.target.closest('button[data-report-kind]');if(button)previewReport(button.dataset.reportKind,button.dataset.reportId,button.dataset.reportTitle,button.dataset.reportFormat);});
     function tab(value) {
         ['members','chat','plans','knowledge','skills'].forEach(key=>{const selected=key===value; $(`at-tab-${key}`).setAttribute('aria-selected',String(selected)); $(`at-tab-${key}`).tabIndex=selected?0:-1; $(`at-${key}-panel`).hidden=!selected;});
         if(value==='members') AgentTeamActivity.refresh(true);
@@ -106,6 +171,7 @@ const AgentTeamPlans = (() => {
         if(button.id==='at-plan-today'){day=today();frame();load();}
         if(button.id==='at-plan-create') open('new');
         if(button.id==='at-plan-link') open('link');
+        if(button.dataset.planReports) openReports({id:button.dataset.planReports,name:button.dataset.planName});
     });
     return {reset, mount:async value=>{team=value;period='week';day=today();frame();await load();}};
 })();

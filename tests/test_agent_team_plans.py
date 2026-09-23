@@ -131,8 +131,6 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(day['items'][0]['completed_tasks'],1)
         self.assertEqual(day['items'][0]['progress'],17)
         self.assertEqual(day['items'][0]['report_count'], 0)
-        self.assertEqual(day['items'][0]['report_url'],
-                         '/testplans?plan_id=%s&report=1' % plan['id'])
         self.assertIsNone(day['items'][0]['supervision'])
         week = self.client.get(self.url+'?period=week&date=2026-09-27',headers=self._headers()).json
         self.assertEqual(week['start_date'],'2026-09-21')
