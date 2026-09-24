@@ -185,12 +185,17 @@ def list_todos(claw_id):
       include_not_due: 是否包含尚未到期/已完成/已禁用定义（管理页面使用，默认 false）
     """
     OpenClawInstance.query.get_or_404(claw_id)
+    status_filter = str(request.args.get('status') or '').strip().lower()
     enabled_only = request.args.get('enabled_only', 'true').lower() == 'true'
+    if status_filter == 'all':
+        # Backward-compatible Agent contract: older clients already use
+        # status=all when reconciling a submitted one-shot todo.
+        enabled_only = False
     include_not_due_arg = request.args.get('include_not_due')
     include_not_due = (
         include_not_due_arg.lower() == 'true'
         if include_not_due_arg is not None
-        else _get_session_user() is not None
+        else (_get_session_user() is not None or status_filter == 'all')
     )
     category = request.args.get('category')
     urgency = request.args.get('urgency')
@@ -210,6 +215,21 @@ def list_todos(claw_id):
         # 查看完整定义，避免“已启用”被误解为“现在可执行”。
         items = [item for item in items if item.get('is_due')]
     return jsonify(items)
+
+
+@api_bp.route('/openclaws/<int:claw_id>/todos/<int:todo_id>', methods=['GET'])
+def get_todo(claw_id, todo_id):
+    """Return one owned todo with its auditable execution history."""
+
+    todo = ClawTodo.query.filter_by(
+        id=todo_id, openclaw_id=claw_id).first_or_404()
+    payload = todo.to_dict(with_today_status=True)
+    payload['logs'] = [
+        log.to_dict()
+        for log in todo.logs.order_by(
+            ClawTodoLog.log_date.desc(), ClawTodoLog.created_at.desc()).all()
+    ]
+    return jsonify(payload)
 
 
 @api_bp.route('/openclaws/<int:claw_id>/todos', methods=['POST'])
@@ -320,6 +340,13 @@ def complete_todo(claw_id, todo_id):
     now_cst = cst_now_naive()
     today = now_cst.date()
     status = data.get('status', 'submitted')
+    summary = data.get('result_summary')
+    if (todo.task_category == 'init' and status == 'submitted'
+            and (not isinstance(summary, str) or not summary.strip())):
+        return jsonify({
+            'error': '注册验收待办必须提交非空证据摘要',
+            'code': 'INIT_EVIDENCE_REQUIRED',
+        }), 400
 
     if status != 'retry_failed':
         from app.services.skill_installation import require_installation_for_todo
@@ -335,6 +362,13 @@ def complete_todo(claw_id, todo_id):
     if not state['is_due']:
         # 已经提交/完成的同周期重放保持幂等，不再次修改完成时间。
         if log and log.status in TERMINAL_TODO_STATUSES:
+            # Older Workers could submit an init todo without the required
+            # summary. Permit one evidence-only enrichment while preserving
+            # status, completion time and idempotent execution semantics.
+            if (log.status == 'submitted' and not log.result_summary
+                    and isinstance(summary, str) and summary.strip()):
+                log.result_summary = summary.strip()
+                db.session.commit()
             return jsonify(log.to_dict())
         return jsonify({
             'error': '待办尚未到执行时间',

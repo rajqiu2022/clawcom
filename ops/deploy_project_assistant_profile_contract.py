@@ -9,6 +9,7 @@ release.FILES = (
     'app/api/openclaws.py',
     'app/api/packs.py',
     'app/api/skills.py',
+    'app/api/todos.py',
     'app/services/skill_delivery.py',
 )
 release.MIGRATIONS = ()
@@ -92,6 +93,9 @@ with app.app_context():
             time.sleep(1)
         else:
             raise RuntimeError('HTTP readiness did not recover')
+        assert requests.get(
+            'http://127.0.0.1:18800/api/v1/openclaws/61/todos/4076',
+            timeout=10, allow_redirects=False).status_code in (401, 403)
     assert AgentTask.query.count() == agent_task_count
     assert WorkflowRun.query.count() == workflow_run_count
     print('TEAM_RELEASE ' + json.dumps({

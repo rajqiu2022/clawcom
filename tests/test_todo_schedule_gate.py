@@ -162,6 +162,56 @@ class TodoScheduleGateTest(unittest.TestCase):
         self.assertEqual(by_id[self.daily.id]['today_status'], 'scheduled')
         self.assertFalse(by_id[self.daily.id]['is_due'])
 
+    def test_agent_status_all_and_detail_reconcile_submitted_once_todo(self):
+        self.once.task_category = 'init'
+        db.session.commit()
+        headers = {'Authorization': 'Bearer claw47-test-token'}
+        completed = self.client.post(
+            f'/api/v1/openclaws/{self.claw.id}/todos/{self.once.id}/complete',
+            json={'result_summary': '验收证据', 'status': 'submitted'},
+            headers=headers,
+        )
+        self.assertEqual(200, completed.status_code, completed.get_json())
+
+        listing = self.client.get(
+            f'/api/v1/openclaws/{self.claw.id}/todos?status=all',
+            headers=headers,
+        )
+        detail = self.client.get(
+            f'/api/v1/openclaws/{self.claw.id}/todos/{self.once.id}',
+            headers=headers,
+        )
+
+        self.assertEqual(200, listing.status_code)
+        self.assertIn(self.once.id, [item['id'] for item in listing.get_json()])
+        self.assertEqual(200, detail.status_code)
+        self.assertEqual('验收证据', detail.get_json()['logs'][0]['result_summary'])
+
+    def test_init_todo_requires_summary_and_allows_legacy_enrichment(self):
+        self.once.task_category = 'init'
+        db.session.commit()
+        path = f'/api/v1/openclaws/{self.claw.id}/todos/{self.once.id}/complete'
+
+        missing = self.client.post(path, json={'status': 'submitted'})
+        self.assertEqual(400, missing.status_code)
+        self.assertEqual('INIT_EVIDENCE_REQUIRED', missing.get_json()['code'])
+
+        legacy = ClawTodoLog(
+            todo_id=self.once.id,
+            openclaw_id=self.claw.id,
+            log_date=datetime.now().date(),
+            completed_at=datetime.now(),
+            result_summary=None,
+            status='submitted',
+        )
+        self.once.enabled = False
+        db.session.add(legacy)
+        db.session.commit()
+        enriched = self.client.post(
+            path, json={'status': 'submitted', 'result_summary': '补交证据'})
+        self.assertEqual(200, enriched.status_code)
+        self.assertEqual('补交证据', enriched.get_json()['result_summary'])
+
     def test_complete_rejects_early_execution_and_accepts_at_due_time(self):
         with patch(
                 'app.api.todos.cst_now_naive',
