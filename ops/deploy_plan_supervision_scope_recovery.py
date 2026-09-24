@@ -14,6 +14,7 @@ release.FILES = (
     'app/services/agent_team_plans.py',
     'app/services/plan_supervision.py',
     'templates/agent_teams.html',
+    'templates/testplans.html',
     'static/js/agent_team_plans.js',
 )
 release.MIGRATIONS = ()
