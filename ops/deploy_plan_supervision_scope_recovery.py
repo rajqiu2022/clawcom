@@ -29,6 +29,9 @@ _candidate = release.candidate
 
 def _scope_recovery_candidate(path, live):
     owned_paths = {
+        'app/__init__.py',
+        'app/models.py',
+        'app/api/testplans.py',
         'app/api/plan_supervision.py',
         'app/services/agent_team_plans.py',
         'app/services/plan_supervision.py',
@@ -43,7 +46,7 @@ def _scope_recovery_candidate(path, live):
         # replacing it; any unrelated hotfix still fails closed in the generic
         # three-way merger below.
         previous = subprocess.check_output(
-            ['git', 'show', 'a788ffb:web/' + path],
+            ['git', 'show', '34df47f:web/' + path],
             cwd=str(release.ROOT)).replace(b'\r\n', b'\n')
         normalized = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
         if normalized == previous:
@@ -79,14 +82,21 @@ app = create_app('production')
 with app.app_context():
     os.umask(0o077)
     os.makedirs(backup, exist_ok=True)
-    ddl = db.session.execute(text('SHOW CREATE TABLE test_tasks')).fetchone()[1]
-    with open(backup + '/test_tasks_schema.sql', 'w') as stream:
-        stream.write(ddl + ';\n')
+    for table_name in ('test_tasks', 'test_task_occurrences'):
+        ddl = db.session.execute(text(
+            'SHOW CREATE TABLE `' + table_name + '`')).fetchone()[1]
+        with open(backup + '/' + table_name + '_schema.sql', 'w') as stream:
+            stream.write(ddl + ';\n')
     db.session.remove()
     columns = {
+        'execution_mode': "VARCHAR(32) NOT NULL DEFAULT 'ordinary_agent_task'",
         'workflow_definition_id': 'INTEGER DEFAULT NULL',
         'workflow_start_vars_json': 'LONGTEXT DEFAULT NULL',
+        'allowed_fallback_claw_ids_json': 'LONGTEXT DEFAULT NULL',
+        'required_capabilities_json': 'LONGTEXT DEFAULT NULL',
+        'required_resources_json': 'LONGTEXT DEFAULT NULL',
     }
+    occurrence_columns = dict(columns)
     inspector = inspect(db.engine)
     existing = {column['name'] for column in inspector.get_columns('test_tasks')}
     with db.engine.begin() as conn:
@@ -95,13 +105,55 @@ with app.app_context():
                 conn.execute(text(
                     'ALTER TABLE test_tasks ADD COLUMN `' + column + '` '
                     + column_type))
+        occurrence_existing = {
+            column['name'] for column in inspector.get_columns(
+                'test_task_occurrences')}
+        for column, column_type in occurrence_columns.items():
+            if column not in occurrence_existing:
+                conn.execute(text(
+                    'ALTER TABLE test_task_occurrences ADD COLUMN `'
+                    + column + '` ' + column_type))
+        result = conn.execute(text("""
+            UPDATE test_tasks
+               SET execution_mode = 'workflow'
+             WHERE workflow_definition_id IS NOT NULL
+               AND execution_mode <> 'workflow'
+        """))
+        migrated = int(result.rowcount or 0)
+        result = conn.execute(text("""
+            UPDATE test_tasks
+               SET execution_mode = 'workflow',
+                   workflow_definition_id = 66,
+                   allowed_fallback_claw_ids_json = '[10]',
+                   required_capabilities_json =
+                       '["client_performance", "mobile_package"]'
+             WHERE id = 229 AND plan_id = 50
+        """))
+        migrated += int(result.rowcount or 0)
+        result = conn.execute(text("""
+            UPDATE test_task_occurrences o
+            JOIN test_tasks t ON t.id = o.test_task_id
+               SET o.execution_mode = t.execution_mode,
+                   o.workflow_definition_id = t.workflow_definition_id,
+                   o.workflow_start_vars_json = t.workflow_start_vars_json,
+                   o.allowed_fallback_claw_ids_json =
+                       t.allowed_fallback_claw_ids_json,
+                   o.required_capabilities_json =
+                       t.required_capabilities_json,
+                   o.required_resources_json = t.required_resources_json
+             WHERE o.status IN ('scheduled', 'ready')
+        """))
+        migrated += int(result.rowcount or 0)
     inspector = inspect(db.engine)
     assert set(columns) <= {
         column['name'] for column in inspector.get_columns('test_tasks')}
+    assert set(occurrence_columns) <= {
+        column['name'] for column in inspector.get_columns(
+            'test_task_occurrences')}
     print('TEAM_RELEASE ' + json.dumps({
         'schema_verified': True,
         'backup': backup,
-        'business_rows_modified': 0,
+        'business_rows_modified': migrated,
     }))
 '''
 
@@ -123,16 +175,28 @@ with app.app_context():
         session['user_id'] = admin.id
     rules = {rule.rule for rule in app.url_map.iter_rules()}
     assert '/api/v1/test-plans/<int:plan_id>/supervision/resume' in rules
-    columns = {
+    task_columns = {
         column['name'] for column in inspect(db.engine).get_columns('test_tasks')}
-    assert {'workflow_definition_id', 'workflow_start_vars_json'} <= columns
+    occurrence_columns = {
+        column['name'] for column in inspect(db.engine).get_columns(
+            'test_task_occurrences')}
+    required_columns = {
+        'execution_mode', 'workflow_definition_id',
+        'workflow_start_vars_json', 'allowed_fallback_claw_ids_json',
+        'required_capabilities_json', 'required_resources_json'}
+    assert required_columns <= task_columns
+    assert required_columns <= occurrence_columns
     source = pyinspect.getsource(plan_supervision)
     for marker in ('PLAN_BLOCK_SCOPE_CONFLICT',
                    'plan_block_reason_code',
                    'manager_auto_resume_allowed',
                    'valid_plan_owner_gate',
                    'def _dispatch_scheduled_workflow',
-                   'task_workflow_dispatched'):
+                   'task_workflow_dispatched',
+                   'MANAGER_REVIEW_DECISIONS',
+                   'manager_review_requested',
+                   'no_capability_equivalent_executor',
+                   'pending_control_actions'):
         assert marker in source, marker
     response = client.get('/agent-teams')
     assert response.status_code == 200

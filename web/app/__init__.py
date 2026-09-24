@@ -803,8 +803,12 @@ def create_app(config_name=None):
                         ('due_time', "VARCHAR(5) DEFAULT ''"),
                         ('auto_dispatch', 'BOOLEAN NOT NULL DEFAULT FALSE'),
                         ('execution_role', "VARCHAR(32) NOT NULL DEFAULT 'member_work'"),
+                        ('execution_mode', "VARCHAR(32) NOT NULL DEFAULT 'ordinary_agent_task'"),
                         ('workflow_definition_id', 'INTEGER DEFAULT NULL'),
                         ('workflow_start_vars_json', 'LONGTEXT DEFAULT NULL'),
+                        ('allowed_fallback_claw_ids_json', 'LONGTEXT DEFAULT NULL'),
+                        ('required_capabilities_json', 'LONGTEXT DEFAULT NULL'),
+                        ('required_resources_json', 'LONGTEXT DEFAULT NULL'),
                     ]:
                         try:
                             conn.execute(text(
@@ -828,6 +832,13 @@ def create_app(config_name=None):
                                 mission_stage_id INTEGER,
                                 agent_task_id INTEGER,
                                 workflow_run_id INTEGER,
+                                execution_mode VARCHAR(32) NOT NULL
+                                    DEFAULT 'ordinary_agent_task',
+                                workflow_definition_id INTEGER,
+                                workflow_start_vars_json LONGTEXT,
+                                allowed_fallback_claw_ids_json LONGTEXT,
+                                required_capabilities_json LONGTEXT,
+                                required_resources_json LONGTEXT,
                                 attempt_count INTEGER NOT NULL DEFAULT 0,
                                 action_attempt_count INTEGER NOT NULL DEFAULT 0,
                                 recommended_action VARCHAR(64) DEFAULT '',
@@ -877,6 +888,12 @@ def create_app(config_name=None):
                         ('next_probe_at', 'DATETIME DEFAULT NULL'),
                         ('last_condition_event_at', 'DATETIME DEFAULT NULL'),
                         ('resume_fencing_token', 'INTEGER NOT NULL DEFAULT 0'),
+                        ('execution_mode', "VARCHAR(32) NOT NULL DEFAULT 'ordinary_agent_task'"),
+                        ('workflow_definition_id', 'INTEGER DEFAULT NULL'),
+                        ('workflow_start_vars_json', 'LONGTEXT DEFAULT NULL'),
+                        ('allowed_fallback_claw_ids_json', 'LONGTEXT DEFAULT NULL'),
+                        ('required_capabilities_json', 'LONGTEXT DEFAULT NULL'),
+                        ('required_resources_json', 'LONGTEXT DEFAULT NULL'),
                     ]:
                         try:
                             conn.execute(text(

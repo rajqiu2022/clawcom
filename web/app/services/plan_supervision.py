@@ -11,7 +11,8 @@ from app.models import (AgentTask, AgentTeam, AgentTeamMember,
                         AgentTeamMemberStatus,
                         AgentTeamMemberTask, AgentTeamMission,
                         AnalysisRefreshBatch, AuditLog, CapabilityGap,
-                        ClawMessage, MissionStage, OpenClawInstance,
+                        ClawMessage, ClawSidecarConfig, MissionStage,
+                        OpenClawInstance,
                         RequirementItem, TestIteration, TestPlan, TestReport,
                         TestPlanReport, TestTask, TestTaskOccurrence, WorkflowMission,
                         WorkflowMissionDispatch,
@@ -222,6 +223,18 @@ def materialize_task_occurrences(sup, now=None):
             timezone=task.schedule_timezone or 'Asia/Shanghai',
             not_before_at=not_before, due_at=due_at,
             status='scheduled', assignee_claw_id=task.assignee_claw_id,
+            execution_mode=(
+                'workflow' if task.workflow_definition_id else
+                task.execution_mode or 'ordinary_agent_task'),
+            workflow_definition_id=task.workflow_definition_id,
+            workflow_start_vars_json=copy.deepcopy(
+                task.workflow_start_vars_json or {}),
+            allowed_fallback_claw_ids_json=list(
+                task.allowed_fallback_claw_ids_json or []),
+            required_capabilities_json=list(
+                task.required_capabilities_json or []),
+            required_resources_json=copy.deepcopy(
+                task.required_resources_json or {}),
             next_action='wait_not_before', next_check_at=not_before,
             execution_goal_json={
                 'objective': task.name,
@@ -340,6 +353,54 @@ def migrate_schedule_templates(sup, body, now=None):
         if workflow_start_vars and not workflow_definition_id:
             fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
                  'workflow_start_vars 仅可用于已绑定 Flow 的周期任务', 400)
+        execution_mode = str(row.get(
+            'execution_mode') or (
+                'workflow' if workflow_definition_id
+                else 'ordinary_agent_task')).strip().lower()
+        if execution_mode not in ('ordinary_agent_task', 'workflow'):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'execution_mode 仅支持 ordinary_agent_task/workflow', 400)
+        if ((workflow_definition_id is not None) !=
+                (execution_mode == 'workflow')):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'workflow 模式与 workflow_definition_id 必须同时配置', 400)
+        raw_fallbacks = row.get('allowed_fallback_claw_ids') or []
+        if (not isinstance(raw_fallbacks, list)
+                or any(isinstance(item, bool) for item in raw_fallbacks)):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'allowed_fallback_claw_ids 必须为正整数数组', 400)
+        try:
+            fallback_ids = sorted(set(int(item) for item in raw_fallbacks))
+        except (TypeError, ValueError):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'allowed_fallback_claw_ids 必须为正整数数组', 400)
+        if any(item <= 0 for item in fallback_ids):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'allowed_fallback_claw_ids 必须为正整数数组', 400)
+        if fallback_ids:
+            valid_fallbacks = {item.id for item in OpenClawInstance.query.filter(
+                OpenClawInstance.id.in_(fallback_ids),
+                OpenClawInstance.project_id == plan.project_id,
+                OpenClawInstance.status != 'deleted').all()}
+            if valid_fallbacks != set(fallback_ids):
+                fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                     'allowed_fallback_claw_ids 必须属于当前项目且未删除', 400)
+        required_capabilities = row.get('required_capabilities') or []
+        if (not isinstance(required_capabilities, list)
+                or len(required_capabilities) > 50
+                or any(not isinstance(item, str) or not item.strip()
+                       or len(item.strip()) > 120
+                       for item in required_capabilities)):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'required_capabilities 必须为非空字符串数组', 400)
+        required_capabilities = sorted(set(
+            item.strip() for item in required_capabilities))
+        required_resources = row.get('required_resources') or {}
+        if (not isinstance(required_resources, dict)
+                or len(json.dumps(
+                    required_resources, ensure_ascii=False)) > 16000):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'required_resources 必须为 JSON 对象', 400)
         weekdays = row.get('recurrence_weekdays') or []
         if recurrence == 'weekly' and (not isinstance(weekdays, list)
                 or not weekdays or any(type(value) is not int or value < 0
@@ -353,8 +414,12 @@ def migrate_schedule_templates(sup, body, now=None):
             'due_time': due_time,
             'auto_dispatch': row.get('auto_dispatch') is not False,
             'execution_role': execution_role,
+            'execution_mode': execution_mode,
             'workflow_definition_id': workflow_definition_id,
             'workflow_start_vars': workflow_start_vars,
+            'allowed_fallback_claw_ids': fallback_ids,
+            'required_capabilities': required_capabilities,
+            'required_resources': required_resources,
         }))
 
     def apply():
@@ -375,8 +440,14 @@ def migrate_schedule_templates(sup, body, now=None):
             task.due_time = config['due_time']
             task.auto_dispatch = config['auto_dispatch']
             task.execution_role = config['execution_role']
+            task.execution_mode = config['execution_mode']
             task.workflow_definition_id = config['workflow_definition_id']
             task.workflow_start_vars_json = config['workflow_start_vars']
+            task.allowed_fallback_claw_ids_json = config[
+                'allowed_fallback_claw_ids']
+            task.required_capabilities_json = config[
+                'required_capabilities']
+            task.required_resources_json = config['required_resources']
             changed.append({
                 'test_task_id': task.id, 'before': before,
                 'after': {
@@ -653,7 +724,11 @@ def _task_assignment(team, task):
         # Managers may execute only an explicitly classified analysis/review
         # occurrence.  Generic execution work remains fenced from the manager.
         if task.execution_role == 'manager_work':
-            return {'role_key': 'test_manager', 'specialty': 'analysis'}
+            return {
+                'role_key': 'test_manager', 'specialty': 'analysis',
+                'required_capabilities': list(
+                    task.required_capabilities_json or []),
+            }
         return None
     members = [row for row in team.members
                if row.claw_id == task.assignee_claw_id]
@@ -668,8 +743,15 @@ def _task_assignment(team, task):
         row.role_key))
     member = rows[0]
     if member.role_key != 'test_executor':
-        return {'role_key': member.role_key, 'specialty': None}
+        return {
+            'role_key': member.role_key, 'specialty': None,
+            'required_capabilities': list(
+                task.required_capabilities_json or []),
+        }
     specialties = sorted(set(member.specialties_json or []))
+    required = sorted(set(task.required_capabilities_json or []))
+    if required and not set(required).issubset(set(specialties)):
+        return None
     choices = []
     if task.task_type == 'performance':
         choices.append('client_performance')
@@ -677,21 +759,49 @@ def _task_assignment(team, task):
         choices.append('mobile_package')
     if task.task_type == 'automation' or re.search(r'unity|编辑器|flow\s*#?12', text, re.I):
         choices.append('editor')
-    specialty = next((item for item in choices if item in specialties),
-                     specialties[0] if specialties else None)
-    return {'role_key': 'test_executor', 'specialty': specialty}
+    inferred = sorted(set(
+        item for item in choices if item in specialties))
+    effective_required = required or inferred
+    specialty = next(
+        (item for item in effective_required if item in specialties), None)
+    specialty = specialty or (
+        specialties[0] if specialties else None)
+    return {
+        'role_key': 'test_executor', 'specialty': specialty,
+        'required_capabilities': effective_required,
+    }
 
 
 def _stage_snapshot(team, task, assignment, occurrence=None):
+    definition_id = (occurrence.workflow_definition_id if occurrence
+                     else task.workflow_definition_id)
+    start_vars = ((occurrence.workflow_start_vars_json if occurrence
+                  else task.workflow_start_vars_json) or {})
+    fallback_ids = ((occurrence.allowed_fallback_claw_ids_json if occurrence
+                    else task.allowed_fallback_claw_ids_json) or [])
+    required_capabilities = (
+        (occurrence.required_capabilities_json if occurrence
+         else task.required_capabilities_json)
+        or assignment.get('required_capabilities')
+        or ([assignment['specialty']] if assignment.get('specialty') else []))
+    required_resources = ((occurrence.required_resources_json if occurrence
+                          else task.required_resources_json) or {})
+    execution_mode = (
+        occurrence.execution_mode if occurrence else
+        'workflow' if definition_id else
+        task.execution_mode or 'ordinary_agent_task')
     snapshot = {
         'test_plan_id': task.plan_id,
         'test_task_id': task.id,
         'test_task_name': task.name,
         'test_task_type': task.task_type,
         'test_task_priority': task.priority,
-        'workflow_definition_id': task.workflow_definition_id,
-        'workflow_start_vars': copy.deepcopy(
-            task.workflow_start_vars_json or {}),
+        'execution_mode': execution_mode,
+        'workflow_definition_id': definition_id,
+        'workflow_start_vars': copy.deepcopy(start_vars),
+        'allowed_fallback_claw_ids': list(fallback_ids),
+        'required_capabilities': list(required_capabilities),
+        'required_resources': copy.deepcopy(required_resources),
         'scheduled_start_date': str(task.start_date) if task.start_date else None,
         'scheduled_end_date': str(task.end_date) if task.end_date else None,
         'team_assignment': {
@@ -699,6 +809,9 @@ def _stage_snapshot(team, task, assignment, occurrence=None):
             'team_version': team.version,
             'role_key': assignment['role_key'],
             'specialty': assignment['specialty'],
+            'assigned_claw_id': (
+                occurrence.assignee_claw_id if occurrence
+                else task.assignee_claw_id),
         },
     }
     if occurrence:
@@ -793,6 +906,9 @@ def sync_plan_stages(sup, now=None):
                 'assignee_claw_id': task.assignee_claw_id, 'reason': reason,
             })
             continue
+        if not occurrence.required_capabilities_json:
+            occurrence.required_capabilities_json = list(
+                assignment.get('required_capabilities') or [])
         snapshot = _stage_snapshot(team, task, assignment, occurrence)
         stage = MissionStage(
             mission_id=mission.id,
@@ -1304,7 +1420,8 @@ def undispatched_stages(sup):
         if (stage.workflow_run_id is not None
                 and control_kind not in (
                     'workflow_execution_reconciliation',
-                    'environment_repair', 'evidence_review')):
+                    'environment_repair', 'evidence_review',
+                    'manager_review')):
             continue
         items.append({
             'stage_key': stage.stage_key,
@@ -1606,10 +1723,19 @@ def promote_and_dispatch_due_occurrences(sup, now=None):
             ], {'task_id': task.id, 'occurrence_id': occurrence.id}, now)
         if not task.auto_dispatch or stage.state != 'ready':
             continue
-        if task.workflow_definition_id:
+        mode = occurrence.execution_mode or (
+            'workflow' if occurrence.workflow_definition_id
+            else 'ordinary_agent_task')
+        if mode == 'workflow':
+            if not occurrence.workflow_definition_id:
+                fail('PLAN_OCCURRENCE_FLOW_BINDING_REQUIRED',
+                     '周期实例已冻结为 workflow 模式，但缺少 Flow 绑定', 409)
             _dispatch_scheduled_workflow(sup, task, stage, occurrence, now)
             wake_ids.append(occurrence.assignee_claw_id)
             continue
+        if occurrence.workflow_definition_id:
+            fail('PLAN_OCCURRENCE_EXECUTION_MODE_CONFLICT',
+                 '普通 AgentTask 实例不得携带 Flow 绑定', 409)
         active = ordinary.get(stage.id)
         if active and active.status in ('pending', 'running'):
             continue
@@ -1632,7 +1758,7 @@ def _dispatch_scheduled_workflow(sup, task, stage, occurrence, now=None):
     team = db.session.get(AgentTeam, sup.team_id)
     binding = db.session.get(AgentTeamMission, sup.mission_id)
     definition = db.session.get(
-        WorkflowDefinition, task.workflow_definition_id)
+        WorkflowDefinition, occurrence.workflow_definition_id)
     worker = db.session.get(OpenClawInstance, occurrence.assignee_claw_id)
     if not mission or not team or not binding:
         fail('PLAN_MISSION_INCOMPLETE', '周期 Flow 派发缺少团队 Mission 绑定', 409)
@@ -1662,7 +1788,7 @@ def _dispatch_scheduled_workflow(sup, task, stage, occurrence, now=None):
         fail('MISSION_WORKER_EXECUTE_FORBIDDEN', '周期 Flow 执行 Agent 没有执行权限', 403)
     if int(mission.child_run_count or 0) >= int(mission.max_child_runs or 20):
         fail('MISSION_CHILD_RUN_BUDGET_EXHAUSTED', 'Mission Child Run 预算已耗尽', 409)
-    start_vars = copy.deepcopy(task.workflow_start_vars_json or {})
+    start_vars = copy.deepcopy(occurrence.workflow_start_vars_json or {})
     start_vars['worker_claw_id'] = worker.id
     decision_key = 'plan:%s:occurrence:%s:flow:%s' % (
         sup.plan_id, occurrence.id, definition.id)
@@ -1869,6 +1995,117 @@ def _record_control_claim(agent_task, link, now):
     return stage
 
 
+MANAGER_REVIEW_DECISIONS = frozenset({
+    'publish_partial_closeout', 'create_environment_repair',
+    'wait_condition', 'retry_same_executor', 'dispatch_workflow',
+    'owner_action_required',
+})
+
+
+def _apply_manager_review_decision(sup, agent_task, source, result, now):
+    """Apply one fenced manager decision to the source occurrence."""
+    outputs = result.get('outputs') if isinstance(result.get('outputs'), dict) else {}
+    decision = str(result.get('decision') or outputs.get('decision') or '').strip()
+    if decision not in MANAGER_REVIEW_DECISIONS:
+        return False, None, 'PLAN_MANAGER_DECISION_INVALID'
+    evidence = result.get('evidence') or outputs.get('evidence')
+    if not isinstance(evidence, (list, dict)) or not evidence:
+        return False, None, 'PLAN_MANAGER_EVIDENCE_REQUIRED'
+    original = db.session.get(MissionStage, source.mission_stage_id)
+    task = db.session.get(TestTask, source.test_task_id)
+    if not original or not task or original.mission_id != sup.mission_id:
+        return False, None, 'PLAN_MANAGER_SOURCE_INVALID'
+    receipt = {
+        'decision': decision,
+        'agent_task_id': agent_task.task_id,
+        'manager_claw_id': agent_task.claw_id,
+        'decided_at': now.isoformat() + '+08:00',
+        'evidence_digest': digest(evidence),
+    }
+    metadata = dict(source.action_metadata_json or {})
+    metadata['manager_review_receipt'] = receipt
+    source.action_metadata_json = metadata
+    source.owner_gate = False
+    wake_id = None
+    if decision == 'publish_partial_closeout':
+        source.status = 'analysis_incomplete'
+        source.condition_state = 'manager_closed_partial'
+        source.recommended_action = 'publish_partial_closeout'
+        source.next_action = 'none'
+        source.next_check_at = None
+        original.state = 'completed'
+        original.last_reason_code = 'manager_partial_closeout'
+    elif decision == 'create_environment_repair':
+        source.status = 'blocked'
+        source.recommended_action = decision
+        source.next_action = decision
+        source.next_check_at = now
+        original.state = 'blocked'
+        original.last_reason_code = 'manager_requested_environment_repair'
+    elif decision == 'wait_condition':
+        contract, checkpoint, next_probe_at = _normalize_resume_contract(
+            result, source, now)
+        source.status = 'waiting_condition'
+        source.condition_state = 'waiting_condition'
+        source.resume_contract_json = contract
+        source.checkpoint_json = checkpoint
+        source.next_probe_at = next_probe_at
+        source.next_check_at = next_probe_at
+        source.owner_gate = bool(contract['owner_gate'])
+        source.recommended_action = (
+            'owner_action_then_auto_resume' if source.owner_gate
+            else 'local_probe_then_auto_resume')
+        source.next_action = (
+            'wait_owner_and_probe' if source.owner_gate
+            else 'wait_condition_probe')
+        original.state = 'waiting_condition'
+        original.last_reason_code = 'manager_wait_condition'
+    elif decision == 'owner_action_required':
+        source.status = 'blocked'
+        source.owner_gate = True
+        source.recommended_action = decision
+        source.next_action = decision
+        source.next_check_at = None
+        original.state = 'blocked'
+        original.last_reason_code = 'manager_owner_action_required'
+    elif decision in ('retry_same_executor', 'dispatch_workflow'):
+        if source.due_at and source.due_at <= now:
+            return False, None, 'PLAN_MANAGER_DECISION_AFTER_DUE'
+        mode = source.execution_mode or 'ordinary_agent_task'
+        if decision == 'dispatch_workflow' and mode != 'workflow':
+            return False, None, 'PLAN_MANAGER_FLOW_BINDING_REQUIRED'
+        if mode == 'workflow' and source.workflow_run_id:
+            return False, None, 'PLAN_MANAGER_EXISTING_RUN_RECONCILIATION_REQUIRED'
+        source.status = 'ready'
+        source.condition_state = 'manager_retry_approved'
+        source.next_action = 'auto_dispatch'
+        source.next_check_at = now
+        source.resume_fencing_token = int(source.resume_fencing_token or 0) + 1
+        original.state = 'ready'
+        original.last_reason_code = 'manager_retry_approved'
+        if mode == 'workflow':
+            _dispatch_scheduled_workflow(sup, task, original, source, now)
+            wake_id = source.assignee_claw_id
+        else:
+            dispatched = _create_plan_agent_task(
+                sup, task, original,
+                'manager-retry:%s:%s' % (
+                    source.id, source.resume_fencing_token),
+                '测试经理已完成复核；沿用当前能力与资源合同重试同一执行者。',
+                2, occurrence=source)
+            wake_id = dispatched.claw_id
+    original.version = int(original.version or 1) + 1
+    add_event(sup.plan_id, 'manager_review_decided', [
+        'manager-review-decided', source.id, agent_task.task_id, decision,
+    ], {
+        'occurrence_id': source.id,
+        'test_task_id': source.test_task_id,
+        **receipt,
+        'wake_claw_id': wake_id,
+    }, now)
+    return True, wake_id, None
+
+
 def _record_control_terminal(agent_task, link, result, status, now):
     sup = locked(link['plan_id'])
     stage = db.session.get(MissionStage, link['mission_stage_id'])
@@ -1878,6 +2115,31 @@ def _record_control_terminal(agent_task, link, result, status, now):
              '控制 AgentTask 与阶段绑定不一致', 409)
     result = result if isinstance(result, dict) else {}
     completed = status == 'completed'
+    manager_wake_id = None
+    manager_error = None
+    source_id = link.get('source_occurrence_id')
+    source = (db.session.get(TestTaskOccurrence, source_id)
+              if source_id else None)
+    if (link['action_kind'] == 'manager_review' and completed):
+        if source:
+            completed, manager_wake_id, manager_error = (
+                _apply_manager_review_decision(
+                    sup, agent_task, source, result, now))
+        else:
+            completed, manager_error = False, 'PLAN_MANAGER_SOURCE_INVALID'
+    if (link['action_kind'] == 'manager_review' and not completed and source):
+        attempts = int(source.action_attempt_count or 0)
+        source.status = 'blocked'
+        source.condition_state = 'manager_decision_rejected'
+        source.recommended_action = 'manager_review'
+        if attempts >= 3:
+            source.owner_gate = True
+            source.next_action = 'owner_action_required'
+            source.next_check_at = None
+        else:
+            source.owner_gate = False
+            source.next_action = 'manager_review'
+            source.next_check_at = now
     if (link['action_kind'] == 'workflow_execution_reconciliation'
             and completed and stage.state != 'completed'):
         # The dedicated resolve API is the canonical verifier. A model result
@@ -1890,13 +2152,10 @@ def _record_control_terminal(agent_task, link, result, status, now):
     else:
         stage.state = 'blocked'
         stage.last_reason_code = str(
-            result.get('error_code') or stage.last_reason_code
+            manager_error or result.get('error_code') or stage.last_reason_code
             or status or 'plan_control_task_failed')[:80]
     stage.version = int(stage.version or 1) + 1
-    source_id = link.get('source_occurrence_id')
-    source = (db.session.get(TestTaskOccurrence, source_id)
-              if source_id else None)
-    wake_id = None
+    wake_id = manager_wake_id
     if completed and source and link['action_kind'] == 'environment_repair':
         task = db.session.get(TestTask, source.test_task_id)
         original = db.session.get(MissionStage, source.mission_stage_id)
@@ -1929,6 +2188,10 @@ def _record_control_terminal(agent_task, link, result, status, now):
         'agent_task_id': agent_task.task_id,
         'status': stage.state,
         'source_occurrence_id': source_id,
+        'decision': (result.get('decision') or (
+            result.get('outputs') or {}).get('decision')
+            if isinstance(result.get('outputs'), dict)
+            else result.get('decision')),
     }, now)
     return {'stage': stage, 'wake_claw_id': wake_id} if wake_id else stage
 
@@ -2396,18 +2659,100 @@ def guard_execution_goals(sup, now=None):
     return changed
 
 
-def _alternate_executor(sup, stage, current_claw_id):
+def _candidate_assignment_match(sup, stage, occurrence, member, claw):
+    """Validate one replacement against the frozen occurrence contract."""
+    snapshot = stage.input_snapshot_json or {}
+    assignment = snapshot.get('team_assignment') or {}
+    required = set(
+        (occurrence.required_capabilities_json if occurrence else None)
+        or snapshot.get('required_capabilities') or
+        ([assignment.get('specialty')] if assignment.get('specialty') else []))
+    specialties = set(member.specialties_json or [])
+    fallback_ids = set(
+        (occurrence.allowed_fallback_claw_ids_json if occurrence else None)
+        or snapshot.get('allowed_fallback_claw_ids') or [])
+    resources = dict(
+        (occurrence.required_resources_json if occurrence else None)
+        or snapshot.get('required_resources') or {})
+    if member.role_key != stage.role_key:
+        return False, {'reason': 'role_mismatch'}
+    if fallback_ids and claw.id not in fallback_ids:
+        return False, {'reason': 'fallback_not_allowed'}
+    if not required.issubset(specialties):
+        return False, {
+            'reason': 'capability_mismatch',
+            'required_capabilities': sorted(required),
+            'candidate_capabilities': sorted(specialties),
+        }
+    explicit_ids = resources.get('allowed_claw_ids') or resources.get(
+        'executor_claw_ids') or []
+    if explicit_ids and claw.id not in {
+            int(item) for item in explicit_ids
+            if not isinstance(item, bool) and str(item).isdigit()}:
+        return False, {'reason': 'resource_executor_mismatch'}
+    bound_claw = resources.get('claw_id')
+    if bound_claw not in (None, ''):
+        try:
+            bound_claw_id = int(bound_claw)
+        except (TypeError, ValueError):
+            return False, {'reason': 'resource_bound_claw_invalid'}
+        if bound_claw_id != claw.id:
+            return False, {'reason': 'resource_bound_to_other_claw'}
+    nonportable = set(resources).intersection({
+        'device_id', 'device_ids', 'account_id', 'account_ids',
+        'resource_lease_id', 'resource_lease_ids',
+    })
+    if nonportable and not explicit_ids and resources.get('portable') is not True:
+        return False, {'reason': 'resource_binding_not_portable'}
+    worker_platform = str(resources.get('worker_platform') or '').lower()
+    if worker_platform:
+        sidecar = db.session.get(ClawSidecarConfig, claw.id)
+        actual_platform = str(
+            (sidecar.runtime_config_json or {}).get('platform')
+            if sidecar else '').lower()
+        if actual_platform != worker_platform:
+            return False, {
+                'reason': 'worker_platform_mismatch',
+                'required_platform': worker_platform,
+                'candidate_platform': actual_platform,
+            }
+    return True, {
+        'role_key': member.role_key,
+        'required_capabilities': sorted(required),
+        'candidate_capabilities': sorted(specialties),
+        'required_resources': resources,
+    }
+
+
+def _alternate_executor(sup, stage, current_claw_id, occurrence=None):
     if not sup.team_id:
-        return None
+        return None, {'reason': 'team_missing'}
     rows = AgentTeamMember.query.filter_by(
         team_id=sup.team_id, role_key=stage.role_key).order_by(
             AgentTeamMember.claw_id).all()
-    candidates = sorted({row.claw_id for row in rows
-                         if row.claw_id != current_claw_id})
+    members = {row.claw_id: row for row in rows
+               if row.claw_id != current_claw_id}
+    candidates = sorted(members)
+    plan = db.session.get(TestPlan, sup.plan_id)
+    if not plan:
+        return None, {'reason': 'plan_missing'}
     claws = {row.id: row for row in OpenClawInstance.query.filter(
         OpenClawInstance.id.in_(candidates),
-        OpenClawInstance.status != 'deleted').all()} if candidates else {}
-    return next((claw_id for claw_id in candidates if claw_id in claws), None)
+        OpenClawInstance.status != 'deleted',
+        OpenClawInstance.project_id == plan.project_id).all()} if candidates else {}
+    rejected = []
+    for claw_id in candidates:
+        claw = claws.get(claw_id)
+        if not claw:
+            rejected.append({'claw_id': claw_id, 'reason': 'claw_unavailable'})
+            continue
+        matched, detail = _candidate_assignment_match(
+            sup, stage, occurrence, members[claw_id], claw)
+        if matched:
+            return claw_id, detail
+        rejected.append({'claw_id': claw_id, **detail})
+    return None, {'reason': 'no_capability_equivalent_executor',
+                  'rejected_candidates': rejected}
 
 
 def advance_occurrence_actions(sup, now=None):
@@ -2430,8 +2775,9 @@ def advance_occurrence_actions(sup, now=None):
         if not task or not stage:
             continue
         if action == 'reassign_stage':
-            alternate = _alternate_executor(
-                sup, stage, occurrence.assignee_claw_id)
+            previous_claw_id = occurrence.assignee_claw_id
+            alternate, match = _alternate_executor(
+                sup, stage, previous_claw_id, occurrence)
             if not alternate:
                 occurrence.owner_gate = True
                 occurrence.recommended_action = 'owner_select_executor'
@@ -2442,7 +2788,8 @@ def advance_occurrence_actions(sup, now=None):
                 ], {
                     'occurrence_id': occurrence.id,
                     'test_task_id': task.id,
-                    'reason': 'no_alternate_executor',
+                    'reason': 'no_capability_equivalent_executor',
+                    'capability_match': match,
                 }, now)
                 continue
             occurrence.action_attempt_count = int(
@@ -2452,15 +2799,118 @@ def advance_occurrence_actions(sup, now=None):
             occurrence.next_action = 'auto_dispatch'
             occurrence.next_check_at = now
             stage.assigned_claw_id = alternate
+            snapshot = dict(stage.input_snapshot_json or {})
+            team_assignment = dict(snapshot.get('team_assignment') or {})
+            team_assignment.update({
+                'assigned_claw_id': alternate,
+                'reassigned_from_claw_id': previous_claw_id,
+                'matched_capabilities': match.get(
+                    'candidate_capabilities', []),
+            })
+            snapshot['team_assignment'] = team_assignment
+            stage.input_snapshot_json = snapshot
             stage.state = 'ready'
             stage.last_reason_code = 'occurrence_reassigned'
             stage.version = int(stage.version or 1) + 1
-            dispatched = _create_plan_agent_task(
-                sup, task, stage,
-                'reassign:%s:%s' % (
-                    occurrence.id, occurrence.action_attempt_count),
-                '前一执行者已耗尽有界重试。继续同一当日目标，并保留已有证据。',
-                2, occurrence=occurrence)
+            if occurrence.execution_mode == 'workflow':
+                dispatched = _dispatch_scheduled_workflow(
+                    sup, task, stage, occurrence, now)
+                wake_ids.append(alternate)
+                execution_ref = {'workflow_run_id': dispatched.id}
+            else:
+                dispatched = _create_plan_agent_task(
+                    sup, task, stage,
+                    'reassign:%s:%s' % (
+                        occurrence.id, occurrence.action_attempt_count),
+                    '前一执行者已耗尽有界重试。继续同一当日目标，并保留已有证据。',
+                    2, occurrence=occurrence)
+                wake_ids.append(dispatched.claw_id)
+                execution_ref = {'agent_task_id': dispatched.task_id}
+            metadata = dict(occurrence.action_metadata_json or {})
+            metadata['last_reassignment'] = {
+                'from_claw_id': previous_claw_id,
+                'to_claw_id': alternate,
+                'reason': 'bounded_retry_exhausted',
+                'capability_match': match,
+                'fencing_token': int(stage.fencing_token or 0),
+                **execution_ref,
+            }
+            occurrence.action_metadata_json = metadata
+            add_event(sup.plan_id, 'occurrence_reassigned', [
+                'occurrence-reassigned', occurrence.id,
+                previous_claw_id, alternate,
+                int(stage.fencing_token or 0),
+            ], {
+                'occurrence_id': occurrence.id,
+                'test_task_id': task.id,
+                **metadata['last_reassignment'],
+            }, now)
+            continue
+        if action == 'manager_review':
+            occurrence.action_attempt_count = int(
+                occurrence.action_attempt_count or 0) + 1
+            key = 'occurrence_%s_manager_review' % occurrence.id
+            control = MissionStage.query.filter_by(
+                mission_id=sup.mission_id, stage_key=key,
+                stage_version=1).first()
+            if not control:
+                control = MissionStage(
+                    mission_id=sup.mission_id, stage_key=key,
+                    stage_version=1, role_key='test_manager',
+                    assigned_claw_id=sup.orchestrator_claw_id,
+                    state='ready',
+                    input_snapshot_json={
+                        'kind': 'manager_review',
+                        'source_stage_id': stage.id,
+                        'source_occurrence_id': occurrence.id,
+                        'test_task_id': task.id,
+                        'test_task_name': task.name,
+                        'current_occurrence': occurrence.to_dict(),
+                        'failure': occurrence.action_metadata_json or {},
+                        'allowed_decisions': sorted(
+                            MANAGER_REVIEW_DECISIONS),
+                        'decision_contract': {
+                            'decision': 'required',
+                            'evidence': 'required',
+                            'resume_contract': (
+                                'required_when_decision_is_wait_condition'),
+                            'checkpoint': (
+                                'required_when_decision_is_wait_condition'),
+                        },
+                    },
+                    evidence_refs_json=[])
+                db.session.add(control)
+                db.session.flush()
+            active = _plan_control_tasks(sup).get(control.id)
+            if active and active.status in (
+                    'pending', 'running', 'waiting_condition'):
+                occurrence.next_action = 'await_manager_review'
+                occurrence.next_check_at = None
+                wake_ids.append(active.claw_id)
+                continue
+            dispatched = _create_control_agent_task(
+                sup, control, 'manager_review',
+                '复核当前执行实例，并从 input_snapshot.allowed_decisions '
+                '中选择唯一 decision；返回结构化 evidence，禁止用文字替代决策。',
+                source_occurrence_id=occurrence.id)
+            occurrence.next_action = 'await_manager_review'
+            occurrence.next_check_at = None
+            metadata = dict(occurrence.action_metadata_json or {})
+            metadata['manager_review_control'] = {
+                'mission_stage_id': control.id,
+                'agent_task_id': dispatched.task_id,
+                'manager_claw_id': dispatched.claw_id,
+                'created_at': now.isoformat() + '+08:00',
+            }
+            occurrence.action_metadata_json = metadata
+            add_event(sup.plan_id, 'manager_review_requested', [
+                'manager-review-requested', occurrence.id,
+                dispatched.task_id,
+            ], {
+                'occurrence_id': occurrence.id,
+                'test_task_id': task.id,
+                **metadata['manager_review_control'],
+            }, now)
             wake_ids.append(dispatched.claw_id)
             continue
         if action not in ('create_environment_repair',
@@ -2522,7 +2972,8 @@ def dispatch_ready_control_stages(sup, now=None):
         snapshot = stage.input_snapshot_json or {}
         kind = snapshot.get('kind')
         if kind not in ('workflow_execution_reconciliation',
-                        'environment_repair', 'evidence_review'):
+                        'environment_repair', 'evidence_review',
+                        'manager_review'):
             continue
         current = active.get(stage.id)
         if current and current.status in (
@@ -2535,6 +2986,9 @@ def dispatch_ready_control_stages(sup, now=None):
                 '成功后再调用 recover_api。'),
             'environment_repair': '执行受控环境修复并返回结构化证据。',
             'evidence_review': '补证或复核，不重跑已通过范围。',
+            'manager_review': (
+                '复核来源 occurrence，并从 allowed_decisions 中返回唯一 '
+                'decision 与结构化 evidence。'),
         }[kind]
         task = _create_control_agent_task(
             sup, stage, kind, instruction,
@@ -2918,10 +3372,12 @@ def task_dispatch_receipts(sup):
         task_id = _stage_task_id(stage)
         if control or control_kind in (
                 'workflow_execution_reconciliation',
-                'environment_repair', 'evidence_review'):
+                'environment_repair', 'evidence_review',
+                'manager_review'):
             if not control and control_kind not in (
                     'workflow_execution_reconciliation',
-                    'environment_repair', 'evidence_review'):
+                    'environment_repair', 'evidence_review',
+                    'manager_review'):
                 continue
             control_claimed = bool(
                 control and control.assigned_at
@@ -3267,12 +3723,13 @@ def refresh_supervision_report(sup, now=None):
 def stage_truth_snapshot(sup):
     if not sup or not sup.mission_id:
         return {'independent_stage_status': [], 'actionable_gaps': [],
-                'allowed_actions': [], 'next_check_at': None}
+                'pending_control_actions': [], 'allowed_actions': [],
+                'next_check_at': None}
     stages = MissionStage.query.filter_by(mission_id=sup.mission_id).order_by(
         MissionStage.id).all()
     ordinary_tasks = _plan_agent_tasks(sup)
     control_tasks = _plan_control_tasks(sup)
-    rows, gaps = [], []
+    rows, gaps, pending_controls = [], [], []
     for stage in stages:
         task_id = _stage_task_id(stage)
         task = db.session.get(TestTask, task_id) if task_id else None
@@ -3315,6 +3772,24 @@ def stage_truth_snapshot(sup):
             'reason_code': stage.last_reason_code or '',
         }
         rows.append(item)
+        if (snapshot.get('kind') in (
+                'manager_review', 'workflow_execution_reconciliation',
+                'environment_repair', 'evidence_review')
+                and stage.state not in ('completed', 'cancelled')):
+            pending_controls.append({
+                'stage_key': stage.stage_key,
+                'action_kind': snapshot.get('kind'),
+                'source_occurrence_id': snapshot.get(
+                    'source_occurrence_id'),
+                'agent_task_id': active_task.task_id if active_task else None,
+                'agent_task_status': (
+                    active_task.status if active_task else None),
+                'manager_claw_id': (
+                    stage.assigned_claw_id
+                    if snapshot.get('kind') == 'manager_review' else None),
+                'allowed_decisions': snapshot.get(
+                    'allowed_decisions') or [],
+            })
         if (stage.state in ('blocked', 'failed', 'cancelled')
                 or (occurrence and occurrence.owner_gate)
                 or (occurrence and occurrence.status == 'waiting_condition'
@@ -3322,11 +3797,15 @@ def stage_truth_snapshot(sup):
                     and occurrence.next_probe_at <= _now())):
             gaps.append(item)
     actions = ['wait', 'dispatch_ready_stage', 'recover_run']
+    if any(row['action_kind'] == 'manager_review'
+           for row in pending_controls):
+        actions.append('review_manager_action')
     if sup.status in OWNER_GATE_STATUSES:
         actions = ['wait_for_owner_resume']
     return {
         'independent_stage_status': rows,
         'actionable_gaps': gaps,
+        'pending_control_actions': pending_controls,
         'allowed_actions': actions,
         'next_check_at': (sup.next_check_at.isoformat() + '+08:00'
                           if sup.next_check_at else None),

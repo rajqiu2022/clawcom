@@ -1280,6 +1280,56 @@ def _normalize_task_schedule(data, plan, current=None):
         raise ValueError('workflow_start_vars 不能超过 16000 字节')
     if not workflow_definition_id and start_vars:
         raise ValueError('workflow_start_vars 仅可用于已绑定 Flow 的周期任务')
+
+    mode_default = (
+        'workflow' if workflow_definition_id else
+        current.execution_mode if current else 'ordinary_agent_task')
+    execution_mode = str(data.get('execution_mode', mode_default)
+                         or '').strip().lower()
+    if execution_mode not in ('ordinary_agent_task', 'workflow'):
+        raise ValueError('execution_mode 仅支持 ordinary_agent_task/workflow')
+    if workflow_definition_id and execution_mode != 'workflow':
+        raise ValueError('已绑定 workflow_definition_id 的任务必须使用 workflow 模式')
+    if execution_mode == 'workflow' and not workflow_definition_id:
+        raise ValueError('workflow 模式必须绑定 workflow_definition_id')
+
+    def string_list(name, current_value=None):
+        value = data.get(name, current_value if current_value is not None else []) or []
+        if (not isinstance(value, list) or len(value) > 50
+                or any(not isinstance(item, str) or not item.strip()
+                       or len(item.strip()) > 120 for item in value)):
+            raise ValueError('%s 必须为不超过 50 项的非空字符串数组' % name)
+        return sorted(set(item.strip() for item in value))
+
+    raw_fallbacks = data.get(
+        'allowed_fallback_claw_ids',
+        current.allowed_fallback_claw_ids_json if current else []) or []
+    if (not isinstance(raw_fallbacks, list) or len(raw_fallbacks) > 50
+            or any(isinstance(item, bool) for item in raw_fallbacks)):
+        raise ValueError('allowed_fallback_claw_ids 必须为正整数数组')
+    try:
+        fallback_ids = sorted(set(int(item) for item in raw_fallbacks))
+    except (TypeError, ValueError):
+        raise ValueError('allowed_fallback_claw_ids 必须为正整数数组')
+    if any(item <= 0 for item in fallback_ids):
+        raise ValueError('allowed_fallback_claw_ids 必须为正整数数组')
+    if fallback_ids:
+        valid_ids = {row.id for row in OpenClawInstance.query.filter(
+            OpenClawInstance.id.in_(fallback_ids),
+            OpenClawInstance.project_id == plan.project_id,
+            OpenClawInstance.status != 'deleted').all()}
+        if valid_ids != set(fallback_ids):
+            raise ValueError('allowed_fallback_claw_ids 必须属于当前项目且未删除')
+
+    required_capabilities = string_list(
+        'required_capabilities',
+        current.required_capabilities_json if current else [])
+    required_resources = data.get(
+        'required_resources', current.required_resources_json
+        if current else {}) or {}
+    if (not isinstance(required_resources, dict)
+            or len(json.dumps(required_resources, ensure_ascii=False)) > 16000):
+        raise ValueError('required_resources 必须为不超过 16000 字节的 JSON 对象')
     return {
         'schedule_enabled': enabled,
         'recurrence_type': recurrence,
@@ -1290,8 +1340,12 @@ def _normalize_task_schedule(data, plan, current=None):
         'due_time': clock('due_time', '23:59'),
         'auto_dispatch': auto_dispatch,
         'execution_role': execution_role,
+        'execution_mode': execution_mode,
         'workflow_definition_id': workflow_definition_id,
         'workflow_start_vars_json': start_vars,
+        'allowed_fallback_claw_ids_json': fallback_ids,
+        'required_capabilities_json': required_capabilities,
+        'required_resources_json': required_resources,
     }
 
 

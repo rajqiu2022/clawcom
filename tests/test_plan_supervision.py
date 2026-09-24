@@ -7,7 +7,7 @@ from unittest.mock import patch
 import test_workflow_missions_api as fixtures
 from app import db
 from app.models import (AgentTask, AgentTeam, AgentTeamMember, AgentTeamMission, MissionStage,
-                        TestPlan, TestTask, TestTaskOccurrence, ClawMessage,
+                        OpenClawInstance, TestPlan, TestTask, TestTaskOccurrence, ClawMessage,
                         WorkflowRun, WorkflowRunStep,
                         WorkflowMission, WorkflowMissionDispatch, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
@@ -864,6 +864,173 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertTrue(replay['replayed'])
         self.assertEqual(PlanSupervisorReceipt.query.filter_by(
             action='migrate_schedule_templates').count(), 1)
+
+    def test_reassignment_skips_same_role_without_frozen_capabilities(self):
+        team = self.scoped_team()
+        editor = OpenClawInstance(
+            name='Editor only', safe_name='editor-only',
+            claw_tag='editor-only', owner='editor',
+            project_id=self.project.id, status='工作')
+        equivalent = OpenClawInstance(
+            name='Mobile performance', safe_name='mobile-performance',
+            claw_tag='mobile-performance', owner='performance',
+            project_id=self.project.id, status='工作')
+        db.session.add_all([editor, equivalent])
+        db.session.flush()
+        db.session.add_all([
+            AgentTeamMember(
+                team_id=team.id, claw_id=self.other_claw.id,
+                role_key='test_executor',
+                specialties_json=['client_performance', 'mobile_package']),
+            AgentTeamMember(
+                team_id=team.id, claw_id=editor.id,
+                role_key='test_executor', specialties_json=['editor']),
+            AgentTeamMember(
+                team_id=team.id, claw_id=equivalent.id,
+                role_key='test_executor',
+                specialties_json=['client_performance', 'mobile_package']),
+        ])
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='微信小游戏每日性能测试',
+            status='assigned', assignee_claw_id=self.other_claw.id,
+            task_type='performance', start_date=self.plan.start_date,
+            end_date=self.plan.end_date, schedule_enabled=True,
+            recurrence_type='daily', not_before_time='00:00',
+            due_time='23:59', auto_dispatch=True,
+            execution_role='member_work',
+            required_capabilities_json=[
+                'client_performance', 'mobile_package'])
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'capability-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        now = datetime.combine(self.plan.start_date, time(10, 0))
+        svc.sync_plan_stages(self.sup(), now=now)
+        occurrence = TestTaskOccurrence.query.filter_by(
+            test_task_id=task.id).one()
+        stage = db.session.get(MissionStage, occurrence.mission_stage_id)
+        occurrence.status = 'failed'
+        occurrence.next_action = 'reassign_stage'
+        occurrence.next_check_at = now
+        stage.state = 'blocked'
+        db.session.commit()
+
+        self.assertEqual(
+            svc.advance_occurrence_actions(self.sup(), now=now),
+            [equivalent.id])
+        db.session.commit()
+        self.assertEqual(occurrence.assignee_claw_id, equivalent.id)
+        self.assertNotEqual(occurrence.assignee_claw_id, editor.id)
+        event = PlanSupervisorEvent.query.filter_by(
+            kind='occurrence_reassigned').one()
+        self.assertEqual(event.payload_json['from_claw_id'],
+                         self.other_claw.id)
+        self.assertEqual(event.payload_json['to_claw_id'], equivalent.id)
+        self.assertEqual(event.payload_json['capability_match'][
+            'required_capabilities'], [
+                'client_performance', 'mobile_package'])
+
+    def test_manager_review_creates_control_task_and_fenced_receipt(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='需要经理复核的局部结果',
+            status='assigned', assignee_claw_id=self.other_claw.id,
+            task_type='automation', start_date=self.plan.start_date,
+            end_date=self.plan.end_date, schedule_enabled=True,
+            recurrence_type='daily', not_before_time='00:00',
+            due_time='23:59', auto_dispatch=False,
+            execution_role='member_work')
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'manager-review-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        now = datetime.combine(self.plan.start_date, time(10, 0))
+        svc.sync_plan_stages(self.sup(), now=now)
+        occurrence = TestTaskOccurrence.query.filter_by(
+            test_task_id=task.id).one()
+        original = db.session.get(MissionStage, occurrence.mission_stage_id)
+        occurrence.status = 'blocked'
+        occurrence.recommended_action = 'manager_review'
+        occurrence.next_action = 'manager_review'
+        occurrence.next_check_at = now
+        original.state = 'blocked'
+        db.session.commit()
+
+        self.assertEqual(svc.advance_occurrence_actions(
+            self.sup(), now=now), [self.main_claw.id])
+        db.session.commit()
+        control = AgentTask.query.filter_by(
+            task_type='plan_control_action', claw_id=self.main_claw.id).one()
+        self.assertEqual(occurrence.next_action, 'await_manager_review')
+        truth = svc.stage_truth_snapshot(self.sup())
+        self.assertEqual(truth['pending_control_actions'][0][
+            'action_kind'], 'manager_review')
+        claimed = claim_pending_tasks(self.main_claw.id, now=now)[0]
+        complete_task(claimed, {
+            'claim_token': claimed.claim_token,
+            'attempt_no': claimed.attempt_no,
+            'fencing_token': claimed.fencing_token,
+            'status': 'completed',
+            'result': {
+                'decision': 'publish_partial_closeout',
+                'evidence': [{'ref': 'report://partial'}],
+                'summary': '已复核，发布局部结论',
+            },
+        }, now=now + timedelta(minutes=1))
+        db.session.commit()
+        self.assertEqual(occurrence.status, 'analysis_incomplete')
+        self.assertEqual(occurrence.next_action, 'none')
+        self.assertEqual(occurrence.action_metadata_json[
+            'manager_review_receipt']['agent_task_id'], control.task_id)
+        self.assertEqual(PlanSupervisorEvent.query.filter_by(
+            kind='manager_review_decided').count(), 1)
+
+    def test_occurrence_keeps_flow_binding_after_template_changes(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='固定 Flow 每日任务', status='blocked',
+            assignee_claw_id=self.other_claw.id, task_type='automation',
+            start_date=self.plan.start_date, end_date=self.plan.end_date,
+            schedule_enabled=True, recurrence_type='daily',
+            not_before_time='00:00', due_time='23:59',
+            auto_dispatch=True, execution_role='member_work',
+            execution_mode='workflow',
+            workflow_definition_id=self.flow_a.id,
+            workflow_start_vars_json={'frozen': 'yes'})
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'frozen-flow-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        now = datetime.combine(self.plan.start_date, time(10, 0))
+        svc.sync_plan_stages(self.sup(), now=now)
+        occurrence = TestTaskOccurrence.query.filter_by(
+            test_task_id=task.id).one()
+        task.execution_mode = 'ordinary_agent_task'
+        task.workflow_definition_id = None
+        task.workflow_start_vars_json = {}
+        db.session.commit()
+
+        self.assertEqual(svc.promote_and_dispatch_due_occurrences(
+            self.sup(), now=now), [self.other_claw.id])
+        db.session.commit()
+        self.assertEqual(occurrence.execution_mode, 'workflow')
+        self.assertEqual(occurrence.workflow_definition_id, self.flow_a.id)
+        self.assertEqual(occurrence.workflow_start_vars_json,
+                         {'frozen': 'yes'})
+        self.assertIsNotNone(occurrence.workflow_run_id)
+        self.assertEqual(WorkflowRun.query.count(), 1)
 
     def test_admin_resume_atomically_dispatches_due_agent_task_and_one_flow(self):
         team = self.scoped_team()

@@ -5583,11 +5583,20 @@ class TestTask(db.Model):
     execution_role = db.Column(
         db.String(32), nullable=False, default='member_work',
         comment='member_work/manager_work')
+    execution_mode = db.Column(
+        db.String(32), nullable=False, default='ordinary_agent_task',
+        comment='ordinary_agent_task/workflow')
     workflow_definition_id = db.Column(
         db.Integer, db.ForeignKey('workflow_definitions.id'),
         comment='周期实例到点后应创建的固定 Workflow；为空则创建普通 AgentTask')
     workflow_start_vars_json = db.Column(
         db.JSON, comment='周期 Workflow 的受控启动变量模板')
+    allowed_fallback_claw_ids_json = db.Column(
+        db.JSON, comment='能力等价重派允许的 Claw 白名单；空数组表示团队内等价成员')
+    required_capabilities_json = db.Column(
+        db.JSON, comment='执行者必须同时具备的团队 specialty/capability')
+    required_resources_json = db.Column(
+        db.JSON, comment='不可降级的平台、设备、账号及资源绑定')
 
     # 优先级
     priority = db.Column(db.Enum('P0', 'P1', 'P2', 'P3'), default='P2', comment='优先级')
@@ -5681,8 +5690,15 @@ class TestTask(db.Model):
             'due_time': self.due_time or '',
             'auto_dispatch': bool(self.auto_dispatch),
             'execution_role': self.execution_role or 'member_work',
+            'execution_mode': (
+                'workflow' if self.workflow_definition_id else
+                self.execution_mode or 'ordinary_agent_task'),
             'workflow_definition_id': self.workflow_definition_id,
             'workflow_start_vars': self.workflow_start_vars_json or {},
+            'allowed_fallback_claw_ids': (
+                self.allowed_fallback_claw_ids_json or []),
+            'required_capabilities': self.required_capabilities_json or [],
+            'required_resources': self.required_resources_json or {},
             'priority': self.priority,
             'library_id': self.library_id,
             'library_name': self.library.name if self.library else None,
@@ -5711,11 +5727,26 @@ class TestTask(db.Model):
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
         if self.schedule_enabled:
-            occurrence = self.occurrences.order_by(
+            occurrence = self.occurrences.filter_by(
+                occurrence_date=_now().date()).order_by(
+                TestTaskOccurrence.id.desc()).first()
+            latest = self.occurrences.order_by(
                 TestTaskOccurrence.occurrence_date.desc(),
                 TestTaskOccurrence.id.desc()).first()
             data['current_occurrence'] = (
                 occurrence.to_dict() if occurrence else None)
+            data['latest_historical_occurrence'] = (
+                latest.to_dict()
+                if latest and (not occurrence or latest.id != occurrence.id)
+                else None)
+            data['template_status'] = self.status
+            data['template_last_status'] = self.status
+            data['historical_status'] = (
+                latest.status if latest else self.status)
+            data['execution_truth'] = (
+                'current_occurrence' if occurrence else 'template')
+            if occurrence:
+                data['status'] = occurrence.status
         if with_cases:
             data['task_cases'] = [tc.to_dict() for tc in self.task_cases]
         return data
@@ -5750,6 +5781,14 @@ class TestTaskOccurrence(db.Model):
         db.Integer, db.ForeignKey('agent_tasks.id'), index=True)
     workflow_run_id = db.Column(
         db.Integer, db.ForeignKey('workflow_runs.id'), index=True)
+    execution_mode = db.Column(
+        db.String(32), nullable=False, default='ordinary_agent_task')
+    workflow_definition_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_definitions.id'))
+    workflow_start_vars_json = db.Column(db.JSON)
+    allowed_fallback_claw_ids_json = db.Column(db.JSON)
+    required_capabilities_json = db.Column(db.JSON)
+    required_resources_json = db.Column(db.JSON)
     attempt_count = db.Column(db.Integer, nullable=False, default=0)
     action_attempt_count = db.Column(db.Integer, nullable=False, default=0)
     recommended_action = db.Column(db.String(64), default='')
@@ -5811,6 +5850,13 @@ class TestTaskOccurrence(db.Model):
             'mission_stage_id': self.mission_stage_id,
             'agent_task_id': self.agent_task_id,
             'workflow_run_id': self.workflow_run_id,
+            'execution_mode': self.execution_mode or 'ordinary_agent_task',
+            'workflow_definition_id': self.workflow_definition_id,
+            'workflow_start_vars': self.workflow_start_vars_json or {},
+            'allowed_fallback_claw_ids': (
+                self.allowed_fallback_claw_ids_json or []),
+            'required_capabilities': self.required_capabilities_json or [],
+            'required_resources': self.required_resources_json or {},
             'attempt_count': int(self.attempt_count or 0),
             'action_attempt_count': int(self.action_attempt_count or 0),
             'recommended_action': self.recommended_action or '',
