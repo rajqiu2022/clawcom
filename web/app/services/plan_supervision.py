@@ -995,6 +995,7 @@ def ensure_team_mission(sup):
             max_child_runs=int((team.policy_json or {}).get('max_child_runs') or 20),
             child_run_count=0, max_retries_per_flow=3,
             allow_external_notification=False, allow_destructive_actions=False,
+            allow_external_mutations=False,
             context_json={
                 'plan_supervision_id': plan.id,
                 'test_plan_id': plan.id,
@@ -1555,6 +1556,28 @@ def _create_control_agent_task(sup, stage, action_kind, instruction,
     task_id = 'plan_%s_control_%s_%s' % (
         sup.plan_id, stage.id,
         hashlib.sha256(seed.encode()).hexdigest()[:16])
+    # Control tasks are advisory/read-only unless a future, separately
+    # authenticated Owner approval binds an exact mutation manifest. A broad
+    # phrase such as "environment repair" must never become repository,
+    # deployment, or shared-environment write authority.
+    allowed_operations = {
+        'manager_review': ['inspect_hub_state', 'submit_decision'],
+        'environment_repair': [
+            'inspect_environment', 'diagnose', 'propose_patch'],
+        'evidence_review': ['inspect_evidence', 'propose_findings'],
+        'workflow_execution_reconciliation': [
+            'inspect_execution', 'submit_reconciliation_receipt'],
+    }.get(action_kind, ['inspect_hub_state'])
+    side_effect_policy = {
+        'mode': 'read_only',
+        'external_mutations_allowed': False,
+        'owner_approval_required': True,
+        'git_commit_allowed': False,
+        'git_push_allowed': False,
+        'deployment_allowed': False,
+        'shared_api_mutation_allowed': False,
+        'denial_code': 'EXTERNAL_MUTATION_APPROVAL_REQUIRED',
+    }
     payload = {
         'contract': _PLAN_CONTROL_TASK_CONTRACT,
         'test_plan_id': sup.plan_id,
@@ -1565,6 +1588,10 @@ def _create_control_agent_task(sup, stage, action_kind, instruction,
         'source_occurrence_id': source_occurrence_id,
         'input_snapshot': stage.input_snapshot_json or {},
         'instruction': instruction,
+        'allowed_operations': allowed_operations,
+        'allowed_paths': [],
+        'allowed_repositories': [],
+        'side_effect_policy': side_effect_policy,
         'acceptance': {
             'result_contract': 'plan_control_action',
             'evidence_required': True,
@@ -1588,6 +1615,7 @@ def _create_control_agent_task(sup, stage, action_kind, instruction,
         'agent_task_id': task.task_id,
         'executor_claw_id': task.claw_id,
         'source_occurrence_id': source_occurrence_id,
+        'side_effect_policy': side_effect_policy,
     })
     return task
 
@@ -2157,28 +2185,30 @@ def _record_control_terminal(agent_task, link, result, status, now):
     stage.version = int(stage.version or 1) + 1
     wake_id = manager_wake_id
     if completed and source and link['action_kind'] == 'environment_repair':
-        task = db.session.get(TestTask, source.test_task_id)
         original = db.session.get(MissionStage, source.mission_stage_id)
-        if task and original and source.due_at and source.due_at > now:
-            source.status = 'recovery_ready'
-            source.condition_state = 'recovery_ready'
-            source.resume_fencing_token = int(
-                source.resume_fencing_token or 0) + 1
-            source.owner_gate = False
-            source.next_action = 'auto_resume'
-            source.recommended_action = 'resume_from_checkpoint'
-            original.state = 'ready'
-            original.last_reason_code = 'environment_repair_completed'
+        if original:
+            # The control task is only a read-only diagnosis/proposal. It is
+            # never evidence that a shared environment was mutated, so it may
+            # not automatically resume the source occurrence.
+            metadata = dict(source.action_metadata_json or {})
+            metadata['environment_repair_proposal'] = {
+                'agent_task_id': agent_task.task_id,
+                'executor_claw_id': agent_task.claw_id,
+                'recorded_at': now.isoformat() + '+08:00',
+                'result_digest': digest(result),
+                'approval_required': True,
+                'denial_code': 'EXTERNAL_MUTATION_APPROVAL_REQUIRED',
+            }
+            source.action_metadata_json = metadata
+            source.status = 'blocked'
+            source.condition_state = 'environment_repair_proposed'
+            source.owner_gate = True
+            source.next_action = 'owner_action_required'
+            source.next_check_at = None
+            source.recommended_action = 'owner_action_required'
+            original.state = 'blocked'
+            original.last_reason_code = 'environment_repair_approval_required'
             original.version = int(original.version or 1) + 1
-            resumed = _create_plan_agent_task(
-                sup, task, original,
-                'repair-resume:%s:%s' % (
-                    source.id, source.resume_fencing_token),
-                '环境修复已完成，从 checkpoint 继续剩余步骤。',
-                2, occurrence=source)
-            source.condition_state = 'resuming'
-            source.next_action = 'await_resume_claim'
-            wake_id = resumed.claw_id
     add_event(sup.plan_id, 'control_action_terminal', [
         'control-action-terminal', agent_task.task_id,
         int(agent_task.attempt_no or 0), status,
@@ -2847,8 +2877,6 @@ def advance_occurrence_actions(sup, now=None):
             }, now)
             continue
         if action == 'manager_review':
-            occurrence.action_attempt_count = int(
-                occurrence.action_attempt_count or 0) + 1
             key = 'occurrence_%s_manager_review' % occurrence.id
             control = MissionStage.query.filter_by(
                 mission_id=sup.mission_id, stage_key=key,
@@ -2888,6 +2916,16 @@ def advance_occurrence_actions(sup, now=None):
                 occurrence.next_check_at = None
                 wake_ids.append(active.claw_id)
                 continue
+            if (active and active.status == 'completed'
+                    and (occurrence.action_metadata_json or {}).get(
+                        'manager_review_receipt')):
+                # A completed, fenced manager decision is final for this
+                # occurrence. Never manufacture another review merely because
+                # a stale supervisor snapshot still says manager_review.
+                occurrence.next_check_at = None
+                continue
+            occurrence.action_attempt_count = int(
+                occurrence.action_attempt_count or 0) + 1
             dispatched = _create_control_agent_task(
                 sup, control, 'manager_review',
                 '复核当前执行实例，并从 input_snapshot.allowed_decisions '
@@ -2916,12 +2954,9 @@ def advance_occurrence_actions(sup, now=None):
         if action not in ('create_environment_repair',
                            'create_evidence_review'):
             continue
-        occurrence.action_attempt_count = int(
-            occurrence.action_attempt_count or 0) + 1
         kind = ('environment_repair' if action == 'create_environment_repair'
                 else 'evidence_review')
-        key = 'occurrence_%s_%s_%s' % (
-            occurrence.id, kind, occurrence.action_attempt_count)
+        key = 'occurrence_%s_%s' % (occurrence.id, kind)
         control = MissionStage.query.filter_by(
             mission_id=sup.mission_id, stage_key=key,
             stage_version=1).first()
@@ -2939,15 +2974,31 @@ def advance_occurrence_actions(sup, now=None):
                     'test_task_id': task.id,
                     'checkpoint': occurrence.checkpoint_json or {},
                     'failure': occurrence.action_metadata_json or {},
-                    'rule': ('repair_then_resume_same_occurrence'
+                    'rule': ('diagnose_then_require_owner_approval'
                              if kind == 'environment_repair'
                              else 'supplement_evidence_without_rerun'),
                 },
                 evidence_refs_json=[])
             db.session.add(control)
             db.session.flush()
+        active = _plan_control_tasks(sup).get(control.id)
+        if active and active.status in (
+                'pending', 'running', 'waiting_condition'):
+            occurrence.next_action = 'await_%s' % kind
+            occurrence.next_check_at = None
+            wake_ids.append(active.claw_id)
+            continue
+        if active and active.status == 'completed':
+            # Completed repair/evidence proposals are immutable for the source
+            # occurrence. An Owner must approve a new exact action instead of
+            # the supervisor replaying the same generic control task.
+            occurrence.next_check_at = None
+            continue
+        occurrence.action_attempt_count = int(
+            occurrence.action_attempt_count or 0) + 1
         instruction = (
-            '执行受控环境修复并返回结构化证据；不得扩大到任意命令。'
+            '只读诊断环境问题并返回候选 diff、目标仓库/分支、影响范围和回滚计划；'
+            '禁止修改文件、commit、push、发布、部署或调用共享写接口。'
             if kind == 'environment_repair' else
             '仅补齐或复核缺失证据，不重跑已通过范围。')
         dispatched = _create_control_agent_task(
@@ -2984,7 +3035,9 @@ def dispatch_ready_control_stages(sup, now=None):
                 '核对执行已停止、副作用已对账，并按 input_snapshot.resolve_api '
                 '提交 execution_stopped、side_effects_reconciled、receipt_ref；'
                 '成功后再调用 recover_api。'),
-            'environment_repair': '执行受控环境修复并返回结构化证据。',
+            'environment_repair': (
+                '只读诊断环境问题并返回候选 diff、目标仓库/分支、影响范围和回滚计划；'
+                '禁止修改文件、commit、push、发布、部署或调用共享写接口。'),
             'evidence_review': '补证或复核，不重跑已通过范围。',
             'manager_review': (
                 '复核来源 occurrence，并从 allowed_decisions 中返回唯一 '

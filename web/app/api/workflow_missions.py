@@ -325,7 +325,9 @@ def create_workflow_mission():
         return _error('MISSION_POLICY_INVALID', str(exc))
     if team:
         team_flows = set(team.policy_json['allowed_definition_ids'])
-        if data.get('allow_destructive_actions') is True or data.get('allow_external_notification') is True:
+        if (data.get('allow_destructive_actions') is True
+                or data.get('allow_external_notification') is True
+                or data.get('allow_external_mutations') is True):
             raise TeamError('TEAM_AUTHORITY_NOT_GRANTED', '首期团队不允许自行启用破坏性操作或外部通知', 403)
         if allowed and not set(allowed) <= team_flows:
             raise TeamError('TEAM_FLOW_NOT_ALLOWED', 'Mission Flow 超出团队授权', 403)
@@ -335,6 +337,13 @@ def create_workflow_mission():
         if not set(allowed_workers) <= team_workers:
             raise TeamError('TEAM_WORKER_NOT_ALLOWED', 'Mission Worker 不属于团队', 403)
         max_child_runs = min(max_child_runs, team.policy_json['max_child_runs'])
+    allow_external_mutations = data.get('allow_external_mutations') is True
+    if allow_external_mutations and (
+            actor['type'] != 'user'
+            or actor['user'].role not in ('super_admin', 'admin')):
+        return _error(
+            'MISSION_EXTERNAL_MUTATION_APPROVAL_REQUIRED',
+            '外部写操作只能由登录管理员在 Mission 创建时显式批准', 403)
     if main_claw_id in allowed_workers:
         allowed_workers.remove(main_claw_id)
     if allowed_workers:
@@ -431,6 +440,7 @@ def create_workflow_mission():
             data.get('allow_external_notification') is True),
         allow_destructive_actions=(
             data.get('allow_destructive_actions') is True),
+        allow_external_mutations=allow_external_mutations,
         context_json=mission_context,
         created_by_type=actor['type'],
         created_by_id=actor['id'],
@@ -659,6 +669,8 @@ def create_mission_dispatch_record(
             mission.allow_external_notification),
         'allow_destructive_actions': bool(
             mission.allow_destructive_actions),
+        'allow_external_mutations': bool(
+            mission.allow_external_mutations),
     }
     if team:
         context['mission'].update({

@@ -170,6 +170,7 @@ class WorkflowMissionsApiTest(unittest.TestCase):
 
     def test_mission_defaults_to_all_active_project_flows(self):
         mission = self._create_mission()
+        self.assertFalse(mission['allow_external_mutations'])
         with self.client.session_transaction() as session:
             session.clear()
 
@@ -182,6 +183,33 @@ class WorkflowMissionsApiTest(unittest.TestCase):
         self.assertEqual(ids, {self.flow_a.id, self.flow_b.id})
         self.assertNotIn(self.foreign_flow.id, ids)
         self.assertEqual(response.get_json()['control_mode'], 'agent_autonomous')
+
+    def test_external_mutation_authority_requires_logged_in_admin(self):
+        approved = self._create_mission(
+            mission_key='admin-approved-external-mutations',
+            allow_external_mutations=True,
+        )
+        self.assertTrue(approved['allow_external_mutations'])
+        self.assertTrue(db.session.get(
+            WorkflowMission, approved['id']).allow_external_mutations)
+
+        with self.client.session_transaction() as session:
+            session.clear()
+        denied = self.client.post(
+            '/api/v1/workflow-missions',
+            headers=self._headers(),
+            json={
+                'project_id': self.project.id,
+                'main_claw_id': self.main_claw.id,
+                'objective': 'Agent不得自行扩大外部写权限',
+                'allow_external_mutations': True,
+            },
+        )
+        self.assertEqual(denied.status_code, 403, denied.get_data(as_text=True))
+        self.assertEqual(
+            denied.get_json()['code'],
+            'MISSION_EXTERNAL_MUTATION_APPROVAL_REQUIRED',
+        )
 
     def test_main_agent_dispatches_idempotently_without_executor_override(self):
         mission = self._create_mission()

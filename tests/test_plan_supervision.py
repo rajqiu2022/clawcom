@@ -992,6 +992,86 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(PlanSupervisorEvent.query.filter_by(
             kind='manager_review_decided').count(), 1)
 
+    def test_environment_repair_is_read_only_idempotent_and_owner_gated(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='共享环境异常', status='assigned',
+            assignee_claw_id=self.other_claw.id, task_type='automation',
+            start_date=self.plan.start_date, end_date=self.plan.end_date,
+            schedule_enabled=True, recurrence_type='daily',
+            not_before_time='00:00', due_time='23:59',
+            auto_dispatch=False, execution_role='member_work')
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'environment-repair-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        now = datetime.combine(self.plan.start_date, time(10, 0))
+        svc.sync_plan_stages(self.sup(), now=now)
+        occurrence = TestTaskOccurrence.query.filter_by(
+            test_task_id=task.id).one()
+        original = db.session.get(MissionStage, occurrence.mission_stage_id)
+        occurrence.status = 'blocked'
+        occurrence.recommended_action = 'create_environment_repair'
+        occurrence.next_action = 'create_environment_repair'
+        occurrence.next_check_at = now
+        original.state = 'blocked'
+        db.session.commit()
+
+        self.assertEqual(
+            svc.advance_occurrence_actions(self.sup(), now=now),
+            [self.other_claw.id],
+        )
+        db.session.commit()
+        control = AgentTask.query.filter_by(
+            task_type='plan_control_action').one()
+        payload = json.loads(control.payload)
+        self.assertEqual(payload['allowed_operations'], [
+            'inspect_environment', 'diagnose', 'propose_patch'])
+        self.assertEqual(payload['allowed_paths'], [])
+        self.assertEqual(payload['allowed_repositories'], [])
+        self.assertEqual(payload['side_effect_policy']['mode'], 'read_only')
+        self.assertFalse(payload['side_effect_policy'][
+            'external_mutations_allowed'])
+        self.assertFalse(payload['side_effect_policy']['git_push_allowed'])
+
+        # A stale supervisor snapshot must not create another task or consume
+        # another action attempt while the first task is active.
+        attempts = occurrence.action_attempt_count
+        occurrence.next_action = 'create_environment_repair'
+        occurrence.next_check_at = now
+        db.session.commit()
+        svc.advance_occurrence_actions(self.sup(), now=now)
+        db.session.commit()
+        self.assertEqual(AgentTask.query.filter_by(
+            task_type='plan_control_action').count(), 1)
+        self.assertEqual(occurrence.action_attempt_count, attempts)
+
+        claimed = claim_pending_tasks(self.other_claw.id, now=now)[0]
+        complete_task(claimed, {
+            'claim_token': claimed.claim_token,
+            'attempt_no': claimed.attempt_no,
+            'fencing_token': claimed.fencing_token,
+            'status': 'completed',
+            'result': {
+                'status': 'passed',
+                'summary': '只读诊断完成，等待Owner批准候选diff',
+                'evidence': [{'ref': 'proposal://world-124'}],
+            },
+        }, now=now + timedelta(minutes=1))
+        db.session.commit()
+        self.assertTrue(occurrence.owner_gate)
+        self.assertEqual(
+            occurrence.condition_state, 'environment_repair_proposed')
+        self.assertEqual(occurrence.next_action, 'owner_action_required')
+        self.assertEqual(original.state, 'blocked')
+        self.assertEqual(AgentTask.query.filter_by(
+            task_type='test_plan_agent_task').count(), 0)
+
     def test_occurrence_keeps_flow_binding_after_template_changes(self):
         team = self.scoped_team()
         db.session.add(AgentTeamMember(

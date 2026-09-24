@@ -1582,6 +1582,11 @@ class WorkflowMission(db.Model):
         db.Boolean, nullable=False, default=False)
     allow_destructive_actions = db.Column(
         db.Boolean, nullable=False, default=False)
+    # External mutations are a separate authority boundary from destructive
+    # local actions. A Mission may inspect/propose a remote change without
+    # being allowed to commit, push, deploy, publish, or mutate a shared API.
+    allow_external_mutations = db.Column(
+        db.Boolean, nullable=False, default=False)
     context_json = db.Column(db.JSON)
     created_by_type = db.Column(db.String(16), nullable=False)
     created_by_id = db.Column(db.Integer, nullable=False)
@@ -1629,6 +1634,8 @@ class WorkflowMission(db.Model):
             'allow_external_notification': bool(
                 self.allow_external_notification),
             'allow_destructive_actions': bool(self.allow_destructive_actions),
+            'allow_external_mutations': bool(
+                self.allow_external_mutations),
             'context': self.context_json or {},
             'created_by_type': self.created_by_type,
             'created_by_id': self.created_by_id,
