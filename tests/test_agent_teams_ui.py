@@ -110,10 +110,14 @@ class AgentTeamsUiTest(unittest.TestCase):
         for marker in ('共享知识库', '共享 Skills', 'at-knowledge-panel', 'at-skills-panel'):
             self.assertIn(marker, self.js)
         for marker in ('/shared-resources', 'pull_url', '复制拉取地址',
-                       'Agent 按需拉取最新版本', 'data-unlink-resource'):
+                       'Agent 按需拉取最新版本', 'data-unlink-resource',
+                       'at-resource-id', '#${esc(item.id)}'):
             self.assertIn(marker, resources)
+        css = (ROOT / 'web/static/css/agent_teams.css').read_text(encoding='utf-8')
+        self.assertIn('.at-resource-id', css)
         self.assertIn('id="at-resource-dialog"', self.html)
         self.assertIn('agent_team_resources.js', self.html)
+        self.assertIn('20260924resourceids', self.html)
         self.assertNotIn('template_content', resources)
 
     def test_fixed_team_chat_is_mention_driven_and_does_not_dispatch_work(self):

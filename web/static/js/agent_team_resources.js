@@ -13,7 +13,7 @@ const AgentTeamResources = (() => {
     function formatTime(value) { return value ? String(value).replace('T', ' ').slice(0, 16) : '—'; }
     function card(item, type) {
         const revision = type === 'knowledge' && item.revision ? `Revision ${item.revision}` : (item.review_status || item.category || '');
-        return `<article class="at-resource-card"><header><span class="at-resource-kind">${type === 'knowledge' ? 'KNOWLEDGE' : 'SKILL'}</span><span>${esc(revision)}</span></header>
+        return `<article class="at-resource-card"><header><span class="at-resource-kind">${type === 'knowledge' ? 'KNOWLEDGE' : 'SKILL'} <b class="at-resource-id">#${esc(item.id)}</b></span><span>${esc(revision)}</span></header>
             <h4><a href="${esc(item.web_url)}">${esc(item.title)} ↗</a></h4>
             <p>${esc(type === 'knowledge' ? (item.module_name || item.category || item.entry_type) : `${item.name} · ${item.category || item.scope || ''}`)}</p>
             <footer><span>更新 ${esc(formatTime(item.updated_at))}</span><div><button type="button" class="btn btn-ghost btn-sm" data-copy-resource="${esc(item.pull_url)}">复制拉取地址</button>${manifest.can_manage ? `<button type="button" class="btn btn-ghost btn-sm" data-unlink-resource="${type}" data-resource-id="${item.id}">移出团队</button>` : ''}</div></footer></article>`;
