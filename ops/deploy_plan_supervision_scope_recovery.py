@@ -46,7 +46,7 @@ def _scope_recovery_candidate(path, live):
         # replacing it; any unrelated hotfix still fails closed in the generic
         # three-way merger below.
         previous = subprocess.check_output(
-            ['git', 'show', '34df47f:web/' + path],
+            ['git', 'show', 'e2b6a96:web/' + path],
             cwd=str(release.ROOT)).replace(b'\r\n', b'\n')
         normalized = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
         if normalized == previous:
@@ -142,6 +142,16 @@ with app.app_context():
                        t.required_capabilities_json,
                    o.required_resources_json = t.required_resources_json
              WHERE o.status IN ('scheduled', 'ready')
+        """))
+        migrated += int(result.rowcount or 0)
+        result = conn.execute(text("""
+            UPDATE test_task_occurrences o
+            JOIN workflow_runs r ON r.id = o.workflow_run_id
+               SET o.execution_mode = 'workflow',
+                   o.workflow_definition_id = r.definition_id
+             WHERE o.workflow_run_id IS NOT NULL
+               AND (o.execution_mode <> 'workflow'
+                    OR o.workflow_definition_id IS NULL)
         """))
         migrated += int(result.rowcount or 0)
     inspector = inspect(db.engine)
