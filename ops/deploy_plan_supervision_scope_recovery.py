@@ -34,6 +34,7 @@ def _scope_recovery_candidate(path, live):
         'app/services/plan_supervision.py',
         'static/css/agent_teams.css',
         'static/css/agent_team_plans.css',
+        'static/js/agent_team_chat.js',
         'static/js/agent_team_plans.js',
     }
     if path in owned_paths and live is not None:
@@ -42,18 +43,10 @@ def _scope_recovery_candidate(path, live):
         # replacing it; any unrelated hotfix still fails closed in the generic
         # three-way merger below.
         previous = subprocess.check_output(
-            ['git', 'show', '1a95a5c:web/' + path],
+            ['git', 'show', 'a788ffb:web/' + path],
             cwd=str(release.ROOT)).replace(b'\r\n', b'\n')
         normalized = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
         if normalized == previous:
-            return (release.ROOT / 'web' / path).read_bytes().replace(
-                b'\r\n', b'\n')
-    if path == 'static/js/agent_team_chat.js' and live is not None:
-        normalized = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
-        # Production predates the committed clipboard-image client changes.
-        # Accept only that exact known bundle before replacing it with the
-        # current chat client; an unknown hotfix must still fail closed.
-        if release.sha(normalized) == 'fef4194d87359eb5538241d4df136849611ea6f1a3a9caba58ac4248821c544e':
             return (release.ROOT / 'web' / path).read_bytes().replace(
                 b'\r\n', b'\n')
     if path != 'templates/agent_teams.html' or live is None:
@@ -65,7 +58,7 @@ def _scope_recovery_candidate(path, live):
         (rb"(filename='css/agent_team_plans\.css'\) }}\?v=)[^\"<]+",
          rb'\g<1>20260924teamtaskrefresh'),
         (rb"(filename='js/agent_team_chat\.js'\) }}\?v=)[^\"<]+",
-         rb'\g<1>20260924sidebarmentions'),
+         rb'\g<1>20260924sidebarmentionfix'),
         (rb"(filename='css/agent_teams\.css'\) }}\?v=)[^\"<]+",
          rb'\g<1>20260924sidebarmentions'),
     )
@@ -144,7 +137,7 @@ with app.app_context():
     response = client.get('/agent-teams')
     assert response.status_code == 200
     assert '20260924teamtaskrefresh' in response.get_data(as_text=True)
-    assert '20260924sidebarmentions' in response.get_data(as_text=True)
+    assert '20260924sidebarmentionfix' in response.get_data(as_text=True)
     db.session.remove()
     if os.getcwd() == '/opt/openclaw-web':
         cookie = app.session_interface.get_signing_serializer(app).dumps(
@@ -164,7 +157,7 @@ with app.app_context():
         else:
             raise RuntimeError('HTTP readiness did not recover')
         assert '20260924teamtaskrefresh' in response.text
-        assert '20260924sidebarmentions' in response.text
+        assert '20260924sidebarmentionfix' in response.text
     assert AgentTask.query.count() == task_count
     assert WorkflowRun.query.count() == run_count
     print('TEAM_RELEASE ' + json.dumps({
