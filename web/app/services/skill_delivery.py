@@ -220,6 +220,17 @@ def _skill_unavailable_reason(skill, claw) -> str | None:
     return None
 
 
+def skill_assignment_unavailable_reason(skill, claw) -> str | None:
+    """Return why a Skill must not be assigned to this Claw.
+
+    Assignment writers use the same predicate as manifest generation so Hub
+    cannot create an enabled relation that the authenticated Worker is then
+    forbidden to download.
+    """
+
+    return _skill_unavailable_reason(skill, claw)
+
+
 def _source_contract(
     claw,
     ref_type=None,

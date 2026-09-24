@@ -183,11 +183,16 @@ def _resolve_items(pack):
 
 def _apply_pack_to_claw(pack, claw):
     """将一个标准包同步到一个 claw，返回新安装的数量"""
+    from app.services.skill_delivery import (
+        skill_assignment_unavailable_reason,
+    )
+
     count = 0
     for item_id in pack._get_item_ids():
         if pack.pack_type == 'skill':
             skill = Skill.query.get(item_id)
-            if not skill or skill.name == 'registration-skill':
+            if (not skill or skill.name == 'registration-skill'
+                    or skill_assignment_unavailable_reason(skill, claw)):
                 continue
             existing = OpenClawSkill.query.filter_by(
                 openclaw_id=claw.id, skill_id=item_id

@@ -572,9 +572,13 @@ def create_openclaw():
 
     # 2) 兼容旧逻辑：is_standard=True 但不在任何标准包内的，也自动安装
     try:
+        from app.services.skill_delivery import (
+            skill_assignment_unavailable_reason,
+        )
         standard_skills = Skill.query.filter_by(is_standard=True).all()
         for skill in standard_skills:
-            if skill.name == 'registration-skill':
+            if (skill.name == 'registration-skill'
+                    or skill_assignment_unavailable_reason(skill, claw)):
                 continue
             existing = OpenClawSkill.query.filter_by(
                 openclaw_id=claw.id, skill_id=skill.id

@@ -67,12 +67,12 @@ class GameTestAgentTeamSeedTest(unittest.TestCase):
         first = seed_game_test_agent_team()
         second = seed_game_test_agent_team()
         self.assertEqual(
-            {'skills': 4, 'profiles': 3, 'posts': 3}, first)
+            {'skills': 4, 'profiles': 4, 'posts': 4}, first)
         self.assertEqual(
             {'skills': 0, 'profiles': 0, 'posts': 0}, second)
         self.assertEqual(4, Skill.query.count())
-        self.assertEqual(3, AgentProfile.query.count())
-        self.assertEqual(3, AgentPost.query.count())
+        self.assertEqual(4, AgentProfile.query.count())
+        self.assertEqual(4, AgentPost.query.count())
         self.assertEqual(3, SkillFile.query.count())
         requirement = AgentProfile.query.filter_by(
             profile_key='mission_requirement_analyst').one()
@@ -81,6 +81,10 @@ class GameTestAgentTeamSeedTest(unittest.TestCase):
             requirement.required_skills_json)
         self.assertEqual(
             'requirement_analysis', requirement.contract_json['artifact_type'])
+        assistant = AgentProfile.query.filter_by(
+            profile_key='project_assistant').one()
+        self.assertEqual('project_assistant', assistant.contract_json['role_key'])
+        self.assertIn('project-manager', assistant.required_skills_json)
 
     def test_seed_preserves_same_version_profile_and_human_edited_skill(self):
         seed_game_test_agent_team()

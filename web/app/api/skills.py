@@ -1192,6 +1192,17 @@ def install_skill(claw_id):
     if skill.is_deleted:
         return jsonify({'error': '此 Skill 已删除，无法安装'}), 403
 
+    from app.services.skill_delivery import (
+        skill_assignment_unavailable_reason,
+    )
+    unavailable_reason = skill_assignment_unavailable_reason(skill, claw)
+    if unavailable_reason:
+        return jsonify({
+            'error': '此 Skill 对目标 Agent 不可用，无法安装',
+            'code': 'SKILL_NOT_AVAILABLE',
+            'reason': unavailable_reason,
+        }), 403
+
     # ID 级下架用于废弃旧方案：不进公开列表，也不可再分配。
     if int(skill.id) in OFF_SHELF_SKILL_IDS:
         return jsonify({'error': '此 Skill 已下架，无法安装；请使用新版替代 Skill'}), 403
@@ -1341,6 +1352,21 @@ def batch_assign_skill(skill_id):
             claw = OpenClawInstance.query.get(claw_id)
             if not claw:
                 results.append({'claw_id': claw_id, 'success': False, 'message': f'OpenClaw #{claw_id} 不存在'})
+                continue
+
+            from app.services.skill_delivery import (
+                skill_assignment_unavailable_reason,
+            )
+            unavailable_reason = skill_assignment_unavailable_reason(
+                skill, claw)
+            if unavailable_reason:
+                results.append({
+                    'claw_id': claw_id,
+                    'success': False,
+                    'message': 'Skill 对目标 Agent 不可用',
+                    'code': 'SKILL_NOT_AVAILABLE',
+                    'reason': unavailable_reason,
+                })
                 continue
 
             existing = OpenClawSkill.query.filter_by(
