@@ -18,8 +18,8 @@ const AgentTeamChat = (() => {
         $('at-chat-root').innerHTML = `<section class="at-chat-workspace">
             <header class="at-chat-head"><div><span class="at-eyebrow">TEAM CHANNEL</span><h3>固定团队聊天室</h3><p>同一团队始终使用这个房间。@ 才会唤醒 Agent；普通消息只沉淀上下文。</p></div><div class="at-chat-signal"><i></i><span id="at-chat-room-state">正在连接</span></div></header>
             <div class="at-chat-layout"><main class="at-chat-main"><div id="at-chat-stream" class="at-chat-stream" tabindex="0" aria-label="团队聊天室消息"><p class="at-empty">正在读取团队聊天室…</p></div>
-            <form id="at-chat-form" class="at-chat-compose"><div id="at-chat-mentions" class="at-chat-mentions"></div><div id="at-chat-image-preview" class="at-chat-image-preview" hidden></div><textarea id="at-chat-input" rows="3" maxlength="20000" placeholder="输入讨论内容；可直接 Ctrl+V 粘贴图片，需要 Agent 回复时先选择 @成员"></textarea><footer><span id="at-chat-compose-note">Enter 发送 · Shift+Enter 换行 · Ctrl+V 粘贴图片</span><div class="at-chat-actions"><input id="at-chat-image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden><button class="btn btn-secondary btn-sm" id="at-chat-image-button" type="button">图片</button><button class="btn btn-primary btn-sm" id="at-chat-send" type="submit">发送</button></div></footer></form></main>
-            <aside class="at-chat-side"><header><strong>在场成员</strong><span id="at-chat-member-count">—</span></header><div id="at-chat-members"></div><div class="at-chat-rule"><b>频道边界</b><span>讨论、问答和结论确认留在这里。</span><span>真正开工、重试、取消仍必须走 Stage / Run。</span></div></aside></div>
+            <form id="at-chat-form" class="at-chat-compose"><div id="at-chat-image-preview" class="at-chat-image-preview" hidden></div><textarea id="at-chat-input" rows="3" maxlength="20000" placeholder="输入讨论内容；可直接 Ctrl+V 粘贴图片，需要 Agent 回复时点击右侧成员的 @ 按钮"></textarea><footer><span id="at-chat-compose-note">未 @ Agent，本条仅记录 · Enter 发送 · Ctrl+V 粘贴图片</span><div class="at-chat-actions"><input id="at-chat-image-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden><button class="btn btn-secondary btn-sm" id="at-chat-image-button" type="button">图片</button><button class="btn btn-primary btn-sm" id="at-chat-send" type="submit">发送</button></div></footer></form></main>
+            <aside class="at-chat-side"><header><strong>在场成员</strong><div><button type="button" class="at-chat-mention-all" data-chat-mention="all" aria-pressed="false">@ 全部</button><span id="at-chat-member-count">—</span></div></header><div id="at-chat-members"></div><div class="at-chat-rule"><b>频道边界</b><span>讨论、问答和结论确认留在这里。</span><span>真正开工、重试、取消仍必须走 Stage / Run。</span></div></aside></div>
             <p id="at-chat-note" class="at-help" role="status"></p></section>
             <dialog id="at-chat-lightbox" class="at-chat-lightbox" aria-labelledby="at-chat-lightbox-caption">
                 <button type="button" class="at-chat-lightbox-close" data-chat-lightbox-close aria-label="关闭图片预览">×</button>
@@ -46,12 +46,13 @@ const AgentTeamChat = (() => {
             if (event.target === event.currentTarget || event.target.closest('[data-chat-lightbox-close]')) closeImagePreview();
         });
         $('at-chat-lightbox').addEventListener('close', clearImagePreview);
-        $('at-chat-mentions').addEventListener('click', event => {
+        $('at-chat-side').addEventListener('click', event => {
             const button = event.target.closest('[data-chat-mention]'); if (!button) return;
             const value = button.dataset.chatMention;
             if (value === 'all') { selected.clear(); selected.add('all'); }
             else { selected.delete('all'); selected.has(value) ? selected.delete(value) : selected.add(value); }
             renderMentionSelection();
+            $('at-chat-input').focus({preventScroll:true});
         });
     }
     function openImagePreview(url, label) {
@@ -122,8 +123,10 @@ const AgentTeamChat = (() => {
         return pendingImages.map(item => item.id);
     }
     function renderMentionSelection() {
-        $('at-chat-mentions')?.querySelectorAll('[data-chat-mention]').forEach(button => {
-            button.classList.toggle('selected', selected.has(button.dataset.chatMention));
+        $('at-chat-side')?.querySelectorAll('[data-chat-mention]').forEach(button => {
+            const active = selected.has(button.dataset.chatMention);
+            button.classList.toggle('selected', active);
+            button.setAttribute('aria-pressed', String(active));
         });
         const count = selected.has('all') ? '将唤醒全部 Agent' : selected.size ? `将唤醒 ${selected.size} 个 Agent` : '未 @ Agent，本条仅记录';
         if ($('at-chat-compose-note')) $('at-chat-compose-note').textContent = `${count} · Enter 发送 · Ctrl+V 粘贴图片`;
@@ -139,9 +142,16 @@ const AgentTeamChat = (() => {
         roomId = room.id;
         $('at-chat-room-state').textContent = `Room #${room.id} · ${rounds.size} 轮问答`;
         $('at-chat-member-count').textContent = `${members.length} 人`;
-        $('at-chat-members').innerHTML = members.map(member => `<div class="at-chat-member"><span class="at-chat-avatar ${member.member_type}">${member.member_type === 'agent' ? 'AI' : esc((member.display_name || '?').slice(0,1))}</span><div><strong>${esc(member.display_name)}</strong><small>${member.member_type === 'agent' ? `Claw #${member.claw_id}` : member.role === 'owner' ? '房主' : '项目成员'}</small></div><i class="${member.status === 'active' ? 'online' : ''}"></i></div>`).join('');
         const me = room.my_member?.id;
-        $('at-chat-mentions').innerHTML = `<button type="button" class="at-chat-mention" data-chat-mention="all">@ 所有人</button>` + members.filter(member => member.member_type === 'agent' && member.id !== me).map(member => `<button type="button" class="at-chat-mention" data-chat-mention="${member.claw_id}">@ ${esc(member.display_name)}</button>`).join('');
+        const agentIds = new Set(members.filter(member => member.member_type === 'agent' && member.id !== me).map(member => String(member.claw_id)));
+        if (!selected.has('all')) selected = new Set([...selected].filter(value => agentIds.has(value)));
+        $('at-chat-members').innerHTML = members.map(member => {
+            const canMention = member.member_type === 'agent' && member.id !== me;
+            const mention = canMention ? `<button type="button" class="at-chat-member-mention" data-chat-mention="${member.claw_id}" aria-pressed="false" aria-label="@ ${esc(member.display_name)}" title="@ ${esc(member.display_name)}">@</button>` : '';
+            return `<div class="at-chat-member"><span class="at-chat-avatar ${member.member_type}">${member.member_type === 'agent' ? 'AI' : esc((member.display_name || '?').slice(0,1))}</span><div><strong>${esc(member.display_name)}</strong><small>${member.member_type === 'agent' ? `Claw #${member.claw_id}` : member.role === 'owner' ? '房主' : '项目成员'}</small></div>${mention}<i class="${member.status === 'active' ? 'online' : ''}"></i></div>`;
+        }).join('');
+        const mentionAll = $('at-chat-side').querySelector('[data-chat-mention="all"]');
+        mentionAll.disabled = !agentIds.size;
         renderMentionSelection();
         const messages = data.messages || [], signature = JSON.stringify(messages.map(message => [message.id,message.content,message.created_at,(message.images||[]).map(image=>[image.id,image.sha256])])) + JSON.stringify(data.rounds || []);
         if (signature === rendered) return;

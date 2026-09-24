@@ -85,7 +85,7 @@ class AgentTeamsUiTest(unittest.TestCase):
         self.assertIn('.at-task-report', plan_css)
         self.assertIn('.at-plan-reports-dialog.is-fullscreen', plan_css)
         self.assertIn('.at-plan-report', plan_css)
-        self.assertIn('20260923taskconclusion', self.html)
+        self.assertIn('20260924teamtaskrefresh', self.html)
         self.assertIn('id="at-task-conclusion"', self.html)
         self.assertIn('不会生成测试报告', self.html)
         self.assertIn('/conclusion', plans)
@@ -125,7 +125,7 @@ class AgentTeamsUiTest(unittest.TestCase):
         plans = (ROOT / 'web/static/js/agent_team_plans.js').read_text(encoding='utf-8')
         for marker in ('at-tab-chat', 'at-chat-panel', 'AgentTeamChat.mount(team)'):
             self.assertIn(marker, self.js)
-        for marker in ('agent_team_chat.js', '20260923clipboardimages'):
+        for marker in ('agent_team_chat.js', '20260924sidebarmentions'):
             self.assertIn(marker, self.html)
         for marker in ('mention_claw_ids', 'mention_all', 'Idempotency-Key',
                        'expected_count', 'replied_count', 'setTimeout',
@@ -133,6 +133,11 @@ class AgentTeamsUiTest(unittest.TestCase):
                        "addEventListener('paste'", 'clipboardData',
                        'Ctrl+V 粘贴图片'):
             self.assertIn(marker, chat)
+        for marker in ('at-chat-member-mention', 'at-chat-mention-all',
+                       "$('at-chat-side').addEventListener('click'",
+                       "focus({preventScroll:true})"):
+            self.assertIn(marker, chat)
+        self.assertNotIn('id="at-chat-mentions"', chat)
         for marker in ('at-chat-lightbox', 'data-chat-image', 'showModal()', 'data-chat-lightbox-close'):
             self.assertIn(marker, chat)
         self.assertNotIn('target="_blank" rel="noopener"><img', chat)
