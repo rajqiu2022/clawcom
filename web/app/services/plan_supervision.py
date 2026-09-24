@@ -1486,11 +1486,18 @@ def _create_plan_agent_task(sup, task, stage, command_key, instruction,
             'due_at': (occurrence.due_at.isoformat() + '+08:00'
                        if occurrence.due_at else None),
             'execution_goal': occurrence.execution_goal_json or {},
-            'checkpoint': occurrence.checkpoint_json or {},
-            'resume_contract': occurrence.resume_contract_json or {},
             'resume_fencing_token': int(
                 occurrence.resume_fencing_token or 0),
         })
+        # Worker treats the *presence* of resume_contract as a signed request
+        # to enable deterministic condition probing and validates it before a
+        # Provider can run.  A fresh occurrence has no such contract; sending
+        # an empty object makes Worker correctly fail closed with
+        # resume_contract_invalid.  Only resumed work may carry the checkpoint
+        # and contract that Hub previously accepted and persisted.
+        if occurrence.resume_contract_json:
+            payload['resume_contract'] = occurrence.resume_contract_json
+            payload['checkpoint'] = occurrence.checkpoint_json or {}
     agent_task = AgentTask(
         task_id=task_id,
         claw_id=executor_claw_id,

@@ -620,6 +620,9 @@ class PlanSupervisionTest(unittest.TestCase):
             [self.other_claw.id])
         db.session.commit()
         agent_task = AgentTask.query.one()
+        initial_payload = json.loads(agent_task.payload)
+        self.assertNotIn('resume_contract', initial_payload)
+        self.assertNotIn('checkpoint', initial_payload)
         db.session.refresh(occurrence)
         self.assertEqual(occurrence.status, 'dispatched')
         self.assertEqual(occurrence.agent_task_id, agent_task.id)
@@ -753,6 +756,7 @@ class PlanSupervisionTest(unittest.TestCase):
         resumed = AgentTask.query.order_by(AgentTask.id.desc()).first()
         payload = json.loads(resumed.payload)
         self.assertEqual(payload['resume_fencing_token'], 1)
+        self.assertIn('resume_contract', payload)
         self.assertEqual(payload['checkpoint']['remaining_steps'], [
             'collect_performance'])
         replay = svc.record_condition_probe(
