@@ -8,8 +8,8 @@ const AgentTeamPlans = (() => {
     function today() { return new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Shanghai'}).format(new Date()); }
     function reset() { ++epoch; ++requestId; ++reportRequestId; team = null; $('at-plan-dialog').close(); $('at-plan-reports-dialog').close(); }
     function frame() {
-        $('at-plans-root').innerHTML = `<section class="at-plan-workspace"><header class="at-plan-toolbar"><div><span class="at-eyebrow">TEAM SCHEDULE</span><h3>测试计划与任务</h3></div><div><button type="button" class="btn btn-secondary btn-sm" id="at-plan-link" hidden>关联已有计划</button> <button type="button" class="btn btn-primary btn-sm" id="at-plan-create" hidden>＋ 新建计划</button></div></header>
-        <div class="at-plan-filters"><div role="group" aria-label="排期范围">${[['day','每日'],['week','每周'],['all','全部']].map(([key,label])=>`<button type="button" data-period="${key}" aria-pressed="${key===period}">${label}</button>`).join('')}</div><label>基准日期 <input id="at-plan-date" type="date" class="form-input" value="${day}" ${period==='all'?'disabled':''}></label><button id="at-plan-today" type="button" class="btn btn-ghost btn-sm">回到今天</button><button id="at-plan-refresh" type="button" class="btn btn-secondary btn-sm">刷新</button></div>
+        $('at-plans-root').innerHTML = `<section class="at-plan-workspace"><header class="at-plan-toolbar"><div><span class="at-eyebrow">TEAM SCHEDULE</span><h3>测试计划与任务</h3></div><div><button id="at-plan-refresh" type="button" class="btn btn-secondary btn-sm"><span class="at-refresh-icon" aria-hidden="true">↻</span> 刷新状态</button> <button type="button" class="btn btn-secondary btn-sm" id="at-plan-link" hidden>关联已有计划</button> <button type="button" class="btn btn-primary btn-sm" id="at-plan-create" hidden>＋ 新建计划</button></div></header>
+        <div class="at-plan-filters"><div role="group" aria-label="排期范围">${[['day','每日'],['week','每周'],['all','全部']].map(([key,label])=>`<button type="button" data-period="${key}" aria-pressed="${key===period}">${label}</button>`).join('')}</div><label>基准日期 <input id="at-plan-date" type="date" class="form-input" value="${day}" ${period==='all'?'disabled':''}></label><button id="at-plan-today" type="button" class="btn btn-ghost btn-sm">回到今天</button></div>
         <p id="at-plan-range" class="at-help"></p><div id="at-plan-summary" class="at-plan-summary"></div><div id="at-plan-recovery" class="at-plan-recovery" hidden></div><p id="at-plan-note" class="at-help" role="status"></p><div id="at-plan-cards" class="at-plan-grid"></div><div id="at-plan-pages" class="at-pager"></div>
         <p class="at-help">按实际测试任务排期交集展示（北京时间，周一至周日），完成比例不含任务链。跨日任务会在对应日期出现；未排期任务请在“全部”查看。日期筛选不代表重复执行或自动调度。</p></section>`;
     }
@@ -201,12 +201,30 @@ const AgentTeamPlans = (() => {
             $('at-plan-cards').innerHTML = data.items.length ? data.items.map(p=>`<article class="at-plan-card" data-plan-card="${esc(p.id)}"><header><span class="at-eyebrow">PLAN #${p.id}</span>${badge(p.status)}</header><h4><a href="${esc(p.url)}">${esc(p.name)} ↗</a></h4><p class="at-help">${esc(p.start_date)} → ${esc(p.end_date)}</p>${supervision(p)}<div class="at-progress"><progress max="100" value="${p.progress}" aria-label="计划任务完成比例"></progress><span>${p.completed_tasks}/${p.total_tasks} 已完成</span></div><div class="at-plan-section">${period==='all'?'全部任务':'当前范围任务'} <strong>${p.period_tasks}</strong>${p.unscheduled_tasks?`<span>另有 ${p.unscheduled_tasks} 项未排期</span>`:''}</div><ul data-plan-tasks="${esc(p.id)}">${p.tasks.map((t,index)=>task(t,p.id,index>=5)).join('') || '<li class="at-help">当前范围暂无已排期任务</li>'}</ul><footer><span class="at-help">${p.tasks.length>5?`<button type="button" class="btn btn-secondary btn-sm at-plan-task-toggle" data-plan-task-toggle="${esc(p.id)}" aria-expanded="false">查看全部 ${p.tasks.length} 项</button>`:'进度来自测试计划记录'}</span><div class="at-plan-actions"><button type="button" class="at-plan-report" data-plan-reports="${esc(p.id)}" data-plan-name="${esc(p.name)}" aria-label="查看计划 #${esc(p.id)} 的关联报告">📄 报告 <b data-report-count ${p.report_count?'':'hidden'}>${esc(p.report_count)}</b></button><a href="${esc(p.url)}">查看计划详情 →</a></div></footer></article>`).join('') : '<div class="at-empty">当前范围暂无团队计划。<br>可切换日期、“全部”，或由测试经理新建 / 关联已有计划。</div>';
             $('at-plan-pages').innerHTML = `<span class="at-muted">${data.total?page+1:0}–${page+data.items.length} / ${data.total} 个计划</span><button type="button" class="btn btn-secondary btn-sm" data-plan-page="${Math.max(0,page-6)}" ${page===0?'disabled':''}>上一页</button><button type="button" class="btn btn-secondary btn-sm" data-plan-page="${page+6}" ${page+data.items.length>=data.total?'disabled':''}>下一页</button>`;
             $('at-plan-note').textContent = data.can_manage?'可创建草稿计划，或将同项目已有计划关联到本团队。':'计划由团队测试经理或项目管理员维护。';
+            return true;
         } catch (error) {
             if (generation!==epoch || turn!==requestId) return;
             $('at-plan-create').hidden = $('at-plan-link').hidden = true;
             $('at-plan-cards').replaceChildren(); $('at-plan-summary').replaceChildren(); $('at-plan-recovery').replaceChildren(); $('at-plan-recovery').hidden = true; $('at-plan-pages').replaceChildren();
             $('at-plan-note').textContent = `读取失败：${error.message || '请稍后重试'}，请点击刷新。`;
+            return false;
         } finally { if(generation===epoch && turn===requestId) $('at-plan-cards').removeAttribute('aria-busy'); }
+    }
+    async function refreshStatus(button) {
+        button.disabled = true;
+        button.classList.add('is-loading');
+        button.setAttribute('aria-busy', 'true');
+        const ok = await load(offset);
+        button.disabled = false;
+        button.classList.remove('is-loading');
+        button.removeAttribute('aria-busy');
+        if (!ok) return;
+        const refreshedAt = new Intl.DateTimeFormat('zh-CN', {
+            timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit',
+            second: '2-digit', hour12: false,
+        }).format(new Date());
+        $('at-plan-note').textContent = `任务、执行实例和监督状态已刷新 · ${refreshedAt}`;
+        showToast('团队任务状态已刷新', 'success');
     }
     async function open(kind) {
         if (!team || saving) return;
@@ -268,7 +286,7 @@ const AgentTeamPlans = (() => {
         if(button.dataset.teamTab) tab(button.dataset.teamTab);
         if(button.dataset.period){period=button.dataset.period;frame();load();}
         if(button.dataset.planPage) load(Number(button.dataset.planPage));
-        if(button.id==='at-plan-refresh') load(offset);
+        if(button.id==='at-plan-refresh') refreshStatus(button);
         if(button.id==='at-plan-today'){day=today();frame();load();}
         if(button.id==='at-plan-create') open('new');
         if(button.id==='at-plan-link') open('link');
