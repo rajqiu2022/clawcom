@@ -1,6 +1,7 @@
 """Deploy Agent Team resource ID badges; no schema or business-row writes."""
 
 import deploy_team_activity_knowledge as deployment
+import re
 
 
 release = deployment.release
@@ -11,6 +12,48 @@ release.FILES = (
     'static/js/agent_team_resources.js',
 )
 release.MIGRATIONS = ()
+
+
+def _resource_id_candidate(path, live):
+    """Apply only the ID badge delta while preserving live Team hotfixes."""
+    if live is None:
+        raise RuntimeError('Missing deployed Team resource file: ' + path)
+    source = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
+    text = source.decode('utf-8')
+    if path == 'templates/agent_teams.html':
+        patterns = (
+            (r"(filename='css/agent_teams\.css'\) }}\?v=)[^\"<]+",
+             r'\g<1>20260924resourceids'),
+            (r"(filename='js/agent_team_resources\.js'\) }}\?v=)[^\"<]+",
+             r'\g<1>20260924resourceids'),
+        )
+        for pattern, replacement in patterns:
+            text, count = re.subn(pattern, replacement, text, count=1)
+            if count != 1:
+                raise RuntimeError('Expected one Team bundle reference: ' + pattern)
+        return text.encode('utf-8')
+    if path == 'static/js/agent_team_resources.js':
+        if 'class="at-resource-id"' in text:
+            return source
+        anchor = "${type === 'knowledge' ? 'KNOWLEDGE' : 'SKILL'}</span>"
+        replacement = ("${type === 'knowledge' ? 'KNOWLEDGE' : 'SKILL'} "
+                       "<b class=\"at-resource-id\">#${esc(item.id)}</b></span>")
+        if text.count(anchor) != 1:
+            raise RuntimeError('Expected one resource-kind card anchor')
+        return text.replace(anchor, replacement, 1).encode('utf-8')
+    if path == 'static/css/agent_teams.css':
+        if '.at-resource-id{' in text:
+            return source
+        rule = ('.at-resource-kind{display:inline-flex;align-items:center;gap:7px}'
+                '.at-resource-id{padding:2px 5px;border:1px solid '
+                'color-mix(in srgb,var(--at-accent) 38%,transparent);'
+                'border-radius:4px;background:color-mix(in srgb,'
+                'var(--at-accent) 8%,transparent);font-size:9px;letter-spacing:0}')
+        return (text.rstrip() + '\n' + rule + '\n').encode('utf-8')
+    raise RuntimeError('Unexpected release path: ' + path)
+
+
+release.candidate = _resource_id_candidate
 
 release.SCHEMA = r'''
 print('TEAM_RELEASE ' + json.dumps({
