@@ -1,6 +1,7 @@
 """Deploy Plan scope validation and deterministic overdue-task recovery."""
 import deploy_plan_supervision_resume_contract as deployment
 import re
+import subprocess
 
 
 release = deployment.release
@@ -14,7 +15,7 @@ release.FILES = (
     'app/services/agent_team_plans.py',
     'app/services/plan_supervision.py',
     'templates/agent_teams.html',
-    'templates/testplans.html',
+    'static/css/agent_team_plans.css',
     'static/js/agent_team_plans.js',
 )
 release.MIGRATIONS = ()
@@ -25,15 +26,32 @@ _candidate = release.candidate
 
 
 def _scope_recovery_candidate(path, live):
+    if path == 'static/js/agent_team_plans.js' and live is not None:
+        # The immediately preceding release already owns the inline recovery
+        # action.  Accept only that exact committed production baseline before
+        # replacing it with the banner build; any unrelated hotfix still fails
+        # closed in the generic three-way merger below.
+        previous = subprocess.check_output(
+            ['git', 'show', '514921a:web/' + path],
+            cwd=str(release.ROOT)).replace(b'\r\n', b'\n')
+        normalized = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
+        if normalized == previous:
+            return (release.ROOT / 'web' / path).read_bytes().replace(
+                b'\r\n', b'\n')
     if path != 'templates/agent_teams.html' or live is None:
         return _candidate(path, live)
     live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
-    pattern = rb"(filename='js/agent_team_plans\.js'\) }}\?v=)[^\"<]+"
-    merged, count = re.subn(
-        pattern, rb'\g<1>20260924supervisorresume', live, count=1)
-    if count != 1:
-        raise RuntimeError(
-            'Expected exactly one agent_team_plans.js script reference')
+    replacements = (
+        (rb"(filename='js/agent_team_plans\.js'\) }}\?v=)[^\"<]+",
+         rb'\g<1>20260924supervisorresumebanner'),
+        (rb"(filename='css/agent_team_plans\.css'\) }}\?v=)[^\"<]+",
+         rb'\g<1>20260924supervisorresumebanner'),
+    )
+    merged = live
+    for pattern, replacement in replacements:
+        merged, count = re.subn(pattern, replacement, merged, count=1)
+        if count != 1:
+            raise RuntimeError('Expected exactly one Agent Team plan asset reference')
     return merged
 
 
@@ -101,7 +119,7 @@ with app.app_context():
         assert marker in source, marker
     response = client.get('/agent-teams')
     assert response.status_code == 200
-    assert '20260924supervisorresume' in response.get_data(as_text=True)
+    assert '20260924supervisorresumebanner' in response.get_data(as_text=True)
     db.session.remove()
     if os.getcwd() == '/opt/openclaw-web':
         cookie = app.session_interface.get_signing_serializer(app).dumps(
@@ -120,7 +138,7 @@ with app.app_context():
             time.sleep(1)
         else:
             raise RuntimeError('HTTP readiness did not recover')
-        assert '20260924supervisorresume' in response.text
+        assert '20260924supervisorresumebanner' in response.text
     assert AgentTask.query.count() == task_count
     assert WorkflowRun.query.count() == run_count
     print('TEAM_RELEASE ' + json.dumps({

@@ -1853,34 +1853,11 @@ async function deleteIterationTab(tabKey) {
     }
 }
 
-function renderPlanActions(planId, supervision = null) {
-    const paused = supervision && ['blocked', 'blocked_owner_gate', 'stopped'].includes(supervision.status);
-    const resumeButton = paused
-        ? `<button class="tp-btn-sm" onclick="resumePlanSupervision(${planId})" title="恢复 Supervisor，并原子推进和补派所有已到点的独立任务；局部阻断任务保持原状">▶ 恢复监督</button>`
-        : '';
+function renderPlanActions(planId) {
     return `
-        ${resumeButton}
         <button class="tp-btn-sm" onclick="openPlanReport(${planId})">📄 报告</button>
         <button class="tp-btn-sm" onclick="openPlanModal(${planId}, ${currentIterId})">✏️ 编辑</button>
         <button class="tp-btn-sm danger" onclick="deletePlan(${planId})">🗑️ 删除</button>`;
-}
-
-async function resumePlanSupervision(planId) {
-    if (!await customConfirm(`恢复计划 #${planId} 的持续监督，并立即补派所有已到点任务？\n局部阻断任务不会被解除。`)) return;
-    try {
-        const key = (globalThis.crypto && crypto.randomUUID)
-            ? crypto.randomUUID()
-            : `testplan-resume-${planId}-${Date.now()}`;
-        const result = await API.post(`/test-plans/${planId}/supervision/resume`, {
-            command_key: key,
-            reason: '计划管理者从测试计划详情页恢复监督并补派已到点任务',
-        });
-        const count = Array.isArray(result.dispatched) ? result.dispatched.length : 0;
-        showToast(`监督已恢复，已确认 ${count} 个到点派发`, 'success');
-        await showPlanDetail(planId);
-    } catch (error) {
-        showToast(`恢复监督失败：${error.message || error}`, 'error');
-    }
 }
 
 function renderPlanCard(p) {
@@ -1948,13 +1925,8 @@ async function showPlanDetail(planId) {
     if (actions) actions.innerHTML = renderPlanActions(planId);
 
     try {
-        const [plan, supervisionResult] = await Promise.all([
-            API.get(`/test-plans/${planId}`),
-            API.get(`/test-plans/${planId}/supervision`).catch(() => ({supervision:null})),
-        ]);
+        const plan = await API.get(`/test-plans/${planId}`);
         if (currentPlanId !== planId) return;
-        plan.supervision = supervisionResult && supervisionResult.supervision;
-        if (actions) actions.innerHTML = renderPlanActions(planId, plan.supervision);
         const url = new URL(location.href);
         url.searchParams.set('plan_id', String(planId));
         if (plan.iteration_id) url.searchParams.set('iteration_id', String(plan.iteration_id));
@@ -1975,14 +1947,6 @@ function renderPlanDetail(plan) {
     const baseTaskTotal = Number(plan.total_tasks || tasks.length || 0);
     const baseCompletedTotal = Number(plan.completed_tasks || 0);
 
-    const supervision = plan.supervision;
-    const supervisionHtml = supervision ? `
-        <div style="margin:10px 0 16px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:.8rem;color:var(--text-secondary)">
-            持续监督：<strong style="color:${['blocked','blocked_owner_gate','stopped'].includes(supervision.status) ? '#ef4444' : '#22c55e'}">${esc(supervision.status)}</strong>
-            ${supervision.next_check_at ? ` · 下次检查 ${esc(supervision.next_check_at)}` : ''}
-            ${['blocked','blocked_owner_gate','stopped'].includes(supervision.status) ? ' · 请使用页面上方“恢复监督”处理' : ''}
-        </div>` : '';
-
     el.innerHTML = `
     <div style="margin-top:20px;border-top:2px solid var(--accent);padding-top:16px">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">
@@ -1991,8 +1955,6 @@ function renderPlanDetail(plan) {
                 ${plan.description ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-top:4px">${esc(plan.description)}</div>` : ''}
             </div>
         </div>
-
-        ${supervisionHtml}
 
         <!-- 计划统计 -->
         <div class="tp-stats-row" style="grid-template-columns:repeat(4,1fr)">
