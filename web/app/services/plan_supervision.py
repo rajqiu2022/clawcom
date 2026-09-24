@@ -101,6 +101,7 @@ def team_capability(team_id):
                     'summary_must_not_claim_local_scope': True,
                 },
                 'continue_when_undispatched_stages_remain': True,
+                'manager_auto_recovers_invalid_owner_gate': True,
                 'note': ('单个 Child Run/Stage 阻断不得暂停整个计划；主 Agent 应继续判断并派发'
                          '无依赖、无资源冲突的 Stage。只有团队级问题才显式使用 block_scope=plan。'),
             },
@@ -981,20 +982,56 @@ def available(sup, now=None):
                 and datetime.combine(plan.start_date, time.min) <= now < ends_at(plan))
 
 
+def valid_plan_owner_gate(sup):
+    """Return whether the stored decision is a fully evidenced global gate."""
+    decision = (sup.last_decision_json or {}) if sup else {}
+    evidence = decision.get('plan_block_evidence')
+    summary = str(decision.get('summary') or '')
+    return bool(
+        decision.get('requested_outcome', decision.get('outcome')) == 'blocked'
+        and decision.get('block_scope') == 'plan'
+        and decision.get('plan_block_reason_code') in PLAN_BLOCK_REASON_CODES
+        and isinstance(evidence, list) and evidence
+        and all(isinstance(item, dict) and item for item in evidence)
+        and not PLAN_SCOPE_CONFLICT_RE.search(summary)
+    )
+
+
+def manager_auto_resume_allowed(sup, now=None):
+    """A durable test manager may recover invalid/local legacy owner gates."""
+    return bool(
+        sup and sup.status in ('blocked', 'blocked_owner_gate')
+        and (manager_lease_payload(sup, now) or {}).get('active')
+        and not valid_plan_owner_gate(sup)
+    )
+
+
 def repair_recoverable_state(sup, now=None):
-    """Repair legacy/transient blocked states without crossing an Owner gate."""
+    """Repair legacy/local blocks without crossing a validated global gate."""
     now = now or _now()
-    if sup.status == 'blocked':
-        decision = sup.last_decision_json or {}
-        if decision.get('block_scope') == 'plan' or sup.resume_condition == 'manual':
+    if sup.status in ('blocked', 'blocked_owner_gate'):
+        if valid_plan_owner_gate(sup):
             sup.status = 'blocked_owner_gate'
             return False
+        if not manager_auto_resume_allowed(sup, now):
+            return False
+        previous = sup.status
+        cancel_wake(sup)
         sup.status = 'retryable'
         sup.next_check_at = min(sup.next_check_at or now, now)
         sup.resume_condition = 'timer_or_event'
+        sup.lease_owner = None
+        sup.lease_expires_at = None
+        sup.turn_deadline_at = None
         add_event(sup.plan_id, 'supervisor_auto_repaired', [
-            'auto-repair', sup.plan_id, sup.fencing_token,
-        ], {'from_status': 'blocked', 'to_status': 'retryable'}, now)
+            'manager-auto-repair', sup.plan_id, sup.fencing_token,
+            (sup.last_decision_json or {}).get('at'),
+        ], {
+            'from_status': previous,
+            'to_status': 'retryable',
+            'authority': 'team_test_manager',
+            'reason': 'invalid_or_local_owner_gate',
+        }, now)
         return True
     return False
 
@@ -3332,8 +3369,7 @@ def sweep(now=None):
             current_app.logger.exception(
                 'Plan supervisor bootstrap failed for plan_id=%s', plan.id)
     ids = [r.plan_id for r in PlanSupervisor.query.filter(
-        PlanSupervisor.status.notin_(['expired', 'stopped',
-                                      'blocked_owner_gate'])).order_by(
+        PlanSupervisor.status.notin_(['expired', 'stopped'])).order_by(
             PlanSupervisor.plan_id).all()]
     # One small transaction per Plan. The caller's scheduler already serializes scans.
     for plan_id in ids:

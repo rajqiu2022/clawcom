@@ -454,6 +454,63 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(conflict.json['code'], 'PLAN_BLOCK_SCOPE_CONFLICT')
         self.assertEqual(self.sup().status, 'leased')
 
+    def test_watchdog_auto_recovers_legacy_local_owner_gate_for_team_manager(self):
+        team = self.scoped_team()
+        self.plan.team_id = team.id
+        db.session.commit()
+        started = self.post('start', {
+            'command_key': 'legacy-gate-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.assertEqual(started.status_code, 200, started.json)
+        supervisor = self.sup()
+        supervisor.status = 'blocked_owner_gate'
+        supervisor.resume_condition = 'manual'
+        supervisor.next_check_at = None
+        supervisor.last_decision_json = {
+            'outcome': 'blocked', 'requested_outcome': 'blocked',
+            'block_scope': 'plan',
+            'summary': '任务局部阻断，不构成全计划 Owner gate；其他任务继续',
+            'plan_block_reason_code': None,
+            'plan_block_evidence': [],
+        }
+        db.session.commit()
+
+        self.assertTrue(svc.manager_auto_resume_allowed(supervisor))
+        svc.sweep(now=_now())
+        supervisor = self.sup()
+        self.assertNotEqual(supervisor.status, 'blocked_owner_gate')
+        self.assertEqual(supervisor.resume_condition, 'timer_or_event')
+        self.assertIsNotNone(supervisor.next_check_at)
+        repaired = PlanSupervisorEvent.query.filter_by(
+            plan_id=self.plan.id, kind='supervisor_auto_repaired').one()
+        self.assertEqual(
+            repaired.payload_json['authority'], 'team_test_manager')
+
+    def test_watchdog_preserves_evidenced_global_owner_gate(self):
+        team = self.scoped_team()
+        self.plan.team_id = team.id
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'global-gate-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        supervisor = self.sup()
+        supervisor.status = 'blocked_owner_gate'
+        supervisor.resume_condition = 'manual'
+        supervisor.next_check_at = None
+        supervisor.last_decision_json = {
+            'outcome': 'blocked', 'requested_outcome': 'blocked',
+            'block_scope': 'plan',
+            'summary': '全团队运行环境不可用，暂停整个计划',
+            'plan_block_reason_code': 'global_environment_unavailable',
+            'plan_block_evidence': [{'ref': 'probe://all-workers'}],
+        }
+        db.session.commit()
+
+        self.assertFalse(svc.manager_auto_resume_allowed(supervisor))
+        svc.sweep(now=_now())
+        self.assertEqual(self.sup().status, 'blocked_owner_gate')
+        self.assertIsNone(self.sup().next_check_at)
+
     def test_manager_can_dispatch_non_flow_agent_task_while_plan_is_blocked(self):
         team = self.scoped_team()
         db.session.add(AgentTeamMember(

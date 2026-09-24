@@ -31,7 +31,14 @@ const AgentTeamPlans = (() => {
     async function resumeSupervision(button) {
         const planId = Number(button.dataset.planResume);
         if (!planId || !button.dataset.resumeApi) return;
-        if (!window.confirm(`恢复计划 #${planId} 的持续监督，并立即补派所有已到点任务？\n局部阻断任务不会被解除。`)) return;
+        const confirmed = await customConfirm({
+            type: 'warning',
+            title: `恢复计划 #${planId} 的持续监督？`,
+            msg: 'Hub 将立即重新对账并补派已到点任务。\n局部阻断任务保持原状，不会被错误解除。',
+            okText: '恢复监督',
+            cancelText: '暂不恢复',
+        });
+        if (!confirmed) return;
         button.disabled = true;
         const original = button.textContent;
         button.textContent = '恢复中…';
@@ -43,9 +50,11 @@ const AgentTeamPlans = (() => {
             });
             const count = (result.dispatched || []).length;
             $('at-plan-note').textContent = `计划 #${planId} 已恢复监督，已确认 ${count} 个到点派发。`;
+            showToast(`计划 #${planId} 已恢复持续监督`, 'success');
             await load(offset);
         } catch (error) {
             $('at-plan-note').textContent = `恢复失败：${error.message || '请稍后重试'}`;
+            showToast(`恢复失败：${error.message || '请稍后重试'}`, 'error');
             button.disabled = false;
             button.textContent = original;
         }

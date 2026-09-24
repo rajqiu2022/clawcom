@@ -26,13 +26,19 @@ _candidate = release.candidate
 
 
 def _scope_recovery_candidate(path, live):
-    if path == 'static/js/agent_team_plans.js' and live is not None:
+    owned_paths = {
+        'app/api/plan_supervision.py',
+        'app/services/agent_team_plans.py',
+        'app/services/plan_supervision.py',
+        'static/js/agent_team_plans.js',
+    }
+    if path in owned_paths and live is not None:
         # The immediately preceding release already owns the inline recovery
-        # action.  Accept only that exact committed production baseline before
-        # replacing it with the banner build; any unrelated hotfix still fails
-        # closed in the generic three-way merger below.
+        # contract. Accept only that exact committed production baseline before
+        # replacing it; any unrelated hotfix still fails closed in the generic
+        # three-way merger below.
         previous = subprocess.check_output(
-            ['git', 'show', '514921a:web/' + path],
+            ['git', 'show', '4255467:web/' + path],
             cwd=str(release.ROOT)).replace(b'\r\n', b'\n')
         normalized = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
         if normalized == previous:
@@ -43,7 +49,7 @@ def _scope_recovery_candidate(path, live):
     live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
     replacements = (
         (rb"(filename='js/agent_team_plans\.js'\) }}\?v=)[^\"<]+",
-         rb'\g<1>20260924supervisorresumebanner'),
+         rb'\g<1>20260924supervisorautoresume'),
         (rb"(filename='css/agent_team_plans\.css'\) }}\?v=)[^\"<]+",
          rb'\g<1>20260924supervisorresumebanner'),
     )
@@ -114,12 +120,14 @@ with app.app_context():
     source = pyinspect.getsource(plan_supervision)
     for marker in ('PLAN_BLOCK_SCOPE_CONFLICT',
                    'plan_block_reason_code',
+                   'manager_auto_resume_allowed',
+                   'valid_plan_owner_gate',
                    'def _dispatch_scheduled_workflow',
                    'task_workflow_dispatched'):
         assert marker in source, marker
     response = client.get('/agent-teams')
     assert response.status_code == 200
-    assert '20260924supervisorresumebanner' in response.get_data(as_text=True)
+    assert '20260924supervisorautoresume' in response.get_data(as_text=True)
     db.session.remove()
     if os.getcwd() == '/opt/openclaw-web':
         cookie = app.session_interface.get_signing_serializer(app).dumps(
@@ -138,7 +146,7 @@ with app.app_context():
             time.sleep(1)
         else:
             raise RuntimeError('HTTP readiness did not recover')
-        assert '20260924supervisorresumebanner' in response.text
+        assert '20260924supervisorautoresume' in response.text
     assert AgentTask.query.count() == task_count
     assert WorkflowRun.query.count() == run_count
     print('TEAM_RELEASE ' + json.dumps({

@@ -249,10 +249,11 @@ def stop_plan_supervision(plan_id):
 @api_bp.route('/test-plans/<int:plan_id>/supervision/resume', methods=['POST'])
 def resume_plan_supervision(plan_id):
     _, sup, claw = load(plan_id, write=True)
-    if claw:
-        svc.fail('PLAN_HUMAN_RESUME_REQUIRED', '阻断后的恢复须由登录的计划管理者确认', 403)
     if not sup:
         svc.fail('PLAN_SUPERVISION_NOT_STARTED', '计划尚未启动监督')
+    if claw and (claw.id != sup.orchestrator_claw_id
+                 or not svc.manager_auto_resume_allowed(sup)):
+        svc.fail('PLAN_HUMAN_RESUME_REQUIRED', '阻断后的恢复须由登录的计划管理者确认', 403)
     body = payload()
     reason = str(body.get('reason') or '').strip()
     if not reason or len(reason) > 1000:

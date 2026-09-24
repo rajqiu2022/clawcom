@@ -220,7 +220,7 @@ def overview(team, period, raw_date, limit, offset):
                     manage and supervisor_data['status'] in (
                         'blocked', 'blocked_owner_gate', 'stopped')),
                 'resume_api': (
-                    '/api/v1/test-plans/%s/supervision/resume' % plan.id),
+                    '/test-plans/%s/supervision/resume' % plan.id),
             } if supervisor_data else None),
             'tasks': [{'id': t.id, 'name': t.name,
                        'status': ((current_occurrences.get(t.id) or {}).get('status')

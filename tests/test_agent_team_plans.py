@@ -57,6 +57,13 @@ class AgentTeamPlansTest(unittest.TestCase):
                 msg_type='plan_supervision').count(), 1)
             wake.assert_called_once_with(self.main_claw.id)
 
+            overview = self.client.get(
+                self.url + '?period=all', headers=self._headers()).json
+            supervision = overview['items'][0]['supervision']
+            self.assertEqual(
+                supervision['resume_api'],
+                '/test-plans/%s/supervision/resume' % plan['id'])
+
             task = self.client.post(
                 '/api/v1/test-plans/%s/tasks' % plan['id'],
                 headers=self._headers(), json={
