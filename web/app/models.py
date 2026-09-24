@@ -5604,6 +5604,12 @@ class TestTask(db.Model):
         db.JSON, comment='执行者必须同时具备的团队 specialty/capability')
     required_resources_json = db.Column(
         db.JSON, comment='不可降级的平台、设备、账号及资源绑定')
+    reference_skill_ids_json = db.Column(
+        db.JSON, comment='执行前按需读取的 Skill ID 快照')
+    reference_knowledge_ids_json = db.Column(
+        db.JSON, comment='执行前按需读取的知识库 ID 快照')
+    reference_report_ids_json = db.Column(
+        db.JSON, comment='执行前按需读取的测试报告 ID 快照')
 
     # 优先级
     priority = db.Column(db.Enum('P0', 'P1', 'P2', 'P3'), default='P2', comment='优先级')
@@ -5706,6 +5712,9 @@ class TestTask(db.Model):
                 self.allowed_fallback_claw_ids_json or []),
             'required_capabilities': self.required_capabilities_json or [],
             'required_resources': self.required_resources_json or {},
+            'reference_skill_ids': self.reference_skill_ids_json or [],
+            'reference_knowledge_ids': self.reference_knowledge_ids_json or [],
+            'reference_report_ids': self.reference_report_ids_json or [],
             'priority': self.priority,
             'library_id': self.library_id,
             'library_name': self.library.name if self.library else None,
@@ -5733,6 +5742,8 @@ class TestTask(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
+        from app.services.test_task_references import serialize_task_references
+        data['references'] = serialize_task_references(self)
         if self.schedule_enabled:
             occurrence = self.occurrences.filter_by(
                 occurrence_date=_now().date()).order_by(
@@ -5796,6 +5807,9 @@ class TestTaskOccurrence(db.Model):
     allowed_fallback_claw_ids_json = db.Column(db.JSON)
     required_capabilities_json = db.Column(db.JSON)
     required_resources_json = db.Column(db.JSON)
+    reference_skill_ids_json = db.Column(db.JSON)
+    reference_knowledge_ids_json = db.Column(db.JSON)
+    reference_report_ids_json = db.Column(db.JSON)
     attempt_count = db.Column(db.Integer, nullable=False, default=0)
     action_attempt_count = db.Column(db.Integer, nullable=False, default=0)
     recommended_action = db.Column(db.String(64), default='')
@@ -5841,7 +5855,7 @@ class TestTaskOccurrence(db.Model):
             agent and agent.status == 'running'
             and agent.lease_expires_at
             and agent.lease_expires_at <= _now())
-        return {
+        payload = {
             'id': self.id,
             'plan_id': self.plan_id,
             'test_task_id': self.test_task_id,
@@ -5864,6 +5878,9 @@ class TestTaskOccurrence(db.Model):
                 self.allowed_fallback_claw_ids_json or []),
             'required_capabilities': self.required_capabilities_json or [],
             'required_resources': self.required_resources_json or {},
+            'reference_skill_ids': self.reference_skill_ids_json or [],
+            'reference_knowledge_ids': self.reference_knowledge_ids_json or [],
+            'reference_report_ids': self.reference_report_ids_json or [],
             'attempt_count': int(self.attempt_count or 0),
             'action_attempt_count': int(self.action_attempt_count or 0),
             'recommended_action': self.recommended_action or '',
@@ -5908,6 +5925,9 @@ class TestTaskOccurrence(db.Model):
             'created_at': str(self.created_at) if self.created_at else None,
             'updated_at': str(self.updated_at) if self.updated_at else None,
         }
+        from app.services.test_task_references import serialize_task_references
+        payload['references'] = serialize_task_references(self.task, self)
+        return payload
 
 
 class TestTaskReport(db.Model):

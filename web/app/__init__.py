@@ -809,6 +809,9 @@ def create_app(config_name=None):
                         ('allowed_fallback_claw_ids_json', 'LONGTEXT DEFAULT NULL'),
                         ('required_capabilities_json', 'LONGTEXT DEFAULT NULL'),
                         ('required_resources_json', 'LONGTEXT DEFAULT NULL'),
+                        ('reference_skill_ids_json', 'LONGTEXT DEFAULT NULL'),
+                        ('reference_knowledge_ids_json', 'LONGTEXT DEFAULT NULL'),
+                        ('reference_report_ids_json', 'LONGTEXT DEFAULT NULL'),
                     ]:
                         try:
                             conn.execute(text(
@@ -839,6 +842,9 @@ def create_app(config_name=None):
                                 allowed_fallback_claw_ids_json LONGTEXT,
                                 required_capabilities_json LONGTEXT,
                                 required_resources_json LONGTEXT,
+                                reference_skill_ids_json LONGTEXT,
+                                reference_knowledge_ids_json LONGTEXT,
+                                reference_report_ids_json LONGTEXT,
                                 attempt_count INTEGER NOT NULL DEFAULT 0,
                                 action_attempt_count INTEGER NOT NULL DEFAULT 0,
                                 recommended_action VARCHAR(64) DEFAULT '',
@@ -894,6 +900,9 @@ def create_app(config_name=None):
                         ('allowed_fallback_claw_ids_json', 'LONGTEXT DEFAULT NULL'),
                         ('required_capabilities_json', 'LONGTEXT DEFAULT NULL'),
                         ('required_resources_json', 'LONGTEXT DEFAULT NULL'),
+                        ('reference_skill_ids_json', 'LONGTEXT DEFAULT NULL'),
+                        ('reference_knowledge_ids_json', 'LONGTEXT DEFAULT NULL'),
+                        ('reference_report_ids_json', 'LONGTEXT DEFAULT NULL'),
                     ]:
                         try:
                             conn.execute(text(

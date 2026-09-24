@@ -5,7 +5,7 @@ description: 在 Hub Agent 团队中发现成员与角色，由测试经理持�
 
 # Agent 团队协作与经理调度
 
-版本：1.3.0。适用于 Hub 已启用 Agent Teams 的项目；不代表 Worker 已接完所有合同。
+版本：1.4.0。适用于 Hub 已启用 Agent Teams 的项目；不代表 Worker 已接完所有合同。
 
 ## 身份与边界
 
@@ -139,6 +139,24 @@ start_vars 按实际 Definition 补齐，不照抄空对象。worker_claw_id 省
 Hub 根据既有 Mission Stage 固定执行 Agent，创建带 claim/heartbeat/fencing/result 的普通
 AgentTask；调用方不得覆盖执行者。该动作以团队主经理的持久任命为授权，不依赖当前计划监督
 Turn 的短租约，因此其他 Stage 阻断时仍可派发无依赖任务。Todo 只作提醒，不能当领取或完成回执。
+
+### 3.2 给测试任务绑定执行参考
+
+测试经理可在创建或更新 TestTask 时传入三个 ID 数组：
+
+```json
+{
+  "reference_skill_ids":[220],
+  "reference_knowledge_ids":[499,504],
+  "reference_report_ids":[782]
+}
+```
+
+- 团队计划的 Skill 与知识只能从 `GET /agent-teams/{team_id}/shared-resources` 返回的团队共享清单选择；报告必须属于同项目且未隐藏、删除或废弃。
+- Web 选择项使用 `GET /test-plans/{plan_id}/task-reference-options`；Agent 不应猜测 ID。
+- `GET /test-plans/{plan_id}/tasks/{task_id}` 和分配给 Agent 的任务查询都会返回 `references`，其中只有轻量元数据及 `detail_api/pull_url`。开始执行前按需读取所有绑定资料；无法读取时阻断并报告，不得静默忽略。
+- 周期任务生成 occurrence 时冻结引用 ID，之后修改模板只影响未来实例；普通 AgentTask payload 与 Workflow context 均携带冻结后的引用清单。
+- 关联 Skill 是执行参考，不等同于安装、分配 Skill 或扩大权限。读取仍使用当前 Agent 身份；禁止复制正文、凭据或私有资源到任务描述。
 
 ## 4. 阶段与交付证据
 

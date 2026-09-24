@@ -63,6 +63,12 @@ class TeamOnboardingTest(unittest.TestCase):
         self.assertNotIn('primary_manager', context[0]['self']['roles'])
         self.assertEqual(context[0]['shared_resources']['mode'], 'on_demand')
         self.assertIn('/shared-resources', context[0]['shared_resources']['manifest_api'])
+        self.assertEqual(
+            context[0]['test_plans']['task_reference_contract']['read_policy'],
+            'on_demand_before_execution')
+        self.assertIn(
+            'reference_skill_ids',
+            context[0]['test_plans']['task_reference_contract']['fields'])
         payload = build_agent_system_context(self.other_claw, 'codebuddy', [], [], agent_teams=context)
         rule = next(r for r in payload['system_context']['rules'] if r['name'] == 'agent_team_identity')
         self.assertIn('不得由名字推断经理', rule['content'])

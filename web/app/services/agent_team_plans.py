@@ -6,6 +6,7 @@ from app.models import (TestPlan, TestPlanReport, TestReport, TestTask,
                         TestTaskOccurrence,
                         TestTaskReport, TestIteration, OpenClawInstance, _now)
 from app.services.agent_teams import TeamError, load_team, integer
+from app.services.test_task_references import serialize_task_references
 
 
 def access(team, write=False):
@@ -180,9 +181,11 @@ def overview(team, period, raw_date, limit, offset):
         TestTaskOccurrence.occurrence_date == anchor,
     ).order_by(TestTaskOccurrence.id.desc()).all()) if preview_task_ids else []
     current_occurrences = {}
+    current_occurrence_rows = {}
     for occurrence in occurrence_rows:
-        current_occurrences.setdefault(
-            occurrence.test_task_id, occurrence.to_dict())
+        if occurrence.test_task_id not in current_occurrences:
+            current_occurrences[occurrence.test_task_id] = occurrence.to_dict()
+            current_occurrence_rows[occurrence.test_task_id] = occurrence
     items = []
     for plan in rows:
         all_counts = stats.get(plan.id, {})
@@ -223,6 +226,9 @@ def overview(team, period, raw_date, limit, offset):
                     '/test-plans/%s/supervision/resume' % plan.id),
             } if supervisor_data else None),
             'tasks': [{'id': t.id, 'name': t.name,
+                       'description': t.description or '',
+                       'references': serialize_task_references(
+                           t, current_occurrence_rows.get(t.id)),
                        'status': ((current_occurrences.get(t.id) or {}).get('status')
                                   if t.schedule_enabled else t.status),
                        'template_status': t.status,

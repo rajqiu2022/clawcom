@@ -61,10 +61,21 @@ const AgentTeamPlans = (() => {
     }
     function task(t, planId, collapsed) {
         const occurrence = t.occurrence || null, execution = occurrence && occurrence.execution;
+        const refs = t.references || {};
+        const referenceItems = [
+            ...(refs.skills || []).map(item => ({...item, icon:'⚙'})),
+            ...(refs.knowledge || []).map(item => ({...item, icon:'📚'})),
+            ...(refs.reports || []).map(item => ({...item, icon:'📄'})),
+        ];
+        const referenceHtml = referenceItems.length
+            ? `<div class="at-task-references">${referenceItems.slice(0,4).map(item=>`<a href="${esc(item.web_url || '#')}" target="_blank" rel="noopener" title="${esc(item.title)}">${item.icon} #${esc(item.id)} ${esc(item.title)}</a>`).join('')}${referenceItems.length>4?`<span>+${referenceItems.length-4}</span>`:''}</div>`
+            : '';
+        const description = t.description
+            ? `<p class="at-task-description">${esc(t.description)}</p>` : '';
         const executionMeta = occurrence
             ? `<p class="at-help">执行实例 #${esc(occurrence.id)} · ${esc(occurrence.occurrence_date)}${execution?` · AgentTask #${esc(execution.agent_task_row_id)} / ${esc(execution.agent_task_id)} · 尝试 ${esc(execution.attempt_no || 1)}${execution.last_heartbeat_at?` · 心跳 ${esc(execution.last_heartbeat_at)}`:''}`:''}${occurrence.next_action?` · 下一步 ${esc(occurrence.next_action)}`:''}${occurrence.next_check_at?` · 检查 ${esc(occurrence.next_check_at)}`:''}${execution && execution.lease_expired?' · <span class="at-plan-alert">租约已超时，等待 Hub 回队</span>':''}</p>`
             : (t.schedule_enabled ? '<p class="at-help">当前日期尚未生成执行实例</p>' : '');
-        return `<li ${collapsed?'hidden data-plan-extra-task':''}><div class="at-plan-task-title"><span><span class="at-plan-task-id">任务 #${esc(t.id)}</span>${esc(t.name)}</span><span class="at-plan-task-actions"><button type="button" class="at-task-report" data-task-reports="${esc(t.id)}" data-plan-id="${esc(planId)}" data-task-name="${esc(t.name)}" aria-label="查看任务 #${esc(t.id)} 的关联报告">📄 报告 <b data-report-count ${t.report_count?'':'hidden'}>${esc(t.report_count || 0)}</b></button>${badge(t.status || 'scheduled')}</span></div><p class="at-help">${esc(t.priority)} · ${esc(t.assignee)} · ${esc(t.start_date || t.end_date || '未排期')}${t.end_date && t.end_date!==t.start_date?' → '+esc(t.end_date):''}${t.schedule_enabled?` · ${esc(t.recurrence_type==='daily'?'每日':t.recurrence_type==='weekly'?'每周':'单次')}`:''}${t.overdue?' · <span class="at-plan-alert">已逾期</span>':''}</p>${executionMeta}<div class="at-progress"><progress max="100" value="${t.progress}" aria-label="任务上报进度"></progress><span>${t.progress}%</span></div></li>`;
+        return `<li ${collapsed?'hidden data-plan-extra-task':''}><div class="at-plan-task-title"><span><span class="at-plan-task-id">任务 #${esc(t.id)}</span>${esc(t.name)}</span><span class="at-plan-task-actions"><button type="button" class="at-task-report" data-task-reports="${esc(t.id)}" data-plan-id="${esc(planId)}" data-task-name="${esc(t.name)}" aria-label="查看任务 #${esc(t.id)} 的关联报告">📄 报告 <b data-report-count ${t.report_count?'':'hidden'}>${esc(t.report_count || 0)}</b></button>${badge(t.status || 'scheduled')}</span></div><p class="at-help">${esc(t.priority)} · ${esc(t.assignee)} · ${esc(t.start_date || t.end_date || '未排期')}${t.end_date && t.end_date!==t.start_date?' → '+esc(t.end_date):''}${t.schedule_enabled?` · ${esc(t.recurrence_type==='daily'?'每日':t.recurrence_type==='weekly'?'每周':'单次')}`:''}${t.overdue?' · <span class="at-plan-alert">已逾期</span>':''}</p>${description}${referenceHtml}${executionMeta}<div class="at-progress"><progress max="100" value="${t.progress}" aria-label="任务上报进度"></progress><span>${t.progress}%</span></div></li>`;
     }
     function reportCard(r) {
         const global = r.kind === 'global';

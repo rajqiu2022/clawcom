@@ -39,6 +39,10 @@ from app.services.test_task_case_sync import (
     restore_backup as restore_task_case_backup,
     select_library_cases,
 )
+from app.services.test_task_references import (
+    normalize_task_references,
+    task_reference_options,
+)
 
 
 def _get_current_user():
@@ -175,10 +179,19 @@ def _create_test_task_notification(task, plan, action='assigned', message=''):
     plan_name = plan.name if plan else '未知计划'
     title = f'[测试任务] {task.name} - {action}'
 
+    reference_count = sum((
+        len(task.reference_skill_ids_json or []),
+        len(task.reference_knowledge_ids_json or []),
+        len(task.reference_report_ids_json or []),
+    ))
+    reference_note = (
+        f'\n📎 执行参考：{reference_count} 项，开始前必须从任务详情按需读取'
+        if reference_count else '')
     desc = (f'{message}\n\n'
             f'📋 所属计划：{plan_name}\n'
             f'📌 任务优先级：{task.priority}\n'
-            f'📅 排期：{task.start_date or "未设置"} ~ {task.end_date or "未设置"}\n'
+            f'📅 排期：{task.start_date or "未设置"} ~ {task.end_date or "未设置"}'
+            f'{reference_note}\n'
             f'🔗 查看详情：GET /api/v1/test-plans/{task.plan_id}/tasks/{task.id}')
 
     todo = ClawTodo(
@@ -1385,6 +1398,16 @@ def list_test_tasks(plan_id):
     return jsonify([t.to_dict() for t in tasks])
 
 
+@api_bp.route('/test-plans/<int:plan_id>/task-reference-options', methods=['GET'])
+def list_test_task_reference_options(plan_id):
+    """Return project/team-scoped resources a manager may bind to tasks."""
+    plan = TestPlan.query.get_or_404(plan_id)
+    user = _get_current_user()
+    if not _can_edit_plan(user, plan):
+        return jsonify({'error': '仅测试经理或计划管理员可选择任务参考资料'}), 403
+    return jsonify(task_reference_options(plan))
+
+
 @api_bp.route('/test-plans/<int:plan_id>/tasks', methods=['POST'])
 def create_test_task(plan_id):
     """创建测试任务"""
@@ -1426,6 +1449,10 @@ def create_test_task(plan_id):
 
     normalized_case_filter = enrich_case_filter(
         data.get('library_id'), data.get('case_filter'))
+    try:
+        references = normalize_task_references(data, plan)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
     task = TestTask(
         plan_id=plan_id,
         name=data['name'],
@@ -1440,6 +1467,7 @@ def create_test_task(plan_id):
         case_filter=normalized_case_filter,
         status=data.get('status', 'assigned'),
         created_by=created_by,
+        **references,
         **schedule,
     )
     db.session.add(task)
@@ -1488,7 +1516,20 @@ def get_test_task(plan_id, task_id):
 def update_test_task(plan_id, task_id):
     """更新测试任务"""
     task = TestTask.query.filter_by(plan_id=plan_id, id=task_id).first_or_404()
+    plan = TestPlan.query.get_or_404(plan_id)
     data = request.get_json()
+
+    reference_fields = {
+        'reference_skill_ids', 'reference_knowledge_ids',
+        'reference_report_ids'}
+    if reference_fields.intersection(data or {}):
+        user = _get_current_user()
+        if not _can_edit_plan(user, plan):
+            return jsonify({'error': '仅测试经理或计划管理员可绑定任务参考资料'}), 403
+    try:
+        references = normalize_task_references(data or {}, plan, task)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
 
     old_library_id = task.library_id
     old_case_filter = json.dumps(
@@ -1556,6 +1597,8 @@ def update_test_task(plan_id, task_id):
         task.end_date = task.end_date or plan_for_schedule.end_date or task.start_date
     for field, value in schedule.items():
         setattr(task, field, value)
+    for field, value in references.items():
+        setattr(task, field, value)
 
     # tapd_bug_ids
     if 'tapd_bug_ids' in data:
@@ -1579,7 +1622,6 @@ def update_test_task(plan_id, task_id):
     # 重算用例统计
     _recalc_task_case_stats(task)
 
-    plan = TestPlan.query.get(plan_id)
     if plan:
         _recalc_plan_stats(plan)
 

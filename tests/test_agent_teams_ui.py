@@ -78,7 +78,8 @@ class AgentTeamsUiTest(unittest.TestCase):
                        'Promise.all', 'renderReportContent', 'data-report-format',
                        '/html-preview', 'data-plan-task-toggle', '查看全部',
                        'data-plan-extra-task', 'aria-expanded',
-                       '/conclusion', 'saveTaskConclusion'):
+                       '/conclusion', 'saveTaskConclusion',
+                       'at-task-references', 't.references'):
             self.assertIn(marker, js)
         plan_css = (ROOT / 'web/static/css/agent_team_plans.css').read_text(encoding='utf-8')
         self.assertIn('.at-plan-task-id', plan_css)
@@ -90,6 +91,10 @@ class AgentTeamsUiTest(unittest.TestCase):
         self.assertIn('不会生成测试报告', self.html)
         self.assertIn('/conclusion', plans)
         self.assertIn('saveTaskConclusion', plans)
+        for marker in ('执行参考资料', 'task-reference-options',
+                       'reference_skill_ids', 'reference_knowledge_ids',
+                       'reference_report_ids', 'renderTaskReferencePicker'):
+            self.assertIn(marker, plans)
         for forbidden in ('/dispatch', '/supervision/start', 'setInterval('):
             self.assertNotIn(forbidden, js)
         self.assertIn('aria-labelledby="at-plan-dialog-title"', self.html)

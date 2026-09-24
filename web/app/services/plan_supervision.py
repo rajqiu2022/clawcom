@@ -18,6 +18,7 @@ from app.models import (AgentTask, AgentTeam, AgentTeamMember,
                         WorkflowMissionDispatch,
                         WorkflowDefinition, WorkflowRun, WorkflowRunStep, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
+from app.services.test_task_references import serialize_task_references
 
 
 class SupervisionError(Exception):
@@ -235,6 +236,12 @@ def materialize_task_occurrences(sup, now=None):
                 task.required_capabilities_json or []),
             required_resources_json=copy.deepcopy(
                 task.required_resources_json or {}),
+            reference_skill_ids_json=list(
+                task.reference_skill_ids_json or []),
+            reference_knowledge_ids_json=list(
+                task.reference_knowledge_ids_json or []),
+            reference_report_ids_json=list(
+                task.reference_report_ids_json or []),
             next_action='wait_not_before', next_check_at=not_before,
             execution_goal_json={
                 'objective': task.name,
@@ -794,6 +801,7 @@ def _stage_snapshot(team, task, assignment, occurrence=None):
         'test_plan_id': task.plan_id,
         'test_task_id': task.id,
         'test_task_name': task.name,
+        'test_task_description': task.description or '',
         'test_task_type': task.task_type,
         'test_task_priority': task.priority,
         'execution_mode': execution_mode,
@@ -802,6 +810,7 @@ def _stage_snapshot(team, task, assignment, occurrence=None):
         'allowed_fallback_claw_ids': list(fallback_ids),
         'required_capabilities': list(required_capabilities),
         'required_resources': copy.deepcopy(required_resources),
+        'references': serialize_task_references(task, occurrence),
         'scheduled_start_date': str(task.start_date) if task.start_date else None,
         'scheduled_end_date': str(task.end_date) if task.end_date else None,
         'team_assignment': {
@@ -1655,6 +1664,7 @@ def _create_plan_agent_task(sup, task, stage, command_key, instruction,
         'priority': task.priority,
         'task_type': task.task_type,
         'execution_role': task.execution_role or 'member_work',
+        'references': serialize_task_references(task, occurrence),
         'acceptance': {
             'result_contract': 'ordinary_agent_task',
             'report_to_hub': True,
@@ -1689,7 +1699,9 @@ def _create_plan_agent_task(sup, task, stage, command_key, instruction,
              if task.execution_role == 'manager_work' else
              '执行固定分配的测试任务：')
             + ('测试计划 #%s，任务 #%s「%s」。完成后返回结构化结论、'
-               'outputs 与 evidence。' % (sup.plan_id, task.id, task.name))),
+               'outputs 与 evidence。开始前必须读取 payload.references 中'
+               '绑定的 Skill、知识库和报告；任何必需资料不可读时应阻断并'
+               '报告，不能静默忽略。' % (sup.plan_id, task.id, task.name))),
         payload=json.dumps(payload, ensure_ascii=False, sort_keys=True),
         status='pending',
         retry_max=retry_max,
@@ -1824,7 +1836,9 @@ def _dispatch_scheduled_workflow(sup, task, stage, occurrence, now=None):
         'test_plan_id': sup.plan_id,
         'test_task_id': task.id,
         'test_task_occurrence_id': occurrence.id,
+        'test_task_description': task.description or '',
         'business_date': occurrence.occurrence_date.isoformat(),
+        'task_references': serialize_task_references(task, occurrence),
     }
     data = {
         'workflow_definition_id': definition.id,

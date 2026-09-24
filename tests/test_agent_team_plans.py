@@ -4,9 +4,11 @@ from datetime import date
 from unittest.mock import patch
 import test_agent_teams_api as fixtures
 from app import db
-from app.models import (AgentTeam, ClawMessage, MissionStage, TestPlan,
-                        TestPlanReport, TestReport, TestTask, TestTaskReport,
-                        WorkflowRun, WorkflowMission)
+from app.models import (AgentTask, AgentTeam, AgentTeamKnowledgeResource,
+                        AgentTeamSkillResource, ClawMessage, KnowledgeEntry,
+                        MissionStage, Skill, TestPlan, TestPlanReport,
+                        TestReport, TestTask, TestTaskOccurrence,
+                        TestTaskReport, WorkflowRun, WorkflowMission)
 from app.models_plan_supervision import PlanSupervisor
 
 
@@ -40,6 +42,122 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(WorkflowMission.query.count(), 0)
         self.assertEqual(self.client.put('/api/v1/test-plans/%s' % plan['id'],
             headers=self._headers(), json={'name':'已调整'}).status_code, 200)
+
+    def test_manager_binds_task_references_and_agent_task_receives_manifest(self):
+        self.app.config.update(
+            PLAN_SUPERVISION_ENABLED=True,
+            PLAN_SUPERVISION_TEAM_IDS=str(self.team_id),
+        )
+        knowledge = KnowledgeEntry(
+            title='移动端回归门禁', content='# 门禁', category='testing',
+            scope='project', project_id=self.project.id, status='approved')
+        skill = Skill(
+            name='mobile-regression-reference', display_name='移动端回归参考',
+            review_status='approved', visibility='public',
+            applicable_projects=[self.project.id])
+        report = TestReport(
+            title='昨日性能基线', report_type='performance',
+            project_id=self.project.id, status='published', risk_level='medium')
+        db.session.add_all([knowledge, skill, report])
+        db.session.flush()
+        db.session.add_all([
+            AgentTeamKnowledgeResource(
+                team_id=self.team_id, knowledge_id=knowledge.id,
+                linked_by_type='user', linked_by_name='tester'),
+            AgentTeamSkillResource(
+                team_id=self.team_id, skill_id=skill.id,
+                linked_by_type='user', linked_by_name='tester'),
+        ])
+        db.session.commit()
+
+        with patch('app.services.plan_supervision.wake'):
+            plan = self.create(status='active')
+        options = self.client.get(
+            '/api/v1/test-plans/%s/task-reference-options' % plan['id'],
+            headers=self._headers())
+        self.assertEqual(options.status_code, 200, options.json)
+        self.assertEqual([skill.id], [item['id'] for item in options.json['skills']])
+        self.assertEqual([knowledge.id], [item['id'] for item in options.json['knowledge']])
+        self.assertIn(report.id, [item['id'] for item in options.json['reports']])
+
+        created = self.client.post(
+            '/api/v1/test-plans/%s/tasks' % plan['id'],
+            headers=self._headers(), json={
+                'name': '微信小游戏性能回归',
+                'description': '对照昨日基线执行',
+                'assignee_claw_id': self.other_claw.id,
+                'reference_skill_ids': [skill.id],
+                'reference_knowledge_ids': [knowledge.id],
+                'reference_report_ids': [report.id],
+            })
+        self.assertEqual(created.status_code, 201, created.json)
+        self.assertEqual(created.json['reference_skill_ids'], [skill.id])
+        self.assertEqual(
+            created.json['references']['knowledge'][0]['pull_url'],
+            '/api/v1/knowledge/%s/export.md' % knowledge.id)
+        self.assertEqual(
+            created.json['references']['reports'][0]['detail_api'],
+            '/api/v1/test-reports/%s' % report.id)
+        readable = self.client.get(
+            '/api/v1/test-plans/%s/tasks/%s' % (
+                plan['id'], created.json['id']),
+            headers=self._headers(self.other_token))
+        self.assertEqual(readable.status_code, 200, readable.json)
+        self.assertEqual(
+            readable.json['references']['skills'][0]['id'], skill.id)
+
+        denied = self.client.put(
+            '/api/v1/test-plans/%s/tasks/%s' % (plan['id'], created.json['id']),
+            headers=self._headers(self.other_token),
+            json={'reference_report_ids': []})
+        self.assertEqual(denied.status_code, 403, denied.json)
+
+        dispatched = self.client.post(
+            '/api/v1/test-plans/%s/supervision/agent-tasks' % plan['id'],
+            headers=self._headers(), json={
+                'command_key': 'task-references-dispatch-v1',
+                'test_task_id': created.json['id'],
+            })
+        self.assertEqual(dispatched.status_code, 201, dispatched.json)
+        agent_task = AgentTask.query.filter_by(
+            task_type='test_plan_agent_task').one()
+        payload = __import__('json').loads(agent_task.payload)
+        self.assertEqual(payload['description'], '对照昨日基线执行')
+        self.assertEqual(payload['references']['skills'][0]['id'], skill.id)
+        self.assertEqual(payload['references']['knowledge'][0]['id'], knowledge.id)
+        self.assertEqual(payload['references']['reports'][0]['id'], report.id)
+        self.assertTrue(payload['references']['read_policy']['required_before_execution'])
+        self.assertIn('开始前必须读取 payload.references', agent_task.command)
+
+        scheduled = self.client.post(
+            '/api/v1/test-plans/%s/tasks' % plan['id'],
+            headers=self._headers(), json={
+                'name': '每日参考资料快照',
+                'assignee_claw_id': self.other_claw.id,
+                'schedule_enabled': True,
+                'recurrence_type': 'daily',
+                'auto_dispatch': False,
+                'reference_skill_ids': [skill.id],
+                'reference_knowledge_ids': [knowledge.id],
+                'reference_report_ids': [report.id],
+            })
+        self.assertEqual(scheduled.status_code, 201, scheduled.json)
+        occurrence = TestTaskOccurrence.query.filter_by(
+            test_task_id=scheduled.json['id']).one()
+        self.assertEqual(occurrence.reference_skill_ids_json, [skill.id])
+        updated = self.client.put(
+            '/api/v1/test-plans/%s/tasks/%s' % (
+                plan['id'], scheduled.json['id']),
+            headers=self._headers(), json={
+                'reference_skill_ids': [],
+                'reference_knowledge_ids': [],
+                'reference_report_ids': [],
+            })
+        self.assertEqual(updated.status_code, 200, updated.json)
+        db.session.refresh(occurrence)
+        self.assertEqual(occurrence.reference_skill_ids_json, [skill.id])
+        self.assertEqual(
+            occurrence.to_dict()['references']['reports'][0]['id'], report.id)
 
     def test_active_team_plan_bootstraps_supervisor_mission_and_task_stage(self):
         self.app.config.update(

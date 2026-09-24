@@ -59,7 +59,18 @@ def team_snapshot(team, claw_id, names):
         'plan_supervision': team_capability(team.id),
         'test_plans': {'api': '/api/v1/agent-teams/%s/test-plans' % team.id,
                        'create_role': 'test_manager', 'periods': ['day', 'week', 'all'],
-                       'note': '团队计划创建为草稿；排期概览不是自动执行调度。'},
+                       'task_reference_contract': {
+                           'fields': [
+                               'reference_skill_ids',
+                               'reference_knowledge_ids',
+                               'reference_report_ids',
+                           ],
+                           'options_api': (
+                               '/api/v1/test-plans/{plan_id}/'
+                               'task-reference-options'),
+                           'read_policy': 'on_demand_before_execution',
+                       },
+                       'note': '团队计划创建为草稿；排期概览不是自动执行调度。测试经理可给任务绑定团队 Skill、知识库及项目报告，执行者须按 references 地址读取。'},
         'shared_resources': {
             'manifest_api': '/api/v1/agent-teams/%s/shared-resources' % team.id,
             'mode': 'on_demand',
