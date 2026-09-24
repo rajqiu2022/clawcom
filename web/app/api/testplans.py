@@ -14,7 +14,7 @@ from app.models import (TestPlan, TestPlanReport, TestTask, TestTaskCase, TestTa
                         TestTaskChain, TestTaskChainStep,
                         TestTaskReport, TestTaskBugReport,
                         Project, OpenClawInstance, TestCaseLibrary, TestCase, User,
-                        ClawMessage, ClawTodo)
+                        ClawMessage, ClawTodo, WorkflowDefinition)
 from app.api import api_bp
 from app.services.iteration_tabs import (
     append_chart,
@@ -1250,6 +1250,36 @@ def _normalize_task_schedule(data, plan, current=None):
         raise ValueError('schedule_effective_from 必须为 YYYY-MM-DD')
     if effective_from and plan and plan.end_date and effective_from > plan.end_date:
         raise ValueError('schedule_effective_from 不能晚于计划结束日期')
+    raw_definition_id = data.get(
+        'workflow_definition_id', current.workflow_definition_id
+        if current else None)
+    if raw_definition_id in (None, ''):
+        workflow_definition_id = None
+    else:
+        if isinstance(raw_definition_id, bool):
+            raise ValueError('workflow_definition_id 必须为正整数')
+        try:
+            workflow_definition_id = int(raw_definition_id)
+        except (TypeError, ValueError):
+            raise ValueError('workflow_definition_id 必须为正整数')
+        if workflow_definition_id <= 0:
+            raise ValueError('workflow_definition_id 必须为正整数')
+        definition = db.session.get(WorkflowDefinition, workflow_definition_id)
+        if (not definition or definition.status != 'active'
+                or not plan
+                or int(definition.project_id or 0) != int(plan.project_id or 0)):
+            raise ValueError('workflow_definition_id 必须是同项目的有效 Flow')
+        if not enabled:
+            raise ValueError('仅 Hub 周期调度任务可绑定 workflow_definition_id')
+    start_vars = data.get(
+        'workflow_start_vars', current.workflow_start_vars_json
+        if current else {}) or {}
+    if not isinstance(start_vars, dict):
+        raise ValueError('workflow_start_vars 必须为 JSON 对象')
+    if len(json.dumps(start_vars, ensure_ascii=False)) > 16000:
+        raise ValueError('workflow_start_vars 不能超过 16000 字节')
+    if not workflow_definition_id and start_vars:
+        raise ValueError('workflow_start_vars 仅可用于已绑定 Flow 的周期任务')
     return {
         'schedule_enabled': enabled,
         'recurrence_type': recurrence,
@@ -1260,6 +1290,8 @@ def _normalize_task_schedule(data, plan, current=None):
         'due_time': clock('due_time', '23:59'),
         'auto_dispatch': auto_dispatch,
         'execution_role': execution_role,
+        'workflow_definition_id': workflow_definition_id,
+        'workflow_start_vars_json': start_vars,
     }
 
 

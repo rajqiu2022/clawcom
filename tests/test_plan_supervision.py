@@ -345,7 +345,9 @@ class PlanSupervisionTest(unittest.TestCase):
 
         self._login_admin()
         resumed = self.client.post(
-            self.base + '/resume', json={'command_key': 'resume-after-notice'})
+            self.base + '/resume', json={
+                'command_key': 'resume-after-notice',
+                'reason': '管理员确认恢复'})
         self.assertEqual(resumed.status_code, 200, resumed.json)
         self.agent()
         self.claim('quiet-claim')
@@ -412,6 +414,8 @@ class PlanSupervisionTest(unittest.TestCase):
             'command_key': 'plan-block-decision', **self.credentials(),
             'cursor': self.sup().lease_cursor, 'outcome': 'blocked',
             'block_scope': 'plan',
+            'plan_block_reason_code': 'global_security_or_compliance',
+            'plan_block_evidence': [{'ref': 'security://incident/1'}],
             'summary': '团队级安全问题，明确暂停整个计划',
         })
         self.assertEqual(blocked.status_code, 200, blocked.json)
@@ -419,6 +423,36 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(blocked.json['block_scope'], 'plan')
         self.assertFalse(blocked.json['continue_supervision'])
         self.assertEqual(self.sup().status, 'blocked_owner_gate')
+
+    def test_plan_scope_rejects_local_summary_and_missing_global_evidence(self):
+        team = self.scoped_team()
+        self.plan.team_id = team.id
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'scope-guard-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.agent()
+        self.claim('scope-guard-claim')
+        credentials = self.credentials()
+        cursor = self.sup().lease_cursor
+        missing = self.post('decision', {
+            'command_key': 'scope-guard-missing', **credentials,
+            'cursor': cursor, 'outcome': 'blocked',
+            'block_scope': 'plan', 'summary': '整个团队环境不可用',
+        })
+        self.assertEqual(missing.status_code, 400, missing.json)
+        self.assertEqual(missing.json['code'], 'PLAN_BLOCK_REASON_REQUIRED')
+        conflict = self.post('decision', {
+            'command_key': 'scope-guard-conflict', **credentials,
+            'cursor': cursor, 'outcome': 'blocked',
+            'block_scope': 'plan',
+            'plan_block_reason_code': 'global_environment_unavailable',
+            'plan_block_evidence': [{'ref': 'probe://global-env'}],
+            'summary': '这只是阶段级阻断，其他独立任务可继续',
+        })
+        self.assertEqual(conflict.status_code, 409, conflict.json)
+        self.assertEqual(conflict.json['code'], 'PLAN_BLOCK_SCOPE_CONFLICT')
+        self.assertEqual(self.sup().status, 'leased')
 
     def test_manager_can_dispatch_non_flow_agent_task_while_plan_is_blocked(self):
         team = self.scoped_team()
@@ -439,7 +473,10 @@ class PlanSupervisionTest(unittest.TestCase):
         blocked = self.post('decision', {
             'command_key': 'direct-task-block-plan', **self.credentials(),
             'cursor': self.sup().lease_cursor, 'outcome': 'blocked',
-            'block_scope': 'plan', 'summary': '其他 Flow 需人工处理',
+            'block_scope': 'plan',
+            'plan_block_reason_code': 'global_environment_unavailable',
+            'plan_block_evidence': [{'ref': 'environment://all-workers'}],
+            'summary': '全团队运行环境不可用，须人工处理',
         })
         self.assertEqual(blocked.status_code, 200, blocked.json)
         self.assertEqual(self.sup().status, 'blocked_owner_gate')
@@ -767,6 +804,72 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(PlanSupervisorReceipt.query.filter_by(
             action='migrate_schedule_templates').count(), 1)
 
+    def test_admin_resume_atomically_dispatches_due_agent_task_and_one_flow(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        ordinary = TestTask(
+            plan_id=self.plan.id, name='到点普通回归', status='completed',
+            assignee_claw_id=self.other_claw.id, task_type='functional',
+            start_date=self.plan.start_date, end_date=self.plan.end_date,
+            schedule_enabled=True, recurrence_type='daily',
+            not_before_time='00:00', due_time='23:59',
+            auto_dispatch=True, execution_role='member_work')
+        flow_task = TestTask(
+            plan_id=self.plan.id, name='到点 Flow 冒烟', status='blocked',
+            assignee_claw_id=self.other_claw.id, task_type='automation',
+            start_date=self.plan.start_date, end_date=self.plan.end_date,
+            schedule_enabled=True, recurrence_type='daily',
+            not_before_time='00:00', due_time='23:59',
+            auto_dispatch=True, execution_role='member_work',
+            workflow_definition_id=self.flow_a.id,
+            workflow_start_vars_json={})
+        local_block = TestTask(
+            plan_id=self.plan.id, name='局部阻断项', status='blocked',
+            assignee_claw_id=self.other_claw.id, task_type='performance')
+        db.session.add_all([ordinary, flow_task, local_block])
+        db.session.commit()
+        started = self.post('start', {
+            'command_key': 'atomic-resume-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.assertEqual(started.status_code, 200, started.json)
+        self.agent()
+        self.claim('atomic-resume-claim')
+        blocked = self.post('decision', {
+            'command_key': 'atomic-resume-block', **self.credentials(),
+            'cursor': self.sup().lease_cursor, 'outcome': 'blocked',
+            'block_scope': 'plan',
+            'plan_block_reason_code': 'global_environment_unavailable',
+            'plan_block_evidence': [{'ref': 'probe://global'}],
+            'summary': '全团队环境不可用，暂停整个计划',
+        })
+        self.assertEqual(blocked.status_code, 200, blocked.json)
+        self._login_admin()
+        body = {'command_key': 'atomic-resume-v1',
+                'reason': '全局环境恢复，补派到点任务'}
+        resumed = self.client.post(self.base + '/resume', json=body)
+        self.assertEqual(resumed.status_code, 200, resumed.json)
+        ordinary_occ = TestTaskOccurrence.query.filter_by(
+            test_task_id=ordinary.id).one()
+        flow_occ = TestTaskOccurrence.query.filter_by(
+            test_task_id=flow_task.id).one()
+        self.assertEqual(ordinary_occ.status, 'dispatched')
+        self.assertIsNotNone(ordinary_occ.agent_task_id)
+        self.assertEqual(flow_occ.status, 'dispatched')
+        self.assertIsNotNone(flow_occ.workflow_run_id)
+        self.assertEqual(WorkflowRun.query.count(), 1)
+        flow_stage = db.session.get(MissionStage, flow_occ.mission_stage_id)
+        self.assertEqual(flow_stage.workflow_run_id, flow_occ.workflow_run_id)
+        self.assertEqual(local_block.status, 'blocked')
+        replay = self.client.post(self.base + '/resume', json=body)
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertTrue(replay.json['replayed'])
+        self.assertEqual(WorkflowRun.query.count(), 1)
+        self.assertEqual(AgentTask.query.filter_by(
+            task_type='test_plan_agent_task').count(), 1)
+
     def test_reconciliation_stage_becomes_claimable_control_agent_task(self):
         team = self.scoped_team()
         db.session.add(AgentTeamMember(
@@ -991,7 +1094,8 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(self.post('stop', {'command_key': 'stop', **self.credentials()}).status_code, 200)
         self.assertEqual(self.post('resume', {'command_key': 'resume'}).status_code, 403)
         self._login_admin()
-        self.assertEqual(self.client.post(self.base + '/resume', json={'command_key': 'resume'}).status_code, 200)
+        self.assertEqual(self.client.post(self.base + '/resume', json={
+            'command_key': 'resume', 'reason': '管理员恢复监督'}).status_code, 200)
 
     def test_progress_repetition_cannot_hide_stall_and_heartbeat_is_quiet(self):
         mission_data = self._create_mission()

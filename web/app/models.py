@@ -5583,6 +5583,11 @@ class TestTask(db.Model):
     execution_role = db.Column(
         db.String(32), nullable=False, default='member_work',
         comment='member_work/manager_work')
+    workflow_definition_id = db.Column(
+        db.Integer, db.ForeignKey('workflow_definitions.id'),
+        comment='周期实例到点后应创建的固定 Workflow；为空则创建普通 AgentTask')
+    workflow_start_vars_json = db.Column(
+        db.JSON, comment='周期 Workflow 的受控启动变量模板')
 
     # 优先级
     priority = db.Column(db.Enum('P0', 'P1', 'P2', 'P3'), default='P2', comment='优先级')
@@ -5676,6 +5681,8 @@ class TestTask(db.Model):
             'due_time': self.due_time or '',
             'auto_dispatch': bool(self.auto_dispatch),
             'execution_role': self.execution_role or 'member_work',
+            'workflow_definition_id': self.workflow_definition_id,
+            'workflow_start_vars': self.workflow_start_vars_json or {},
             'priority': self.priority,
             'library_id': self.library_id,
             'library_name': self.library.name if self.library else None,

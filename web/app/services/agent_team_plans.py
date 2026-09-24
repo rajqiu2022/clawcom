@@ -36,9 +36,9 @@ def bind(data, plan=None):
     if old_team_id and team_id != old_team_id:
         raise TeamError('TEAM_PLAN_REBIND_FORBIDDEN', '计划已归属其他团队', 409)
     team = load_team(team_id, lock=True)
-    access(team, write=True)
     if not old_team_id and team.status != 'active':
         raise TeamError('TEAM_PLAN_INACTIVE', '仅启用中的团队可创建或关联计划', 409)
+    access(team, write=True)
     project_id = data.get('project_id', plan.project_id if plan else team.project_id)
     if (type(project_id) is not int or project_id != team.project_id
             or (plan and plan.project_id != team.project_id)):
@@ -216,6 +216,11 @@ def overview(team, period, raw_date, limit, offset):
                     (supervisor_data.get('manager_lease') or {}).get('active')),
                 'lease_expires_at': (
                     (supervisor_data.get('manager_lease') or {}).get('expires_at')),
+                'can_resume': bool(
+                    manage and supervisor_data['status'] in (
+                        'blocked', 'blocked_owner_gate', 'stopped')),
+                'resume_api': (
+                    '/api/v1/test-plans/%s/supervision/resume' % plan.id),
             } if supervisor_data else None),
             'tasks': [{'id': t.id, 'name': t.name,
                        'status': ((current_occurrences.get(t.id) or {}).get('status')

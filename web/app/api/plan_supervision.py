@@ -4,7 +4,9 @@ from flask import jsonify, request
 from app import db
 from app.api import api_bp
 from app.api.auth_utils import get_current_claw, get_current_user, user_project_ids
-from app.models import TestPlan, OpenClawInstance, WorkflowMission, WorkflowMissionDispatch, AgentTeamMission, _now
+from app.models import (TestPlan, TestTaskOccurrence, OpenClawInstance,
+                        WorkflowMission, WorkflowMissionDispatch,
+                        AgentTeamMission, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
 from app.services import plan_supervision as svc
 
@@ -252,20 +254,59 @@ def resume_plan_supervision(plan_id):
     if not sup:
         svc.fail('PLAN_SUPERVISION_NOT_STARTED', '计划尚未启动监督')
     body = payload()
+    reason = str(body.get('reason') or '').strip()
+    if not reason or len(reason) > 1000:
+        svc.fail('PLAN_RESUME_REASON_REQUIRED',
+                 '恢复监督须填写不超过 1000 字的原因', 400)
+    wake_targets = set()
     def apply():
+        now = _now()
         plan = db.session.get(TestPlan, plan_id)
-        if plan.status != 'active' or _now() >= svc.ends_at(plan):
+        if plan.status != 'active' or now >= svc.ends_at(plan):
             svc.fail('PLAN_SUPERVISION_INACTIVE', '计划已结束或不在 active 状态')
         if sup.status not in ('blocked', 'blocked_owner_gate', 'stopped'):
             svc.fail('PLAN_SUPERVISION_NOT_PAUSED', '不能重置正在监督的计划')
+        svc.cancel_wake(sup)
         sup.status = 'waiting'
         sup.expired_turns = 0
-        sup.next_check_at = _now()
-        svc.add_event(plan_id, 'supervisor_resumed', ['resume', body.get('command_key')])
-        svc.pump(sup)
+        sup.next_check_at = now
+        sup.resume_condition = 'timer_or_event'
+        sup.lease_owner = None
+        sup.lease_expires_at = None
+        sup.turn_deadline_at = None
+        created_stages = svc.sync_plan_stages(sup, now=now)
+        due_before = {
+            row.id for row in TestTaskOccurrence.query.filter(
+                TestTaskOccurrence.plan_id == plan_id,
+                TestTaskOccurrence.status.in_(('scheduled', 'ready')),
+                TestTaskOccurrence.not_before_at <= now).all()}
+        wake_targets.update(
+            svc.promote_and_dispatch_due_occurrences(sup, now=now))
+        svc.add_event(plan_id, 'supervisor_resumed', [
+            'resume', body.get('command_key'),
+        ], {
+            'reason': reason,
+            'created_stage_count': created_stages,
+            'due_occurrence_ids': sorted(due_before),
+            'wake_claw_ids': sorted(wake_targets),
+        }, now)
+        manager_target = svc.pump(sup, now)
+        if manager_target:
+            wake_targets.add(manager_target)
+        dispatched = svc.task_dispatch_receipts(sup)
+        return {
+            'reason': reason,
+            'created_stage_count': created_stages,
+            'due_occurrence_ids': sorted(due_before),
+            'dispatched': [row for row in dispatched
+                           if row.get('occurrence_id') in due_before],
+            'wake_claw_ids': sorted(wake_targets),
+        }
     result = svc.receipt(sup, 'resume', body, apply)
     db.session.commit()
-    svc.wake(sup.orchestrator_claw_id)
+    if not result.get('replayed'):
+        for claw_id in result.get('wake_claw_ids') or []:
+            svc.wake(claw_id)
     return jsonify(result)
 
 

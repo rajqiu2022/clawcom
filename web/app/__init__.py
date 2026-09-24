@@ -803,6 +803,8 @@ def create_app(config_name=None):
                         ('due_time', "VARCHAR(5) DEFAULT ''"),
                         ('auto_dispatch', 'BOOLEAN NOT NULL DEFAULT FALSE'),
                         ('execution_role', "VARCHAR(32) NOT NULL DEFAULT 'member_work'"),
+                        ('workflow_definition_id', 'INTEGER DEFAULT NULL'),
+                        ('workflow_start_vars_json', 'LONGTEXT DEFAULT NULL'),
                     ]:
                         try:
                             conn.execute(text(

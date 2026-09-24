@@ -1,6 +1,9 @@
 -- Immutable dated executions for Hub-owned recurring TestTask templates.
 -- Template/report columns are added conditionally by the release schema step
 -- because production MariaDB 10.1 has no ADD COLUMN IF NOT EXISTS support.
+-- The deployment schema step also adds nullable TestTask workflow_definition_id
+-- and workflow_start_vars_json columns. They are omitted here because MariaDB
+-- 10.1 cannot express additive idempotent ALTER TABLE in static SQL.
 CREATE TABLE IF NOT EXISTS test_task_occurrences (
     id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     plan_id INT NOT NULL,

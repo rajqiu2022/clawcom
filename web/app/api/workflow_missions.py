@@ -37,6 +37,8 @@ from app.services.workflow_library_snapshots import (
 from app.services.workflows import (
     build_workflow_start_context,
     can_execute_workflow,
+    resolve_workflow_start_vars,
+    WorkflowStartVarsValidationError,
     workflow_catalog_metadata,
     workflow_outcome_requirements,
 )
@@ -623,6 +625,166 @@ def list_workflow_mission_definitions(mission_id):
     })
 
 
+def create_mission_dispatch_record(
+        *, mission, definition, stage, worker_claw_id, actor_id,
+        actor_name, data, start_vars, raw_context, reason, decision_key,
+        idempotency_key, request_hash, team=None, binding=None,
+        ip_address='', commit=False):
+    """Create one Mission Child Run after the caller has enforced policy.
+
+    Both the Agent-facing dispatch endpoint and Hub's human recovery path use
+    this function. Keeping one constructor is important: snapshots, immutable
+    Stage binding and idempotency must not drift between normal dispatch and
+    deterministic overdue-task compensation.
+    """
+    start_vars = resolve_workflow_start_vars(
+        definition.definition_json or {}, start_vars, {
+            'worker_claw_id': worker_claw_id,
+            'executor_claw_id': worker_claw_id,
+            'executor_claw_ids': [worker_claw_id],
+        }, defer_required_fields={'reviewer_claw_id'})
+    context = build_workflow_start_context(
+        start_vars, raw_context, start_mode='mission_dispatch',
+        executor_claw_ids=[], executor_user_ids=[],
+        worker_claw_id=worker_claw_id,
+    )
+    context['mission'] = {
+        'id': mission.id,
+        'mission_key': mission.mission_key,
+        'objective': mission.objective,
+        'control_mode': 'agent_autonomous',
+        'main_claw_id': mission.main_claw_id,
+        'worker_claw_id': worker_claw_id,
+        'allow_external_notification': bool(
+            mission.allow_external_notification),
+        'allow_destructive_actions': bool(
+            mission.allow_destructive_actions),
+    }
+    if team:
+        context['mission'].update({
+            'control_mode': 'team_managed', 'team_id': team.id,
+            'team_version': binding.team_version,
+            'manager_epoch': team.manager_epoch,
+            'dispatch_manager_claw_id': actor_id,
+            'stage_key': stage.stage_key,
+        })
+    from app.api.workflows import (
+        _workflow_definition_snapshot_fingerprint,
+        _workflow_execution_input_snapshot,
+    )
+    context['workflow_definition_snapshot'] = (
+        _workflow_definition_snapshot_fingerprint(definition))
+    context['workflow_catalog_snapshot'] = workflow_catalog_metadata(
+        definition.definition_json or {})
+    context['outcome_requirements_snapshot'] = workflow_outcome_requirements(
+        definition.definition_json or {})
+    context['execution_input_snapshot'] = _workflow_execution_input_snapshot(
+        context['workflow_definition_snapshot'],
+        start_vars,
+        raw_context,
+        (definition.definition_json or {}).get('context'),
+    )
+    run = WorkflowRun(
+        definition_id=definition.id,
+        run_name=(str(data.get('run_name') or '').strip()
+                  or definition.name),
+        status='pending', project_id=mission.project_id,
+        triggered_by=actor_name, idempotency_key=idempotency_key,
+        idempotency_request_hash=request_hash,
+        controller_run_id=mission.mission_key,
+        correlation_id=f'mission:{mission.id}',
+        trigger_source='mission_dispatch', context_json=context,
+    )
+    db.session.add(run)
+    db.session.flush()
+    freeze_run_context(
+        run, team=team,
+        manager_claw_id=actor_id if team else mission.main_claw_id)
+    if stage:
+        stage.workflow_run_id = run.id
+        stage.state = 'dispatched'
+        stage.last_reason_code = 'scheduled_workflow_dispatched'
+        stage.version = int(stage.version or 1) + 1
+    definition_json = copy.deepcopy(definition.definition_json or {})
+    for position, step in enumerate(definition_json.get('steps') or []):
+        initial_status = (
+            'waiting_approval'
+            if step.get('approval_required') and not step.get('depends_on')
+            else 'pending')
+        db.session.add(WorkflowRunStep(
+            run_id=run.id, step_id=step['id'], position=position,
+            name=step.get('name') or step['id'],
+            step_type=step.get('type') or 'worker_task',
+            runner=step.get('runner') or '',
+            target_claw_id=step.get('target_claw_id'),
+            target_agent=step.get('target_agent') or '',
+            target_post=step.get('target_post') or '',
+            status=initial_status,
+            depends_on_json=step.get('depends_on') or [],
+            step_config_json=step,
+        ))
+    db.session.flush()
+    from app.api.workflows import _recompute_run_status
+    _recompute_run_status(run, actor_name)
+
+    snapshot_library_id, snapshot_warning = resolve_workflow_library_id(
+        data, context, workflow_key=definition.workflow_key)
+    if snapshot_library_id is not None:
+        snapshot_record = None
+        try:
+            with db.session.begin_nested():
+                snapshot_record, freeze_warning = (
+                    freeze_workflow_run_library_snapshot(
+                        run, snapshot_library_id, actor_name))
+            snapshot_warning = snapshot_warning or freeze_warning
+        except Exception as exc:
+            current_app.logger.warning(
+                'Mission Run %s library snapshot failed: %s',
+                run.id, exc, exc_info=True)
+            snapshot_warning = {
+                'code': 'TESTCASE_LIBRARY_SNAPSHOT_FAILED',
+                'message': 'Mission Run continues without frozen library',
+                'details': {'library_id': snapshot_library_id},
+            }
+        updated_context = copy.deepcopy(run.context_json or {})
+        if snapshot_record is not None:
+            updated_context['testcase_library_snapshot'] = (
+                snapshot_record.to_dict())
+        if snapshot_warning:
+            updated_context = append_workflow_snapshot_warning(
+                updated_context, snapshot_warning)
+        run.context_json = updated_context
+
+    dispatch = WorkflowMissionDispatch(
+        mission_id=mission.id, definition_id=definition.id,
+        workflow_run_id=run.id,
+        decision_key=decision_key or idempotency_key,
+        idempotency_key=idempotency_key, request_hash=request_hash,
+        reason=reason, status='created',
+        created_by_claw_id=actor_id,
+        worker_claw_id=worker_claw_id,
+    )
+    mission.child_run_count = int(mission.child_run_count or 0) + 1
+    db.session.add(dispatch)
+    db.session.add(AuditLog(
+        action='dispatch', resource_type='workflow_mission',
+        resource_id=mission.id, resource_name=mission.mission_key,
+        operator=actor_name, ip_address=ip_address,
+        detail=json.dumps({
+            'definition_id': definition.id,
+            'workflow_run_id': run.id,
+            'worker_claw_id': worker_claw_id,
+            'decision_key': dispatch.decision_key,
+            'reason': reason,
+        }, ensure_ascii=False, sort_keys=True),
+    ))
+    if commit:
+        db.session.commit()
+    else:
+        db.session.flush()
+    return dispatch
+
+
 @api_bp.route(
     '/workflow-missions/<int:mission_id>/dispatch', methods=['POST'])
 def dispatch_workflow_mission(mission_id):
@@ -763,145 +925,26 @@ def dispatch_workflow_mission(mission_id):
                 {'worker_claw_id': worker_claw_id,
                  'workflow_definition_id': definition.id})
 
-    context = build_workflow_start_context(
-        start_vars, raw_context, start_mode='mission_dispatch',
-        executor_claw_ids=[], executor_user_ids=[],
-        worker_claw_id=worker_claw_id,
-    )
-    context['mission'] = {
-        'id': mission.id,
-        'mission_key': mission.mission_key,
-        'objective': mission.objective,
-        'control_mode': 'agent_autonomous',
-        'main_claw_id': mission.main_claw_id,
-        'worker_claw_id': worker_claw_id,
-        'allow_external_notification': bool(
-            mission.allow_external_notification),
-        'allow_destructive_actions': bool(
-            mission.allow_destructive_actions),
-    }
-    if team:
-        context['mission'].update({
-            'control_mode': 'team_managed', 'team_id': team.id,
-            'team_version': binding.team_version, 'manager_epoch': team.manager_epoch,
-            'dispatch_manager_claw_id': actor['id'], 'stage_key': stage.stage_key,
-        })
-    from app.api.workflows import (
-        _workflow_definition_snapshot_fingerprint,
-        _workflow_execution_input_snapshot,
-    )
-    context['workflow_definition_snapshot'] = (
-        _workflow_definition_snapshot_fingerprint(definition))
-    context['workflow_catalog_snapshot'] = workflow_catalog_metadata(
-        definition.definition_json or {})
-    context['outcome_requirements_snapshot'] = workflow_outcome_requirements(
-        definition.definition_json or {})
-    context['execution_input_snapshot'] = _workflow_execution_input_snapshot(
-        context['workflow_definition_snapshot'],
-        start_vars,
-        raw_context,
-        (definition.definition_json or {}).get('context'),
-    )
-    run = WorkflowRun(
-        definition_id=definition.id,
-        run_name=(str(data.get('run_name') or '').strip()
-                  or definition.name),
-        status='pending', project_id=mission.project_id,
-        triggered_by=actor['name'], idempotency_key=idempotency_key,
-        idempotency_request_hash=request_hash,
-        controller_run_id=mission.mission_key,
-        correlation_id=f'mission:{mission.id}',
-        trigger_source='mission_dispatch', context_json=context,
-    )
-    db.session.add(run)
     try:
-        db.session.flush()
-        freeze_run_context(
-            run, team=team,
-            manager_claw_id=actor['id'] if team else mission.main_claw_id)
-        if stage:
-            stage.workflow_run_id = run.id
-            stage.version = int(stage.version or 1) + 1
-        definition_json = copy.deepcopy(definition.definition_json or {})
-        for position, step in enumerate(definition_json.get('steps') or []):
-            initial_status = (
-                'waiting_approval'
-                if step.get('approval_required') and not step.get('depends_on')
-                else 'pending')
-            db.session.add(WorkflowRunStep(
-                run_id=run.id, step_id=step['id'], position=position,
-                name=step.get('name') or step['id'],
-                step_type=step.get('type') or 'worker_task',
-                runner=step.get('runner') or '',
-                target_claw_id=step.get('target_claw_id'),
-                target_agent=step.get('target_agent') or '',
-                target_post=step.get('target_post') or '',
-                status=initial_status,
-                depends_on_json=step.get('depends_on') or [],
-                step_config_json=step,
-            ))
-        db.session.flush()
-        from app.api.workflows import _recompute_run_status
-        _recompute_run_status(run, actor['name'])
-
-        snapshot_library_id, snapshot_warning = resolve_workflow_library_id(
-            data, context, workflow_key=definition.workflow_key)
-        if snapshot_library_id is not None:
-            snapshot_record = None
-            try:
-                with db.session.begin_nested():
-                    snapshot_record, freeze_warning = (
-                        freeze_workflow_run_library_snapshot(
-                            run, snapshot_library_id, actor['name']))
-                snapshot_warning = snapshot_warning or freeze_warning
-            except Exception as exc:
-                current_app.logger.warning(
-                    'Mission Run %s library snapshot failed: %s',
-                    run.id, exc, exc_info=True)
-                snapshot_warning = {
-                    'code': 'TESTCASE_LIBRARY_SNAPSHOT_FAILED',
-                    'message': 'Mission Run continues without frozen library',
-                    'details': {'library_id': snapshot_library_id},
-                }
-            updated_context = copy.deepcopy(run.context_json or {})
-            if snapshot_record is not None:
-                updated_context['testcase_library_snapshot'] = (
-                    snapshot_record.to_dict())
-            if snapshot_warning:
-                updated_context = append_workflow_snapshot_warning(
-                    updated_context, snapshot_warning)
-            run.context_json = updated_context
-
-        dispatch = WorkflowMissionDispatch(
-            mission_id=mission.id, definition_id=definition.id,
-            workflow_run_id=run.id,
-            decision_key=decision_key or idempotency_key,
-            idempotency_key=idempotency_key, request_hash=request_hash,
-            reason=reason, status='created',
-            created_by_claw_id=actor['id'],
-            worker_claw_id=worker_claw_id,
-        )
-        mission.child_run_count = int(mission.child_run_count or 0) + 1
-        db.session.add(dispatch)
-        db.session.add(AuditLog(
-            action='dispatch', resource_type='workflow_mission',
-            resource_id=mission.id, resource_name=mission.mission_key,
-            operator=actor['name'], ip_address=request.remote_addr,
-            detail=json.dumps({
-                'definition_id': definition.id,
-                'workflow_run_id': run.id,
-                'worker_claw_id': worker_claw_id,
-                'decision_key': dispatch.decision_key,
-                'reason': reason,
-            }, ensure_ascii=False, sort_keys=True),
-        ))
-        db.session.commit()
+        dispatch = create_mission_dispatch_record(
+            mission=mission, definition=definition, stage=stage,
+            worker_claw_id=worker_claw_id, actor_id=actor['id'],
+            actor_name=actor['name'], data=data, start_vars=start_vars,
+            raw_context=raw_context, reason=reason,
+            decision_key=decision_key, idempotency_key=idempotency_key,
+            request_hash=request_hash, team=team, binding=binding,
+            ip_address=request.remote_addr, commit=True)
     except ContextSnapshotError as exc:
         db.session.rollback()
         return _error(
             exc.code, str(exc), 409,
             {'workflow_definition_id': definition.id,
              'worker_claw_id': worker_claw_id})
+    except WorkflowStartVarsValidationError as exc:
+        db.session.rollback()
+        return _error(
+            exc.code, str(exc), 422,
+            dict({'workflow_definition_id': definition.id}, **exc.details))
     except IntegrityError:
         db.session.rollback()
         existing = WorkflowMissionDispatch.query.filter_by(

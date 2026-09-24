@@ -15,7 +15,7 @@ from app.models import (AgentTask, AgentTeam, AgentTeamMember,
                         RequirementItem, TestIteration, TestPlan, TestReport,
                         TestPlanReport, TestTask, TestTaskOccurrence, WorkflowMission,
                         WorkflowMissionDispatch,
-                        WorkflowRun, WorkflowRunStep, _now)
+                        WorkflowDefinition, WorkflowRun, WorkflowRunStep, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
 
 
@@ -39,6 +39,15 @@ OCCURRENCE_TERMINAL = {
     'completed', 'blocked', 'failed', 'skipped', 'cancelled',
     'blocked_terminal', 'analysis_incomplete',
 }
+PLAN_BLOCK_REASON_CODES = frozenset({
+    'owner_cancelled', 'global_environment_unavailable',
+    'global_release_invalid', 'global_security_or_compliance',
+    'global_resource_unavailable', 'plan_prerequisite_missing',
+})
+PLAN_SCOPE_CONFLICT_RE = re.compile(
+    r'(?:局部|阶段级|单(?:个|项)|不(?:升级|属于|是).{0,8}计划级|'
+    r'不(?:影响|阻断).{0,12}(?:其他|独立)|其他.{0,12}(?:继续|可继续)|'
+    r'独立.{0,12}(?:继续|可继续))', re.I)
 
 
 def enabled():
@@ -85,7 +94,12 @@ def team_capability(team_id):
                 'blocked_owner_gate', 'stopped', 'expired'],
             'blocking_policy': {
                 'default_scope': 'stage',
-                'plan_scope_requires': {'block_scope': 'plan'},
+                'plan_scope_requires': {
+                    'block_scope': 'plan',
+                    'plan_block_reason_code': sorted(PLAN_BLOCK_REASON_CODES),
+                    'plan_block_evidence': 'non_empty_object_array',
+                    'summary_must_not_claim_local_scope': True,
+                },
                 'continue_when_undispatched_stages_remain': True,
                 'note': ('单个 Child Run/Stage 阻断不得暂停整个计划；主 Agent 应继续判断并派发'
                          '无依赖、无资源冲突的 Stage。只有团队级问题才显式使用 block_scope=plan。'),
@@ -300,6 +314,31 @@ def migrate_schedule_templates(sup, body, now=None):
         if execution_role not in ('member_work', 'manager_work'):
             fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
                  'execution_role 仅支持 member_work/manager_work', 400)
+        raw_definition_id = row.get('workflow_definition_id')
+        workflow_definition_id = None
+        workflow_start_vars = row.get('workflow_start_vars') or {}
+        if raw_definition_id not in (None, ''):
+            if isinstance(raw_definition_id, bool):
+                fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                     'workflow_definition_id 必须为正整数', 400)
+            try:
+                workflow_definition_id = int(raw_definition_id)
+            except (TypeError, ValueError):
+                fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                     'workflow_definition_id 必须为正整数', 400)
+            definition = db.session.get(
+                WorkflowDefinition, workflow_definition_id)
+            if (workflow_definition_id <= 0 or not definition
+                    or definition.status != 'active'
+                    or int(definition.project_id or 0) != int(plan.project_id or 0)):
+                fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                     'workflow_definition_id 必须是同项目的有效 Flow', 400)
+        if not isinstance(workflow_start_vars, dict):
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'workflow_start_vars 必须为 JSON 对象', 400)
+        if workflow_start_vars and not workflow_definition_id:
+            fail('PLAN_SCHEDULE_TEMPLATE_INVALID',
+                 'workflow_start_vars 仅可用于已绑定 Flow 的周期任务', 400)
         weekdays = row.get('recurrence_weekdays') or []
         if recurrence == 'weekly' and (not isinstance(weekdays, list)
                 or not weekdays or any(type(value) is not int or value < 0
@@ -313,6 +352,8 @@ def migrate_schedule_templates(sup, body, now=None):
             'due_time': due_time,
             'auto_dispatch': row.get('auto_dispatch') is not False,
             'execution_role': execution_role,
+            'workflow_definition_id': workflow_definition_id,
+            'workflow_start_vars': workflow_start_vars,
         }))
 
     def apply():
@@ -333,6 +374,8 @@ def migrate_schedule_templates(sup, body, now=None):
             task.due_time = config['due_time']
             task.auto_dispatch = config['auto_dispatch']
             task.execution_role = config['execution_role']
+            task.workflow_definition_id = config['workflow_definition_id']
+            task.workflow_start_vars_json = config['workflow_start_vars']
             changed.append({
                 'test_task_id': task.id, 'before': before,
                 'after': {
@@ -645,6 +688,9 @@ def _stage_snapshot(team, task, assignment, occurrence=None):
         'test_task_name': task.name,
         'test_task_type': task.task_type,
         'test_task_priority': task.priority,
+        'workflow_definition_id': task.workflow_definition_id,
+        'workflow_start_vars': copy.deepcopy(
+            task.workflow_start_vars_json or {}),
         'scheduled_start_date': str(task.start_date) if task.start_date else None,
         'scheduled_end_date': str(task.end_date) if task.end_date else None,
         'team_assignment': {
@@ -1091,7 +1137,8 @@ def pump(sup, now=None):
                            '稍后继续须提交 decision 并拿到调度回执；无有效租约不得派工。'
                            '单个 Child Run 或 Stage 阻断时，继续判断未派发 Stage 的依赖与资源冲突；'
                            '默认 blocked 仅按阶段级处理，不暂停全队。只有团队级问题才提交 '
-                           'block_scope=plan。'
+                           'block_scope=plan，并提供白名单 plan_block_reason_code 与结构化 '
+                           'plan_block_evidence；摘要若声明局部阻断或其他任务可继续，Hub 将拒绝。'
                            '无需 Flow 的独立测试任务由你决策后调用 '
                            '/api/v1/test-plans/{plan_id}/supervision/agent-tasks，'
                            '提交 test_task_id、稳定 command_key 和可选 instruction；'
@@ -1515,6 +1562,10 @@ def promote_and_dispatch_due_occurrences(sup, now=None):
             ], {'task_id': task.id, 'occurrence_id': occurrence.id}, now)
         if not task.auto_dispatch or stage.state != 'ready':
             continue
+        if task.workflow_definition_id:
+            _dispatch_scheduled_workflow(sup, task, stage, occurrence, now)
+            wake_ids.append(occurrence.assignee_claw_id)
+            continue
         active = ordinary.get(stage.id)
         if active and active.status in ('pending', 'running'):
             continue
@@ -1525,6 +1576,123 @@ def promote_and_dispatch_due_occurrences(sup, now=None):
         ordinary[stage.id] = agent_task
         wake_ids.append(occurrence.assignee_claw_id)
     return sorted(set(wake_ids))
+
+
+def _dispatch_scheduled_workflow(sup, task, stage, occurrence, now=None):
+    """Create exactly one Mission Run for a due, explicitly Flow-bound task."""
+    now = now or _now()
+    if stage.workflow_run_id or occurrence.workflow_run_id:
+        return db.session.get(
+            WorkflowRun, stage.workflow_run_id or occurrence.workflow_run_id)
+    mission = db.session.get(WorkflowMission, sup.mission_id)
+    team = db.session.get(AgentTeam, sup.team_id)
+    binding = db.session.get(AgentTeamMission, sup.mission_id)
+    definition = db.session.get(
+        WorkflowDefinition, task.workflow_definition_id)
+    worker = db.session.get(OpenClawInstance, occurrence.assignee_claw_id)
+    if not mission or not team or not binding:
+        fail('PLAN_MISSION_INCOMPLETE', '周期 Flow 派发缺少团队 Mission 绑定', 409)
+    if (not definition or definition.status != 'active'
+            or int(definition.project_id or 0) != int(mission.project_id or 0)):
+        fail('PLAN_SCHEDULED_FLOW_INVALID', '周期任务绑定的 Flow 不存在或不属于本项目', 409)
+    if definition.id not in {
+            int(item) for item in (team.policy_json or {}).get(
+                'allowed_definition_ids', [])}:
+        fail('TEAM_FLOW_NOT_ALLOWED', '周期任务绑定的 Flow 不在团队授权范围内', 403)
+    if (not worker or worker.status == 'deleted'
+            or int(worker.project_id or 0) != int(mission.project_id or 0)):
+        fail('MISSION_WORKER_SCOPE_INVALID', '周期 Flow 的固定执行 Agent 无效', 403)
+    from app.api.workflow_missions import (
+        _allowed_worker_ids, _claw_can_execute_definition, _dispatch_key,
+        _mission_definition_allowed, _request_hash, _trusted_worker_runtime,
+        create_mission_dispatch_record,
+    )
+    if (worker.id != mission.main_claw_id
+            and worker.id not in _allowed_worker_ids(mission)):
+        fail('MISSION_WORKER_NOT_ALLOWED', '周期 Flow 执行 Agent 不在 Mission 白名单', 403)
+    if not _mission_definition_allowed(mission, definition):
+        fail('MISSION_DEFINITION_NOT_ALLOWED', '周期 Flow 不在 Mission 定义白名单', 403)
+    if not _trusted_worker_runtime(worker.id):
+        fail('MISSION_WORKER_RUNTIME_REQUIRED', '周期 Flow 执行 Agent 未注册可信 Runtime', 409)
+    if not _claw_can_execute_definition(worker.id, definition):
+        fail('MISSION_WORKER_EXECUTE_FORBIDDEN', '周期 Flow 执行 Agent 没有执行权限', 403)
+    if int(mission.child_run_count or 0) >= int(mission.max_child_runs or 20):
+        fail('MISSION_CHILD_RUN_BUDGET_EXHAUSTED', 'Mission Child Run 预算已耗尽', 409)
+    start_vars = copy.deepcopy(task.workflow_start_vars_json or {})
+    start_vars['worker_claw_id'] = worker.id
+    decision_key = 'plan:%s:occurrence:%s:flow:%s' % (
+        sup.plan_id, occurrence.id, definition.id)
+    raw_context = {
+        'test_plan_id': sup.plan_id,
+        'test_task_id': task.id,
+        'test_task_occurrence_id': occurrence.id,
+        'business_date': occurrence.occurrence_date.isoformat(),
+    }
+    data = {
+        'workflow_definition_id': definition.id,
+        'stage_key': stage.stage_key,
+        'decision_key': decision_key,
+        'start_vars': start_vars,
+        'context': raw_context,
+        'reason': 'Hub 到点补派周期测试任务 #%s / occurrence #%s' % (
+            task.id, occurrence.id),
+    }
+    hash_payload = {
+        'mission_id': mission.id,
+        'workflow_definition_id': definition.id,
+        'worker_claw_id': worker.id,
+        'start_vars': start_vars,
+        'context': raw_context,
+        'run_name': '',
+        'reason': data['reason'],
+        'decision_key': decision_key,
+        'stage_key': stage.stage_key,
+    }
+    request_hash = _request_hash(hash_payload)
+    idempotency_key = _dispatch_key(mission.id, data, request_hash)
+    existing = WorkflowMissionDispatch.query.filter_by(
+        mission_id=mission.id, idempotency_key=idempotency_key).first()
+    if existing:
+        if existing.request_hash != request_hash:
+            fail('MISSION_IDEMPOTENCY_CONFLICT', '周期 Flow 幂等键发生请求冲突', 409)
+        stage.workflow_run_id = existing.workflow_run_id
+        occurrence.workflow_run_id = existing.workflow_run_id
+        occurrence.status = 'dispatched'
+        occurrence.next_action = 'await_claim'
+        occurrence.next_check_at = now
+        return db.session.get(WorkflowRun, existing.workflow_run_id)
+    manager = db.session.get(OpenClawInstance, sup.orchestrator_claw_id)
+    try:
+        dispatch = create_mission_dispatch_record(
+            mission=mission, definition=definition, stage=stage,
+            worker_claw_id=worker.id, actor_id=sup.orchestrator_claw_id,
+            actor_name=(manager.name if manager and manager.name
+                        else 'Hub Plan Supervisor'),
+            data=data, start_vars=start_vars, raw_context=raw_context,
+            reason=data['reason'], decision_key=decision_key,
+            idempotency_key=idempotency_key, request_hash=request_hash,
+            team=team, binding=binding, ip_address='hub-plan-supervisor',
+            commit=False)
+    except Exception as exc:
+        from app.services.workflows import WorkflowStartVarsValidationError
+        if isinstance(exc, WorkflowStartVarsValidationError):
+            fail(exc.code, str(exc), 422)
+        raise
+    occurrence.workflow_run_id = dispatch.workflow_run_id
+    occurrence.status = 'dispatched'
+    occurrence.attempt_count = max(int(occurrence.attempt_count or 0), 1)
+    occurrence.next_action = 'await_claim'
+    occurrence.next_check_at = now
+    add_event(sup.plan_id, 'task_workflow_dispatched', [
+        'task-workflow-dispatched', occurrence.id, definition.id,
+    ], {
+        'test_task_id': task.id,
+        'occurrence_id': occurrence.id,
+        'workflow_definition_id': definition.id,
+        'workflow_run_id': dispatch.workflow_run_id,
+        'executor_claw_id': worker.id,
+    }, now)
+    return db.session.get(WorkflowRun, dispatch.workflow_run_id)
 
 
 def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
@@ -1557,6 +1725,9 @@ def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
         id=test_task_id, plan_id=sup.plan_id).with_for_update().first()
     if not task:
         fail('TEST_TASK_NOT_FOUND', '测试任务不存在', 404)
+    if task.workflow_definition_id:
+        fail('TEST_TASK_FLOW_DISPATCH_REQUIRED',
+             '该周期任务已绑定 Flow，由 Hub 到点派发或管理员恢复监督补派', 409)
     if (not task.schedule_enabled
             and task.status not in ('assigned', 'pending')):
         fail('TEST_TASK_NOT_DISPATCHABLE', '仅新分配或待开始任务可直接派发', 409)
@@ -1592,6 +1763,20 @@ def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
         fail('TEST_TASK_STAGE_INVALID', '任务缺少有效的团队执行阶段或执行 Agent', 409)
     if stage.workflow_run_id:
         fail('TEST_TASK_ALREADY_FLOW_DISPATCHED', '任务已经通过 Workflow 派发', 409)
+
+    if (occurrence and occurrence.status == 'scheduled'
+            and occurrence.not_before_at <= _now()):
+        occurrence.status = 'ready'
+        occurrence.next_action = (
+            'auto_dispatch' if task.auto_dispatch else 'manager_dispatch')
+        occurrence.next_check_at = _now()
+        if stage.state == 'scheduled':
+            stage.state = 'ready'
+            stage.last_reason_code = 'manager_dispatch_due_occurrence'
+            stage.version = int(stage.version or 1) + 1
+        add_event(sup.plan_id, 'task_occurrence_due', [
+            'task-occurrence-manager-due', occurrence.id,
+        ], {'task_id': task.id, 'occurrence_id': occurrence.id})
 
     def apply():
         active = _plan_agent_tasks(sup).get(stage.id)
@@ -2538,6 +2723,24 @@ def decide(sup, claw_id, body, now=None):
         summary = body.get('summary')
         if not isinstance(summary, str) or not summary.strip() or len(summary) > 4000:
             fail('PLAN_DECISION_INVALID', '必须提供不超过 4000 字的决策摘要', 400)
+        plan_block_reason_code = body.get('plan_block_reason_code')
+        plan_block_evidence = body.get('plan_block_evidence')
+        if outcome == 'blocked' and block_scope == 'plan':
+            if plan_block_reason_code not in PLAN_BLOCK_REASON_CODES:
+                fail('PLAN_BLOCK_REASON_REQUIRED',
+                     '计划级阻断必须提供受支持的 plan_block_reason_code', 400)
+            if (not isinstance(plan_block_evidence, list)
+                    or not plan_block_evidence
+                    or any(not isinstance(item, dict) or not item
+                           for item in plan_block_evidence)):
+                fail('PLAN_BLOCK_EVIDENCE_REQUIRED',
+                     '计划级阻断必须提供非空结构化 plan_block_evidence', 400)
+            if PLAN_SCOPE_CONFLICT_RE.search(summary):
+                fail('PLAN_BLOCK_SCOPE_CONFLICT',
+                     '摘要声明局部/阶段级阻断或其他任务可继续，不能提交计划级阻断', 409)
+        elif plan_block_reason_code is not None or plan_block_evidence is not None:
+            fail('PLAN_DECISION_INVALID',
+                 'plan_block_reason_code/evidence 仅用于计划级阻断', 400)
         remaining = undispatched_stages(sup)
         local_block = bool(
             outcome == 'blocked' and block_scope != 'plan' and remaining)
@@ -2586,6 +2789,8 @@ def decide(sup, claw_id, body, now=None):
             'requested_outcome': outcome,
             'block_scope': effective_scope,
             'summary': summary,
+            'plan_block_reason_code': plan_block_reason_code,
+            'plan_block_evidence': plan_block_evidence or [],
             'cursor': sup.lease_cursor,
             'at': now.isoformat() + '+08:00',
         }

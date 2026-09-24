@@ -1,0 +1,137 @@
+"""Deploy Plan scope validation and deterministic overdue-task recovery."""
+import deploy_plan_supervision_resume_contract as deployment
+import re
+
+
+release = deployment.release
+release.BASE = 'ef82be2'
+release.FILES = (
+    'app/__init__.py',
+    'app/models.py',
+    'app/api/plan_supervision.py',
+    'app/api/testplans.py',
+    'app/api/workflow_missions.py',
+    'app/services/agent_team_plans.py',
+    'app/services/plan_supervision.py',
+    'templates/agent_teams.html',
+    'static/js/agent_team_plans.js',
+)
+release.MIGRATIONS = ()
+# This release owns the current team-plan bundle and template cache key; do not
+# reuse the older task-conclusion-only template merger.
+release.candidate = deployment.deployment._candidate
+_candidate = release.candidate
+
+
+def _scope_recovery_candidate(path, live):
+    if path != 'templates/agent_teams.html' or live is None:
+        return _candidate(path, live)
+    live = live.replace(b'\r\r\n', b'\n').replace(b'\r\n', b'\n')
+    pattern = rb"(filename='js/agent_team_plans\.js'\) }}\?v=)[^\"<]+"
+    merged, count = re.subn(
+        pattern, rb'\g<1>20260924supervisorresume', live, count=1)
+    if count != 1:
+        raise RuntimeError(
+            'Expected exactly one agent_team_plans.js script reference')
+    return merged
+
+
+release.candidate = _scope_recovery_candidate
+
+release.SCHEMA = r'''
+from app import create_app, db
+from sqlalchemy import inspect, text
+app = create_app('production')
+with app.app_context():
+    os.umask(0o077)
+    os.makedirs(backup, exist_ok=True)
+    ddl = db.session.execute(text('SHOW CREATE TABLE test_tasks')).fetchone()[1]
+    with open(backup + '/test_tasks_schema.sql', 'w') as stream:
+        stream.write(ddl + ';\n')
+    db.session.remove()
+    columns = {
+        'workflow_definition_id': 'INTEGER DEFAULT NULL',
+        'workflow_start_vars_json': 'LONGTEXT DEFAULT NULL',
+    }
+    inspector = inspect(db.engine)
+    existing = {column['name'] for column in inspector.get_columns('test_tasks')}
+    with db.engine.begin() as conn:
+        for column, column_type in columns.items():
+            if column not in existing:
+                conn.execute(text(
+                    'ALTER TABLE test_tasks ADD COLUMN `' + column + '` '
+                    + column_type))
+    inspector = inspect(db.engine)
+    assert set(columns) <= {
+        column['name'] for column in inspector.get_columns('test_tasks')}
+    print('TEAM_RELEASE ' + json.dumps({
+        'schema_verified': True,
+        'backup': backup,
+        'business_rows_modified': 0,
+    }))
+'''
+
+release.SMOKE = r'''
+from app import create_app, db
+from app.models import AgentTask, TestTask, User, WorkflowRun
+from app.services import plan_supervision
+from sqlalchemy import inspect
+import inspect as pyinspect
+import requests, time
+app = create_app('production')
+with app.app_context():
+    admin = User.query.filter_by(role='super_admin').first()
+    assert admin
+    task_count = AgentTask.query.count()
+    run_count = WorkflowRun.query.count()
+    client = app.test_client()
+    with client.session_transaction() as session:
+        session['user_id'] = admin.id
+    rules = {rule.rule for rule in app.url_map.iter_rules()}
+    assert '/api/v1/test-plans/<int:plan_id>/supervision/resume' in rules
+    columns = {
+        column['name'] for column in inspect(db.engine).get_columns('test_tasks')}
+    assert {'workflow_definition_id', 'workflow_start_vars_json'} <= columns
+    source = pyinspect.getsource(plan_supervision)
+    for marker in ('PLAN_BLOCK_SCOPE_CONFLICT',
+                   'plan_block_reason_code',
+                   'def _dispatch_scheduled_workflow',
+                   'task_workflow_dispatched'):
+        assert marker in source, marker
+    response = client.get('/agent-teams')
+    assert response.status_code == 200
+    assert '20260924supervisorresume' in response.get_data(as_text=True)
+    db.session.remove()
+    if os.getcwd() == '/opt/openclaw-web':
+        cookie = app.session_interface.get_signing_serializer(app).dumps(
+            {'user_id': admin.id})
+        headers = {'Cookie': app.config.get('SESSION_COOKIE_NAME', 'session')
+                   + '=' + cookie}
+        for attempt in range(20):
+            try:
+                response = requests.get(
+                    'http://127.0.0.1:18800/agent-teams', headers=headers,
+                    timeout=5, allow_redirects=False)
+                if response.status_code == 200:
+                    break
+            except requests.RequestException:
+                pass
+            time.sleep(1)
+        else:
+            raise RuntimeError('HTTP readiness did not recover')
+        assert '20260924supervisorresume' in response.text
+    assert AgentTask.query.count() == task_count
+    assert WorkflowRun.query.count() == run_count
+    print('TEAM_RELEASE ' + json.dumps({
+        'smoke': 'passed',
+        'agent_tasks_started': AgentTask.query.count() - task_count,
+        'workflow_runs_started': WorkflowRun.query.count() - run_count,
+        'business_rows_modified': 0,
+        'workers_modified': False,
+        'deepflow_modified': False,
+    }, ensure_ascii=False))
+'''
+
+
+if __name__ == '__main__':
+    deployment.deployment.deployment.main()

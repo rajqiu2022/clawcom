@@ -19,7 +19,30 @@ const AgentTeamPlans = (() => {
         const s = p.supervision;
         if (!s) return '<p class="at-help at-plan-alert">监管未启动 · 尚无 Supervisor/Mission</p>';
         if (!s.manager_authority_active) return `<p class="at-help at-plan-alert">监管 ${esc(s.status)} · 测试经理已被移出或团队已暂停 · Mission ${s.mission_id ? '#'+esc(s.mission_id) : '未创建'}</p>`;
-        return `<p class="at-help">监管 ${esc(s.status)} · 经理 #${esc(s.orchestrator_claw_id)} · Mission #${esc(s.mission_id)}${s.next_check_at?' · 下次 '+esc(s.next_check_at):''}</p>`;
+        const resume = s.can_resume ? ` <button type="button" class="btn btn-secondary btn-sm at-plan-resume" data-plan-resume="${esc(p.id)}" data-resume-api="${esc(s.resume_api)}" title="恢复 Supervisor，并原子推进和补派所有已到点的独立任务；局部阻断任务保持原状">恢复监督</button>` : '';
+        return `<p class="at-help">监管 ${esc(s.status)} · 经理 #${esc(s.orchestrator_claw_id)} · Mission #${esc(s.mission_id)}${s.next_check_at?' · 下次 '+esc(s.next_check_at):''}${resume}</p>`;
+    }
+    async function resumeSupervision(button) {
+        const planId = Number(button.dataset.planResume);
+        if (!planId || !button.dataset.resumeApi) return;
+        if (!window.confirm(`恢复计划 #${planId} 的持续监督，并立即补派所有已到点任务？\n局部阻断任务不会被解除。`)) return;
+        button.disabled = true;
+        const original = button.textContent;
+        button.textContent = '恢复中…';
+        try {
+            const commandKey = `team-ui-resume:${planId}:${Date.now()}:${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}`;
+            const result = await API.post(button.dataset.resumeApi, {
+                command_key: commandKey,
+                reason: '管理员从 Agent 团队计划页面恢复监督并补派已到点任务',
+            });
+            const count = (result.dispatched || []).length;
+            $('at-plan-note').textContent = `计划 #${planId} 已恢复监督，已确认 ${count} 个到点派发。`;
+            await load(offset);
+        } catch (error) {
+            $('at-plan-note').textContent = `恢复失败：${error.message || '请稍后重试'}`;
+            button.disabled = false;
+            button.textContent = original;
+        }
     }
     function task(t, planId, collapsed) {
         const occurrence = t.occurrence || null, execution = occurrence && occurrence.execution;
@@ -233,6 +256,7 @@ const AgentTeamPlans = (() => {
         if(button.id==='at-plan-today'){day=today();frame();load();}
         if(button.id==='at-plan-create') open('new');
         if(button.id==='at-plan-link') open('link');
+        if(button.dataset.planResume) resumeSupervision(button);
         if(button.dataset.planTaskToggle){
             const card=button.closest('[data-plan-card]');
             const extras=card?card.querySelectorAll('[data-plan-extra-task]'):[];
