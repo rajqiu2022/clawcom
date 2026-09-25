@@ -82,7 +82,8 @@ def team_capability(team_id):
                 'recoverable_states_v2', 'persistent_schedule_v1',
                 'terminal_projection_v1', 'authoritative_execution_v1',
                 'execution_goal_resume_v1', 'condition_probe_v1',
-                'control_action_dispatch_v1', 'fact_freshness_v1'],
+                'control_action_dispatch_v1', 'fact_freshness_v1',
+                'manager_goal_v1', 'manager_stage_actions_v1'],
             'start_requires': ['team_id', 'orchestrator_claw_id', 'command_key'],
             'supervisor_api': '/api/v1/test-plans/{plan_id}/supervision',
             'direct_task_dispatch_api': (
@@ -97,6 +98,19 @@ def team_capability(team_id):
             'persistent_schedule': schedule,
             'decision_outcomes': [
                 'wait', 'degraded', 'retryable', 'blocked'],
+            'manager_decision_contract': {
+                'name': 'hub.manager_goal.v1',
+                'stage_actions': ['dispatch', 'defer', 'block', 'complete'],
+                'tool_receipt_fields': ['stage_decisions', 'action_receipts'],
+                'modes': {
+                    'tool_first': 'AI 调用受控 Hub API 后提交动作回执',
+                    'atomic_decision': 'AI 在 decision.stage_actions 中由 Hub 原子执行',
+                },
+                'safety_boundary': (
+                    'Hub validates identity, plan scope, fencing, idempotency '
+                    'and audit only; the manager Agent chooses the business action.'
+                ),
+            },
             'supervisor_states': [
                 'waiting', 'pending', 'leased', 'degraded', 'retryable',
                 'blocked_owner_gate', 'stopped', 'expired'],
@@ -1073,6 +1087,7 @@ def bootstrap(plan, team_id, claw_id, body, now=None):
     def apply():
         plan.status = 'active'
         sup.next_check_at = max(now, datetime.combine(plan.start_date, time.min))
+        manager_goal_snapshot(sup, persist=True, now=now)
         manager = ensure_manager_tenure(sup, now)
         mission = ensure_team_mission(sup) if team_id else None
         add_event(plan.id, 'plan_started', ['start', plan.id], {
@@ -1400,6 +1415,9 @@ def claim(sup, claw_id, body, now=None):
         if not isinstance(owner, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', owner):
             fail('PLAN_WORKER_ID_INVALID', 'worker_id 格式不合法', 400)
         ensure_manager_tenure(sup, now)
+        # Existing supervisors created before manager_goal.v1 are upgraded on
+        # their next real lease acquisition, without mutating a read-only GET.
+        manager_goal_snapshot(sup, persist=True, now=now)
         ingest(sup)
         sup.fencing_token += 1
         sup.status = 'leased'
@@ -1453,6 +1471,181 @@ def undispatched_stages(sup):
                 % sup.plan_id),
         })
     return items
+
+
+MANAGER_DECISION_CONTRACT = 'hub.manager_goal.v1'
+MANAGER_STAGE_ACTIONS = frozenset({'dispatch', 'defer', 'block', 'complete'})
+
+
+def manager_goal_snapshot(sup, persist=False, now=None):
+    """Return the durable manager objective without creating a second engine.
+
+    The Supervisor row already is the plan-scoped durable aggregate.  Keeping
+    the goal and bounded commitment ledger in ``observations_json`` makes the
+    extension deployable without changing existing Flow/Worker tables while
+    preserving every security fence around the actual effects.
+    """
+    now = now or _now()
+    observations = dict((sup.observations_json or {}) if sup else {})
+    goal = observations.get('manager_goal')
+    plan = db.session.get(TestPlan, sup.plan_id) if sup else None
+    team = db.session.get(AgentTeam, sup.team_id) if sup and sup.team_id else None
+    if not isinstance(goal, dict):
+        goal = {
+            'schema_version': 1,
+            'contract': MANAGER_DECISION_CONTRACT,
+            'goal_id': 'plan-manager:%s' % (sup.plan_id if sup else 'unknown'),
+            'version': 1,
+            'status': 'active',
+            'objective': (
+                '持续推进测试计划「%s」，完成派发、跟进、异常恢复、复核与收口。'
+                % (plan.name if plan else '')),
+            'success_criteria': [
+                '所有到期任务均有执行结果、明确延期条件或可审计阻断',
+                '关键结论与证据已回写 Hub，Owner 只处理必要授权和产品取舍',
+            ],
+            'stop_conditions': ['plan_completed', 'plan_archived', 'owner_stopped'],
+            'current_priorities': [],
+            'next_review_at': None,
+            'created_at': now.isoformat() + '+08:00',
+        }
+        if persist and sup:
+            observations['manager_goal'] = goal
+            sup.observations_json = observations
+    commitments = observations.get('manager_commitments')
+    if not isinstance(commitments, list):
+        commitments = []
+    latest_commitments = {}
+    for item in commitments[-100:]:
+        if not isinstance(item, dict):
+            continue
+        key = item.get('stage_id') or item.get('stage_key')
+        if isinstance(key, str) and key:
+            latest_commitments[key] = item
+    stage_states = {
+        row.stage_key: row.state for row in MissionStage.query.filter_by(
+            mission_id=sup.mission_id).all()
+    } if sup and sup.mission_id else {}
+    return {
+        **goal,
+        'plan_id': sup.plan_id if sup else None,
+        'team_id': sup.team_id if sup else None,
+        'team_name': team.name if team else '',
+        'pending_commitments': [
+            item for key, item in latest_commitments.items()
+            if item.get('status') == 'pending'
+            and stage_states.get(key) == 'ready'
+        ],
+    }
+
+
+def manager_brief(sup):
+    """Small, trusted situation summary for a manager model turn."""
+    plan = db.session.get(TestPlan, sup.plan_id) if sup else None
+    remaining = undispatched_stages(sup)
+    status_counts = {}
+    if sup and sup.mission_id:
+        for state, count in (db.session.query(
+                MissionStage.state, db.func.count(MissionStage.id))
+                .filter_by(mission_id=sup.mission_id)
+                .group_by(MissionStage.state).all()):
+            status_counts[state] = int(count)
+    return {
+        'schema_version': 1,
+        'plan_id': sup.plan_id if sup else None,
+        'plan_name': plan.name if plan else '',
+        'plan_status': plan.status if plan else None,
+        'stage_status_counts': status_counts,
+        'ready_stages': [
+            {
+                'stage_id': item['stage_key'],
+                'stage_key': item['stage_key'],
+                'test_task_id': item.get('test_task_id'),
+                'test_task_name': item.get('test_task_name') or '',
+                'executor_claw_id': item.get('executor_claw_id'),
+                'control_action': item.get('control_action'),
+            }
+            for item in remaining
+        ],
+        'ready_stage_keys': [item['stage_key'] for item in remaining],
+        'ready_count': len(remaining),
+        'last_decision': (sup.last_decision_json or {}) if sup else {},
+        'next_check_at': (
+            sup.next_check_at.isoformat() + '+08:00'
+            if sup and sup.next_check_at else None),
+    }
+
+
+def _manager_decision_audit(sup, body, now):
+    """Validate manager receipts without second-guessing business choices."""
+    decisions = body.get('stage_decisions')
+    receipts = body.get('action_receipts')
+    if decisions is None and receipts is None:
+        return {}, []
+    if (not isinstance(decisions, list) or len(decisions) > 256
+            or any(not isinstance(item, dict) for item in decisions)
+            or not isinstance(receipts, list) or len(receipts) > 256
+            or any(not isinstance(item, dict) for item in receipts)):
+        fail('PLAN_MANAGER_DECISION_INVALID',
+             'stage_decisions/action_receipts 须为有界对象数组', 400)
+    allowed_stages = {
+        row.stage_key: row for row in MissionStage.query.filter_by(
+            mission_id=sup.mission_id).all()
+    }
+    seen = set()
+    normalized = []
+    commitments = []
+    dispositions = {
+        'dispatched', 'in_progress', 'completed', 'deferred', 'blocked',
+    }
+    for item in decisions:
+        stage_id = str(item.get('stage_id') or '').strip()
+        disposition = str(item.get('disposition') or '').strip()
+        reason = str(item.get('reason') or '').strip()
+        if (stage_id not in allowed_stages or stage_id in seen
+                or disposition not in dispositions
+                or not reason or len(reason) > 2000):
+            fail('PLAN_MANAGER_DECISION_INVALID',
+                 'Stage 决策必须属于当前 Mission、不可重复，并提供有效处置与理由', 409)
+        receipt_value = item.get('receipt')
+        if disposition in ('dispatched', 'in_progress', 'completed'):
+            if not isinstance(receipt_value, dict) or not receipt_value:
+                fail('PLAN_MANAGER_RECEIPT_REQUIRED',
+                     '已执行处置必须附带稳定 Hub 动作回执', 409)
+        normalized_item = {
+            'stage_id': stage_id,
+            'disposition': disposition,
+            'reason': reason,
+        }
+        if isinstance(receipt_value, dict):
+            normalized_item['receipt'] = receipt_value
+        normalized.append(normalized_item)
+        commitments.append({
+            **normalized_item,
+            'status': ('pending' if disposition in ('deferred', 'blocked')
+                       else 'fulfilled'),
+            'decided_at': now.isoformat() + '+08:00',
+            'decision_command_key': body.get('command_key'),
+        })
+        seen.add(stage_id)
+    normalized_receipts = []
+    for item in receipts:
+        if (not item or len(item) > 16
+                or not any(item.get(key) not in (None, '') for key in (
+                    'receipt_id', 'operation_id', 'mission_id', 'task_id',
+                    'run_id'))):
+            fail('PLAN_MANAGER_RECEIPT_INVALID',
+                 '动作回执必须包含稳定 Hub 资源标识', 400)
+        normalized_receipts.append(item)
+    observations = dict(sup.observations_json or {})
+    history = observations.get('manager_commitments')
+    history = history if isinstance(history, list) else []
+    observations['manager_commitments'] = (history + commitments)[-100:]
+    sup.observations_json = observations
+    return {
+        'stage_decisions': normalized,
+        'action_receipts': normalized_receipts,
+    }, commitments
 
 
 _PLAN_AGENT_TASK_CONTRACT = 'hub.plan_test_task.agent_task.v1'
@@ -3519,6 +3712,142 @@ def recovery_snapshot(sup):
     return empty
 
 
+def _manager_stage_actions(sup, claw_id, body, remaining, now):
+    """Validate and apply manager-selected effects inside the decision txn.
+
+    Deliberately keep policy broad: Hub does not rank work or interpret the
+    manager's reason.  It only proves that every referenced stage belongs to
+    this plan and that concrete effects use the existing fenced/idempotent
+    APIs.  ``defer`` and stage-local ``block`` remain non-terminal so ordinary
+    environmental waits never destroy executable work.
+    """
+    contract = body.get('manager_contract')
+    actions = body.get('stage_actions')
+    if contract != MANAGER_DECISION_CONTRACT:
+        return [], [], None
+    if actions is None:
+        actions = []
+    if (not isinstance(actions, list) or len(actions) > 100
+            or any(not isinstance(item, dict) for item in actions)):
+        fail('PLAN_STAGE_ACTIONS_INVALID', 'stage_actions 须为不超过 100 项的对象数组', 400)
+    remaining_by_key = {item['stage_key']: item for item in remaining}
+    seen = set()
+    normalized = []
+    for raw in actions:
+        stage_key = raw.get('stage_key')
+        action = raw.get('action')
+        reason = str(raw.get('reason') or '').strip()
+        if (not isinstance(stage_key, str) or stage_key not in remaining_by_key
+                or stage_key in seen):
+            fail('PLAN_STAGE_ACTION_SCOPE_INVALID',
+                 'stage_action 必须且只能引用本计划本轮一个未派发 Stage', 409)
+        if action not in MANAGER_STAGE_ACTIONS:
+            fail('PLAN_STAGE_ACTION_INVALID',
+                 'stage action 仅支持 dispatch/defer/block/complete', 400)
+        if not reason or len(reason) > 2000:
+            fail('PLAN_STAGE_ACTION_REASON_REQUIRED',
+                 '每个 stage action 必须提供不超过 2000 字的理由', 400)
+        seen.add(stage_key)
+        normalized.append((remaining_by_key[stage_key], raw, action, reason))
+    if remaining_by_key and set(remaining_by_key) != seen:
+        fail('SUPERVISION_ACTIONS_UNCOMMITTED',
+             '本轮须为每个 ready Stage 选择 dispatch/defer/block/complete；'
+             '可自由延期，但不能静默遗漏', 409)
+
+    receipts = []
+    wake_ids = []
+    next_checks = []
+    commitments = []
+    plan = db.session.get(TestPlan, sup.plan_id)
+    for stage_info, raw, action, reason in normalized:
+        stage_key = stage_info['stage_key']
+        stage = MissionStage.query.filter_by(
+            mission_id=sup.mission_id, stage_key=stage_key,
+        ).with_for_update().first()
+        if not stage or stage.state != 'ready':
+            fail('PLAN_STAGE_STATE_CONFLICT', 'Stage 已被其他动作推进，请回读后重试', 409)
+        action_receipt = {
+            'stage_key': stage_key,
+            'action': action,
+            'reason': reason,
+        }
+        commitment = {
+            **action_receipt,
+            'status': 'pending',
+            'decided_at': now.isoformat() + '+08:00',
+            'decision_command_key': body.get('command_key'),
+        }
+        if action == 'dispatch':
+            task_id = stage_info.get('test_task_id')
+            if type(task_id) is not int:
+                fail('PLAN_STAGE_DISPATCH_UNSUPPORTED',
+                     '该 Stage 不能通过普通 AgentTask 派发；请先调用其受控 Flow/控制动作接口', 409)
+            dispatched = dispatch_test_task(sup, claw_id, task_id, {
+                'command_key': '%s:%s' % (body['command_key'], stage_key),
+                'occurrence_id': stage_info.get('test_task_occurrence_id'),
+                'instruction': str(raw.get('instruction') or '')[:4000],
+                'retry_max': raw.get('retry_max', 1),
+            })
+            wake_id = dispatched.pop('wake_claw_id', None)
+            if wake_id:
+                wake_ids.append(wake_id)
+            action_receipt.update({
+                'status': 'dispatched',
+                'agent_task_id': (dispatched.get('agent_task') or {}).get('task_id'),
+                'dispatch_receipt_id': dispatched.get('receipt_id'),
+            })
+            commitment.update(action_receipt)
+            commitment['status'] = 'fulfilled'
+        elif action in ('defer', 'block'):
+            condition = str(raw.get('resume_condition') or '').strip()
+            if not condition or len(condition) > 500:
+                fail('PLAN_STAGE_RESUME_CONDITION_REQUIRED',
+                     '延期或阶段阻断须提供可观察的 resume_condition', 400)
+            raw_check = raw.get('next_check_at')
+            check = (parse_time(raw_check) if raw_check is not None
+                     else now + timedelta(minutes=30))
+            if not now < check < ends_at(plan):
+                fail('PLAN_SCHEDULE_OUT_OF_RANGE', 'Stage 复查时间须在未来且不晚于计划结束')
+            next_checks.append(check)
+            action_receipt.update({
+                'status': 'deferred' if action == 'defer' else 'blocked_stage',
+                'resume_condition': condition,
+                'next_check_at': check.isoformat() + '+08:00',
+            })
+            commitment.update(action_receipt)
+            add_event(sup.plan_id, 'manager_stage_%s' % action, [
+                'manager-stage-action', body.get('command_key'), stage_key,
+            ], action_receipt, now)
+        else:  # complete
+            task = db.session.get(TestTask, stage_info.get('test_task_id'))
+            occurrence = db.session.get(
+                TestTaskOccurrence, stage_info.get('test_task_occurrence_id'))
+            verified = bool(
+                (occurrence and occurrence.status in OCCURRENCE_TERMINAL)
+                or (task and task.status in ('completed', 'skipped')))
+            if not verified:
+                fail('PLAN_STAGE_COMPLETION_UNVERIFIED',
+                     'complete 只能收口已有终态事实，不能代替执行结果', 409)
+            stage.state = 'completed'
+            stage.last_reason_code = 'manager_verified_terminal_fact'
+            stage.version = int(stage.version or 1) + 1
+            action_receipt['status'] = 'completed'
+            commitment.update(action_receipt)
+            commitment['status'] = 'fulfilled'
+            add_event(sup.plan_id, 'manager_stage_completed', [
+                'manager-stage-completed', body.get('command_key'), stage_key,
+            ], action_receipt, now)
+        receipts.append(action_receipt)
+        commitments.append(commitment)
+
+    observations = dict(sup.observations_json or {})
+    history = observations.get('manager_commitments')
+    history = history if isinstance(history, list) else []
+    observations['manager_commitments'] = (history + commitments)[-100:]
+    sup.observations_json = observations
+    return receipts, sorted(set(wake_ids)), (min(next_checks) if next_checks else None)
+
+
 def decide(sup, claw_id, body, now=None):
     now = now or _now()
     def apply():
@@ -3556,8 +3885,14 @@ def decide(sup, claw_id, body, now=None):
             fail('PLAN_DECISION_INVALID',
                  'plan_block_reason_code/evidence 仅用于计划级阻断', 400)
         remaining = undispatched_stages(sup)
+        stage_action_receipts, wake_claw_ids, stage_next_check = (
+            _manager_stage_actions(sup, claw_id, body, remaining, now))
+        manager_audit, _manager_commitments = _manager_decision_audit(
+            sup, body, now)
+        remaining_after_actions = undispatched_stages(sup)
         local_block = bool(
-            outcome == 'blocked' and block_scope != 'plan' and remaining)
+            outcome == 'blocked' and block_scope != 'plan'
+            and remaining_after_actions)
         effective_outcome = 'wait' if local_block else outcome
         effective_scope = (
             'stage' if local_block else
@@ -3605,6 +3940,9 @@ def decide(sup, claw_id, body, now=None):
             'summary': summary,
             'plan_block_reason_code': plan_block_reason_code,
             'plan_block_evidence': plan_block_evidence or [],
+            'manager_contract': body.get('manager_contract'),
+            'stage_actions': stage_action_receipts,
+            **manager_audit,
             'cursor': sup.lease_cursor,
             'at': now.isoformat() + '+08:00',
         }
@@ -3619,7 +3957,26 @@ def decide(sup, claw_id, body, now=None):
         else:
             sup.status = 'waiting'
         sup.next_check_at = check
+        if stage_next_check and (not sup.next_check_at or stage_next_check < sup.next_check_at):
+            sup.next_check_at = stage_next_check
         sup.resume_condition = 'timer_or_event' if check else 'manual'
+        observations = dict(sup.observations_json or {})
+        goal = dict(observations.get('manager_goal') or {})
+        if goal:
+            goal['last_reviewed_at'] = now.isoformat() + '+08:00'
+            goal['next_review_at'] = (
+                sup.next_check_at.isoformat() + '+08:00'
+                if sup.next_check_at else None)
+            goal['current_priorities'] = [
+                (item.get('stage_id') or item.get('stage_key'))
+                for item in (
+                    manager_audit.get('stage_decisions', [])
+                    or stage_action_receipts)
+                if (item.get('disposition') or item.get('action'))
+                not in ('completed', 'complete')
+            ][:50]
+            observations['manager_goal'] = goal
+            sup.observations_json = observations
         sup.lease_owner = None
         sup.lease_expires_at = None
         sup.turn_deadline_at = None
@@ -3629,7 +3986,8 @@ def decide(sup, claw_id, body, now=None):
                 'stage-blocked-continuation', body.get('command_key'),
             ], {
                 'summary': summary,
-                'undispatched_stage_keys': [row['stage_key'] for row in remaining],
+                'undispatched_stage_keys': [
+                    row['stage_key'] for row in remaining_after_actions],
                 'rule': 'manager_decides_next_stage',
             }, now)
         return {
@@ -3639,7 +3997,10 @@ def decide(sup, claw_id, body, now=None):
             'supervisor_status': sup.status,
             'block_scope': effective_scope,
             'continue_supervision': local_block,
-            'undispatched_stages': remaining,
+            'undispatched_stages': remaining_after_actions,
+            'stage_action_receipts': stage_action_receipts,
+            **manager_audit,
+            'wake_claw_ids': wake_claw_ids,
             'owner_notification': {
                 'required': bool(notification_reasons),
                 'reasons': notification_reasons,

@@ -320,6 +320,90 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertIn('independent_stage_status', readback['supervision'])
         self.assertIn('allowed_actions', readback['supervision'])
 
+    def test_manager_goal_brief_and_commitment_audit_are_durable(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='等待构建后执行冒烟', status='assigned',
+            assignee_claw_id=self.other_claw.id, task_type='automation')
+        db.session.add(task)
+        db.session.commit()
+        started = self.post('start', {
+            'command_key': 'manager-goal-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.assertEqual(started.status_code, 200, started.json)
+        self.agent()
+        self.claim('manager-goal-claim')
+        readback = self.client.get(self.base, headers=self._headers()).json
+        self.assertEqual(
+            'hub.manager_goal.v1', readback['manager_goal']['contract'])
+        self.assertEqual(
+            readback['manager_goal'],
+            readback['supervision']['manager_goal'])
+        stage_id = readback['manager_brief']['ready_stages'][0]['stage_id']
+        decided = self.post('decision', {
+            'command_key': 'manager-goal-defer', **self.credentials(),
+            'cursor': self.sup().lease_cursor,
+            'outcome': 'wait', 'summary': '构建尚未发布，保留任务并定时复查',
+            'next_check_at': (_now() + timedelta(minutes=15)).isoformat() + '+08:00',
+            'resume_condition': 'timer_or_event',
+            'stage_decisions': [{
+                'stage_id': stage_id, 'disposition': 'deferred',
+                'reason': '等待可观察的 build_changed 事件',
+            }],
+            'action_receipts': [],
+        })
+        self.assertEqual(decided.status_code, 200, decided.json)
+        self.assertEqual(
+            stage_id,
+            decided.json['supervision']['last_decision'][
+                'stage_decisions'][0]['stage_id'])
+        pending = svc.manager_goal_snapshot(self.sup())['pending_commitments']
+        self.assertEqual(stage_id, pending[-1]['stage_id'])
+
+    def test_manager_contract_can_atomically_dispatch_fixed_stage_executor(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='经理自主派发冒烟', status='assigned',
+            assignee_claw_id=self.other_claw.id, task_type='automation')
+        db.session.add(task)
+        db.session.commit()
+        started = self.post('start', {
+            'command_key': 'manager-dispatch-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.assertEqual(started.status_code, 200, started.json)
+        self.agent()
+        self.claim('manager-dispatch-claim')
+        stage_key = 'test_task_%s' % task.id
+        decided = self.post('decision', {
+            'command_key': 'manager-dispatch-decision', **self.credentials(),
+            'cursor': self.sup().lease_cursor,
+            'manager_contract': 'hub.manager_goal.v1',
+            'outcome': 'wait', 'summary': '执行条件满足，直接派发固定执行者',
+            'next_check_at': (_now() + timedelta(minutes=5)).isoformat() + '+08:00',
+            'resume_condition': 'timer_or_event',
+            'stage_actions': [{
+                'stage_key': stage_key, 'action': 'dispatch',
+                'reason': '执行 Agent 在线且无资源冲突',
+            }],
+        })
+        self.assertEqual(decided.status_code, 200, decided.json)
+        self.assertEqual('dispatched', decided.json['stage_action_receipts'][0]['status'])
+        agent_task = AgentTask.query.filter_by(claw_id=self.other_claw.id).one()
+        self.assertEqual('pending', agent_task.status)
+        self.assertEqual(
+            'dispatched',
+            MissionStage.query.filter_by(
+                mission_id=self.sup().mission_id, stage_key=stage_key).one().state)
+        self.wake.assert_any_call(self.other_claw.id)
+
     def test_key_decision_delegates_owner_notice_to_agent_and_quiet_wait_stays_silent(self):
         self.start()
         self.claim()

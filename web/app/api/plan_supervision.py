@@ -77,7 +77,13 @@ def get_plan_supervision(plan_id):
     supervision = sup.to_dict()
     supervision.update(svc.recovery_snapshot(sup))
     supervision.update(svc.stage_truth_snapshot(sup))
+    manager_goal = svc.manager_goal_snapshot(sup)
+    manager_brief = svc.manager_brief(sup)
+    supervision['manager_goal'] = manager_goal
+    supervision['manager_brief'] = manager_brief
     return jsonify({'supervision': supervision,
+        'manager_goal': manager_goal,
+        'manager_brief': manager_brief,
         'project_portfolio': svc.project_portfolio_snapshot(sup),
         'events': [{'id': r.id, 'sequence': r.sequence, 'kind': r.kind,
                     'payload': r.payload_json} for r in events],
@@ -249,8 +255,11 @@ def heartbeat_plan_supervision(plan_id):
 def decide_plan_supervision(plan_id):
     sup, claw = self_supervisor(plan_id)
     result = svc.decide(sup, claw.id, payload())
+    wake_claw_ids = result.pop('wake_claw_ids', [])
     target = svc.pump(sup)
     db.session.commit()
+    for claw_id in sorted(set(wake_claw_ids)):
+        svc.wake(claw_id)
     if target:
         svc.wake(target)
     return jsonify(result)
