@@ -49,6 +49,21 @@ class AgentTeamsUiTest(unittest.TestCase):
         self.assertIn('overflow:auto', self.css)
         self.assertIn('.at-shell [hidden]', self.css)
 
+    def test_team_directory_defaults_to_thumbnail_rail_and_can_expand(self):
+        for marker in ('id="at-layout"', 'id="at-directory"',
+                       'id="at-directory-toggle"', 'directory-collapsed',
+                       'aria-expanded="false"'):
+            self.assertIn(marker, self.html)
+        for marker in ('directoryCollapsed: true', 'setDirectoryCollapsed',
+                       "$('at-directory-toggle').addEventListener",
+                       'at-team-thumbnail', 'at-team-summary'):
+            self.assertIn(marker, self.js)
+        for marker in ('.at-layout.directory-collapsed',
+                       '.at-directory.is-collapsed',
+                       '.at-team-thumbnail', '.at-directory-toggle'):
+            self.assertIn(marker, self.css)
+        self.assertIn('20260925teamrail', self.html)
+
     def test_member_activity_is_read_only_safe_and_refreshes_while_visible(self):
         js = (ROOT / 'web/static/js/agent_team_activity.js').read_text(encoding='utf-8')
         for marker in ('document.hidden', 'detailEpoch', 'epoch', 'clearTimeout(timer)',
@@ -78,15 +93,17 @@ class AgentTeamsUiTest(unittest.TestCase):
                        'Promise.all', 'renderReportContent', 'data-report-format',
                        '/html-preview', 'data-plan-task-toggle', '查看全部',
                        'data-plan-extra-task', 'aria-expanded',
+                       'at-task-details', '查看详情', '收起详情',
                        '/conclusion', 'saveTaskConclusion',
                        'at-task-references', 't.references'):
             self.assertIn(marker, js)
         plan_css = (ROOT / 'web/static/css/agent_team_plans.css').read_text(encoding='utf-8')
         self.assertIn('.at-plan-task-id', plan_css)
         self.assertIn('.at-task-report', plan_css)
+        self.assertIn('.at-task-details', plan_css)
         self.assertIn('.at-plan-reports-dialog.is-fullscreen', plan_css)
         self.assertIn('.at-plan-report', plan_css)
-        self.assertIn('20260924teamtaskrefresh', self.html)
+        self.assertIn('20260925taskdetails', self.html)
         self.assertIn('id="at-task-conclusion"', self.html)
         self.assertIn('不会生成测试报告', self.html)
         self.assertIn('/conclusion', plans)

@@ -8,7 +8,8 @@
     }
     const $ = id => document.getElementById(id);
     const state = { project: '', options: null, teams: [], total: 0, selected: null,
-        loadEpoch: 0, missionEpoch: 0, missionOffset: 0, editing: null, saving: false };
+        loadEpoch: 0, missionEpoch: 0, missionOffset: 0, editing: null, saving: false,
+        directoryCollapsed: true };
     const roleLabels = {test_manager: '测试经理', project_assistant: '项目助理', code_analyst: '代码分析员', test_executor: '测试执行员'};
     const statusLabels = {active: '启用', paused: '暂停', archived: '归档', ready: '待派发',
         running: '执行中', completed: '已完成', cancelled: '已取消', expired: '已过期', failed: '失败',
@@ -41,16 +42,29 @@
             policy: {allowed_definition_ids: [...team.policy.allowed_definition_ids], max_child_runs: team.policy.max_child_runs},
             expected_version: team.version};
     }
+    function setDirectoryCollapsed(collapsed) {
+        state.directoryCollapsed = Boolean(collapsed);
+        $('at-layout').classList.toggle('directory-collapsed', state.directoryCollapsed);
+        $('at-directory').classList.toggle('is-collapsed', state.directoryCollapsed);
+        const toggle = $('at-directory-toggle');
+        toggle.setAttribute('aria-expanded', String(!state.directoryCollapsed));
+        toggle.setAttribute('aria-label', state.directoryCollapsed ? '展开团队目录' : '折叠团队目录');
+        toggle.title = state.directoryCollapsed ? '展开团队目录' : '折叠团队目录';
+        toggle.querySelector('span').textContent = state.directoryCollapsed ? '›' : '‹';
+    }
     function renderList() {
         $('at-total').textContent = state.total;
         $('at-list-count').textContent = `${state.teams.length} / ${state.total}`;
         $('at-more').hidden = state.teams.length >= state.total;
         $('at-list').innerHTML = state.teams.length ? state.teams.map(team => {
             const count = role => team.members.filter(m => m.role_key === role).length;
-            return `<button class="at-team" type="button" data-team="${team.id}" aria-pressed="${team.id === state.selected}">
-                <span class="at-team-head"><span class="at-team-name">${esc(team.name)}</span>${badge(team.status)}</span>
-                <div class="at-team-meta">经理 · ${esc(agentName(team.primary_manager_claw_id))}</div>
-                <div class="at-team-counts"><span>助理 ${count('project_assistant')}</span><span>分析员 ${count('code_analyst')}</span><span>执行员 ${count('test_executor')}</span><span>v${team.version}</span></div></button>`;
+            const manager = agentName(team.primary_manager_claw_id);
+            const statusKind = ['active', 'paused', 'archived'].includes(team.status) ? team.status : 'waiting';
+            return `<button class="at-team" type="button" data-team="${team.id}" aria-pressed="${team.id === state.selected}" aria-label="选择团队 ${esc(team.name)}" title="${esc(team.name)} · 经理 ${esc(manager)}">
+                <span class="at-team-thumbnail" aria-hidden="true"><b>T${esc(team.id)}</b><i class="${esc(statusKind)}"></i></span>
+                <span class="at-team-summary"><span class="at-team-head"><span class="at-team-name">${esc(team.name)}</span>${badge(team.status)}</span>
+                <span class="at-team-meta">经理 · ${esc(manager)}</span>
+                <span class="at-team-counts"><span>助理 ${count('project_assistant')}</span><span>分析员 ${count('code_analyst')}</span><span>执行员 ${count('test_executor')}</span><span>v${team.version}</span></span></span></button>`;
         }).join('') : '<p class="at-empty">这个项目还没有团队。<br>可为不同目标创建多支团队。</p>';
     }
     async function reloadProject(preferredTeam = null) {
@@ -237,6 +251,7 @@
     $('at-refresh').addEventListener('click', () => reloadProject(state.selected));
     $('at-create').addEventListener('click', () => openEditor());
     $('at-more').addEventListener('click', moreTeams);
+    $('at-directory-toggle').addEventListener('click', () => setDirectoryCollapsed(!state.directoryCollapsed));
     $('at-list').addEventListener('click', event => { const button = event.target.closest('[data-team]'); if (button) selectTeam(Number(button.dataset.team)); });
     $('at-detail').addEventListener('click', event => {
         const action = event.target.closest('[data-action]');
@@ -253,6 +268,7 @@
     $('at-editor').addEventListener('cancel', event => { if (state.saving) event.preventDefault(); });
     $('at-form').addEventListener('submit', save);
     async function init() {
+        setDirectoryCollapsed(true);
         try {
             const projects = await API.listProjects();
             $('at-project').innerHTML = '<option value="">选择项目</option>' + projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
