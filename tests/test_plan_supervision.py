@@ -823,6 +823,105 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(AgentTask.query.filter_by(
             task_type='test_plan_agent_task').count(), 2)
 
+    def test_one_off_task_waiting_condition_resumes_with_checkpoint_and_new_fence(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['ios']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='一次性 iOS 性能续采', status='assigned',
+            assignee_claw_id=self.other_claw.id, task_type='performance',
+            start_date=self.plan.start_date, end_date=self.plan.end_date,
+            schedule_enabled=False, execution_role='member_work')
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'one-off-condition-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        now = datetime.combine(self.plan.start_date, time(10, 0))
+        dispatched = svc.dispatch_test_task(
+            self.sup(), self.main_claw.id, task.id, {
+                'command_key': 'one-off-condition-dispatch',
+                'test_task_id': task.id,
+                'instruction': '启动 PerfDogService 并采集剩余性能指标',
+                'retry_max': 1,
+            })
+        db.session.commit()
+        self.assertEqual(dispatched['wake_claw_id'], self.other_claw.id)
+        first = claim_pending_tasks(self.other_claw.id, now=now)[0]
+        disposition = complete_task(first, {
+            'claim_token': first.claim_token,
+            'attempt_no': first.attempt_no,
+            'fencing_token': first.fencing_token,
+            'status': 'waiting_condition',
+            'result': {
+                'summary': '设备与 WDA 已就绪，等待 PerfDogService 登录启动',
+                'checkpoint': {
+                    'completed_scope': ['device_ready', 'wda_ready'],
+                    'remaining_steps': ['collect_cpu_jank_memory'],
+                    'side_effect_receipts': [],
+                },
+                'resume_contract': {
+                    'conditions': [{
+                        'condition_type': 'custom_ready',
+                        'condition_scope': {
+                            'service': 'PerfDogService', 'port': 23456,
+                        },
+                        'probe_operation': 'macos.perfdog.ready_v1',
+                    }],
+                    'probe_interval_seconds': 120,
+                    'resume_from_checkpoint': 'collect_cpu_jank_memory',
+                    'owner_gate': True,
+                    'human_action': '在普通 macOS Terminal 启动并登录 PerfDogService',
+                },
+            },
+        }, now=now + timedelta(minutes=1))
+        self.assertEqual(disposition, 'waiting_condition')
+        db.session.refresh(task)
+        self.assertEqual(task.status, 'waiting_condition')
+        self.assertEqual(task.condition_state, 'waiting_condition')
+        self.assertTrue(task.owner_gate)
+        self.assertEqual(task.checkpoint_json['remaining_steps'], [
+            'collect_cpu_jank_memory'])
+
+        body = {
+            'command_key': 'one-off-condition-ready-1',
+            'condition_type': 'custom_ready',
+            'condition_ready': True,
+            'expected_resume_fencing_token': 0,
+            'facts': {'port': 23456, 'listening': True},
+        }
+        self.agent()
+        response = self.client.post(
+            self.base + '/tasks/%s/condition-events' % task.id,
+            headers=self._headers(self.other_token), json=body)
+        self.assertEqual(response.status_code, 201, response.json)
+        result = response.json
+        self.assertTrue(result['resumed'])
+        self.assertEqual(task.resume_fencing_token, 1)
+        self.assertEqual(task.condition_state, 'resuming')
+        self.assertEqual(task.status, 'pending')
+        resumed = AgentTask.query.order_by(AgentTask.id.desc()).first()
+        payload = json.loads(resumed.payload)
+        self.assertEqual(payload['resume_fencing_token'], 1)
+        self.assertEqual(payload['checkpoint']['remaining_steps'], [
+            'collect_cpu_jank_memory'])
+        self.assertIn('resume_contract', payload)
+        replay = self.client.post(
+            self.base + '/tasks/%s/condition-events' % task.id,
+            headers=self._headers(self.other_token), json=body)
+        self.assertEqual(replay.status_code, 200, replay.json)
+        self.assertTrue(replay.json['replayed'])
+        self.assertEqual(AgentTask.query.filter_by(
+            task_type='test_plan_agent_task').count(), 2)
+        stale = self.client.post(
+            self.base + '/tasks/%s/condition-events' % task.id,
+            headers=self._headers(self.other_token), json=dict(
+                body, command_key='one-off-condition-stale-1'))
+        self.assertEqual(stale.status_code, 409, stale.json)
+        self.assertEqual(stale.json['code'], 'RESUME_CONDITION_FENCED')
+
     def test_schedule_migration_is_idempotent_and_preserves_task_history(self):
         team = self.scoped_team()
         db.session.add(AgentTeamMember(

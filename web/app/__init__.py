@@ -812,6 +812,18 @@ def create_app(config_name=None):
                         ('reference_skill_ids_json', 'LONGTEXT DEFAULT NULL'),
                         ('reference_knowledge_ids_json', 'LONGTEXT DEFAULT NULL'),
                         ('reference_report_ids_json', 'LONGTEXT DEFAULT NULL'),
+                        ('recommended_action', "VARCHAR(64) DEFAULT ''"),
+                        ('next_action', "VARCHAR(64) DEFAULT ''"),
+                        ('next_check_at', 'DATETIME DEFAULT NULL'),
+                        ('owner_gate', 'BOOLEAN NOT NULL DEFAULT FALSE'),
+                        ('action_metadata_json', 'LONGTEXT DEFAULT NULL'),
+                        ('checkpoint_json', 'LONGTEXT DEFAULT NULL'),
+                        ('resume_contract_json', 'LONGTEXT DEFAULT NULL'),
+                        ('condition_state', "VARCHAR(32) NOT NULL DEFAULT ''"),
+                        ('next_probe_at', 'DATETIME DEFAULT NULL'),
+                        ('last_condition_event_at', 'DATETIME DEFAULT NULL'),
+                        ('resume_fencing_token', 'INTEGER NOT NULL DEFAULT 0'),
+                        ('last_heartbeat_at', 'DATETIME DEFAULT NULL'),
                     ]:
                         try:
                             conn.execute(text(
@@ -819,6 +831,21 @@ def create_app(config_name=None):
                             logger.info(f'已添加 test_tasks.{col} 列')
                         except Exception:
                             pass
+
+                    # MySQL uses a native ENUM for TestTask.status.  Add the
+                    # non-terminal waiting state without changing any existing
+                    # value or default. Other dialects either use VARCHAR or
+                    # reject this statement and safely skip it.
+                    try:
+                        conn.execute(text("""
+                            ALTER TABLE test_tasks MODIFY COLUMN status
+                            ENUM('assigned','pending','in_progress',
+                                 'waiting_condition','completed','blocked','skipped')
+                            DEFAULT 'assigned'
+                        """))
+                        logger.info('已扩展 test_tasks.status waiting_condition')
+                    except Exception:
+                        pass
 
                     try:
                         conn.execute(text("""

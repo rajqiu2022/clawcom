@@ -5630,12 +5630,29 @@ class TestTask(db.Model):
         db.DateTime, comment='同步备份恢复时间；非空表示恢复机会已使用')
 
     # 进度和结果
-    status = db.Column(db.Enum('assigned', 'pending', 'in_progress', 'completed', 'blocked', 'skipped'),
+    status = db.Column(db.Enum('assigned', 'pending', 'in_progress',
+                               'waiting_condition', 'completed', 'blocked', 'skipped'),
                        default='assigned',
                        comment='状态：assigned=新分配, pending=待开始, in_progress=进行中, '
-                               'completed=已完成, blocked=阻塞, skipped=跳过')
+                               'waiting_condition=等待外部条件, completed=已完成, '
+                               'blocked=阻塞, skipped=跳过')
     progress = db.Column(db.Integer, default=0, comment='进度百分比 0-100')
     result_summary = db.Column(db.Text, comment='结果摘要')
+    # 一次性任务同样可以等待外部条件后从 Checkpoint 继续。周期任务的
+    # 执行事实仍保存在 TestTaskOccurrence；这些字段只服务 schedule_enabled=false。
+    recommended_action = db.Column(db.String(64), default='')
+    next_action = db.Column(db.String(64), default='')
+    next_check_at = db.Column(db.DateTime, index=True)
+    owner_gate = db.Column(db.Boolean, nullable=False, default=False)
+    action_metadata_json = db.Column(db.JSON)
+    checkpoint_json = db.Column(db.JSON)
+    resume_contract_json = db.Column(db.JSON)
+    condition_state = db.Column(
+        db.String(32), nullable=False, default='', index=True)
+    next_probe_at = db.Column(db.DateTime, index=True)
+    last_condition_event_at = db.Column(db.DateTime)
+    resume_fencing_token = db.Column(db.Integer, nullable=False, default=0)
+    last_heartbeat_at = db.Column(db.DateTime)
 
     # 用例执行统计
     total_cases = db.Column(db.Integer, default=0, comment='用例总数')
@@ -5731,6 +5748,26 @@ class TestTask(db.Model):
             'status': self.status,
             'progress': self.progress,
             'result_summary': self.result_summary,
+            'recommended_action': self.recommended_action or '',
+            'next_action': self.next_action or '',
+            'next_check_at': (
+                self.next_check_at.isoformat() + '+08:00'
+                if self.next_check_at else None),
+            'owner_gate': bool(self.owner_gate),
+            'action_metadata': self.action_metadata_json or {},
+            'checkpoint': self.checkpoint_json or {},
+            'resume_contract': self.resume_contract_json or {},
+            'condition_state': self.condition_state or '',
+            'next_probe_at': (
+                self.next_probe_at.isoformat() + '+08:00'
+                if self.next_probe_at else None),
+            'last_condition_event_at': (
+                self.last_condition_event_at.isoformat() + '+08:00'
+                if self.last_condition_event_at else None),
+            'resume_fencing_token': int(self.resume_fencing_token or 0),
+            'last_heartbeat_at': (
+                self.last_heartbeat_at.isoformat() + '+08:00'
+                if self.last_heartbeat_at else None),
             'total_cases': self.total_cases,
             'passed_cases': self.passed_cases,
             'failed_cases': self.failed_cases,

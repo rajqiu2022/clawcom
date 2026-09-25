@@ -144,6 +144,32 @@ def report_occurrence_condition(plan_id, occurrence_id):
     return jsonify(result), (200 if result.get('replayed') else 201)
 
 
+@api_bp.route(
+    '/test-plans/<int:plan_id>/supervision/tasks/'
+    '<int:test_task_id>/condition-events', methods=['POST'])
+def report_test_task_condition(plan_id, test_task_id):
+    """Worker no-LLM probes resume one-off TestTasks with a new fence."""
+    _, sup, claw = load(plan_id)
+    if not claw:
+        svc.fail('PLAN_AGENT_REQUIRED', '条件事件必须由执行 Agent 上报', 403)
+    if not sup:
+        svc.fail('PLAN_SUPERVISION_NOT_STARTED', '计划尚未启动监督', 409)
+    body = payload()
+    if set(body) - {
+            'command_key', 'condition_type', 'condition_ready', 'facts',
+            'observed_at', 'expected_resume_fencing_token'}:
+        svc.fail('PLAN_BODY_INVALID', '条件事件包含不支持的字段', 400)
+    result = svc.record_test_task_condition_probe(
+        sup, claw.id, test_task_id, body)
+    target = result.pop('wake_claw_id', None)
+    if result.get('replayed'):
+        target = None
+    db.session.commit()
+    if target:
+        svc.wake(target)
+    return jsonify(result), (200 if result.get('replayed') else 201)
+
+
 @api_bp.route('/test-plans/<int:plan_id>/supervision/receipts/<int:receipt_id>', methods=['GET'])
 def get_plan_supervision_receipt(plan_id, receipt_id):
     load(plan_id)

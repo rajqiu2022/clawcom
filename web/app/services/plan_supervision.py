@@ -87,6 +87,12 @@ def team_capability(team_id):
             'supervisor_api': '/api/v1/test-plans/{plan_id}/supervision',
             'direct_task_dispatch_api': (
                 '/api/v1/test-plans/{plan_id}/supervision/agent-tasks'),
+            'condition_event_apis': {
+                'occurrence': ('/api/v1/test-plans/{plan_id}/supervision/'
+                               'occurrences/{occurrence_id}/condition-events'),
+                'one_off_task': ('/api/v1/test-plans/{plan_id}/supervision/'
+                                 'tasks/{test_task_id}/condition-events'),
+            },
             'worker_lease_receipt_required': True, 'auto_start': bool(team_enabled(team_id)),
             'persistent_schedule': schedule,
             'decision_outcomes': [
@@ -114,6 +120,7 @@ def team_capability(team_id):
                 'notify_on': [
                     'blocked', 'run_terminal', 'heartbeat_anomaly', 'stale',
                     'occurrence_owner_gate', 'occurrence_due_unresolved',
+                    'task_owner_gate', 'task_due_unresolved',
                     'supervision_report_updated', 'control_action_terminal'],
                 'quiet_on': ['heartbeat', 'unchanged', 'ordinary_progress'],
             }}
@@ -1690,6 +1697,11 @@ def _create_plan_agent_task(sup, task, stage, command_key, instruction,
         if occurrence.resume_contract_json:
             payload['resume_contract'] = occurrence.resume_contract_json
             payload['checkpoint'] = occurrence.checkpoint_json or {}
+    elif task.resume_contract_json:
+        payload['resume_fencing_token'] = int(
+            task.resume_fencing_token or 0)
+        payload['resume_contract'] = task.resume_contract_json
+        payload['checkpoint'] = task.checkpoint_json or {}
     agent_task = AgentTask(
         task_id=task_id,
         claw_id=executor_claw_id,
@@ -2275,6 +2287,10 @@ def record_agent_task_claim(agent_task, now=None):
     elif task.status in ('assigned', 'pending'):
         task.status = 'in_progress'
         task.progress = max(1, int(task.progress or 0))
+        task.condition_state = 'running'
+        task.last_heartbeat_at = agent_task.last_heartbeat_at or now
+        task.next_action = 'await_result'
+        task.next_check_at = agent_task.lease_expires_at
     stage.state = 'running'
     stage.last_reason_code = 'ordinary_agent_task_claimed'
     stage.version = int(stage.version or 1) + 1
@@ -2338,6 +2354,10 @@ def record_agent_task_retry_pending(agent_task, now=None):
         occurrence.next_check_at = now
     else:
         task.status = 'pending'
+        task.condition_state = 'retry_pending'
+        task.last_heartbeat_at = None
+        task.next_action = 'retry_pending'
+        task.next_check_at = now
     stage.state = 'dispatched'
     stage.last_reason_code = 'ordinary_agent_task_retry_pending'
     if changed:
@@ -2365,10 +2385,24 @@ def record_agent_task_heartbeat(agent_task, now=None):
             stage.state = 'running'
         return stage
     link = _agent_task_plan_link(agent_task)
-    if not link or not link.get('occurrence_id'):
+    if not link:
         return None
-    occurrence = _linked_occurrence(link)
     now = now or _now()
+    occurrence = _linked_occurrence(link)
+    if not occurrence:
+        task = db.session.get(TestTask, link['test_task_id'])
+        stage = db.session.get(MissionStage, link['mission_stage_id'])
+        if (not task or not stage
+                or task.assignee_claw_id != agent_task.claw_id
+                or stage.assigned_claw_id != agent_task.claw_id):
+            return None
+        task.status = 'in_progress'
+        task.condition_state = 'running'
+        task.last_heartbeat_at = agent_task.last_heartbeat_at or now
+        task.next_action = 'await_result'
+        task.next_check_at = agent_task.lease_expires_at
+        stage.state = 'running'
+        return task
     occurrence.status = 'running'
     occurrence.last_heartbeat_at = agent_task.last_heartbeat_at or now
     occurrence.next_action = 'await_result'
@@ -2405,7 +2439,14 @@ def _apply_terminal_action(occurrence, error_code, summary, now):
     return action
 
 
-def _normalize_resume_contract(result, occurrence, now):
+def _direct_task_due_at(task):
+    if not task or not task.end_date:
+        return None
+    return datetime.combine(
+        task.end_date, _task_clock(task.due_time, '23:59'))
+
+
+def _normalize_resume_contract(result, due_at, now):
     contract = result.get('resume_contract')
     if not isinstance(contract, dict):
         fail('RESUME_CONTRACT_REQUIRED',
@@ -2451,7 +2492,6 @@ def _normalize_resume_contract(result, occurrence, now):
     if owner_gate and not human_action:
         fail('RESUME_CONTRACT_INVALID',
              'owner_gate=true 时必须说明 human_action', 400)
-    due_at = occurrence.due_at
     next_probe_at = now + timedelta(seconds=interval)
     if due_at and next_probe_at > due_at:
         next_probe_at = due_at
@@ -2471,57 +2511,69 @@ def _normalize_resume_contract(result, occurrence, now):
 
 
 def record_agent_task_waiting_condition(agent_task, result, now=None):
-    """Persist a non-terminal external-condition wait for one occurrence."""
+    """Persist a non-terminal external-condition wait for scheduled or one-off work."""
     link = _agent_task_plan_link(agent_task)
-    if not link or not link.get('occurrence_id'):
-        fail('WAITING_CONDITION_OCCURRENCE_REQUIRED',
-             'waiting_condition 仅支持周期任务实例', 409)
+    if not link:
+        fail('WAITING_CONDITION_PLAN_TASK_REQUIRED',
+             'waiting_condition 仅支持团队计划任务', 409)
     now = now or _now()
     task = db.session.get(TestTask, link['test_task_id'])
     stage = db.session.get(MissionStage, link['mission_stage_id'])
     occurrence = _linked_occurrence(link)
     sup = locked(link['plan_id'])
+    expected_assignee = (
+        occurrence.assignee_claw_id if occurrence else
+        task.assignee_claw_id if task else None)
     if (not task or not stage or not sup
-            or agent_task.claw_id != occurrence.assignee_claw_id
+            or task.plan_id != link['plan_id']
+            or stage.mission_id != link['mission_id']
+            or agent_task.claw_id != expected_assignee
             or stage.assigned_claw_id != agent_task.claw_id):
         fail('PLAN_AGENT_TASK_LINK_INVALID',
-             'AgentTask 与周期任务实例绑定不一致', 409)
+             'AgentTask 与计划任务绑定不一致', 409)
+    if not occurrence and task.schedule_enabled:
+        fail('WAITING_CONDITION_OCCURRENCE_REQUIRED',
+             '周期任务的 waiting_condition 必须绑定执行实例', 409)
     contract, checkpoint, next_probe_at = _normalize_resume_contract(
-        result, occurrence, now)
-    occurrence.status = 'waiting_condition'
-    occurrence.condition_state = 'waiting_condition'
-    occurrence.resume_contract_json = contract
-    occurrence.checkpoint_json = checkpoint
-    occurrence.next_probe_at = next_probe_at
-    occurrence.next_check_at = next_probe_at
-    occurrence.last_condition_event_at = now
-    occurrence.owner_gate = bool(contract['owner_gate'])
-    occurrence.recommended_action = (
-        'owner_action_then_auto_resume' if occurrence.owner_gate
+        result, occurrence.due_at if occurrence else _direct_task_due_at(task),
+        now)
+    target = occurrence or task
+    target.status = 'waiting_condition'
+    target.condition_state = 'waiting_condition'
+    target.resume_contract_json = contract
+    target.checkpoint_json = checkpoint
+    target.next_probe_at = next_probe_at
+    target.next_check_at = next_probe_at
+    target.last_condition_event_at = now
+    target.owner_gate = bool(contract['owner_gate'])
+    target.recommended_action = (
+        'owner_action_then_auto_resume' if target.owner_gate
         else 'local_probe_then_auto_resume')
-    occurrence.next_action = (
-        'wait_owner_and_probe' if occurrence.owner_gate
+    target.next_action = (
+        'wait_owner_and_probe' if target.owner_gate
         else 'wait_condition_probe')
-    occurrence.result_summary = str(
+    target.result_summary = str(
         result.get('summary') or result.get('reason') or '')[:8000]
     stage.state = 'waiting_condition'
     stage.last_reason_code = 'waiting_condition'
     stage.version = int(stage.version or 1) + 1
-    event_kind = ('occurrence_owner_gate'
-                  if occurrence.owner_gate else 'occurrence_waiting_condition')
+    event_prefix = 'occurrence' if occurrence else 'task'
+    event_kind = ('%s_owner_gate' % event_prefix if target.owner_gate
+                  else '%s_waiting_condition' % event_prefix)
     add_event(sup.plan_id, event_kind, [
-        event_kind, occurrence.id, int(occurrence.resume_fencing_token or 0),
+        event_kind, occurrence.id if occurrence else task.id,
+        int(target.resume_fencing_token or 0),
     ], {
-        'occurrence_id': occurrence.id,
+        'occurrence_id': occurrence.id if occurrence else None,
         'test_task_id': task.id,
         'condition_types': [row['condition_type']
                             for row in contract['conditions']],
-        'owner_gate': occurrence.owner_gate,
+        'owner_gate': target.owner_gate,
         'human_action': contract['human_action'],
         'next_probe_at': contract['next_probe_at'],
         'due_at': contract['due_at'],
     }, now)
-    return occurrence
+    return target
 
 
 def record_condition_probe(sup, claw_id, occurrence_id, body, now=None):
@@ -2638,6 +2690,128 @@ def record_condition_probe(sup, claw_id, occurrence_id, body, now=None):
     return receipt(sup, 'condition_probe', body, apply)
 
 
+def record_test_task_condition_probe(sup, claw_id, test_task_id, body,
+                                     now=None):
+    """Resume one non-recurring TestTask after a no-LLM condition probe."""
+    now = now or _now()
+    key = body.get('command_key')
+    if isinstance(key, str):
+        old = PlanSupervisorReceipt.query.filter_by(
+            plan_id=sup.plan_id, action='test_task_condition_probe',
+            command_key=key).first()
+        if old:
+            if old.request_hash != digest(body):
+                fail('PLAN_COMMAND_CONFLICT',
+                     '同一 command_key 不得改变请求')
+            return dict(old.response_json, replayed=True)
+    task = TestTask.query.filter_by(
+        id=test_task_id, plan_id=sup.plan_id).with_for_update().first()
+    if not task:
+        fail('TEST_TASK_NOT_FOUND', '测试任务不存在', 404)
+    if task.schedule_enabled:
+        fail('TEST_TASK_OCCURRENCE_REQUIRED',
+             '周期任务须向 occurrence condition-events 上报', 409)
+    if task.assignee_claw_id != claw_id:
+        fail('TEST_TASK_CONDITION_FORBIDDEN',
+             '仅当前执行 Agent 可上报恢复条件', 403)
+    expected = body.get('expected_resume_fencing_token')
+    if (isinstance(expected, bool) or not isinstance(expected, int)
+            or expected != int(task.resume_fencing_token or 0)):
+        fail('RESUME_CONDITION_FENCED', '恢复条件版本已变化', 409)
+    condition_type = str(body.get('condition_type') or '').strip()
+    ready = body.get('condition_ready')
+    if type(ready) is not bool:
+        fail('RESUME_CONDITION_INVALID', 'condition_ready 必须为布尔值', 400)
+    contract = dict(task.resume_contract_json or {})
+    conditions = [dict(row) for row in list(contract.get('conditions') or [])]
+    matched = False
+    for row in conditions:
+        if row.get('condition_type') == condition_type:
+            row['ready'] = ready
+            row['observed_at'] = now.isoformat() + '+08:00'
+            facts = body.get('facts')
+            if isinstance(facts, dict):
+                row['facts_digest'] = digest(facts)
+            matched = True
+    if not matched:
+        fail('RESUME_CONDITION_INVALID',
+             'condition_type 不属于当前 ResumeContract', 400)
+
+    def apply():
+        task.resume_contract_json = dict(contract, conditions=conditions)
+        task.last_condition_event_at = now
+        metadata = dict(task.action_metadata_json or {})
+        probe_count = int(metadata.get('probe_count') or 0) + 1
+        metadata['probe_count'] = probe_count
+        metadata['last_probe_type'] = condition_type
+        metadata['last_probe_ready'] = ready
+        task.action_metadata_json = metadata
+        all_ready = bool(conditions and all(row.get('ready') is True
+                                            for row in conditions))
+        if not all_ready:
+            delays = (60, 120, 300, 600, 1800)
+            delay = delays[min(probe_count - 1, len(delays) - 1)]
+            next_probe = now + timedelta(seconds=delay)
+            due_at = _direct_task_due_at(task)
+            if due_at and next_probe > due_at:
+                next_probe = due_at
+            task.next_probe_at = next_probe
+            task.next_check_at = next_probe
+            task.resume_contract_json = dict(
+                task.resume_contract_json or {},
+                next_probe_at=next_probe.isoformat() + '+08:00')
+            return {
+                'condition_ready': False,
+                'next_probe_at': next_probe.isoformat() + '+08:00',
+            }
+        if (task.status != 'waiting_condition'
+                or task.condition_state != 'waiting_condition'):
+            fail('RESUME_CONDITION_STATE_CONFLICT',
+                 '当前任务不在 waiting_condition', 409)
+        stage = MissionStage.query.filter_by(
+            mission_id=sup.mission_id,
+            stage_key='test_task_%s' % task.id,
+            stage_version=1,
+        ).with_for_update().first()
+        if (not stage or stage.assigned_claw_id != task.assignee_claw_id):
+            fail('TEST_TASK_STAGE_INVALID', '恢复目标阶段不存在', 409)
+        task.status = 'pending'
+        task.condition_state = 'recovery_ready'
+        task.resume_fencing_token = int(task.resume_fencing_token or 0) + 1
+        task.next_probe_at = None
+        task.next_check_at = now
+        task.owner_gate = False
+        task.next_action = 'auto_resume'
+        task.recommended_action = 'resume_from_checkpoint'
+        stage.state = 'ready'
+        stage.last_reason_code = 'resume_condition_satisfied'
+        stage.version = int(stage.version or 1) + 1
+        add_event(sup.plan_id, 'task_recovery_ready', [
+            'task-recovery-ready', task.id, task.resume_fencing_token,
+        ], {
+            'test_task_id': task.id,
+            'resume_fencing_token': task.resume_fencing_token,
+        }, now)
+        agent_task = _create_plan_agent_task(
+            sup, task, stage,
+            'direct-resume:%s:%s' % (
+                task.id, task.resume_fencing_token),
+            ('恢复条件已满足。使用 payload.checkpoint 和 '
+             'payload.resume_contract，从未完成步骤继续；禁止重复已登记副作用。'),
+            2)
+        task.condition_state = 'resuming'
+        task.next_action = 'await_resume_claim'
+        return {
+            'condition_ready': True,
+            'resumed': True,
+            'resume_fencing_token': task.resume_fencing_token,
+            'agent_task': agent_task.to_dict(),
+            'wake_claw_id': task.assignee_claw_id,
+        }
+
+    return receipt(sup, 'test_task_condition_probe', body, apply)
+
+
 def guard_execution_goals(sup, now=None):
     """Close overdue goals and expose stalled probes without invoking an LLM."""
     if not sup:
@@ -2699,6 +2873,58 @@ def guard_execution_goals(sup, now=None):
                 'test_task_id': occurrence.test_task_id,
                 'next_probe_at': occurrence.next_probe_at.isoformat() + '+08:00',
                 'owner_gate': bool(occurrence.owner_gate),
+            }, now)
+    ordinary = _plan_agent_tasks(sup)
+    direct_rows = (TestTask.query.filter_by(
+        plan_id=sup.plan_id, schedule_enabled=False,
+        status='waiting_condition').order_by(TestTask.id).all())
+    for task in direct_rows:
+        stage = MissionStage.query.filter_by(
+            mission_id=sup.mission_id,
+            stage_key='test_task_%s' % task.id,
+            stage_version=1).first()
+        due_at = _direct_task_due_at(task)
+        if due_at and due_at <= now:
+            latest_task = ordinary.get(stage.id) if stage else None
+            if latest_task and latest_task.status == 'waiting_condition':
+                latest_task.status = 'blocked'
+                latest_task.terminal_reason = 'test_task_due_elapsed'
+                latest_task.completed_at = now
+                latest_task.version = int(latest_task.version or 0) + 1
+            task.status = 'blocked'
+            task.condition_state = 'due_elapsed'
+            task.next_probe_at = None
+            task.next_check_at = None
+            task.owner_gate = False
+            task.recommended_action = 'publish_partial_closeout'
+            task.next_action = 'none'
+            if stage:
+                stage.state = 'blocked'
+                stage.last_reason_code = 'test_task_due_elapsed'
+                stage.version = int(stage.version or 1) + 1
+            add_event(sup.plan_id, 'task_due_unresolved', [
+                'task-due-unresolved', task.id, due_at,
+            ], {
+                'test_task_id': task.id,
+                'checkpoint': task.checkpoint_json or {},
+                'resume_contract': task.resume_contract_json or {},
+                'conclusion': 'ANALYSIS_INCOMPLETE',
+            }, now)
+            changed += 1
+            continue
+        if task.next_probe_at and task.next_probe_at <= now:
+            task.recommended_action = (
+                'owner_action_then_auto_resume' if task.owner_gate
+                else 'worker_probe_required')
+            task.next_action = (
+                'wait_owner_and_probe' if task.owner_gate
+                else 'await_probe_event')
+            add_event(sup.plan_id, 'task_probe_overdue', [
+                'task-probe-overdue', task.id, task.next_probe_at,
+            ], {
+                'test_task_id': task.id,
+                'next_probe_at': task.next_probe_at.isoformat() + '+08:00',
+                'owner_gate': bool(task.owner_gate),
             }, now)
     return changed
 
@@ -3122,6 +3348,16 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
         if projected == 'completed':
             task.progress = 100
         task.result_summary = summary
+        task.condition_state = (
+            '' if projected in ('completed', 'skipped') else projected)
+        task.last_heartbeat_at = agent_task.last_heartbeat_at or now
+        task.next_probe_at = None
+        task.next_check_at = None
+        task.owner_gate = False
+        task.recommended_action = (
+            'none' if projected in ('completed', 'skipped') else 'manager_review')
+        task.next_action = (
+            'none' if projected in ('completed', 'skipped') else 'manager_review')
     stage.last_reason_code = str(
         result.get('error_code') or status or 'agent_task_terminal')[:80]
     evidence = result.get('evidence')
@@ -3193,6 +3429,19 @@ def reconcile_ordinary_task_truth(sup, now=None):
                     or (not occurrence and task.status != 'in_progress')
                     or stage.state != 'running'):
                 record_agent_task_claim(agent_task, now=now)
+                count += 1
+            continue
+        if agent_task.status == 'waiting_condition':
+            truth_status = occurrence.status if occurrence else task.status
+            if truth_status == 'waiting_condition' and stage.state == 'waiting_condition':
+                continue
+            try:
+                waiting_result = json.loads(agent_task.result or '{}')
+            except (TypeError, ValueError):
+                waiting_result = {}
+            if isinstance(waiting_result, dict):
+                record_agent_task_waiting_condition(
+                    agent_task, waiting_result, now=now)
                 count += 1
             continue
         terminal = {
