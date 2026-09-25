@@ -43,6 +43,31 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(self.client.put('/api/v1/test-plans/%s' % plan['id'],
             headers=self._headers(), json={'name':'已调整'}).status_code, 200)
 
+    def test_task_dependencies_are_persisted_and_cycles_are_rejected(self):
+        plan = self.create()
+        path = '/api/v1/test-plans/%s/tasks' % plan['id']
+        first = self.client.post(path, headers=self._headers(), json={
+            'name': '生成版本基线',
+            'assignee_claw_id': self.other_claw.id,
+        })
+        self.assertEqual(first.status_code, 201, first.json)
+        second = self.client.post(path, headers=self._headers(), json={
+            'name': '分析代码风险',
+            'assignee_claw_id': self.other_claw.id,
+            'depends_on_task_ids': [first.json['id']],
+        })
+        self.assertEqual(second.status_code, 201, second.json)
+        self.assertEqual(
+            second.json['depends_on_task_ids'], [first.json['id']])
+
+        cycle = self.client.put(
+            '%s/%s' % (path, first.json['id']),
+            headers=self._headers(), json={
+                'depends_on_task_ids': [second.json['id']],
+            })
+        self.assertEqual(cycle.status_code, 400, cycle.json)
+        self.assertIn('循环依赖', cycle.json['error'])
+
     def test_manager_binds_task_references_and_agent_task_receives_manifest(self):
         self.app.config.update(
             PLAN_SUPERVISION_ENABLED=True,

@@ -5610,6 +5610,8 @@ class TestTask(db.Model):
         db.JSON, comment='执行前按需读取的知识库 ID 快照')
     reference_report_ids_json = db.Column(
         db.JSON, comment='执行前按需读取的测试报告 ID 快照')
+    depends_on_task_ids_json = db.Column(
+        db.JSON, comment='同计划前置测试任务 ID；全部完成或跳过后才可派发')
 
     # 优先级
     priority = db.Column(db.Enum('P0', 'P1', 'P2', 'P3'), default='P2', comment='优先级')
@@ -5732,6 +5734,7 @@ class TestTask(db.Model):
             'reference_skill_ids': self.reference_skill_ids_json or [],
             'reference_knowledge_ids': self.reference_knowledge_ids_json or [],
             'reference_report_ids': self.reference_report_ids_json or [],
+            'depends_on_task_ids': self.depends_on_task_ids_json or [],
             'priority': self.priority,
             'library_id': self.library_id,
             'library_name': self.library.name if self.library else None,

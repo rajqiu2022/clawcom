@@ -812,6 +812,7 @@ def create_app(config_name=None):
                         ('reference_skill_ids_json', 'LONGTEXT DEFAULT NULL'),
                         ('reference_knowledge_ids_json', 'LONGTEXT DEFAULT NULL'),
                         ('reference_report_ids_json', 'LONGTEXT DEFAULT NULL'),
+                        ('depends_on_task_ids_json', 'LONGTEXT DEFAULT NULL'),
                         ('recommended_action', "VARCHAR(64) DEFAULT ''"),
                         ('next_action', "VARCHAR(64) DEFAULT ''"),
                         ('next_check_at', 'DATETIME DEFAULT NULL'),

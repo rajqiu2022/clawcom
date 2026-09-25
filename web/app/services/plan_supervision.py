@@ -747,17 +747,20 @@ def ensure_manager_tenure(sup, now=None, ttl_seconds=300):
 def _task_assignment(team, task):
     if not task.assignee_claw_id:
         return None
-    if task.assignee_claw_id in (
-            team.primary_manager_claw_id, team.backup_manager_claw_id):
-        # Managers may execute only an explicitly classified analysis/review
-        # occurrence.  Generic execution work remains fenced from the manager.
-        if task.execution_role == 'manager_work':
+    is_manager = task.assignee_claw_id in (
+        team.primary_manager_claw_id, team.backup_manager_claw_id)
+    if task.execution_role == 'manager_work':
+        if is_manager:
             return {
                 'role_key': 'test_manager', 'specialty': 'analysis',
                 'required_capabilities': list(
                     task.required_capabilities_json or []),
             }
         return None
+    # Manager authority and member execution are independent roles.  A backup
+    # manager explicitly listed as a project assistant/analyst/executor may
+    # still receive member_work through that member role.  Merely being a
+    # manager never grants member execution authority.
     members = [row for row in team.members
                if row.claw_id == task.assignee_claw_id]
     if not members:
@@ -800,6 +803,135 @@ def _task_assignment(team, task):
     }
 
 
+_TASK_DEPENDENCY_SUCCESS = frozenset({'completed', 'skipped'})
+
+
+def task_dependency_state(task):
+    """Return deterministic same-plan dependency truth for one TestTask."""
+    raw_ids = list(task.depends_on_task_ids_json or []) if task else []
+    dependency_ids = sorted({int(item) for item in raw_ids
+                             if type(item) is int and item > 0})
+    if not dependency_ids:
+        return {
+            'depends_on_task_ids': [], 'satisfied_task_ids': [],
+            'pending_task_ids': [], 'missing_task_ids': [], 'ready': True,
+        }
+    rows = TestTask.query.filter(
+        TestTask.plan_id == task.plan_id,
+        TestTask.id.in_(dependency_ids)).all()
+    by_id = {row.id: row for row in rows}
+    missing = [item for item in dependency_ids if item not in by_id]
+    satisfied = [item for item in dependency_ids
+                 if item in by_id and by_id[item].status in _TASK_DEPENDENCY_SUCCESS]
+    pending = [item for item in dependency_ids
+               if item in by_id and by_id[item].status not in _TASK_DEPENDENCY_SUCCESS]
+    return {
+        'depends_on_task_ids': dependency_ids,
+        'satisfied_task_ids': satisfied,
+        'pending_task_ids': pending,
+        'missing_task_ids': missing,
+        'ready': not missing and not pending,
+    }
+
+
+def _apply_task_dependency_state(sup, task, stage, occurrence=None, now=None):
+    """Project dependency truth onto a not-yet-dispatched Mission Stage."""
+    now = now or _now()
+    dependency = task_dependency_state(task)
+    snapshot = dict(stage.input_snapshot_json or {})
+    before_dependency = snapshot.get('dependencies')
+    snapshot['depends_on_task_ids'] = dependency['depends_on_task_ids']
+    snapshot['dependencies'] = dependency
+    if before_dependency != dependency:
+        stage.input_snapshot_json = snapshot
+    if not dependency['depends_on_task_ids']:
+        return True, False
+    mutable_states = {'ready', 'scheduled', 'waiting_dependency'}
+    if stage.state not in mutable_states:
+        return dependency['ready'], before_dependency != dependency
+    changed = before_dependency != dependency
+    if not dependency['ready']:
+        if stage.state != 'waiting_dependency':
+            stage.state = 'waiting_dependency'
+            stage.last_reason_code = 'task_dependency_waiting'
+            changed = True
+            add_event(sup.plan_id, 'task_dependency_waiting', [
+                'task-dependency-waiting', stage.id,
+                digest(dependency),
+            ], {
+                'task_id': task.id,
+                'stage_key': stage.stage_key,
+                **dependency,
+            }, now)
+        if occurrence:
+            occurrence.status = 'ready'
+            occurrence.next_action = 'wait_dependencies'
+            occurrence.next_check_at = None
+        elif task.status in ('assigned', 'pending', 'blocked'):
+            task.status = 'pending'
+            task.condition_state = 'waiting_dependency'
+            task.recommended_action = 'wait_dependencies'
+            task.next_action = 'wait_dependencies'
+            task.next_check_at = None
+        if changed:
+            stage.version = int(stage.version or 1) + 1
+        return False, changed
+    if stage.state == 'waiting_dependency':
+        next_state = (
+            'scheduled' if occurrence and occurrence.not_before_at > now
+            else 'ready')
+        stage.state = next_state
+        stage.last_reason_code = 'task_dependency_satisfied'
+        stage.version = int(stage.version or 1) + 1
+        changed = True
+        if occurrence:
+            occurrence.status = next_state
+            occurrence.next_action = (
+                'auto_dispatch' if next_state == 'ready' and task.auto_dispatch
+                else 'manager_dispatch' if next_state == 'ready'
+                else 'wait_not_before')
+            occurrence.next_check_at = (
+                now if next_state == 'ready' else occurrence.not_before_at)
+        elif task.condition_state == 'waiting_dependency':
+            task.status = 'pending'
+            task.condition_state = ''
+            task.recommended_action = 'dispatch'
+            task.next_action = 'manager_dispatch'
+            task.next_check_at = now
+        add_event(sup.plan_id, 'task_dependency_ready', [
+            'task-dependency-ready', stage.id,
+            digest(dependency),
+        ], {
+            'task_id': task.id,
+            'stage_key': stage.stage_key,
+            **dependency,
+        }, now)
+    elif changed:
+        stage.version = int(stage.version or 1) + 1
+    return True, changed
+
+
+def refresh_task_dependency_stages(sup, now=None):
+    """Refresh dependency gates and release newly satisfied stages."""
+    if not sup or not sup.mission_id:
+        return 0
+    now = now or _now()
+    changed = 0
+    rows = MissionStage.query.filter_by(mission_id=sup.mission_id).all()
+    for stage in rows:
+        task_id = _stage_task_id(stage)
+        task = db.session.get(TestTask, task_id) if task_id else None
+        if not task:
+            continue
+        occurrence_id = _stage_occurrence_id(stage)
+        occurrence = (db.session.get(TestTaskOccurrence, occurrence_id)
+                      if occurrence_id else None)
+        _, updated = _apply_task_dependency_state(
+            sup, task, stage, occurrence=occurrence, now=now)
+        changed += int(updated)
+    return changed
+
+
 def _stage_snapshot(team, task, assignment, occurrence=None):
     definition_id = (occurrence.workflow_definition_id if occurrence
                      else task.workflow_definition_id)
@@ -832,6 +964,7 @@ def _stage_snapshot(team, task, assignment, occurrence=None):
         'required_capabilities': list(required_capabilities),
         'required_resources': copy.deepcopy(required_resources),
         'references': serialize_task_references(task, occurrence),
+        'depends_on_task_ids': list(task.depends_on_task_ids_json or []),
         'scheduled_start_date': str(task.start_date) if task.start_date else None,
         'scheduled_end_date': str(task.end_date) if task.end_date else None,
         'team_assignment': {
@@ -899,11 +1032,12 @@ def sync_plan_stages(sup, now=None):
                       })
             continue
         snapshot = _stage_snapshot(team, task, assignment)
-        db.session.add(MissionStage(
+        stage = MissionStage(
             mission_id=mission.id, stage_key='test_task_%s' % task.id,
             stage_version=1, role_key=assignment['role_key'],
             assigned_claw_id=task.assignee_claw_id, state='ready',
-            input_snapshot_json=snapshot, evidence_refs_json=[]))
+            input_snapshot_json=snapshot, evidence_refs_json=[])
+        db.session.add(stage)
         add_event(sup.plan_id, 'task_stage_created',
                   ['task-stage', task.id], {
                       'task_id': task.id,
@@ -965,8 +1099,9 @@ def sync_plan_stages(sup, now=None):
             'assigned_claw_id': occurrence.assignee_claw_id,
         })
         created += 1
-    if created:
-        db.session.flush()
+    db.session.flush()
+    dependency_changes = refresh_task_dependency_stages(sup, now=now)
+    if created or dependency_changes:
         stages = MissionStage.query.filter_by(mission_id=mission.id).order_by(
             MissionStage.stage_key, MissionStage.stage_version).all()
         manifest = [{
@@ -999,6 +1134,10 @@ def ensure_team_mission(sup):
         mission = db.session.get(WorkflowMission, sup.mission_id)
         if not mission:
             fail('PLAN_MISSION_INCOMPLETE', '监督记录引用的 Mission 不存在', 409)
+        allowed_workers = sorted({row.claw_id for row in team.members})
+        if mission.allowed_worker_claw_ids_json != allowed_workers:
+            mission.allowed_worker_claw_ids_json = allowed_workers
+            mission.version = int(mission.version or 1) + 1
         sync_plan_stages(sup)
         return mission
     mission_key = 'plan-supervisor-%s' % plan.id
@@ -1010,9 +1149,10 @@ def ensure_team_mission(sup):
                 or not binding or binding.team_id != team.id):
             fail('PLAN_MISSION_CONFLICT', '稳定 Mission key 已被不兼容记录占用', 409)
     else:
-        excluded = {team.primary_manager_claw_id, team.backup_manager_claw_id}
-        allowed_workers = sorted({row.claw_id for row in team.members
-                                  if row.claw_id not in excluded})
+        # A manager may also hold an explicit member role.  Only the member
+        # roster grants execution authority; do not erase that authority just
+        # because the same Claw is configured as backup manager.
+        allowed_workers = sorted({row.claw_id for row in team.members})
         mission = WorkflowMission(
             mission_key=mission_key, project_id=plan.project_id,
             main_claw_id=sup.orchestrator_claw_id,
@@ -1298,6 +1438,7 @@ def pump(sup, now=None):
                                       'occurrence_owner_gate',
                                       'occurrence_recovery_failed',
                                       'occurrence_due_unresolved',
+                                      'task_dependency_ready',
                                       'supervision_report_updated',
                                       'control_action_terminal',
                                       'run_recovery_required',
@@ -1466,6 +1607,8 @@ def undispatched_stages(sup):
             'executor_claw_id': stage.assigned_claw_id,
             'role_key': stage.role_key,
             'control_action': control_kind or None,
+            'depends_on_task_ids': snapshot.get('depends_on_task_ids') or [],
+            'dependencies': snapshot.get('dependencies') or {},
             'agent_task_dispatch_api': (
                 '/api/v1/test-plans/%s/supervision/agent-tasks'
                 % sup.plan_id),
@@ -1954,6 +2097,10 @@ def promote_and_dispatch_due_occurrences(sup, now=None):
         stage = db.session.get(MissionStage, occurrence.mission_stage_id)
         if not task or not stage or stage.mission_id != sup.mission_id:
             continue
+        dependency_ready, _ = _apply_task_dependency_state(
+            sup, task, stage, occurrence=occurrence, now=now)
+        if not dependency_ready:
+            continue
         if occurrence.status == 'scheduled':
             occurrence.status = 'ready'
             occurrence.next_action = (
@@ -2148,6 +2295,13 @@ def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
     if (not task.schedule_enabled
             and task.status not in ('assigned', 'pending')):
         fail('TEST_TASK_NOT_DISPATCHABLE', '仅新分配或待开始任务可直接派发', 409)
+    dependency = task_dependency_state(task)
+    if not dependency['ready']:
+        fail('TEST_TASK_DEPENDENCY_NOT_READY',
+             '前置任务尚未完成：%s' % ', '.join(
+                 '#%s' % item for item in (
+                     dependency['pending_task_ids']
+                     + dependency['missing_task_ids'])), 409)
     occurrence = None
     if task.schedule_enabled:
         occurrence_id = body.get('occurrence_id')
@@ -3587,6 +3741,8 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
             'recommended_action': occurrence.recommended_action,
             'summary': summary,
         }, now)
+    if projected in ('completed', 'skipped'):
+        refresh_task_dependency_stages(sup, now=now)
     return task
 
 
@@ -4447,6 +4603,8 @@ def stage_truth_snapshot(sup):
                 if occurrence and occurrence.next_check_at else None),
             'executor_claw_id': stage.assigned_claw_id,
             'reason_code': stage.last_reason_code or '',
+            'depends_on_task_ids': snapshot.get('depends_on_task_ids') or [],
+            'dependencies': snapshot.get('dependencies') or {},
         }
         rows.append(item)
         if (snapshot.get('kind') in (

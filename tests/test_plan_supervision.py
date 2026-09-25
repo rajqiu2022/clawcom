@@ -595,6 +595,106 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(self.sup().status, 'blocked_owner_gate')
         self.assertIsNone(self.sup().next_check_at)
 
+    def test_backup_manager_with_member_role_can_execute_member_work(self):
+        team = self.scoped_team()
+        team.backup_manager_claw_id = self.other_claw.id
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='project_assistant', specialties_json=[]))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='整理当日版本基线', status='pending',
+            assignee_claw_id=self.other_claw.id, task_type='other',
+            execution_role='member_work')
+        db.session.add(task)
+        db.session.commit()
+
+        started = self.post('start', {
+            'command_key': 'backup-member-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+
+        self.assertEqual(started.status_code, 200, started.json)
+        stage = MissionStage.query.filter_by(
+            mission_id=self.sup().mission_id,
+            stage_key='test_task_%s' % task.id).one()
+        mission = db.session.get(WorkflowMission, self.sup().mission_id)
+        self.assertEqual(stage.role_key, 'project_assistant')
+        self.assertEqual(stage.assigned_claw_id, self.other_claw.id)
+        self.assertIn(self.other_claw.id, mission.allowed_worker_claw_ids_json)
+        self.assertEqual(
+            PlanSupervisorEvent.query.filter_by(
+                kind='task_assignment_gap').count(), 0)
+
+    def test_task_dependency_blocks_dispatch_then_releases_after_completion(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        baseline = TestTask(
+            plan_id=self.plan.id, name='生成当日版本基线', status='pending',
+            assignee_claw_id=self.other_claw.id, task_type='other')
+        db.session.add(baseline)
+        db.session.flush()
+        dependent = TestTask(
+            plan_id=self.plan.id, name='分析当日代码风险', status='pending',
+            assignee_claw_id=self.other_claw.id, task_type='other',
+            depends_on_task_ids_json=[baseline.id])
+        db.session.add(dependent)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'dependency-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        baseline_stage = MissionStage.query.filter_by(
+            mission_id=self.sup().mission_id,
+            stage_key='test_task_%s' % baseline.id).one()
+        dependent_stage = MissionStage.query.filter_by(
+            mission_id=self.sup().mission_id,
+            stage_key='test_task_%s' % dependent.id).one()
+        self.assertEqual(baseline_stage.state, 'ready')
+        self.assertEqual(dependent_stage.state, 'waiting_dependency')
+        self.assertEqual(dependent.condition_state, 'waiting_dependency')
+        self.assertEqual(
+            [row['test_task_id'] for row in svc.undispatched_stages(self.sup())],
+            [baseline.id])
+
+        self.agent()
+        blocked = self.client.post(self.base + '/agent-tasks', json={
+            'command_key': 'dependent-too-early',
+            'test_task_id': dependent.id,
+        }, headers=self._headers(self.main_token))
+        self.assertEqual(blocked.status_code, 409, blocked.json)
+        self.assertEqual(blocked.json['code'], 'TEST_TASK_DEPENDENCY_NOT_READY')
+
+        dispatched = self.client.post(self.base + '/agent-tasks', json={
+            'command_key': 'baseline-dispatch',
+            'test_task_id': baseline.id,
+        }, headers=self._headers(self.main_token))
+        self.assertEqual(dispatched.status_code, 201, dispatched.json)
+        agent_task = claim_pending_tasks(self.other_claw.id)[0]
+        complete_task(agent_task, {
+            'claim_token': agent_task.claim_token,
+            'attempt_no': agent_task.attempt_no,
+            'fencing_token': agent_task.fencing_token,
+            'status': 'completed',
+            'result': {
+                'status': 'passed', 'summary': '版本基线已生成',
+                'outputs': {'baseline_id': 'daily-1'},
+                'evidence': {'memo_id': 855},
+            },
+        })
+
+        db.session.refresh(dependent)
+        db.session.refresh(dependent_stage)
+        self.assertEqual(dependent.status, 'pending')
+        self.assertEqual(dependent.condition_state, '')
+        self.assertEqual(dependent_stage.state, 'ready')
+        self.assertEqual(
+            dependent_stage.input_snapshot_json['dependencies']['ready'], True)
+        self.assertEqual(
+            PlanSupervisorEvent.query.filter_by(
+                kind='task_dependency_ready').count(), 1)
+
     def test_manager_can_dispatch_non_flow_agent_task_while_plan_is_blocked(self):
         team = self.scoped_team()
         db.session.add(AgentTeamMember(

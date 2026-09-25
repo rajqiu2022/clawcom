@@ -1362,6 +1362,49 @@ def _normalize_task_schedule(data, plan, current=None):
     }
 
 
+def _normalize_task_dependencies(data, plan, current=None):
+    """Validate an explicit same-plan task dependency DAG."""
+    raw = data.get(
+        'depends_on_task_ids',
+        current.depends_on_task_ids_json if current else []) or []
+    if (not isinstance(raw, list) or len(raw) > 50
+            or any(isinstance(item, bool) for item in raw)):
+        raise ValueError('depends_on_task_ids 必须为不超过 50 项的正整数数组')
+    try:
+        dependency_ids = sorted(set(int(item) for item in raw))
+    except (TypeError, ValueError):
+        raise ValueError('depends_on_task_ids 必须为不超过 50 项的正整数数组')
+    if any(item <= 0 for item in dependency_ids):
+        raise ValueError('depends_on_task_ids 必须为不超过 50 项的正整数数组')
+    if current and current.id in dependency_ids:
+        raise ValueError('测试任务不能依赖自身')
+    if dependency_ids:
+        found = {row.id for row in TestTask.query.filter(
+            TestTask.plan_id == plan.id,
+            TestTask.id.in_(dependency_ids)).all()}
+        if found != set(dependency_ids):
+            raise ValueError('depends_on_task_ids 只能引用同一测试计划的现有任务')
+    if current:
+        graph = {
+            row.id: list(row.depends_on_task_ids_json or [])
+            for row in TestTask.query.filter_by(plan_id=plan.id).all()
+        }
+        graph[current.id] = dependency_ids
+
+        def reaches_current(task_id, seen):
+            if task_id == current.id:
+                return True
+            if task_id in seen:
+                return False
+            seen.add(task_id)
+            return any(reaches_current(value, seen)
+                       for value in graph.get(task_id, []))
+
+        if any(reaches_current(item, set()) for item in dependency_ids):
+            raise ValueError('depends_on_task_ids 不能形成循环依赖')
+    return dependency_ids
+
+
 # ==================== 测试任务 CRUD ====================
 
 @api_bp.route('/test-plans/<int:plan_id>/tasks', methods=['GET'])
@@ -1438,6 +1481,7 @@ def create_test_task(plan_id):
 
     try:
         schedule = _normalize_task_schedule(data, plan)
+        dependency_ids = _normalize_task_dependencies(data, plan)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     resolved_assignee_claw_id = _resolve_assignee_claw_id(data)
@@ -1467,6 +1511,7 @@ def create_test_task(plan_id):
         case_filter=normalized_case_filter,
         status=data.get('status', 'assigned'),
         created_by=created_by,
+        depends_on_task_ids_json=dependency_ids,
         **references,
         **schedule,
     )
@@ -1540,6 +1585,7 @@ def update_test_task(plan_id, task_id):
     old_status = task.status
     try:
         schedule = _normalize_task_schedule(data, TestPlan.query.get(plan_id), task)
+        dependency_ids = _normalize_task_dependencies(data or {}, plan, task)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     assignment_changed = any(
@@ -1599,6 +1645,7 @@ def update_test_task(plan_id, task_id):
         setattr(task, field, value)
     for field, value in references.items():
         setattr(task, field, value)
+    task.depends_on_task_ids_json = dependency_ids
 
     # tapd_bug_ids
     if 'tapd_bug_ids' in data:
