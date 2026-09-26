@@ -144,6 +144,34 @@ class WorkerRuntimeValidationTest(unittest.TestCase):
         })
         self.assertTrue(direct['compatible'])
 
+    def test_nested_deepflow_runner_contract_requires_agent_direct(self):
+        definition = {'steps': [{
+            'id': 'runtime_bootstrap',
+            'type': 'agent_task',
+            'runner': 'agent.skill.racinggo-flow12-v10',
+            'inputs': {
+                'deepflow_runner_tool': True,
+                'agent_direct_contract': {
+                    'runtime_mode': 'agent_direct',
+                    'operation': 'runtime_bootstrap',
+                },
+                'runner_tool': {
+                    'tool': 'deepflow_runner',
+                    'transport': 'mcp',
+                    'runtime_mode': 'agent_direct',
+                },
+            },
+        }]}
+        legacy = workflow_runtime_compatibility(definition, {
+            'schema': 1, 'kind': 'claw_worker', 'provider': 'codebuddy',
+            'runtime_mode': 'legacy_split', 'platform': 'windows',
+            'source': 'worker',
+        })
+        self.assertFalse(legacy['compatible'])
+        self.assertEqual(
+            legacy['requirement']['source'], 'deepflow_controlled_runner')
+        self.assertIn('runtime_mode_mismatch', legacy['reasons'])
+
 
 class WorkerRuntimeApiTest(unittest.TestCase):
     def setUp(self):

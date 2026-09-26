@@ -247,10 +247,25 @@ def workflow_runtime_requirement(definition):
             'providers': sorted({str(item).strip().lower() for item in providers if item}),
             'source': 'definition',
         }
+    def requires_agent_direct(step):
+        if not isinstance(step, dict):
+            return False
+        if step.get('runner') == 'deepflow.racinggo.flow25_worker_v1':
+            return True
+        inputs = step.get('inputs') if isinstance(step.get('inputs'), dict) else {}
+        contract = (
+            inputs.get('agent_direct_contract')
+            if isinstance(inputs.get('agent_direct_contract'), dict) else {})
+        runner_tool = (
+            inputs.get('runner_tool')
+            if isinstance(inputs.get('runner_tool'), dict) else {})
+        return bool(
+            contract.get('runtime_mode') == 'agent_direct'
+            or (runner_tool.get('tool') == 'deepflow_runner'
+                and runner_tool.get('runtime_mode') == 'agent_direct'))
+
     controlled = any(
-        isinstance(step, dict)
-        and step.get('runner') == 'deepflow.racinggo.flow25_worker_v1'
-        for step in (definition.get('steps') or []))
+        requires_agent_direct(step) for step in (definition.get('steps') or []))
     if controlled:
         return {
             'kind': 'claw_worker',
