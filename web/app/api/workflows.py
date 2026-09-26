@@ -119,6 +119,7 @@ from app.services.workflow_direct_execution import (
     workflow_step_claim_required,
     workflow_step_fencing_required,
 )
+from app.services.worker_runtime import workflow_runtime_compatibility
 
 
 # F1：running step 心跳/进度硬超时（秒）。超过后按 retry_max 有限重试，用尽则阻断，
@@ -1360,12 +1361,18 @@ def _step_runtime_payload(step):
         data['testcase_library_snapshot'] = snapshot_meta
     bound_worker_claw_id = _run_worker_claw_id(step.run if step else None)
     if bound_worker_claw_id:
+        acting_claw_id = step.target_claw_id or bound_worker_claw_id
+        acting_agent = step.target_agent or ''
+        if not acting_agent and int(acting_claw_id) == int(bound_worker_claw_id):
+            bound_worker = db.session.get(
+                OpenClawInstance, bound_worker_claw_id)
+            acting_agent = bound_worker.name if bound_worker else ''
         data['worker_claw_id'] = bound_worker_claw_id
         data['execution_route'] = {
             'mode': 'single_flow_worker',
             'worker_claw_id': bound_worker_claw_id,
-            'acting_claw_id': step.target_claw_id,
-            'acting_agent': step.target_agent or '',
+            'acting_claw_id': acting_claw_id,
+            'acting_agent': acting_agent,
             'acting_post': step.target_post or '',
         }
     if step.step_type == 'worker_task':
@@ -2318,6 +2325,58 @@ def _owner_fallback_claw_id(step):
     return None
 
 
+def _has_explicit_step_acting_identity(step):
+    """Whether a Definition deliberately separates acting and physical Worker."""
+    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+    if config.get('assignment_role') in ('executor', 'reviewer'):
+        return True
+    for key in (
+            'target_claw_id_var', 'target_claw_ids_var',
+            'executor_claw_ids_var', 'target_claw_id', 'target_agent',
+            'target_post'):
+        if config.get(key) not in (None, '', []):
+            return True
+    # ``executor_claw_ids`` is also an explicit route when it came from the
+    # Definition.  The old dispatcher wrote the same field after falling back
+    # to the Definition owner, so only trust it when the source Definition
+    # actually declared it.
+    definition = step.run.definition if step.run else None
+    definition_json = (
+        definition.definition_json
+        if definition and isinstance(definition.definition_json, dict) else {})
+    for definition_step in definition_json.get('steps') or []:
+        if (not isinstance(definition_step, dict)
+                or str(definition_step.get('id') or '') != str(step.step_id)):
+            continue
+        if definition_step.get('executor_claw_ids') not in (None, []):
+            return True
+        break
+    return False
+
+
+def _is_implicit_owner_fallback(step, target_claw_ids):
+    """Recognize targets persisted by the old owner-fallback dispatcher.
+
+    Older dispatches copied the Definition owner to ``step.target_claw_id``
+    and injected the same value into ``executor_claw_ids``.  Neither field is
+    proof of an intentional acting identity unless the Definition also carries
+    one of the explicit routing fields checked above.
+    """
+    if _has_explicit_step_acting_identity(step):
+        return False
+    owner_id = _owner_fallback_claw_id(step)
+    if not owner_id or [int(item) for item in target_claw_ids] != [int(owner_id)]:
+        return False
+    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+    raw_ids = config.get('executor_claw_ids')
+    if raw_ids in (None, []):
+        return True
+    try:
+        return sorted({int(item) for item in raw_ids}) == [int(owner_id)]
+    except (TypeError, ValueError):
+        return False
+
+
 def _resolve_step_target_claw_ids(step):
     config = step.step_config_json or {}
     start_vars = _run_start_vars(step.run) if step.run else {}
@@ -2346,6 +2405,8 @@ def _resolve_step_target_claw_ids(step):
     single = _resolve_step_target_claw(step)
     if not single:
         single = _resolve_step_target_post(step)
+    if not single:
+        single = _run_worker_claw_id(step.run if step else None)
     if not single:
         single = _owner_fallback_claw_id(step)
     return [single] if single else []
@@ -2633,6 +2694,14 @@ def _dispatch_agent_task(step):
         }
         step.finished_at = datetime.now()
         return
+    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
+    bound_worker_claw_id = _run_worker_claw_id(step.run)
+    rebound_implicit_owner = bool(
+        bound_worker_claw_id
+        and target_claw_ids != [bound_worker_claw_id]
+        and _is_implicit_owner_fallback(step, target_claw_ids))
+    if rebound_implicit_owner:
+        target_claw_ids = [bound_worker_claw_id]
     if not target_claw_ids:
         step.status = 'blocked'
         step.blocker_json = {
@@ -2667,8 +2736,11 @@ def _dispatch_agent_task(step):
         }
         step.finished_at = datetime.now()
         return
-    config = step.step_config_json if isinstance(step.step_config_json, dict) else {}
     config['executor_claw_ids'] = target_claw_ids
+    config['execution_target_source'] = (
+        'run_worker_binding'
+        if bound_worker_claw_id and target_claw_ids == [bound_worker_claw_id]
+        else 'explicit_definition')
     step.step_config_json = config
     base_task_id = _workflow_agent_task_id(step.run_id, step.step_id, step.attempt_no or 1)
     payload = build_workflow_agent_task_payload(
@@ -2678,11 +2750,29 @@ def _dispatch_agent_task(step):
     )
     if not _shift_left_enabled():
         payload.pop('analysis', None)
-    bound_worker_claw_id = _run_worker_claw_id(step.run)
     delivery_claw_ids = (
         target_claw_ids
         if config.get('assignment_role') in ('executor', 'reviewer')
         else [bound_worker_claw_id] if bound_worker_claw_id else target_claw_ids)
+    route = payload.get('execution_route')
+    if bound_worker_claw_id:
+        acting_id = route.get('acting_claw_id') if isinstance(route, dict) else None
+        route_worker_id = route.get('worker_claw_id') if isinstance(route, dict) else None
+        if (route_worker_id != bound_worker_claw_id
+                or acting_id not in target_claw_ids
+                or (acting_id != bound_worker_claw_id
+                    and not _has_explicit_step_acting_identity(step))):
+            step.status = 'blocked'
+            step.blocker_json = {
+                'type': 'execution_identity_mismatch',
+                'message': (
+                    '单 Worker Flow 的 step target、acting identity 与投递身份不一致'),
+                'worker_claw_id': bound_worker_claw_id,
+                'acting_claw_id': acting_id,
+                'target_claw_ids': target_claw_ids,
+            }
+            step.finished_at = datetime.now()
+            return
     for target_claw_id in delivery_claw_ids:
         task_id = (
             base_task_id
@@ -4194,6 +4284,21 @@ def create_workflow_run():
             'WORKER_BINDING_REQUIRED',
             'This Workflow requires one bound physical Worker',
             details={'workflow_definition_id': definition.id})
+    if worker_claw_id:
+        runtime_config = db.session.get(ClawSidecarConfig, worker_claw_id)
+        compatibility = workflow_runtime_compatibility(
+            normalized,
+            runtime_config.runtime_config_json if runtime_config else None)
+        if not compatibility['compatible']:
+            return _workflow_api_error(
+                'WORKER_RUNTIME_INCOMPATIBLE',
+                'The selected Worker runtime is incompatible with this Workflow',
+                status=409,
+                details={
+                    'worker_claw_id': worker_claw_id,
+                    'workflow_definition_id': definition.id,
+                    **compatibility,
+                })
 
     start_vars = (
         data.get('start_vars')

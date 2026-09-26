@@ -2174,8 +2174,16 @@ def _dispatch_scheduled_workflow(sup, task, stage, occurrence, now=None):
         fail('MISSION_WORKER_NOT_ALLOWED', '周期 Flow 执行 Agent 不在 Mission 白名单', 403)
     if not _mission_definition_allowed(mission, definition):
         fail('MISSION_DEFINITION_NOT_ALLOWED', '周期 Flow 不在 Mission 定义白名单', 403)
-    if not _trusted_worker_runtime(worker.id):
+    runtime = _trusted_worker_runtime(worker.id)
+    if not runtime:
         fail('MISSION_WORKER_RUNTIME_REQUIRED', '周期 Flow 执行 Agent 未注册可信 Runtime', 409)
+    from app.services.worker_runtime import workflow_runtime_compatibility
+    compatibility = workflow_runtime_compatibility(
+        definition.definition_json or {}, runtime.get('worker_runtime'))
+    if not compatibility['compatible']:
+        fail(
+            'WORKER_RUNTIME_INCOMPATIBLE',
+            '周期 Flow 执行 Agent 的运行模式与 Workflow 不兼容', 409)
     if not _claw_can_execute_definition(worker.id, definition):
         fail('MISSION_WORKER_EXECUTE_FORBIDDEN', '周期 Flow 执行 Agent 没有执行权限', 403)
     if int(mission.child_run_count or 0) >= int(mission.max_child_runs or 20):
@@ -2324,8 +2332,7 @@ def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
         stage = MissionStage.query.filter_by(
             mission_id=sup.mission_id,
             stage_key='test_task_%s' % task.id,
-            stage_version=1,
-        ).with_for_update().first()
+        ).order_by(MissionStage.stage_version.desc()).with_for_update().first()
     expected_assignee = (
         occurrence.assignee_claw_id if occurrence else
         task.assignee_claw_id if task else None)
@@ -2372,6 +2379,132 @@ def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
         }
 
     return receipt(sup, 'dispatch_agent_task', body, apply)
+
+
+def create_terminal_task_attempt(sup, manager_claw_id, test_task_id, body,
+                                 now=None):
+    """Replace one terminal/zombie Stage with a fenced, auditable attempt.
+
+    Historical Stages and Runs remain immutable.  Recovery creates the next
+    stage_version, fences the old Stage, and wakes the manager to dispatch the
+    new attempt through the normal AgentTask or Mission path.
+    """
+    now = now or _now()
+    if not sup or not sup.team_id or not sup.mission_id:
+        fail('PLAN_MISSION_INCOMPLETE', '计划尚未建立团队 Mission', 409)
+    team = db.session.get(AgentTeam, sup.team_id)
+    plan = db.session.get(TestPlan, sup.plan_id)
+    if (not team or team.status != 'active' or not plan
+            or plan.status != 'active'
+            or team.primary_manager_claw_id != manager_claw_id
+            or sup.orchestrator_claw_id != manager_claw_id):
+        fail('PLAN_MANAGER_REQUIRED', '仅当前团队主测试经理可以创建恢复尝试', 403)
+    task = TestTask.query.filter_by(
+        id=test_task_id, plan_id=sup.plan_id).with_for_update().first()
+    if not task:
+        fail('TEST_TASK_NOT_FOUND', '测试任务不存在', 404)
+    if task.schedule_enabled:
+        fail('TEST_TASK_OCCURRENCE_REQUIRED', '周期任务须恢复具体 occurrence', 409)
+    stage_key = 'test_task_%s' % task.id
+    previous = (MissionStage.query.filter_by(
+        mission_id=sup.mission_id, stage_key=stage_key)
+        .order_by(MissionStage.stage_version.desc())
+        .with_for_update().first())
+    if not previous:
+        fail('TEST_TASK_STAGE_INVALID', '任务没有可恢复的 Mission Stage', 409)
+    active = _plan_agent_tasks(sup).get(previous.id)
+    if active and active.status in ('pending', 'running', 'waiting_condition'):
+        fail('TEST_TASK_ATTEMPT_ACTIVE', '当前任务仍有活动执行，不能创建新尝试', 409)
+    old_run = (db.session.get(WorkflowRun, previous.workflow_run_id)
+               if previous.workflow_run_id else None)
+    if old_run and old_run.status in RUN_ACTIVE_STATUSES:
+        fail('TEST_TASK_ATTEMPT_ACTIVE', '当前任务仍有关联的活动 Run', 409)
+    recoverable_stage_states = {
+        'ready', 'dispatched', 'blocked', 'failed', 'cancelled'}
+    if previous.state not in recoverable_stage_states:
+        fail('TEST_TASK_STAGE_NOT_RECOVERABLE', '当前 Stage 状态不能创建恢复尝试', 409)
+    reason = str(body.get('reason') or '').strip()
+    if not reason or len(reason) > 1000:
+        fail('TEST_TASK_RECOVERY_REASON_REQUIRED',
+             '创建恢复尝试须填写不超过 1000 字的原因', 400)
+    expected = body.get('expected_stage_version')
+    if (expected is not None
+            and (type(expected) is not int
+                 or expected != int(previous.stage_version or 1))):
+        fail('TEST_TASK_STAGE_VERSION_CONFLICT', 'Stage 已变化，请回读后重试', 409)
+
+    def apply():
+        previous.state = 'cancelled'
+        previous.last_reason_code = 'superseded_by_controlled_attempt'
+        previous.version = int(previous.version or 1) + 1
+        snapshot = copy.deepcopy(previous.input_snapshot_json or {})
+        snapshot['recovery_attempt'] = {
+            'previous_stage_id': previous.id,
+            'previous_stage_version': int(previous.stage_version or 1),
+            'previous_workflow_run_id': previous.workflow_run_id,
+            'reason': reason,
+            'created_at': now.isoformat() + '+08:00',
+            'created_by_claw_id': manager_claw_id,
+        }
+        new_stage = MissionStage(
+            mission_id=sup.mission_id,
+            stage_key=stage_key,
+            stage_version=int(previous.stage_version or 1) + 1,
+            role_key=previous.role_key,
+            assigned_claw_id=task.assignee_claw_id,
+            state='ready',
+            input_snapshot_json=snapshot,
+            evidence_refs_json=list(previous.evidence_refs_json or []),
+            last_reason_code='controlled_recovery_attempt',
+            fencing_token=int(previous.fencing_token or 0) + 1,
+            retry_count=int(previous.retry_count or 0) + 1,
+        )
+        db.session.add(new_stage)
+        db.session.flush()
+        binding = db.session.get(AgentTeamMission, sup.mission_id)
+        mission = db.session.get(WorkflowMission, sup.mission_id)
+        if binding and mission:
+            stages = MissionStage.query.filter_by(
+                mission_id=sup.mission_id).order_by(
+                    MissionStage.stage_key,
+                    MissionStage.stage_version).all()
+            binding.plan_sha256 = digest([{
+                'stage_key': row.stage_key,
+                'stage_version': int(row.stage_version or 1),
+                'role_key': row.role_key,
+                'assigned_claw_id': row.assigned_claw_id,
+                'input_snapshot': row.input_snapshot_json or {},
+            } for row in stages])
+            mission.version = int(mission.version or 1) + 1
+        task.status = 'pending'
+        task.condition_state = 'recovery_ready'
+        task.next_action = 'manager_dispatch'
+        task.recommended_action = 'controlled_new_attempt'
+        task.next_check_at = now
+        task.owner_gate = False
+        task.resume_fencing_token = int(task.resume_fencing_token or 0) + 1
+        add_event(sup.plan_id, 'task_recovery_attempt_created', [
+            'task-recovery-attempt', task.id, new_stage.stage_version,
+        ], {
+            'test_task_id': task.id,
+            'previous_stage_id': previous.id,
+            'previous_workflow_run_id': previous.workflow_run_id,
+            'stage_id': new_stage.id,
+            'stage_key': new_stage.stage_key,
+            'stage_version': new_stage.stage_version,
+            'reason': reason,
+        }, now)
+        sup.next_check_at = now
+        return {
+            'created': True,
+            'test_task_id': task.id,
+            'previous_stage_id': previous.id,
+            'previous_workflow_run_id': previous.workflow_run_id,
+            'stage': new_stage.to_dict(include_input=True),
+            'wake_claw_id': sup.orchestrator_claw_id,
+        }
+
+    return receipt(sup, 'create_terminal_task_attempt', body, apply)
 
 
 def _record_control_claim(agent_task, link, now):
@@ -3118,8 +3251,7 @@ def record_test_task_condition_probe(sup, claw_id, test_task_id, body,
         stage = MissionStage.query.filter_by(
             mission_id=sup.mission_id,
             stage_key='test_task_%s' % task.id,
-            stage_version=1,
-        ).with_for_update().first()
+        ).order_by(MissionStage.stage_version.desc()).with_for_update().first()
         if (not stage or stage.assigned_claw_id != task.assignee_claw_id):
             fail('TEST_TASK_STAGE_INVALID', '恢复目标阶段不存在', 409)
         task.status = 'pending'
@@ -3229,7 +3361,7 @@ def guard_execution_goals(sup, now=None):
         stage = MissionStage.query.filter_by(
             mission_id=sup.mission_id,
             stage_key='test_task_%s' % task.id,
-            stage_version=1).first()
+        ).order_by(MissionStage.stage_version.desc()).first()
         due_at = _direct_task_due_at(task)
         if due_at and due_at <= now:
             latest_task = ordinary.get(stage.id) if stage else None

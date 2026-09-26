@@ -44,7 +44,7 @@ from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
 from app.api import workflows as workflows_api  # noqa: E402
 from app.services.workflow_result_ingestion import ingest_workflow_result  # noqa: E402
-from app.models import (AgentTask, ClawMessage, ClawTodo, OpenClawInstance, Project, SystemConfig, TestReport as ReportModel, User,  # noqa: E402
+from app.models import (AgentTask, ClawMessage, ClawSidecarConfig, ClawTodo, OpenClawInstance, Project, SystemConfig, TestReport as ReportModel, User,  # noqa: E402
                         WecomSendLog, WorkflowDefinition, ShiftLeftFinding,
                         WorkflowEvidenceManifest,
                         WorkflowRun, WorkflowRunStep, hash_token)
@@ -453,6 +453,177 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
             headers=self._headers(),
         )
         self.assertEqual(accepted.status_code, 200, accepted.get_data(as_text=True))
+
+    def test_bound_worker_replaces_definition_owner_fallback_identity(self):
+        definition = WorkflowDefinition(
+            workflow_key='bound-worker-owner-fallback',
+            name='Bound Worker Owner Fallback',
+            project_id=self.definition.project_id,
+            definition_json={
+                'key': 'bound-worker-owner-fallback',
+                'name': 'Bound Worker Owner Fallback',
+                'steps': [{
+                    'id': 'unassigned_agent_step',
+                    'name': 'Unassigned Agent Step',
+                    'type': 'agent_task',
+                    'runner': 'agent.demo',
+                }],
+            },
+            owner_type='claw',
+            owner_id=self.other_claw.id,
+            executor_acl_json={'claw_ids': [self.claw.id]},
+        )
+        db.session.add(definition)
+        db.session.commit()
+
+        response = self.client.post('/api/v1/workflow-runs', json={
+            'workflow_definition_id': definition.id,
+            'start_vars': {'branch': 'dev'},
+        }, headers=self._headers())
+
+        self.assertEqual(response.status_code, 201, response.get_data(as_text=True))
+        run_id = response.get_json()['run_id']
+        step = WorkflowRunStep.query.filter_by(
+            run_id=run_id, step_id='unassigned_agent_step').one()
+        self.assertEqual(step.target_claw_id, self.claw.id)
+        task = AgentTask.query.filter_by(
+            task_type='workflow_agent_task', claw_id=self.claw.id).one()
+        payload = json.loads(task.payload)
+        self.assertEqual(payload['execution_route'], {
+            'mode': 'single_flow_worker',
+            'worker_claw_id': self.claw.id,
+            'acting_claw_id': self.claw.id,
+            'acting_agent': self.claw.name,
+            'acting_post': '',
+        })
+
+    def test_flow25_preflight_rejects_legacy_split_before_run_creation(self):
+        definition = WorkflowDefinition(
+            workflow_key='flow25-runtime-preflight',
+            name='Flow 25 Runtime Preflight',
+            project_id=self.definition.project_id,
+            definition_json={'steps': [{
+                'id': 'runtime_bootstrap',
+                'name': 'Runtime Bootstrap',
+                'type': 'worker_task',
+                'runner': 'deepflow.racinggo.flow25_worker_v1',
+            }]},
+            owner_type='claw', owner_id=self.claw.id,
+            executor_acl_json={'claw_ids': [self.claw.id]},
+        )
+        db.session.add(definition)
+        db.session.add(ClawSidecarConfig(
+            claw_id=self.claw.id, agent_type='codebuddy',
+            config_owner='worker', runtime_config_json={
+                'schema': 1, 'kind': 'claw_worker',
+                'provider': 'codebuddy', 'runtime_mode': 'legacy_split',
+                'platform': 'windows', 'source': 'worker',
+            }))
+        db.session.commit()
+
+        response = self.client.post('/api/v1/workflow-runs', json={
+            'workflow_definition_id': definition.id,
+            'worker_claw_id': self.claw.id,
+        }, headers=self._headers())
+
+        self.assertEqual(response.status_code, 409, response.get_data(as_text=True))
+        self.assertEqual(
+            response.get_json()['code'], 'WORKER_RUNTIME_INCOMPATIBLE')
+        self.assertEqual(
+            response.get_json()['details']['actual']['runtime_mode'],
+            'legacy_split')
+        self.assertEqual(
+            WorkflowRun.query.filter_by(definition_id=definition.id).count(), 0)
+
+    def test_worker_payload_uses_bound_worker_when_step_has_no_acting_identity(self):
+        self.run.context_json = {'workflow_start': {
+            'worker_claw_id': self.claw.id,
+            'worker_binding_mode': 'single_flow_worker',
+        }}
+        self.worker_step.target_claw_id = None
+        self.worker_step.target_agent = ''
+        db.session.commit()
+
+        payload = workflows_api._step_runtime_payload(self.worker_step)
+
+        self.assertEqual(payload['execution_route'], {
+            'mode': 'single_flow_worker',
+            'worker_claw_id': self.claw.id,
+            'acting_claw_id': self.claw.id,
+            'acting_agent': self.claw.name,
+            'acting_post': '',
+        })
+
+    def test_legacy_owner_fallback_is_rebound_before_redispatch(self):
+        self.definition.owner_type = 'claw'
+        self.definition.owner_id = self.other_claw.id
+        self.run.context_json = {'workflow_start': {
+            'worker_claw_id': self.claw.id,
+            'worker_binding_mode': 'single_flow_worker',
+        }}
+        self.agent_step.target_claw_id = self.other_claw.id
+        self.agent_step.target_agent = self.other_claw.name
+        self.agent_step.step_config_json = {
+            'id': 'agent_step',
+            'type': 'agent_task',
+            'runner': 'agent.demo',
+            # This is the exact legacy mutation written by Hub after falling
+            # back to the Definition owner; it is not an explicit route.
+            'executor_claw_ids': [self.other_claw.id],
+        }
+        AgentTask.query.delete()
+        db.session.commit()
+
+        workflows_api._dispatch_agent_task(self.agent_step)
+        db.session.flush()
+
+        self.assertEqual(self.agent_step.target_claw_id, self.claw.id)
+        task = AgentTask.query.filter_by(
+            task_type='workflow_agent_task').one()
+        self.assertEqual(task.claw_id, self.claw.id)
+        payload = json.loads(task.payload)
+        self.assertEqual(payload['execution_route']['worker_claw_id'], self.claw.id)
+        self.assertEqual(payload['execution_route']['acting_claw_id'], self.claw.id)
+        self.assertEqual(
+            self.agent_step.step_config_json['execution_target_source'],
+            'run_worker_binding')
+
+    def test_explicit_executor_ids_equal_owner_are_not_rebound(self):
+        self.definition.owner_type = 'claw'
+        self.definition.owner_id = self.other_claw.id
+        definition_json = dict(self.definition.definition_json)
+        definition_json['steps'] = [{
+            'id': 'agent_step',
+            'name': 'Agent Step',
+            'type': 'agent_task',
+            'runner': 'agent.demo',
+            'executor_claw_ids': [self.other_claw.id],
+        }]
+        self.definition.definition_json = definition_json
+        self.run.context_json = {'workflow_start': {
+            'worker_claw_id': self.claw.id,
+            'worker_binding_mode': 'single_flow_worker',
+        }}
+        self.agent_step.target_claw_id = self.other_claw.id
+        self.agent_step.target_agent = self.other_claw.name
+        self.agent_step.step_config_json = definition_json['steps'][0]
+        AgentTask.query.delete()
+        db.session.commit()
+
+        workflows_api._dispatch_agent_task(self.agent_step)
+        db.session.flush()
+
+        self.assertEqual(self.agent_step.target_claw_id, self.other_claw.id)
+        task = AgentTask.query.filter_by(
+            task_type='workflow_agent_task').one()
+        self.assertEqual(task.claw_id, self.claw.id)
+        payload = json.loads(task.payload)
+        self.assertEqual(payload['execution_route']['worker_claw_id'], self.claw.id)
+        self.assertEqual(
+            payload['execution_route']['acting_claw_id'], self.other_claw.id)
+        self.assertEqual(
+            self.agent_step.step_config_json['execution_target_source'],
+            'explicit_definition')
 
     def test_claw_editor_can_start_flow_for_its_bound_worker(self):
         definition = WorkflowDefinition(

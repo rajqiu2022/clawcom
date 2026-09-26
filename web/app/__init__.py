@@ -333,6 +333,15 @@ def create_app(config_name=None):
                             logger.info('已添加 %s 列', label)
                         except Exception:
                             pass
+                    # 测试经理临时转正/回退：记录被委派人、原主经理与可逆凭据。
+                    # MariaDB 10.1 无原生 JSON，用 LONGTEXT（SQLAlchemy JSON 兼容）。
+                    try:
+                        conn.execute(text(
+                            'ALTER TABLE agent_teams ADD COLUMN '
+                            'manager_delegation_json LONGTEXT DEFAULT NULL'))
+                        logger.info('已添加 agent_teams.manager_delegation_json 列')
+                    except Exception:
+                        pass  # 列已存在
                     # test_cases 表添加 module_path 和 created_by
                     for col, coltype in [('module_path', 'VARCHAR(500) DEFAULT ""'), ('created_by', 'VARCHAR(100) DEFAULT ""')]:
                         try:

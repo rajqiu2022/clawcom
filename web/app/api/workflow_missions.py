@@ -20,7 +20,10 @@ from app.models import (
     AgentTeam, AgentTeamMission, AuditLog, ClawSidecarConfig, MissionStage, OpenClawInstance, Project, WorkflowDefinition,
     WorkflowMission, WorkflowMissionDispatch, WorkflowRun, WorkflowRunStep,
 )
-from app.services.worker_runtime import runtime_summary
+from app.services.worker_runtime import (
+    runtime_summary,
+    workflow_runtime_compatibility,
+)
 from app.services.agent_context_snapshots import (
     ContextSnapshotError,
     freeze_run_context,
@@ -850,8 +853,9 @@ def dispatch_workflow_mission(mission_id):
     if team:
         require_manager(team, actor, data)
         stage = MissionStage.query.filter_by(
-            mission_id=mission.id, stage_key=str(data.get('stage_key') or ''), stage_version=1
-        ).with_for_update().first()
+            mission_id=mission.id,
+            stage_key=str(data.get('stage_key') or ''),
+        ).order_by(MissionStage.stage_version.desc()).with_for_update().first()
         if not stage or not binding.plan_sha256:
             raise TeamError('TEAM_STAGE_REQUIRED', '必须先创建不可变计划并指定 stage_key', 400)
         specialty = (stage.input_snapshot_json or {}).get('team_assignment', {}).get('specialty')
@@ -923,13 +927,24 @@ def dispatch_workflow_mission(mission_id):
             'MISSION_WORKER_SCOPE_INVALID',
             '所选 Worker 不存在或不属于 Mission 项目', 403,
             {'worker_claw_id': worker_claw_id})
+    runtime = _trusted_worker_runtime(worker_claw_id)
     if team or worker_claw_id != int(mission.main_claw_id):
-        runtime = _trusted_worker_runtime(worker_claw_id)
         if not runtime:
             return _error(
                 'MISSION_WORKER_RUNTIME_REQUIRED',
                 '所选 Worker 未注册可信 Claw Worker Runtime', 409,
                 {'worker_claw_id': worker_claw_id})
+    compatibility = workflow_runtime_compatibility(
+        definition.definition_json or {},
+        runtime.get('worker_runtime') if runtime else None)
+    if not compatibility['compatible']:
+        return _error(
+            'WORKER_RUNTIME_INCOMPATIBLE',
+            '所选 Worker 的运行模式与 Workflow 不兼容', 409,
+            {'worker_claw_id': worker_claw_id,
+             'workflow_definition_id': definition.id,
+             **compatibility})
+    if team or worker_claw_id != int(mission.main_claw_id):
         if not _claw_can_execute_definition(worker_claw_id, definition):
             return _error(
                 'MISSION_WORKER_EXECUTE_FORBIDDEN',

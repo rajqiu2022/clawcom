@@ -1386,6 +1386,12 @@ class AgentTeam(db.Model):
     manager_epoch = db.Column(db.Integer, nullable=False, default=0)
     manager_session_id = db.Column(db.String(128), nullable=False, default='')
     manager_lease_expires_at = db.Column(db.DateTime)
+    # Temporary primary-manager handover driven by an operator, e.g. the
+    # incumbent lost Provider quota. Stores the delegate, the displaced primary
+    # and enough provenance to reverse the swap exactly. Manager identity is
+    # mirrored into PlanSupervisor.start_hash, so the handover can never be a
+    # bare column write; see services/agent_team_manager_delegation.py.
+    manager_delegation_json = db.Column(db.JSON)
     policy_json = db.Column(db.JSON, nullable=False)
     version = db.Column(db.Integer, nullable=False, default=1)
     created_at = db.Column(db.DateTime, default=_now, nullable=False)
@@ -1401,6 +1407,30 @@ class AgentTeam(db.Model):
                 self.backup_manager_claw_id,
             )
         )
+
+    @property
+    def manager_delegation(self):
+        """Read-only projection of a temporary manager handover.
+
+        The service module owns validation and writes; this stays import-free
+        because every team readback needs it.
+        """
+        record = self.manager_delegation_json or {}
+        active = bool(record.get('active'))
+        return {
+            'active': active,
+            'delegate_claw_id': record.get('delegate_claw_id') if active else None,
+            'delegate_name': (record.get('delegate_name') or '') if active else '',
+            'previous_primary_claw_id': (
+                record.get('previous_primary_claw_id') if active else None),
+            'started_at': record.get('started_at') if active else None,
+            'started_by': (record.get('started_by') or '') if active else '',
+            'reason': (record.get('reason') or '') if active else '',
+            'expires_at': record.get('expires_at') if active else None,
+            'revision': int(record.get('revision') or 0),
+            'revoked_at': record.get('revoked_at'),
+            'revoked_by': record.get('revoked_by') or '',
+        }
 
     def to_dict(self):
         authority_active = bool(
@@ -1420,6 +1450,7 @@ class AgentTeam(db.Model):
             'manager_lease_active': authority_active,
             'manager_authority_active': authority_active,
             'manager_authority_mode': 'team_role_assignment',
+            'manager_delegation': self.manager_delegation,
             'policy': self.policy_json or {},
             'members': [member.to_dict() for member in sorted(self.members, key=lambda row: row.id or 0)],
             'updated_at': str(self.updated_at),

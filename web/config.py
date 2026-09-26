@@ -19,6 +19,11 @@ class Config:
 
     AGENT_TEAMS_ENABLED = os.getenv('AGENT_TEAMS_ENABLED', '0') in ('1', 'true', 'True', 'yes', 'on')
     AGENT_TEAMS_PROJECT_IDS = os.getenv('AGENT_TEAMS_PROJECT_IDS', '')
+    # 测试经理临时转正/回退开关：缺省继承 AGENT_TEAMS_ENABLED，因此团队已灰度
+    # 的环境无需新增环境变量即可使用；需要冻结该能力时显式设为 0。
+    PLAN_MANAGER_DELEGATION_ENABLED = os.getenv(
+        'PLAN_MANAGER_DELEGATION_ENABLED',
+        os.getenv('AGENT_TEAMS_ENABLED', '0')) in ('1', 'true', 'True', 'yes', 'on')
     RESOURCE_LEASE_RECONCILIATION_ENABLED = os.getenv(
         'RESOURCE_LEASE_RECONCILIATION_ENABLED', '0') in ('1', 'true', 'True', 'yes', 'on')
 

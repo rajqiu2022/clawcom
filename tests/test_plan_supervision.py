@@ -824,6 +824,65 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(stage.state, 'failed')
         self.assertEqual(svc.reconcile_ordinary_task_truth(self.sup()), 0)
 
+    def test_terminal_task_recovery_creates_new_fenced_stage_attempt(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['ios']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='恢复 iOS 性能采集', status='pending',
+            assignee_claw_id=self.other_claw.id, task_type='performance')
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'terminal-recovery-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.agent()
+        dispatched = self.client.post(self.base + '/agent-tasks', json={
+            'command_key': 'terminal-recovery-first',
+            'test_task_id': task.id,
+            'retry_max': 0,
+        }, headers=self._headers(self.main_token))
+        self.assertEqual(dispatched.status_code, 201, dispatched.json)
+        old_stage = MissionStage.query.filter_by(
+            mission_id=self.sup().mission_id,
+            stage_key='test_task_%s' % task.id).one()
+        agent_task = claim_pending_tasks(self.other_claw.id)[0]
+        agent_task.lease_expires_at = _now() - timedelta(seconds=1)
+        db.session.commit()
+        self.assertEqual(expire_stale_ordinary_tasks(), 1)
+        self.assertEqual(task.status, 'blocked')
+
+        recovered = self.client.post(
+            self.base + '/tasks/%s/new-attempt' % task.id,
+            json={
+                'command_key': 'terminal-recovery-attempt-2',
+                'reason': 'PerfDogService 已由用户启动并恢复可用',
+                'expected_stage_version': 1,
+            }, headers=self._headers(self.main_token))
+
+        self.assertEqual(recovered.status_code, 201, recovered.json)
+        stages = MissionStage.query.filter_by(
+            mission_id=self.sup().mission_id,
+            stage_key='test_task_%s' % task.id).order_by(
+                MissionStage.stage_version).all()
+        self.assertEqual([row.stage_version for row in stages], [1, 2])
+        self.assertEqual(stages[0].state, 'cancelled')
+        self.assertEqual(stages[1].state, 'ready')
+        self.assertEqual(stages[1].fencing_token, old_stage.fencing_token + 1)
+        self.assertEqual(task.status, 'pending')
+        self.assertEqual(task.condition_state, 'recovery_ready')
+
+        second = self.client.post(self.base + '/agent-tasks', json={
+            'command_key': 'terminal-recovery-second-dispatch',
+            'test_task_id': task.id,
+            'retry_max': 1,
+        }, headers=self._headers(self.main_token))
+        self.assertEqual(second.status_code, 201, second.json)
+        self.assertEqual(second.json['stage_key'], stages[1].stage_key)
+        self.assertEqual(AgentTask.query.count(), 2)
+
     def test_daily_occurrences_dispatch_at_time_and_retry_result_invalid(self):
         team = self.scoped_team()
         db.session.add(AgentTeamMember(

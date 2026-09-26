@@ -18,6 +18,8 @@ from app.models import (
 )
 from app.services.worker_runtime import runtime_summary
 from app.services import agent_team_activity as activity
+from app.services import agent_team_manager_delegation as delegation
+from app.services import plan_supervision as plan_supervision
 from app.services.agent_team_onboarding import queue_join_notifications, wake_join_recipients
 from app.models import AgentTeamMemberStatus, AgentTeamMemberTask, AgentTeamMemberReport
 from app.services.agent_teams import (
@@ -466,6 +468,17 @@ def update_agent_team(team_id):
     if integer(data.get('expected_version'), 'expected_version') != team.version:
         raise TeamError('TEAM_VERSION_CONFLICT', '团队配置已更新，请回读重试')
     config = normalize_config(data, team.project_id)
+    # A live handover owns the primary/backup slots. Letting the config form
+    # overwrite them would leave the delegation record active while the
+    # supervisor binding points at the delegate — a split-brain team.
+    record = team.manager_delegation_json or {}
+    if record.get('active') and (
+            config['primary_manager_claw_id'] != record.get('delegate_claw_id')
+            or config['backup_manager_claw_id'] != record.get('previous_primary_claw_id')):
+        raise TeamError(
+            'TEAM_DELEGATION_ACTIVE',
+            '团队正处于测试经理临时转正期，主备经理由转正开关管理；'
+            '请先在经理转正入口回退，再修改主备配置', 409)
     previous_member_ids = set(activity.roster(team))
     _apply_config(team, config)
     team.version += 1
@@ -491,6 +504,61 @@ def update_agent_team(team_id):
         raise TeamError('TEAM_NAME_EXISTS', '同项目团队名称已存在')
     wake_join_recipients(notified_ids)
     return jsonify(team.to_dict())
+
+
+@api_bp.route('/agent-teams/<int:team_id>/manager-delegation', methods=['GET'])
+def get_team_manager_delegation(team_id):
+    """Read the temporary primary-manager handover, if any."""
+    team = load_team(team_id)
+    _access(team.project_id)
+    return jsonify({'team': team.to_dict(),
+                    'manager_delegation': delegation.state(team)})
+
+
+@api_bp.route('/agent-teams/<int:team_id>/manager-delegation', methods=['POST'])
+def create_team_manager_delegation(team_id):
+    """Temporarily promote the configured backup manager to primary.
+
+    The displaced primary takes the backup slot, so the handover is a clean swap
+    that can be reversed byte-for-byte by the revoke endpoint.
+    """
+    team = load_team(team_id, lock=True)
+    actor = _access(team.project_id, administer=True)
+    data = _body()
+    if set(data) - {'delegate_claw_id', 'expected_version', 'reason', 'expires_at'}:
+        raise TeamError('TEAM_VALIDATION_FAILED', '未知转正请求字段', 400)
+    result = delegation.delegate(
+        team.id, data.get('delegate_claw_id'), actor['name'],
+        request.remote_addr, data.get('reason') or '', data.get('expires_at'),
+        data.get('expected_version'))
+    target = result.pop('wake_claw_id', None)
+    db.session.commit()
+    if target:
+        plan_supervision.wake(target)
+    return jsonify(result), 201
+
+
+@api_bp.route('/agent-teams/<int:team_id>/manager-delegation', methods=['DELETE'])
+@api_bp.route('/agent-teams/<int:team_id>/manager-delegation/revoke', methods=['POST'])
+def revoke_team_manager_delegation(team_id):
+    """Restore the original primary manager; the delegate returns to backup."""
+    team = load_team(team_id, lock=True)
+    actor = _access(team.project_id, administer=True)
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise TeamError('TEAM_VALIDATION_FAILED', '请求必须为 JSON 对象', 400)
+    if set(data) - {'expected_version', 'reason'}:
+        raise TeamError('TEAM_VALIDATION_FAILED', '未知回退请求字段', 400)
+    result = delegation.revoke(
+        team.id, actor['name'], request.remote_addr, data.get('reason') or '',
+        data.get('expected_version'))
+    target = result.pop('wake_claw_id', None)
+    db.session.commit()
+    if target:
+        plan_supervision.wake(target)
+    return jsonify(result)
 
 
 @api_bp.route('/agent-teams/<int:team_id>/manager-lease', methods=['POST'])

@@ -394,9 +394,18 @@ def list_openclaws():
             runtime_payload['runtime_provider']
             if runtime_payload['has_worker_runtime']
             else (latest_dep.agent_type if latest_dep else ''))
-        d['agent_deployment_status'] = latest_dep.status if latest_dep else ''
-        d['agent_deployment_id'] = latest_dep.id if latest_dep else None
-        d['agent_deployment_error'] = latest_dep.error_message if latest_dep else ''
+        # Windows/source-installed Workers may keep an AgentDeployment row as
+        # an audit record, but the Hub does not own their process lifecycle.
+        # Only systemd rows belong to the unified Hub deployer.
+        managed_dep = (
+            latest_dep
+            if latest_dep and latest_dep.deploy_method == 'systemd'
+            else None
+        )
+        d['agent_deployment_managed'] = bool(managed_dep)
+        d['agent_deployment_status'] = managed_dep.status if managed_dep else ''
+        d['agent_deployment_id'] = managed_dep.id if managed_dep else None
+        d['agent_deployment_error'] = managed_dep.error_message if managed_dep else ''
         # 高危操作（删除 / 看 Token / 重置 Token）的权限：仅 owner（super_admin / 绑定者 / 创建者）
         d['can_own'] = _can_own_claw(user, c)
         result.append(d)

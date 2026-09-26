@@ -128,6 +128,7 @@
         state.selected = id; state.missionOffset = 0; renderList();
         const manage = state.options.can_manage;
         const actions = manage ? `<button class="btn btn-secondary btn-sm" data-action="edit" type="button">编辑配置</button>
+            ${team.manager_delegation?.active ? '<button class="btn btn-secondary btn-sm" data-action="revoke-delegation" type="button">回退临时经理</button>' : ''}
             ${team.status !== 'archived' ? `<button class="btn btn-secondary btn-sm" data-action="${team.status === 'paused' ? 'active' : 'paused'}" type="button">${team.status === 'paused' ? '恢复' : '暂停'}</button>` : ''}
             <button class="btn btn-ghost btn-sm" data-action="${team.status === 'archived' ? 'active' : 'archived'}" type="button">${team.status === 'archived' ? '恢复团队' : '归档'}</button>` : '';
         const authority = team.manager_authority_active ? `主测试经理：${agentLabel(team.primary_manager_claw_id)}` : '当前未启用经理调度权限';
@@ -247,6 +248,25 @@
             if (epoch === state.loadEpoch) notice(error.code === 'TEAM_VERSION_CONFLICT' ? '配置版本已变化，本次未覆盖，请刷新后重试。' : messageFor(error), true);
         } finally { state.saving = false; }
     }
+    async function revokeManagerDelegation() {
+        const team = state.teams.find(t => t.id === state.selected);
+        if (!team?.manager_delegation?.active || !state.options.can_manage || state.saving) return;
+        const detail = team.manager_delegation;
+        const prompt = `回退团队「${team.name}」的临时经理委派？\n将恢复 Claw #${detail.previous_primary_claw_id} 为主经理，并把当前临时经理 #${detail.delegate_claw_id} 恢复为备用经理。`;
+        const confirmed = typeof customConfirm === 'function' ? await customConfirm(prompt) : window.confirm(prompt);
+        if (!confirmed || state.saving) return;
+        state.saving = true;
+        try {
+            await API.request('DELETE', `/agent-teams/${team.id}/manager-delegation`, {
+                expected_version: team.version,
+                reason: '管理员从团队页面回退临时经理委派',
+            });
+            await reloadProject(team.id);
+            notice('临时经理委派已回退，关联 Plan、Mission 与 Supervisor 已同步换绑。');
+        } catch (error) {
+            notice(messageFor(error), true);
+        } finally { state.saving = false; }
+    }
     $('at-project').addEventListener('change', () => reloadProject());
     $('at-refresh').addEventListener('click', () => reloadProject(state.selected));
     $('at-create').addEventListener('click', () => openEditor());
@@ -256,6 +276,7 @@
     $('at-detail').addEventListener('click', event => {
         const action = event.target.closest('[data-action]');
         if (action?.dataset.action === 'edit') openEditor(state.teams.find(t => t.id === state.selected));
+        else if (action?.dataset.action === 'revoke-delegation') revokeManagerDelegation();
         else if (action) changeStatus(action.dataset.action);
         const page = event.target.closest('[data-page]'); if (page && !page.disabled) loadMissions(Number(page.dataset.page));
     });

@@ -125,6 +125,29 @@ def dispatch_plan_agent_task(plan_id):
 
 
 @api_bp.route(
+    '/test-plans/<int:plan_id>/supervision/tasks/'
+    '<int:test_task_id>/new-attempt', methods=['POST'])
+def create_test_task_recovery_attempt(plan_id, test_task_id):
+    """Create a fenced Stage attempt after a terminal or zombie execution."""
+    _, sup, claw = load(plan_id, write=True)
+    if not sup:
+        svc.fail('PLAN_SUPERVISION_NOT_STARTED', '计划尚未启动监督', 409)
+    body = payload()
+    if set(body) - {'command_key', 'reason', 'expected_stage_version'}:
+        svc.fail('PLAN_BODY_INVALID', '恢复尝试包含不支持的字段', 400)
+    manager_claw_id = claw.id if claw else sup.orchestrator_claw_id
+    result = svc.create_terminal_task_attempt(
+        sup, manager_claw_id, test_task_id, body)
+    target = result.pop('wake_claw_id', None)
+    if result.get('replayed'):
+        target = None
+    db.session.commit()
+    if target:
+        svc.wake(target)
+    return jsonify(result), (200 if result.get('replayed') else 201)
+
+
+@api_bp.route(
     '/test-plans/<int:plan_id>/supervision/occurrences/'
     '<int:occurrence_id>/condition-events', methods=['POST'])
 def report_occurrence_condition(plan_id, occurrence_id):

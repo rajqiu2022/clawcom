@@ -222,3 +222,73 @@ def runtime_summary(runtime, config_owner='hub'):
         'runtime_config_owner': owner,
         'worker_runtime': canonical,
     }
+
+
+def workflow_runtime_requirement(definition):
+    """Return the minimum Worker runtime required by one Workflow.
+
+    Definitions may opt in explicitly.  Flow #25 definitions created before
+    the explicit field existed are detected by their immutable controlled
+    runner contract, so a legacy_split Worker is rejected before a Run is
+    created instead of being misreported as an ACL failure later.
+    """
+    definition = definition if isinstance(definition, dict) else {}
+    explicit = definition.get('worker_runtime_requirement')
+    if isinstance(explicit, dict):
+        modes = explicit.get('runtime_modes') or explicit.get('runtime_mode') or []
+        if isinstance(modes, str):
+            modes = [modes]
+        providers = explicit.get('providers') or explicit.get('provider') or []
+        if isinstance(providers, str):
+            providers = [providers]
+        return {
+            'kind': str(explicit.get('kind') or 'claw_worker').strip().lower(),
+            'runtime_modes': sorted({str(item).strip().lower() for item in modes if item}),
+            'providers': sorted({str(item).strip().lower() for item in providers if item}),
+            'source': 'definition',
+        }
+    controlled = any(
+        isinstance(step, dict)
+        and step.get('runner') == 'deepflow.racinggo.flow25_worker_v1'
+        for step in (definition.get('steps') or []))
+    if controlled:
+        return {
+            'kind': 'claw_worker',
+            'runtime_modes': ['agent_direct'],
+            'providers': [],
+            'source': 'deepflow_controlled_runner',
+        }
+    return None
+
+
+def workflow_runtime_compatibility(definition, runtime):
+    """Return a stable preflight verdict without mutating either document."""
+    requirement = workflow_runtime_requirement(definition)
+    if not requirement:
+        return {'compatible': True, 'requirement': None, 'actual': None}
+    summary = runtime_summary(runtime or {}, 'worker')
+    actual = summary.get('worker_runtime') or {}
+    reasons = []
+    if not summary.get('has_worker_runtime'):
+        reasons.append('trusted_worker_runtime_missing')
+    elif requirement['kind'] and actual.get('kind') != requirement['kind']:
+        reasons.append('runtime_kind_mismatch')
+    if (requirement['runtime_modes']
+            and actual.get('runtime_mode') not in requirement['runtime_modes']):
+        reasons.append('runtime_mode_mismatch')
+    if (requirement['providers']
+            and actual.get('provider') not in requirement['providers']):
+        reasons.append('runtime_provider_mismatch')
+    return {
+        'compatible': not reasons,
+        'requirement': requirement,
+        'actual': {
+            'kind': actual.get('kind') or '',
+            'provider': actual.get('provider') or '',
+            'runtime_mode': actual.get('runtime_mode') or '',
+            'platform': actual.get('platform') or '',
+            'release_id': actual.get('release_id') or '',
+            'source_commit': actual.get('source_commit') or '',
+        },
+        'reasons': reasons,
+    }
