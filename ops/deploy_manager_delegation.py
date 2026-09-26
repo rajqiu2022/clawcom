@@ -26,8 +26,11 @@ Usage (on the Hub host or through this remote harness):
 import argparse
 import hashlib
 import json
+import re
 import shlex
+import subprocess
 import sys
+import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +53,6 @@ FILES = (
     'config.py',
     'app/__init__.py',
     'app/api/agent_teams.py',
-    'app/api/openclaws.py',
     'app/api/plan_supervision.py',
     'app/api/workflow_missions.py',
     'app/api/workflows.py',
@@ -66,6 +68,14 @@ FILES = (
 )
 # Files the deploy must never replace: production runs ahead of this branch.
 GUARDED = ('app/api/__init__.py',)
+
+# Production carries independent hotfixes in these two large API modules.  A
+# full-file copy would silently roll them back, so build the deploy candidate
+# from the live bytes and only layer this release's delta on top.
+LIVE_MERGE_BASE = {
+    'app/api/plan_supervision.py': '438dd91',
+    'app/api/workflows.py': '438dd91',
+}
 
 VERIFY_SOURCE = r'''
 import json as _json
@@ -103,6 +113,60 @@ def normalise(data):
 
 def digest(data):
     return hashlib.sha256(normalise(data)).hexdigest()
+
+
+def _git_blob(revision, rel):
+    return subprocess.check_output(
+        ['git', 'show', '%s:web/%s' % (revision, rel)], cwd=ROOT)
+
+
+def _live_merge(rel, live, local):
+    """Return live production plus this release's changes, or fail closed."""
+    revision = LIVE_MERGE_BASE[rel]
+    base = _git_blob(revision, rel)
+    with tempfile.TemporaryDirectory(prefix='hub-live-merge-') as raw_dir:
+        temp = Path(raw_dir)
+        if rel == 'app/api/plan_supervision.py':
+            live_path = temp / 'live.py'
+            base_path = temp / 'base.py'
+            local_path = temp / 'local.py'
+            live_path.write_bytes(live)
+            base_path.write_bytes(base)
+            local_path.write_bytes(local)
+            proc = subprocess.run(
+                ['git', 'merge-file', '-p', str(live_path), str(base_path),
+                 str(local_path)],
+                cwd=ROOT, capture_output=True)
+            if proc.returncode != 0 or b'<<<<<<<' in proc.stdout:
+                raise RuntimeError(
+                    'live three-way merge conflict for %s (rc=%s)' %
+                    (rel, proc.returncode))
+            return normalise(proc.stdout), 'three_way_live'
+
+        # The worker-binding fallback hunk is already live.  Apply the other
+        # Flow identity/runtime-preflight hunks to the production source.
+        patch = subprocess.check_output(
+            ['git', 'diff', revision, '--', 'web/' + rel], cwd=ROOT)
+        chunks = re.split(r'(?=^@@ )', patch.decode('utf-8'), flags=re.M)
+        patch = ''.join(
+            chunk for chunk in chunks
+            if not (chunk.startswith('@@ ')
+                    and '_resolve_step_target_claw_ids' in chunk)
+        ).encode('utf-8')
+        target = temp / 'web' / rel
+        target.parent.mkdir(parents=True)
+        target.write_bytes(live)
+        patch_path = temp / 'release.patch'
+        patch_path.write_bytes(patch)
+        proc = subprocess.run(
+            ['git', 'apply', '--reject', '--whitespace=nowarn', str(patch_path)],
+            cwd=temp, capture_output=True)
+        rejects = list(temp.rglob('*.rej'))
+        if proc.returncode != 0 or rejects:
+            raise RuntimeError(
+                'live additive patch conflict for %s (rc=%s, rejects=%s)' %
+                (rel, proc.returncode, len(rejects)))
+        return normalise(target.read_bytes()), 'additive_live_patch'
 
 
 def command(client, cmd, timeout=120):
@@ -153,15 +217,25 @@ def main(argv=None):
                     'untouched': True,
                 }
             upload = []
+            candidates = {}
             for rel in FILES:
                 remote = REMOTE + '/' + rel
                 live = read(sftp, remote)
+                candidate = normalise(local[rel])
+                merge_mode = 'replace'
+                if live is not None and rel in LIVE_MERGE_BASE:
+                    candidate, merge_mode = _live_merge(rel, live, local[rel])
+                if rel.endswith('.py'):
+                    compile(candidate.decode('utf-8'), rel, 'exec')
+                candidates[rel] = candidate
                 entry = {
                     'remote_exists': live is not None,
                     'remote_sha256': digest(live)[:16] if live else None,
                     'local_sha256': digest(local[rel])[:16],
-                    'identical': bool(live is not None and digest(live) == digest(local[rel])),
-                    'bytes': len(local[rel]),
+                    'candidate_sha256': digest(candidate)[:16],
+                    'identical': bool(live is not None and digest(live) == digest(candidate)),
+                    'bytes': len(candidate),
+                    'merge_mode': merge_mode,
                 }
                 report['files'][rel] = entry
                 # A live file that already contains this release would mean a
@@ -188,7 +262,7 @@ def main(argv=None):
                     backup = '%s.bak.%s' % (remote, stamp)
                     command(client, 'cp -p %s %s' % (shlex.quote(remote), shlex.quote(backup)))
                     report['files'][rel]['backup'] = backup
-                payload = normalise(local[rel])
+                payload = candidates[rel]
                 with sftp.open(remote, 'wb') as stream:
                     stream.write(payload)
                 sftp.chmod(remote, 0o644)
@@ -197,7 +271,7 @@ def main(argv=None):
             mismatched = []
             for rel in FILES:
                 live = read(sftp, REMOTE + '/' + rel)
-                ok = live is not None and digest(live) == digest(local[rel])
+                ok = live is not None and digest(live) == digest(candidates[rel])
                 report['files'][rel]['verified'] = ok
                 if not ok:
                     mismatched.append(rel)
