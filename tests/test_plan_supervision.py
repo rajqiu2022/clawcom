@@ -401,9 +401,37 @@ class PlanSupervisionTest(unittest.TestCase):
         stage = db.session.get(MissionStage, occurrence.mission_stage_id)
         expired_at = _now() + timedelta(minutes=1)
         mission.expires_at = expired_at
+        # Regression: Revision 7 had expired Mission #9 hidden behind an
+        # already-expired Supervisor, so the old status-filtered sweep skipped it.
+        supervisor.status = 'expired'
         supervisor.next_check_at = expired_at + timedelta(hours=1)
         task.next_check_at = expired_at + timedelta(hours=1)
         occurrence.next_check_at = expired_at + timedelta(hours=1)
+        run = WorkflowRun(
+            definition_id=self.flow_a.id, project_id=self.project.id,
+            status='running', current_step_id='analyze', started_at=_now())
+        db.session.add(run)
+        db.session.flush()
+        db.session.add(WorkflowMissionDispatch(
+            mission_id=mission.id, definition_id=self.flow_a.id,
+            workflow_run_id=run.id, decision_key='expiry-run',
+            idempotency_key='expiry-run', request_hash='1' * 64,
+            created_by_claw_id=self.main_claw.id,
+            worker_claw_id=self.other_claw.id))
+        run_step = WorkflowRunStep(
+            run_id=run.id, step_id='analyze', name='analyze',
+            status='running', step_type='agent_task',
+            claimed_by='worker', claimed_claw_id=self.other_claw.id,
+            claim_fencing_token=2)
+        db.session.add(run_step)
+        agent_task = AgentTask(
+            task_id='workflow_%s_analyze_1' % run.id,
+            claw_id=self.other_claw.id, task_type='workflow_agent_task',
+            status='running', claim_token='claim', fencing_token=4,
+            payload=json.dumps({
+                'mission_id': mission.id, 'run_id': run.id,
+                'step_id': 'analyze'}))
+        db.session.add(agent_task)
         db.session.commit()
 
         self.assertEqual(svc.sweep(now=expired_at), 0)
@@ -412,22 +440,32 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual('mission_expired', supervisor.resume_condition)
         self.assertIsNone(supervisor.wake_message_id)
         self.assertEqual('expired', mission.status)
+        self.assertEqual('completed', self.plan.status)
         self.assertEqual('cancelled', stage.state)
-        self.assertEqual('mission_expired_before_dispatch',
+        self.assertEqual('mission_expired',
                          stage.last_reason_code)
         self.assertEqual('cancelled', occurrence.status)
         self.assertIsNone(occurrence.next_check_at)
         self.assertIsNone(task.next_check_at)
-        self.assertEqual(0, AgentTask.query.count())
+        self.assertEqual('cancelled', run.status)
+        self.assertEqual('skipped', run_step.status)
+        self.assertEqual(3, run_step.claim_fencing_token)
+        self.assertEqual('cancelled', agent_task.status)
+        self.assertEqual('mission_expired', agent_task.terminal_reason)
+        self.assertEqual(5, agent_task.fencing_token)
 
         receipt = PlanSupervisorReceipt.query.filter_by(
             plan_id=self.plan.id,
-            action='mission_expiry_closeout').one()
-        self.assertEqual('hub.plan_supervision.closeout.v1',
+            action='mission_lifecycle_closeout').one()
+        self.assertEqual('hub.plan_supervision.closeout.v2',
                          receipt.response_json['contract'])
         self.assertTrue(receipt.response_json['next_check_at_cleared'])
         self.assertEqual([stage.id], receipt.response_json[
-            'cancelled_unstarted_stage_ids'])
+            'cancelled_stage_ids'])
+        self.assertEqual([run.id], receipt.response_json[
+            'cancelled_workflow_run_ids'])
+        self.assertEqual([agent_task.id], receipt.response_json[
+            'cancelled_agent_task_ids'])
         self.assertEqual(1, PlanSupervisorEvent.query.filter_by(
             plan_id=self.plan.id,
             kind='mission_supervision_closed').count())
@@ -438,7 +476,48 @@ class PlanSupervisionTest(unittest.TestCase):
             now=expired_at + timedelta(minutes=1)), 0)
         self.assertEqual(1, PlanSupervisorReceipt.query.filter_by(
             plan_id=self.plan.id,
-            action='mission_expiry_closeout').count())
+            action='mission_lifecycle_closeout').count())
+
+    def test_expired_mission_without_supervisor_closes_child_run(self):
+        now = _now()
+        mission = WorkflowMission(
+            mission_key='orphan-expired-mission', project_id=self.project.id,
+            main_claw_id=self.main_claw.id, objective='orphan work',
+            status='active', control_mode='agent_autonomous',
+            allowed_definition_ids_json=[self.flow_a.id],
+            denied_definition_ids_json=[], allowed_worker_claw_ids_json=[],
+            max_child_runs=2, child_run_count=1, max_retries_per_flow=1,
+            created_by_type='user', created_by_id=self.admin.id,
+            created_by_name=self.admin.username,
+            expires_at=now - timedelta(minutes=1), context_json={})
+        db.session.add(mission)
+        db.session.flush()
+        run = WorkflowRun(
+            definition_id=self.flow_a.id, project_id=self.project.id,
+            status='running', current_step_id='analyze', started_at=now)
+        db.session.add(run)
+        db.session.flush()
+        db.session.add(WorkflowMissionDispatch(
+            mission_id=mission.id, definition_id=self.flow_a.id,
+            workflow_run_id=run.id, decision_key='orphan-run',
+            idempotency_key='orphan-run', request_hash='2' * 64,
+            created_by_claw_id=self.main_claw.id))
+        step = WorkflowRunStep(
+            run_id=run.id, step_id='analyze', name='analyze',
+            status='running', step_type='agent_task')
+        db.session.add(step)
+        db.session.commit()
+
+        closeouts = svc.close_all_expired_missions(now=now)
+        self.assertEqual(1, len(closeouts))
+        self.assertEqual('expired', mission.status)
+        self.assertEqual('cancelled', run.status)
+        self.assertEqual('skipped', step.status)
+        self.assertIsNone(closeouts[0]['plan_id'])
+        self.assertIsNone(closeouts[0]['receipt_id'])
+        self.assertEqual('hub.plan_supervision.closeout.v2',
+                         mission.context_json['lifecycle_closeout']['contract'])
+        self.assertEqual([], svc.close_all_expired_missions(now=now))
 
     def test_expired_mission_rejects_direct_manager_dispatch(self):
         team = self.scoped_team()

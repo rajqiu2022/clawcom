@@ -16,7 +16,8 @@ from app.models import (AgentTask, AgentTeam, AgentTeamMember,
                         RequirementItem, TestIteration, TestPlan, TestReport,
                         TestPlanReport, TestTask, TestTaskOccurrence, WorkflowMission,
                         WorkflowMissionDispatch,
-                        WorkflowDefinition, WorkflowRun, WorkflowRunStep, _now)
+                        WorkflowApproval, WorkflowDefinition, WorkflowRun,
+                        WorkflowRunStep, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
 from app.services.test_task_references import serialize_task_references
 
@@ -41,8 +42,10 @@ OCCURRENCE_TERMINAL = {
     'completed', 'blocked', 'failed', 'skipped', 'cancelled',
     'blocked_terminal', 'analysis_incomplete',
 }
-MISSION_UNSTARTED_STAGE_STATES = {'ready', 'scheduled'}
-MISSION_CLOSEOUT_CONTRACT = 'hub.plan_supervision.closeout.v1'
+MISSION_TERMINAL_STAGE_STATES = {
+    'completed', 'skipped', 'cancelled', 'blocked', 'failed',
+}
+MISSION_CLOSEOUT_CONTRACT = 'hub.plan_supervision.closeout.v2'
 PLAN_BLOCK_REASON_CODES = frozenset({
     'owner_cancelled', 'global_environment_unavailable',
     'global_release_invalid', 'global_security_or_compliance',
@@ -1510,27 +1513,115 @@ def stop(sup, reason):
     sup.turn_deadline_at = None
 
 
-def close_expired_mission_supervision(sup, now=None):
-    """Atomically close one expired Mission/Supervisor and persist a receipt.
+def _mission_plan(mission, sup=None):
+    """Resolve a Mission's owning Plan without trusting a single legacy link."""
+    if sup:
+        return db.session.get(TestPlan, sup.plan_id)
+    context = mission.context_json if mission and isinstance(
+        mission.context_json, dict) else {}
+    for key in ('test_plan_id', 'plan_id'):
+        try:
+            plan_id = int(context.get(key) or 0)
+        except (TypeError, ValueError):
+            plan_id = 0
+        plan = db.session.get(TestPlan, plan_id) if plan_id else None
+        if plan and (not plan.project_id or plan.project_id == mission.project_id):
+            return plan
+    if not mission:
+        return None
+    for stage in MissionStage.query.filter_by(
+            mission_id=mission.id).order_by(MissionStage.id).all():
+        task_id = _stage_task_id(stage)
+        task = db.session.get(TestTask, task_id) if task_id else None
+        if task and task.plan_id:
+            return db.session.get(TestPlan, task.plan_id)
+    return None
 
-    Started work and terminal evidence are preserved. Only stages that never
-    started are cancelled, so a stale scheduler cannot dispatch them later.
+
+def _mission_agent_task_payload(task):
+    try:
+        value = json.loads(task.payload or '{}')
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _cancel_expired_mission_run(run, now):
+    """Terminalize unfinished Run state while preserving all prior evidence."""
+    if not run or run.status not in RUN_ACTIVE_STATUSES:
+        return False
+    run.status = 'cancelled'
+    run.current_step_id = ''
+    run.finished_at = now
+    run.summary = run.summary or 'Mission 已到期，Hub 已终止未完成执行'
+    blocker = dict(run.blocker_json or {})
+    blocker.update({
+        'code': 'MISSION_EXPIRED',
+        'reason': 'mission_lifecycle_closeout',
+        'closed_at': now.isoformat() + '+08:00',
+    })
+    run.blocker_json = blocker
+    if not run.automation_conclusion:
+        run.automation_conclusion = 'CANCELLED_BY_MISSION_EXPIRY'
+    for step in WorkflowRunStep.query.filter_by(
+            run_id=run.id).with_for_update().all():
+        if step.status not in RUN_ACTIVE_STATUSES:
+            continue
+        step.status = 'skipped'
+        step.summary = step.summary or 'Mission 已到期，未完成步骤已跳过'
+        step.finished_at = step.finished_at or now
+        step.updated_by = 'mission-lifecycle-watchdog'
+        step.health_status = 'idle'
+        step.health_checked_at = now
+        step.progress_at = now
+        step.progress_by = 'mission-lifecycle-watchdog'
+        step.progress_phase = 'cancelled'
+        step.progress_message = step.summary
+        step.claimed_by = ''
+        step.claimed_at = None
+        step.claimed_claw_id = None
+        step.claim_expires_at = None
+        step.claim_lease_seconds = None
+        step.claim_fencing_token = int(step.claim_fencing_token or 0) + 1
+    for approval in WorkflowApproval.query.filter_by(
+            run_id=run.id, status='pending').with_for_update().all():
+        approval.status = 'skipped'
+        approval.approver = 'mission-lifecycle-watchdog'
+        approval.comment = approval.comment or 'Mission 已到期，审批自动关闭'
+        approval.approved_at = approval.approved_at or now
+    return True
+
+
+def close_expired_mission_lifecycle(mission, sup=None, reason=None,
+                                    boundary=None, now=None):
+    """Atomically close an expired Mission, its Plan and unfinished work.
+
+    This is Mission-scoped rather than Supervisor-scoped: legacy Missions with
+    an already-expired Supervisor, or with no Supervisor at all, are fenced by
+    the same deterministic watchdog. Historical Runs and evidence are retained.
     """
     now = now or _now()
-    state = mission_expiry_state(sup, now)
-    if not state:
-        return None
-    mission = state['mission']
-    boundary = state['boundary_at'] or now
-    command_key = 'mission-expiry:%s:%s' % (
+    plan = _mission_plan(mission, sup)
+    boundary = boundary or (mission.expires_at if mission else None) or (
+        ends_at(plan) if plan else now)
+    reason = reason or 'mission_expired'
+    mission_context = dict(mission.context_json or {}) if mission else {}
+    previous_closeout = mission_context.get('lifecycle_closeout')
+    if (isinstance(previous_closeout, dict)
+            and previous_closeout.get('contract') == MISSION_CLOSEOUT_CONTRACT):
+        return dict(previous_closeout, replayed=True)
+
+    plan_id = plan.id if plan else (sup.plan_id if sup else None)
+    command_key = 'mission-lifecycle:%s:%s' % (
         mission.id if mission else 'none', boundary.isoformat())
-    old = PlanSupervisorReceipt.query.filter_by(
-        plan_id=sup.plan_id, action='mission_expiry_closeout',
-        command_key=command_key).first()
+    old = (PlanSupervisorReceipt.query.filter_by(
+        plan_id=plan_id, action='mission_lifecycle_closeout',
+        command_key=command_key).first() if plan_id else None)
     if old:
         return dict(old.response_json, replayed=True)
 
-    previous_supervisor_status = sup.status
+    previous_plan_status = plan.status if plan else None
+    previous_supervisor_status = sup.status if sup else None
     previous_mission_status = mission.status if mission else None
     cancelled_stage_ids = []
     preserved_stage_ids = []
@@ -1540,24 +1631,25 @@ def close_expired_mission_supervision(sup, now=None):
               .order_by(MissionStage.id).with_for_update().all()
               if mission else [])
     for stage in stages:
-        if stage.state not in MISSION_UNSTARTED_STAGE_STATES:
-            preserved_stage_ids.append(stage.id)
-            continue
-        stage.state = 'cancelled'
-        stage.last_reason_code = 'mission_expired_before_dispatch'
-        stage.fencing_token = int(stage.fencing_token or 0) + 1
-        stage.version = int(stage.version or 1) + 1
-        cancelled_stage_ids.append(stage.id)
         task_id = _stage_task_id(stage)
         if task_id:
             cleared_task_ids.add(task_id)
+        if stage.state in MISSION_TERMINAL_STAGE_STATES:
+            preserved_stage_ids.append(stage.id)
+            continue
+        stage.state = 'cancelled'
+        stage.last_reason_code = 'mission_expired'
+        stage.fencing_token = int(stage.fencing_token or 0) + 1
+        stage.version = int(stage.version or 1) + 1
+        cancelled_stage_ids.append(stage.id)
 
-    if cancelled_stage_ids:
+    stage_ids = [stage.id for stage in stages]
+    if stage_ids:
         occurrences = TestTaskOccurrence.query.filter(
-            TestTaskOccurrence.mission_stage_id.in_(cancelled_stage_ids)
+            TestTaskOccurrence.mission_stage_id.in_(stage_ids)
         ).with_for_update().all()
         for occurrence in occurrences:
-            if occurrence.status in ('scheduled', 'ready'):
+            if occurrence.status not in OCCURRENCE_TERMINAL:
                 occurrence.status = 'cancelled'
             occurrence.next_action = 'mission_expired'
             occurrence.recommended_action = 'plan_closed'
@@ -1575,59 +1667,163 @@ def close_expired_mission_supervision(sup, now=None):
             task.recommended_action = 'plan_closed'
             task.condition_state = 'mission_expired'
 
+    dispatches = (WorkflowMissionDispatch.query.filter_by(
+        mission_id=mission.id).order_by(WorkflowMissionDispatch.id)
+        .with_for_update().all() if mission else [])
+    run_ids = sorted({row.workflow_run_id for row in dispatches})
+    cancelled_run_ids = []
+    for run in (WorkflowRun.query.filter(WorkflowRun.id.in_(run_ids))
+                .with_for_update().all() if run_ids else []):
+        if _cancel_expired_mission_run(run, now):
+            cancelled_run_ids.append(run.id)
+    for dispatch in dispatches:
+        if dispatch.workflow_run_id in cancelled_run_ids:
+            dispatch.status = 'cancelled'
+
+    cancelled_agent_task_ids = []
+    active_agent_tasks = AgentTask.query.filter(
+        AgentTask.status.in_(('pending', 'running', 'waiting_condition'))
+    ).with_for_update().all()
+    run_id_set = set(run_ids)
+    for task in active_agent_tasks:
+        payload = _mission_agent_task_payload(task)
+        try:
+            payload_mission_id = int(payload.get('mission_id') or 0)
+        except (TypeError, ValueError):
+            payload_mission_id = 0
+        try:
+            payload_run_id = int(payload.get('run_id') or 0)
+        except (TypeError, ValueError):
+            payload_run_id = 0
+        if not ((mission and payload_mission_id == mission.id)
+                or payload_run_id in run_id_set):
+            continue
+        task.status = 'cancelled'
+        task.error = 'Mission expired; unfinished AgentTask cancelled by Hub'
+        task.terminal_reason = 'mission_expired'
+        task.completed_at = now
+        task.claim_token = None
+        task.lease_expires_at = None
+        task.fencing_token = int(task.fencing_token or 0) + 1
+        task.version = int(task.version or 0) + 1
+        cancelled_agent_task_ids.append(task.id)
+
     if mission and mission.status == 'active':
         mission.status = 'expired'
         mission.version = int(mission.version or 1) + 1
-    stop(sup, 'expired')
-    sup.resume_condition = 'mission_expired'
+    if plan and plan.status == 'active':
+        plan.status = 'completed'
+    if sup:
+        stop(sup, 'expired')
+        sup.resume_condition = 'mission_expired'
 
     request_payload = {
         'contract': MISSION_CLOSEOUT_CONTRACT,
-        'plan_id': sup.plan_id,
+        'plan_id': plan_id,
         'mission_id': mission.id if mission else None,
-        'reason': state['reason'],
+        'reason': reason,
         'boundary_at': boundary.isoformat(),
     }
-    record = PlanSupervisorReceipt(
-        plan_id=sup.plan_id, action='mission_expiry_closeout',
-        command_key=command_key, request_hash=digest(request_payload),
-        response_json={}, created_at=now)
-    db.session.add(record)
-    db.session.flush()
+    record = None
+    if plan_id:
+        record = PlanSupervisorReceipt(
+            plan_id=plan_id, action='mission_lifecycle_closeout',
+            command_key=command_key, request_hash=digest(request_payload),
+            response_json={}, created_at=now)
+        db.session.add(record)
+        db.session.flush()
     result = {
         'contract': MISSION_CLOSEOUT_CONTRACT,
-        'receipt_id': record.id,
+        'receipt_id': record.id if record else None,
         'replayed': False,
-        'plan_id': sup.plan_id,
+        'plan_id': plan_id,
         'mission_id': mission.id if mission else None,
-        'reason': state['reason'],
+        'reason': reason,
         'closed_at': now.isoformat() + '+08:00',
         'boundary_at': boundary.isoformat() + '+08:00',
+        'previous_plan_status': previous_plan_status,
+        'plan_status': plan.status if plan else None,
         'previous_supervisor_status': previous_supervisor_status,
-        'supervisor_status': sup.status,
+        'supervisor_status': sup.status if sup else None,
         'previous_mission_status': previous_mission_status,
         'mission_status': mission.status if mission else None,
-        'next_check_at_cleared': sup.next_check_at is None,
-        'cancelled_unstarted_stage_ids': cancelled_stage_ids,
-        'preserved_started_or_terminal_stage_ids': preserved_stage_ids,
+        'next_check_at_cleared': not sup or sup.next_check_at is None,
+        'cancelled_stage_ids': cancelled_stage_ids,
+        'preserved_terminal_stage_ids': preserved_stage_ids,
+        'cancelled_workflow_run_ids': sorted(cancelled_run_ids),
+        'cancelled_agent_task_ids': sorted(cancelled_agent_task_ids),
         'cleared_occurrence_ids': cleared_occurrence_ids,
         'cleared_test_task_ids': sorted(cleared_task_ids),
     }
-    record.response_json = result
-    observations = dict(sup.observations_json or {})
-    observations['mission_closeout'] = dict(result)
-    sup.observations_json = observations
-    add_event(sup.plan_id, 'mission_supervision_closed', [
-        'mission-supervision-closed', mission.id if mission else None,
-        boundary.isoformat(),
-    ], {
-        'receipt_id': record.id,
-        'contract': MISSION_CLOSEOUT_CONTRACT,
-        'reason': state['reason'],
-        'cancelled_unstarted_stage_count': len(cancelled_stage_ids),
-        'preserved_started_or_terminal_stage_count': len(preserved_stage_ids),
-    }, now)
+    if record:
+        record.response_json = result
+    if mission:
+        mission_context['lifecycle_closeout'] = dict(result)
+        mission.context_json = mission_context
+    if sup:
+        observations = dict(sup.observations_json or {})
+        observations['mission_closeout'] = dict(result)
+        sup.observations_json = observations
+    if plan_id:
+        add_event(plan_id, 'mission_supervision_closed', [
+            'mission-lifecycle-closed', mission.id if mission else None,
+            boundary.isoformat(),
+        ], {
+            'receipt_id': record.id if record else None,
+            'contract': MISSION_CLOSEOUT_CONTRACT,
+            'reason': reason,
+            'cancelled_stage_count': len(cancelled_stage_ids),
+            'cancelled_workflow_run_count': len(cancelled_run_ids),
+            'cancelled_agent_task_count': len(cancelled_agent_task_ids),
+        }, now)
+    db.session.add(AuditLog(
+        action='mission_lifecycle_closeout',
+        resource_type='workflow_mission',
+        resource_id=mission.id if mission else None,
+        resource_name=mission.mission_key if mission else 'plan:%s' % plan_id,
+        operator='mission-lifecycle-watchdog',
+        detail=json.dumps(result, ensure_ascii=False, sort_keys=True),
+    ))
     return result
+
+
+def close_expired_mission_supervision(sup, now=None):
+    """Compatibility entry point for one supervised Mission/Plan."""
+    now = now or _now()
+    state = mission_expiry_state(sup, now)
+    if not state:
+        return None
+    return close_expired_mission_lifecycle(
+        state['mission'], sup=sup, reason=state['reason'],
+        boundary=state['boundary_at'], now=now)
+
+
+def close_all_expired_missions(now=None):
+    """Close expired Missions even when their Supervisor is absent/terminal."""
+    now = now or _now()
+    mission_ids = [row.id for row in WorkflowMission.query.filter(
+        WorkflowMission.status.in_(('active', 'expired')),
+        WorkflowMission.expires_at <= now,
+    ).order_by(WorkflowMission.id).limit(200).all()]
+    results = []
+    for mission_id in mission_ids:
+        mission = (WorkflowMission.query.filter_by(id=mission_id)
+                   .with_for_update().first())
+        if not mission:
+            continue
+        context = mission.context_json if isinstance(
+            mission.context_json, dict) else {}
+        existing = context.get('lifecycle_closeout')
+        if (isinstance(existing, dict)
+                and existing.get('contract') == MISSION_CLOSEOUT_CONTRACT):
+            continue
+        sup = (PlanSupervisor.query.filter_by(mission_id=mission.id)
+               .with_for_update().first())
+        results.append(close_expired_mission_lifecycle(
+            mission, sup=sup, reason='mission_expired',
+            boundary=mission.expires_at, now=now))
+        db.session.commit()
+    return results
 
 
 def ingest(sup):
@@ -5242,6 +5438,10 @@ def sweep(now=None):
         return 0
     now = now or _now()
     count = 0
+    # Mission expiry is authoritative even when the legacy Supervisor row is
+    # already terminal or was never created. Close these rows before any Plan
+    # bootstrap/dispatch logic can observe them as runnable.
+    close_all_expired_missions(now)
     # Repair active scoped team Plans that were activated before the durable
     # supervision contract was deployed.  This is intentionally bounded and
     # creates no Workflow Run; it only establishes the unique control chain.
