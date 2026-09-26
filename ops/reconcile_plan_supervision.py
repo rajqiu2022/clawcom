@@ -1,0 +1,68 @@
+"""Reconcile one active team's durable Plan Supervisor and Mission."""
+
+from __future__ import print_function
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[1]
+WEB = ROOT if (ROOT / 'app').is_dir() else ROOT / 'web'
+if str(WEB) not in sys.path:
+    sys.path.insert(0, str(WEB))
+
+from app import create_app, db  # noqa: E402
+from app.models import WorkflowMission  # noqa: E402
+from app.services import plan_supervision as supervision  # noqa: E402
+
+
+def snapshot(plan_id):
+    sup = supervision.locked(plan_id)
+    if not sup:
+        raise RuntimeError('Plan supervisor does not exist')
+    mission = (db.session.get(WorkflowMission, sup.mission_id)
+               if sup.mission_id else None)
+    return sup, mission, {
+        'plan_id': sup.plan_id,
+        'team_id': sup.team_id,
+        'orchestrator_claw_id': sup.orchestrator_claw_id,
+        'supervisor_status': sup.status,
+        'next_check_at': str(sup.next_check_at) if sup.next_check_at else None,
+        'mission_id': mission.id if mission else None,
+        'mission_status': mission.status if mission else None,
+        'mission_main_claw_id': mission.main_claw_id if mission else None,
+        'mission_expires_at': str(mission.expires_at) if mission else None,
+        'allowed_worker_claw_ids': (
+            mission.allowed_worker_claw_ids_json if mission else []),
+    }
+
+
+def apply(plan_id):
+    sup, _mission, before = snapshot(plan_id)
+    supervision.ensure_manager_tenure(sup)
+    supervision.ensure_team_mission(sup)
+    supervision.enqueue_schedule_ticks(sup)
+    db.session.commit()
+    _sup, _mission, after = snapshot(plan_id)
+    return {'changed': before != after, 'before': before, 'after': after}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--plan-id', type=int, required=True)
+    parser.add_argument('--apply', action='store_true')
+    args = parser.parse_args()
+    app = create_app()
+    with app.app_context():
+        if args.apply:
+            result = apply(args.plan_id)
+        else:
+            _sup, _mission, current = snapshot(args.plan_id)
+            result = {'changed': False, 'dry_run': True, 'current': current}
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+
+if __name__ == '__main__':
+    main()
