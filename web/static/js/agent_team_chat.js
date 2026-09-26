@@ -6,12 +6,13 @@ const AgentTeamChat = (() => {
     let team = null, roomId = null, epoch = 0, requestId = 0, timer = null, selected = new Set(), sending = false;
     let pendingImages = [];
     let rendered = '', firstLoad = true;
+    let structuredByMessage = new Map();
     const roundLabels = {open:'等待回复',completed:'已收齐',partial:'部分回复',failed:'回复失败',expired:'已超时'};
     const deliveryLabels = {unread:'待送达',delivered:'已送达',processing:'处理中',replied:'已回复',done:'已完成',failed:'失败',missing:'成员已变化'};
     function visible() { return team && !$('at-chat-panel')?.hidden && !document.hidden; }
     function reset() {
         closeImagePreview();
-        ++epoch; ++requestId; team = null; roomId = null; selected.clear(); clearPendingImages(); rendered = ''; firstLoad = true;
+        ++epoch; ++requestId; team = null; roomId = null; selected.clear(); clearPendingImages(); rendered = ''; structuredByMessage.clear(); firstLoad = true;
         if (timer) clearTimeout(timer); timer = null;
     }
     function frame() {
@@ -40,7 +41,9 @@ const AgentTeamChat = (() => {
         });
         $('at-chat-stream').addEventListener('click', event => {
             const button = event.target.closest('[data-chat-image]');
-            if (button) openImagePreview(button.dataset.chatImage, button.dataset.chatImageAlt);
+            if (button) { openImagePreview(button.dataset.chatImage, button.dataset.chatImageAlt); return; }
+            const copy = event.target.closest('[data-chat-copy-structured]');
+            if (copy) copyStructuredData(copy.dataset.chatCopyStructured, copy);
         });
         $('at-chat-lightbox').addEventListener('click', event => {
             if (event.target === event.currentTarget || event.target.closest('[data-chat-lightbox-close]')) closeImagePreview();
@@ -137,6 +140,47 @@ const AgentTeamChat = (() => {
         const date = new Date(normalized);
         return Number.isNaN(date.getTime()) ? String(value).slice(5,16) : new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(date);
     }
+    const fieldLabels = {image_paths:'图片引用',memory_ops:'记忆更新',evidence:'证据',outputs:'输出',blocker:'阻断信息',logs:'执行日志'};
+    function fieldLabel(key) { return fieldLabels[key] || String(key || '').replaceAll('_', ' '); }
+    function renderMemoryOps(value) {
+        if (!Array.isArray(value)) return '';
+        return `<div class="at-chat-memory-list">${value.map(item => {
+            if (!item || typeof item !== 'object') return `<div class="at-chat-structure-item"><code>${esc(item)}</code></div>`;
+            const badges = [item.op, item.kind, item.scope].filter(Boolean).map(part=>`<span>${esc(part)}</span>`).join('');
+            return `<div class="at-chat-structure-item"><header>${badges}</header>${item.key?`<strong>${esc(item.key)}</strong>`:''}${item.value!=null?`<p>${esc(typeof item.value === 'string' ? item.value : JSON.stringify(item.value, null, 2))}</p>`:''}</div>`;
+        }).join('')}</div>`;
+    }
+    function renderStructuredField(key, value) {
+        if (key === 'image_paths' && Array.isArray(value)) {
+            return `<section><h5>${esc(fieldLabel(key))}</h5><div class="at-chat-paths">${value.map(path=>`<code title="${esc(path)}">${esc(path)}</code>`).join('')}</div></section>`;
+        }
+        if (key === 'memory_ops' && Array.isArray(value)) {
+            return `<section><h5>${esc(fieldLabel(key))} <small>${value.length}</small></h5>${renderMemoryOps(value)}</section>`;
+        }
+        if (value && typeof value === 'object') {
+            return `<section><h5>${esc(fieldLabel(key))}</h5><pre>${esc(JSON.stringify(value, null, 2))}</pre></section>`;
+        }
+        return `<section class="at-chat-structure-line"><h5>${esc(fieldLabel(key))}</h5><p>${esc(value)}</p></section>`;
+    }
+    function renderMessageContent(message) {
+        const presentation = message.presentation && typeof message.presentation === 'object'
+            ? message.presentation : {parsed_json:false,text:message.content || '',fields:{}};
+        const text = presentation.text || '';
+        const fields = presentation.fields && typeof presentation.fields === 'object' ? presentation.fields : {};
+        const entries = Object.entries(fields).filter(([,value]) => value != null && value !== '' && (!Array.isArray(value) || value.length));
+        structuredByMessage.set(String(message.id), fields);
+        const details = entries.length ? `<details class="at-chat-structured"><summary><span>结构化数据</span><b>${entries.length} 组</b></summary><div class="at-chat-structured-body"><div class="at-chat-structured-toolbar"><span>原始字段已整理，按需展开查看</span><button type="button" data-chat-copy-structured="${esc(message.id)}">复制 JSON</button></div>${entries.map(([key,value])=>renderStructuredField(key,value)).join('')}</div></details>` : '';
+        return `${text?`<div class="at-chat-copy">${esc(text)}</div>`:''}${details}`;
+    }
+    async function copyStructuredData(messageId, button) {
+        const value = structuredByMessage.get(String(messageId));
+        if (!value) return;
+        try {
+            await navigator.clipboard.writeText(JSON.stringify(value, null, 2));
+            const original = button.textContent; button.textContent = '已复制';
+            setTimeout(()=>{ if (button.isConnected) button.textContent = original; }, 1200);
+        } catch (_) { $('at-chat-note').textContent = '复制失败，请展开后手动选择。'; }
+    }
     function render(data) {
         const room = data.room, members = data.members || [], rounds = new Map((data.rounds || []).map(item => [item.question_message_id, item]));
         roomId = room.id;
@@ -157,12 +201,13 @@ const AgentTeamChat = (() => {
         if (signature === rendered) return;
         rendered = signature;
         const stream = $('at-chat-stream'), nearBottom = stream.scrollHeight - stream.scrollTop <= stream.clientHeight + 90;
+        structuredByMessage = new Map();
         stream.innerHTML = messages.length ? messages.map(message => {
             const mine = message.sender_member_id === me, sender = message.sender || {}, round = rounds.get(message.id);
             const mentionText = (message.mentions || []).map(item => item.type === 'all' ? '@所有人' : `@${members.find(member => member.id === item.member_id)?.display_name || '成员'}`).join(' ');
             const roundHtml = round ? `<div class="at-chat-round ${esc(round.status)}"><header><strong>${esc(roundLabels[round.status] || round.status)}</strong><span>${round.replied_count}/${round.expected_count} 已回复</span><time>截止 ${esc(time(round.deadline_at))}</time></header><div>${round.members.map(item => `<span class="${esc(item.status)}"><i></i>${esc(item.name)} · ${esc(deliveryLabels[item.status] || item.status)}</span>`).join('')}</div></div>` : '';
             const images = (message.images || []).map(image => `<button type="button" class="at-chat-image" data-chat-image="${esc(image.url)}" data-chat-image-alt="${esc(image.name || '聊天室图片')}" aria-label="放大查看 ${esc(image.name || '聊天室图片')}"><img src="${esc(image.url)}" alt="${esc(image.name || '聊天室图片')}" loading="lazy"></button>`).join('');
-            return `<article class="at-chat-message ${mine ? 'mine' : ''}" data-message-id="${message.id}"><span class="at-chat-avatar ${esc(sender.member_type || '')}">${sender.member_type === 'agent' ? 'AI' : esc((sender.display_name || '?').slice(0,1))}</span><div class="at-chat-bubble"><header><strong>${esc(sender.display_name || '未知成员')}</strong><time>${esc(time(message.created_at))}</time></header>${mentionText ? `<div class="at-chat-mentioned">${esc(mentionText)}</div>` : ''}${message.content ? `<p>${esc(message.content)}</p>` : ''}${images ? `<div class="at-chat-images">${images}</div>` : ''}${roundHtml}</div></article>`;
+            return `<article class="at-chat-message ${mine ? 'mine' : ''}" data-message-id="${message.id}"><span class="at-chat-avatar ${esc(sender.member_type || '')}">${sender.member_type === 'agent' ? 'AI' : esc((sender.display_name || '?').slice(0,1))}</span><div class="at-chat-bubble"><header><strong>${esc(sender.display_name || '未知成员')}</strong><time>${esc(time(message.created_at))}</time></header>${mentionText ? `<div class="at-chat-mentioned">${esc(mentionText)}</div>` : ''}${renderMessageContent(message)}${images ? `<div class="at-chat-images">${images}</div>` : ''}${roundHtml}</div></article>`;
         }).join('') : '<div class="at-empty">频道已经建立。发送第一条消息开始团队协作。</div>';
         if (firstLoad || nearBottom) stream.scrollTop = stream.scrollHeight;
         firstLoad = false;

@@ -13,6 +13,7 @@ from flask import current_app, g
 from sqlalchemy.exc import IntegrityError
 
 from app import db
+from app.services.chat_message_presentation import message_presentation
 from app.models import (
     ChatRoom,
     ChatRoomAudit,
@@ -219,6 +220,7 @@ def room_mentions(message_id):
 
 def serialize_message(message):
     payload = message.to_dict(mentions=room_mentions(message.id))
+    payload['presentation'] = message_presentation(message.content)
     public_base = str(
         current_app.config.get('HUB_PUBLIC_URL')
         or os.getenv('HUB_PUBLIC_URL')
