@@ -148,6 +148,32 @@ def create_test_task_recovery_attempt(plan_id, test_task_id):
 
 
 @api_bp.route(
+    '/test-plans/<int:plan_id>/supervision/tasks/'
+    '<int:test_task_id>/reassign', methods=['POST'])
+def reassign_test_task_stage(plan_id, test_task_id):
+    """Reassign one ready Stage to an equivalent member with a new fence."""
+    _, sup, claw = load(plan_id, write=True)
+    if not sup:
+        svc.fail('PLAN_SUPERVISION_NOT_STARTED', '计划尚未启动监督', 409)
+    if not claw:
+        svc.fail('PLAN_MANAGER_AGENT_REQUIRED', '仅团队主 Agent 可以更换执行者', 403)
+    body = payload()
+    if set(body) - {
+            'command_key', 'reason', 'expected_stage_version',
+            'assignee_claw_id'}:
+        svc.fail('PLAN_BODY_INVALID', '换人请求包含不支持的字段', 400)
+    result = svc.reassign_ready_task_stage(
+        sup, claw.id, test_task_id, body)
+    target = result.pop('wake_claw_id', None)
+    if result.get('replayed'):
+        target = None
+    db.session.commit()
+    if target:
+        svc.wake(target)
+    return jsonify(result), (200 if result.get('replayed') else 201)
+
+
+@api_bp.route(
     '/test-plans/<int:plan_id>/supervision/occurrences/'
     '<int:occurrence_id>/condition-events', methods=['POST'])
 def report_occurrence_condition(plan_id, occurrence_id):

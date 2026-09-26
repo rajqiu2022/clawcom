@@ -320,6 +320,120 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertIn('independent_stage_status', readback['supervision'])
         self.assertIn('allowed_actions', readback['supervision'])
 
+    def test_final_day_schedule_clamps_and_repairs_invalid_next_tick(self):
+        team = self.scoped_team()
+        team.policy_json = dict(team.policy_json or {}, supervision_schedule={
+            'timezone': 'Asia/Shanghai', 'morning_check': '09:30',
+            'progress_summaries': ['13:30'], 'day_close': '18:30',
+        })
+        self.plan.team_id = team.id
+        self.plan.end_date = self.plan.start_date
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'final-day-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        before_close = datetime.combine(self.plan.end_date, time(18, 0))
+        after_close = datetime.combine(self.plan.end_date, time(19, 0))
+        self.assertEqual(
+            datetime.combine(self.plan.end_date, time(18, 30)),
+            svc.next_schedule_at(self.sup(), before_close))
+        self.assertIsNone(svc.next_schedule_at(self.sup(), after_close))
+        self.sup().next_check_at = datetime.combine(
+            self.plan.end_date + timedelta(days=1), time(9, 30))
+        svc.enqueue_schedule_ticks(self.sup(), after_close)
+        self.assertIsNone(self.sup().next_check_at)
+
+    def test_existing_mission_reconciles_manager_roster_and_expiry(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'mission-reconcile-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        mission = db.session.get(WorkflowMission, self.sup().mission_id)
+        binding = db.session.get(AgentTeamMission, mission.id)
+        mission.main_claw_id = self.other_claw.id
+        mission.status = 'expired'
+        mission.expires_at = _now() - timedelta(days=1)
+        mission.allowed_worker_claw_ids_json = []
+        binding.team_version = 0
+        binding.snapshot_json = {}
+        db.session.commit()
+
+        svc.ensure_team_mission(self.sup(), now=_now())
+        db.session.commit()
+        self.assertEqual(self.main_claw.id, mission.main_claw_id)
+        self.assertEqual('active', mission.status)
+        self.assertEqual(svc.ends_at(self.plan), mission.expires_at)
+        self.assertEqual([self.other_claw.id],
+                         mission.allowed_worker_claw_ids_json)
+        self.assertEqual(team.version, binding.team_version)
+        self.assertEqual(self.main_claw.id, binding.snapshot_json[
+            'primary_manager_claw_id'])
+        self.assertEqual(1, PlanSupervisorEvent.query.filter_by(
+            kind='mission_reconciled').count())
+
+    def test_stage_truth_exposes_new_attempt_and_controlled_reassignment(self):
+        team = self.scoped_team()
+        candidate = OpenClawInstance(
+            name='替补执行 Agent', safe_name='alternate-agent',
+            claw_tag='alternate-agent', owner='owner',
+            project_id=self.project.id)
+        db.session.add(candidate)
+        db.session.flush()
+        db.session.add_all([
+            AgentTeamMember(
+                team_id=team.id, claw_id=self.other_claw.id,
+                role_key='test_executor', specialties_json=['editor']),
+            AgentTeamMember(
+                team_id=team.id, claw_id=candidate.id,
+                role_key='test_executor', specialties_json=['editor']),
+        ])
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='可换人任务', status='pending',
+            assignee_claw_id=self.other_claw.id, task_type='automation')
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'reassign-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        truth = svc.stage_truth_snapshot(self.sup())
+        row = next(item for item in truth['independent_stage_status']
+                   if item['test_task_id'] == task.id)
+        action = next(item for item in row['available_actions']
+                      if item['action'] == 'reassign_ready_stage')
+        self.assertEqual(candidate.id, action['suggested_assignee_claw_id'])
+        self.assertIn('reassign_ready_stage', truth['allowed_actions'])
+
+        self.agent()
+        reassigned = self.client.post(
+            action['endpoint'], headers=self._headers(), json={
+                'command_key': 'reassign-task',
+                'expected_stage_version': row['stage_version'],
+                'assignee_claw_id': candidate.id,
+                'reason': '原执行者设备不可用，改派同能力成员',
+            })
+        self.assertEqual(201, reassigned.status_code, reassigned.json)
+        db.session.refresh(task)
+        self.assertEqual(candidate.id, task.assignee_claw_id)
+        stage = db.session.get(MissionStage, row['stage_id'])
+        stage.state = 'failed'
+        task.status = 'blocked'
+        db.session.commit()
+        truth = svc.stage_truth_snapshot(self.sup())
+        gap = next(item for item in truth['actionable_gaps']
+                   if item['test_task_id'] == task.id)
+        retry = next(item for item in gap['available_actions']
+                     if item['action'] == 'create_terminal_task_attempt')
+        self.assertEqual(stage.stage_version,
+                         retry['expected_stage_version'])
+        self.assertIn('create_terminal_task_attempt',
+                      truth['allowed_actions'])
+
     def test_manager_goal_brief_and_commitment_audit_are_durable(self):
         team = self.scoped_team()
         db.session.add(AgentTeamMember(

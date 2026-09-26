@@ -83,11 +83,19 @@ def team_capability(team_id):
                 'terminal_projection_v1', 'authoritative_execution_v1',
                 'execution_goal_resume_v1', 'condition_probe_v1',
                 'control_action_dispatch_v1', 'fact_freshness_v1',
-                'manager_goal_v1', 'manager_stage_actions_v1'],
+                'manager_goal_v1', 'manager_stage_actions_v1',
+                'manager_recovery_actions_v1'],
             'start_requires': ['team_id', 'orchestrator_claw_id', 'command_key'],
             'supervisor_api': '/api/v1/test-plans/{plan_id}/supervision',
             'direct_task_dispatch_api': (
                 '/api/v1/test-plans/{plan_id}/supervision/agent-tasks'),
+            'manager_recovery_apis': {
+                'new_attempt': ('/api/v1/test-plans/{plan_id}/supervision/'
+                                'tasks/{test_task_id}/new-attempt'),
+                'reassign_ready_stage': (
+                    '/api/v1/test-plans/{plan_id}/supervision/tasks/'
+                    '{test_task_id}/reassign'),
+            },
             'condition_event_apis': {
                 'occurrence': ('/api/v1/test-plans/{plan_id}/supervision/'
                                'occurrences/{occurrence_id}/condition-events'),
@@ -184,6 +192,15 @@ def schedule_policy(sup):
 def _clock_at(day, value):
     hour, minute = (int(part) for part in str(value).split(':', 1))
     return datetime.combine(day, time(hour=hour, minute=minute))
+
+
+def final_day_close_reached(sup, now=None):
+    """Whether the last planned day has reached its explicit closeout tick."""
+    now = now or _now()
+    plan = db.session.get(TestPlan, sup.plan_id) if sup else None
+    if not plan or now.date() != plan.end_date:
+        return False
+    return now >= _clock_at(plan.end_date, schedule_policy(sup)['day_close'])
 
 
 def _task_clock(value, default='00:00'):
@@ -506,13 +523,19 @@ def migrate_schedule_templates(sup, body, now=None):
 def next_schedule_at(sup, now=None):
     """Compute the next Hub-owned daily tick independent of a model turn."""
     now = now or _now()
+    plan = db.session.get(TestPlan, sup.plan_id) if sup else None
+    if not plan:
+        return None
+    plan_end = ends_at(plan)
     policy = schedule_policy(sup)
     clocks = [policy['morning_check'], *policy['progress_summaries'],
               policy['day_close']]
     candidates = [_clock_at(now.date(), value) for value in clocks]
     candidates += [_clock_at(now.date() + timedelta(days=1), value)
                    for value in clocks]
-    return min(value for value in candidates if value > now)
+    candidates = [value for value in candidates
+                  if now < value < plan_end]
+    return min(candidates) if candidates else None
 
 
 def enqueue_schedule_ticks(sup, now=None):
@@ -523,9 +546,11 @@ def enqueue_schedule_ticks(sup, now=None):
     slots += [('progress_summary_%s' % index, value)
               for index, value in enumerate(policy['progress_summaries'], 1)]
     slots.append(('day_close', policy['day_close']))
+    plan = db.session.get(TestPlan, sup.plan_id) if sup else None
+    plan_end = ends_at(plan) if plan else now
     for kind, value in slots:
         due_at = _clock_at(now.date(), value)
-        if due_at <= now:
+        if due_at <= now and due_at < plan_end:
             add_event(sup.plan_id, 'schedule_tick', [
                 'schedule', sup.plan_id, now.date().isoformat(), kind,
             ], {
@@ -534,7 +559,9 @@ def enqueue_schedule_ticks(sup, now=None):
                 'timezone': 'Asia/Shanghai',
             }, now)
     scheduled = next_schedule_at(sup, now)
-    if not sup.next_check_at or sup.next_check_at > scheduled:
+    if sup.next_check_at and sup.next_check_at >= plan_end:
+        sup.next_check_at = None
+    if scheduled and (not sup.next_check_at or sup.next_check_at > scheduled):
         sup.next_check_at = scheduled
     return scheduled
 
@@ -1122,8 +1149,75 @@ def sync_plan_stages(sup, now=None):
     return created
 
 
-def ensure_team_mission(sup):
+def _reconcile_team_mission(sup, mission, team, plan, now=None):
+    """Keep a durable Mission aligned with the active Plan and team roster."""
+    now = now or _now()
+    changed = []
+    expected = {
+        'main_claw_id': sup.orchestrator_claw_id,
+        'status': ('active' if (plan.status == 'active'
+                                and now < ends_at(plan)
+                                and mission.status in ('active', 'expired'))
+                   else mission.status),
+        'expires_at': ends_at(plan),
+        'allowed_definition_ids_json': sorted(set(
+            (team.policy_json or {}).get('allowed_definition_ids') or [])),
+        'allowed_worker_claw_ids_json': sorted({
+            row.claw_id for row in team.members}),
+    }
+    for field, value in expected.items():
+        if getattr(mission, field) != value:
+            setattr(mission, field, value)
+            changed.append(field)
+    context = dict(mission.context_json or {})
+    desired_context = {
+        'plan_supervision_id': plan.id,
+        'test_plan_id': plan.id,
+        'team_id': team.id,
+        'manager_claw_id': sup.orchestrator_claw_id,
+    }
+    if any(context.get(key) != value
+           for key, value in desired_context.items()):
+        context.update(desired_context)
+        mission.context_json = context
+        changed.append('context_json')
+
+    binding = db.session.get(AgentTeamMission, mission.id)
+    if not binding:
+        fail('PLAN_MISSION_INCOMPLETE', '团队 Mission 缺少绑定快照', 409)
+    desired_snapshot = {
+        'primary_manager_claw_id': team.primary_manager_claw_id,
+        'backup_manager_claw_id': team.backup_manager_claw_id,
+        'policy': copy.deepcopy(team.policy_json or {}),
+        'members': [row.to_dict() for row in team.members],
+        'manager_epoch_at_creation': team.manager_epoch,
+        'reconciled_at': now.isoformat() + '+08:00',
+    }
+    stable_snapshot = dict(binding.snapshot_json or {})
+    stable_snapshot.pop('reconciled_at', None)
+    desired_stable = dict(desired_snapshot)
+    desired_stable.pop('reconciled_at', None)
+    if (binding.team_version != team.version
+            or stable_snapshot != desired_stable):
+        binding.team_version = team.version
+        binding.snapshot_json = desired_snapshot
+        changed.append('team_binding')
+    if changed:
+        mission.version = int(mission.version or 1) + 1
+        add_event(sup.plan_id, 'mission_reconciled', [
+            'mission-reconciled', mission.id, mission.version,
+        ], {
+            'mission_id': mission.id,
+            'changed_fields': changed,
+            'main_claw_id': mission.main_claw_id,
+            'expires_at': mission.expires_at.isoformat() + '+08:00',
+        }, now)
+    return changed
+
+
+def ensure_team_mission(sup, now=None):
     """Create/recover the one durable Mission owned by a team Plan."""
+    now = now or _now()
     if not sup.team_id:
         return None
     plan = db.session.get(TestPlan, sup.plan_id)
@@ -1134,18 +1228,18 @@ def ensure_team_mission(sup):
         mission = db.session.get(WorkflowMission, sup.mission_id)
         if not mission:
             fail('PLAN_MISSION_INCOMPLETE', '监督记录引用的 Mission 不存在', 409)
-        allowed_workers = sorted({row.claw_id for row in team.members})
-        if mission.allowed_worker_claw_ids_json != allowed_workers:
-            mission.allowed_worker_claw_ids_json = allowed_workers
-            mission.version = int(mission.version or 1) + 1
-        sync_plan_stages(sup)
+        binding = db.session.get(AgentTeamMission, mission.id)
+        if (mission.project_id != plan.project_id or not binding
+                or binding.team_id != team.id):
+            fail('PLAN_MISSION_CONFLICT', '监督 Mission 与计划团队不兼容', 409)
+        _reconcile_team_mission(sup, mission, team, plan, now)
+        sync_plan_stages(sup, now=now)
         return mission
     mission_key = 'plan-supervisor-%s' % plan.id
     mission = WorkflowMission.query.filter_by(mission_key=mission_key).first()
     if mission:
         binding = db.session.get(AgentTeamMission, mission.id)
         if (mission.project_id != plan.project_id
-                or mission.main_claw_id != sup.orchestrator_claw_id
                 or not binding or binding.team_id != team.id):
             fail('PLAN_MISSION_CONFLICT', '稳定 Mission key 已被不兼容记录占用', 409)
     else:
@@ -1170,6 +1264,7 @@ def ensure_team_mission(sup):
                 'plan_supervision_id': plan.id,
                 'test_plan_id': plan.id,
                 'team_id': team.id,
+                'manager_claw_id': sup.orchestrator_claw_id,
                 'created_by': 'hub_plan_supervisor',
             },
             created_by_type='system', created_by_id=0,
@@ -1195,8 +1290,9 @@ def ensure_team_mission(sup):
                 'allowed_worker_claw_ids': allowed_workers,
             }, ensure_ascii=False, sort_keys=True)))
     sup.mission_id = mission.id
+    _reconcile_team_mission(sup, mission, team, plan, now)
     db.session.flush()
-    sync_plan_stages(sup)
+    sync_plan_stages(sup, now=now)
     add_event(sup.plan_id, 'mission_created', ['mission', mission.id], {
         'mission_id': mission.id,
         'stage_count': MissionStage.query.filter_by(mission_id=mission.id).count(),
@@ -1229,7 +1325,7 @@ def bootstrap(plan, team_id, claw_id, body, now=None):
         sup.next_check_at = max(now, datetime.combine(plan.start_date, time.min))
         manager_goal_snapshot(sup, persist=True, now=now)
         manager = ensure_manager_tenure(sup, now)
-        mission = ensure_team_mission(sup) if team_id else None
+        mission = ensure_team_mission(sup, now=now) if team_id else None
         add_event(plan.id, 'plan_started', ['start', plan.id], {
             'orchestrator_claw_id': claw_id,
             'mission_id': mission.id if mission else None,
@@ -1469,6 +1565,11 @@ def pump(sup, now=None):
                            '/api/v1/test-plans/{plan_id}/supervision/agent-tasks，'
                            '提交 test_task_id、稳定 command_key 和可选 instruction；'
                            'Hub 将创建可租约、可回写的普通 AgentTask。禁止用 Todo 代替正式派工。'
+                           '终态普通任务需要重试时，使用态势 actionable_gaps 提供的 '
+                           'new-attempt 端点；ready 阶段需要换人时，使用 available_actions '
+                           '提供的 reassign 端点和 expected_stage_version。不得靠自然语言假装已恢复。'
+                           '计划最终日到达 day_close 后，完成日终收口时省略 next_check_at，'
+                           '并提交 resume_condition=end_of_plan；Hub 会在计划边界自动终止监督。'
                            '禁止模型轮询；正常心跳和无变化检查不通知 Owner。'
                            'decision 返回 owner_notification.required=true 时，使用本 Agent 自己的企微通道'
                            '向 Owner 汇报；不得调用 Hub /wecom/send 或 SendRTXInfo。'}, ensure_ascii=False))
@@ -2505,6 +2606,108 @@ def create_terminal_task_attempt(sup, manager_claw_id, test_task_id, body,
         }
 
     return receipt(sup, 'create_terminal_task_attempt', body, apply)
+
+
+def reassign_ready_task_stage(sup, manager_claw_id, test_task_id, body,
+                              now=None):
+    """Move one ready one-off Stage to a capability-equivalent team member."""
+    now = now or _now()
+    if not sup or not sup.team_id or not sup.mission_id:
+        fail('PLAN_MISSION_INCOMPLETE', '计划尚未建立团队 Mission', 409)
+    team = db.session.get(AgentTeam, sup.team_id)
+    plan = db.session.get(TestPlan, sup.plan_id)
+    if (not team or team.status != 'active' or not plan
+            or plan.status != 'active'
+            or team.primary_manager_claw_id != manager_claw_id
+            or sup.orchestrator_claw_id != manager_claw_id):
+        fail('PLAN_MANAGER_REQUIRED', '仅当前团队主测试经理可以更换执行者', 403)
+    task = TestTask.query.filter_by(
+        id=test_task_id, plan_id=sup.plan_id).with_for_update().first()
+    if not task:
+        fail('TEST_TASK_NOT_FOUND', '测试任务不存在', 404)
+    if task.schedule_enabled:
+        fail('TEST_TASK_OCCURRENCE_REQUIRED', '周期任务须在具体 occurrence 上换人', 409)
+    stage = (MissionStage.query.filter_by(
+        mission_id=sup.mission_id, stage_key='test_task_%s' % task.id)
+        .order_by(MissionStage.stage_version.desc())
+        .with_for_update().first())
+    if not stage or stage.state != 'ready':
+        fail('TEST_TASK_STAGE_NOT_READY', '仅 ready 且尚未派发的 Stage 可以换人', 409)
+    active = _plan_agent_tasks(sup).get(stage.id)
+    if active and active.status in ('pending', 'running', 'waiting_condition'):
+        fail('TEST_TASK_ALREADY_DISPATCHED', '任务已有活动 AgentTask，不能直接换人', 409)
+    expected = body.get('expected_stage_version')
+    if (type(expected) is not int
+            or expected != int(stage.stage_version or 1)):
+        fail('TEST_TASK_STAGE_VERSION_CONFLICT', 'Stage 已变化，请回读后重试', 409)
+    assignee_claw_id = body.get('assignee_claw_id')
+    if (type(assignee_claw_id) is not int or assignee_claw_id <= 0
+            or assignee_claw_id == stage.assigned_claw_id):
+        fail('TEST_TASK_ASSIGNEE_INVALID', '须指定不同的有效团队执行者', 400)
+    member = AgentTeamMember.query.filter_by(
+        team_id=team.id, claw_id=assignee_claw_id,
+        role_key=stage.role_key).first()
+    claw = db.session.get(OpenClawInstance, assignee_claw_id)
+    if (not member or not claw or claw.status == 'deleted'
+            or claw.project_id != plan.project_id):
+        fail('TEST_TASK_ASSIGNEE_NOT_ALLOWED', '目标执行者不是同项目同岗位的有效团队成员', 409)
+    matched, match = _candidate_assignment_match(
+        sup, stage, None, member, claw)
+    if not matched:
+        fail('TEST_TASK_ASSIGNEE_NOT_EQUIVALENT',
+             '目标执行者不满足能力或资源约束：%s' % match.get('reason'), 409)
+    reason = str(body.get('reason') or '').strip()
+    if not reason or len(reason) > 1000:
+        fail('TEST_TASK_REASSIGN_REASON_REQUIRED', '换人须填写不超过 1000 字的原因', 400)
+
+    def apply():
+        previous_claw_id = stage.assigned_claw_id
+        stage.assigned_claw_id = assignee_claw_id
+        stage.fencing_token = int(stage.fencing_token or 0) + 1
+        stage.version = int(stage.version or 1) + 1
+        stage.last_reason_code = 'manager_reassigned_ready_stage'
+        snapshot = copy.deepcopy(stage.input_snapshot_json or {})
+        assignment = dict(snapshot.get('team_assignment') or {})
+        assignment.update({
+            'assigned_claw_id': assignee_claw_id,
+            'reassigned_from_claw_id': previous_claw_id,
+            'reassigned_by_claw_id': manager_claw_id,
+            'reason': reason,
+            'capability_match': match,
+            'reassigned_at': now.isoformat() + '+08:00',
+        })
+        snapshot['team_assignment'] = assignment
+        stage.input_snapshot_json = snapshot
+        task.assignee_claw_id = assignee_claw_id
+        task.status = 'pending'
+        task.next_action = 'manager_dispatch'
+        task.recommended_action = 'dispatch_reassigned_stage'
+        task.next_check_at = now
+        mission = db.session.get(WorkflowMission, sup.mission_id)
+        if mission:
+            mission.version = int(mission.version or 1) + 1
+        add_event(sup.plan_id, 'task_stage_reassigned', [
+            'task-stage-reassigned', stage.id, stage.fencing_token,
+        ], {
+            'test_task_id': task.id,
+            'stage_id': stage.id,
+            'stage_version': stage.stage_version,
+            'from_claw_id': previous_claw_id,
+            'to_claw_id': assignee_claw_id,
+            'reason': reason,
+            'capability_match': match,
+        }, now)
+        sup.next_check_at = now
+        return {
+            'reassigned': True,
+            'test_task_id': task.id,
+            'stage': stage.to_dict(include_input=True),
+            'from_claw_id': previous_claw_id,
+            'to_claw_id': assignee_claw_id,
+            'wake_claw_id': sup.orchestrator_claw_id,
+        }
+
+    return receipt(sup, 'reassign_ready_task_stage', body, apply)
 
 
 def _record_control_claim(agent_task, link, now):
@@ -4195,16 +4398,24 @@ def decide(sup, claw_id, body, now=None):
                      '阶段级阻断由 Hub 立即续调度，不接受 next_check_at', 400)
             check = now
         elif outcome in ('wait', 'degraded', 'retryable'):
-            if body.get('next_check_at') is None and outcome in ('degraded', 'retryable'):
+            closing = final_day_close_reached(sup, now)
+            if body.get('next_check_at') is None and closing:
+                check = None
+            elif body.get('next_check_at') is None and outcome in ('degraded', 'retryable'):
                 check = now + timedelta(seconds=60)
             else:
                 check = parse_time(body.get('next_check_at'))
-            if not now < check < ends_at(db.session.get(TestPlan, sup.plan_id)):
+            if check is not None and not (
+                    now < check < ends_at(db.session.get(TestPlan, sup.plan_id))):
                 fail('PLAN_SCHEDULE_OUT_OF_RANGE', '下一次检查须在未来且不晚于计划结束')
-            if (body.get('resume_condition') not in (None, 'timer_or_event')
+            if (body.get('resume_condition') not in (
+                    None, 'timer_or_event', 'end_of_plan')
                     or (outcome == 'wait'
-                        and body.get('resume_condition') != 'timer_or_event')):
+                        and body.get('resume_condition') not in (
+                            'timer_or_event', 'end_of_plan'))):
                 fail('PLAN_RESUME_CONDITION_REQUIRED', '须声明 timer_or_event；重要事件可提前唤醒', 400)
+            if check is None and not closing:
+                fail('PLAN_SCHEDULE_OUT_OF_RANGE', '非最终日收口必须提供下一次检查时间', 400)
         elif body.get('next_check_at') is not None:
             fail('PLAN_DECISION_INVALID', '人工阻断不能附带自动唤醒时间', 400)
         event_kinds = sorted({row.kind for row in PlanSupervisorEvent.query.filter(
@@ -4247,7 +4458,9 @@ def decide(sup, claw_id, body, now=None):
         sup.next_check_at = check
         if stage_next_check and (not sup.next_check_at or stage_next_check < sup.next_check_at):
             sup.next_check_at = stage_next_check
-        sup.resume_condition = 'timer_or_event' if check else 'manual'
+        sup.resume_condition = (
+            'timer_or_event' if check else
+            'end_of_plan' if final_day_close_reached(sup, now) else 'manual')
         observations = dict(sup.observations_json or {})
         goal = dict(observations.get('manager_goal') or {})
         if goal:
@@ -4694,7 +4907,14 @@ def stage_truth_snapshot(sup):
         MissionStage.id).all()
     ordinary_tasks = _plan_agent_tasks(sup)
     control_tasks = _plan_control_tasks(sup)
+    latest_versions = {}
+    for row in stages:
+        latest_versions[row.stage_key] = max(
+            latest_versions.get(row.stage_key, 0),
+            int(row.stage_version or 1))
     rows, gaps, pending_controls = [], [], []
+    can_create_attempt = False
+    can_reassign = False
     for stage in stages:
         task_id = _stage_task_id(stage)
         task = db.session.get(TestTask, task_id) if task_id else None
@@ -4706,7 +4926,10 @@ def stage_truth_snapshot(sup):
         active_task = ordinary or control
         snapshot = stage.input_snapshot_json or {}
         item = {
-            'stage_key': stage.stage_key, 'state': stage.state,
+            'stage_id': stage.id,
+            'stage_key': stage.stage_key,
+            'stage_version': int(stage.stage_version or 1),
+            'state': stage.state,
             'test_task_id': task_id,
             'test_task_status': task.status if task else None,
             'occurrence_id': occurrence_id,
@@ -4737,7 +4960,29 @@ def stage_truth_snapshot(sup):
             'reason_code': stage.last_reason_code or '',
             'depends_on_task_ids': snapshot.get('depends_on_task_ids') or [],
             'dependencies': snapshot.get('dependencies') or {},
+            'available_actions': [],
         }
+        is_latest = int(stage.stage_version or 1) == latest_versions.get(
+            stage.stage_key)
+        if (is_latest and task and not task.schedule_enabled
+                and stage.state == 'ready' and not (
+                    active_task and active_task.status in (
+                        'pending', 'running', 'waiting_condition'))):
+            alternate, match = _alternate_executor(
+                sup, stage, stage.assigned_claw_id)
+            if alternate:
+                item['available_actions'].append({
+                    'action': 'reassign_ready_stage',
+                    'method': 'POST',
+                    'endpoint': (
+                        '/api/v1/test-plans/%s/supervision/tasks/%s/reassign'
+                        % (sup.plan_id, task.id)),
+                    'test_task_id': task.id,
+                    'expected_stage_version': int(stage.stage_version or 1),
+                    'suggested_assignee_claw_id': alternate,
+                    'capability_match': match,
+                })
+                can_reassign = True
         rows.append(item)
         if (snapshot.get('kind') in (
                 'manager_review', 'workflow_execution_reconciliation',
@@ -4762,8 +5007,31 @@ def stage_truth_snapshot(sup):
                 or (occurrence and occurrence.status == 'waiting_condition'
                     and occurrence.next_probe_at
                     and occurrence.next_probe_at <= _now())):
-            gaps.append(item)
+            gap = dict(item)
+            if (is_latest and task and not task.schedule_enabled
+                    and stage.state in (
+                        'ready', 'dispatched', 'blocked', 'failed',
+                        'cancelled')
+                    and not (active_task and active_task.status in (
+                        'pending', 'running', 'waiting_condition'))):
+                gap['available_actions'] = list(
+                    gap.get('available_actions') or []) + [{
+                        'action': 'create_terminal_task_attempt',
+                        'method': 'POST',
+                        'endpoint': (
+                            '/api/v1/test-plans/%s/supervision/tasks/%s/'
+                            'new-attempt' % (sup.plan_id, task.id)),
+                        'test_task_id': task.id,
+                        'expected_stage_version': int(
+                            stage.stage_version or 1),
+                    }]
+                can_create_attempt = True
+            gaps.append(gap)
     actions = ['wait', 'dispatch_ready_stage', 'recover_run']
+    if can_create_attempt:
+        actions.append('create_terminal_task_attempt')
+    if can_reassign:
+        actions.append('reassign_ready_stage')
     if any(row['action_kind'] == 'manager_review'
            for row in pending_controls):
         actions.append('review_manager_action')
@@ -4830,6 +5098,8 @@ def sweep(now=None):
         guard_execution_goals(sup, now)
         if available(sup, now):
             ensure_manager_tenure(sup, now)
+            if sup.team_id:
+                ensure_team_mission(sup, now=now)
             # Scheduling is Hub-owned: materialize exactly one dated instance,
             # enforce not_before, then create a durable AgentTask for templates
             # that explicitly opted into automatic dispatch.

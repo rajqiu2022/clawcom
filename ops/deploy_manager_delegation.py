@@ -79,6 +79,7 @@ LIVE_MERGE_BASE = {
 LIVE_RELEASE_MARKERS = {
     'app/api/plan_supervision.py': (
         b'def create_test_task_recovery_attempt',
+        b'def reassign_test_task_stage',
     ),
     'app/api/workflows.py': (
         b'workflow_runtime_compatibility',
@@ -142,6 +143,21 @@ def _ensure_workflow_identity_helpers(candidate, local):
     return candidate[:insert_at] + local[start:end] + candidate[insert_at:]
 
 
+def _ensure_plan_reassign_route(candidate, local):
+    """Add only the new manager action route to a drifted live API file."""
+    marker = b'def reassign_test_task_stage'
+    if marker in candidate:
+        return candidate
+    function_at = local.index(marker)
+    start = local.rfind(b'@api_bp.route', 0, function_at)
+    end = local.index(b'@api_bp.route', function_at)
+    insert_marker = (
+        b"@api_bp.route(\n"
+        b"    '/test-plans/<int:plan_id>/supervision/occurrences/")
+    insert_at = candidate.index(insert_marker)
+    return candidate[:insert_at] + local[start:end] + candidate[insert_at:]
+
+
 def _live_merge(rel, live, local):
     """Return live production plus this release's changes, or fail closed."""
     markers = LIVE_RELEASE_MARKERS.get(rel, ())
@@ -154,25 +170,11 @@ def _live_merge(rel, live, local):
             'complete_partial_live_patch'
     revision = LIVE_MERGE_BASE[rel]
     base = _git_blob(revision, rel)
+    if rel == 'app/api/plan_supervision.py':
+        return normalise(_ensure_plan_reassign_route(live, local)), \
+            'additive_live_route'
     with tempfile.TemporaryDirectory(prefix='hub-live-merge-') as raw_dir:
         temp = Path(raw_dir)
-        if rel == 'app/api/plan_supervision.py':
-            live_path = temp / 'live.py'
-            base_path = temp / 'base.py'
-            local_path = temp / 'local.py'
-            live_path.write_bytes(live)
-            base_path.write_bytes(base)
-            local_path.write_bytes(local)
-            proc = subprocess.run(
-                ['git', 'merge-file', '-p', str(live_path), str(base_path),
-                 str(local_path)],
-                cwd=ROOT, capture_output=True)
-            if proc.returncode != 0 or b'<<<<<<<' in proc.stdout:
-                raise RuntimeError(
-                    'live three-way merge conflict for %s (rc=%s)' %
-                    (rel, proc.returncode))
-            return normalise(proc.stdout), 'three_way_live'
-
         # The worker-binding fallback hunk is already live.  Apply the other
         # Flow identity/runtime-preflight hunks to the production source.
         patch = subprocess.check_output(
