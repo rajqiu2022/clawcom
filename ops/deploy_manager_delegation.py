@@ -76,6 +76,16 @@ LIVE_MERGE_BASE = {
     'app/api/plan_supervision.py': '438dd91',
     'app/api/workflows.py': '438dd91',
 }
+LIVE_RELEASE_MARKERS = {
+    'app/api/plan_supervision.py': (
+        b'def create_test_task_recovery_attempt',
+    ),
+    'app/api/workflows.py': (
+        b'workflow_runtime_compatibility',
+        b'def _has_explicit_step_acting_identity',
+        b"config['execution_target_source']",
+    ),
+}
 
 VERIFY_SOURCE = r'''
 import json as _json
@@ -85,6 +95,8 @@ import sys
 TARGETS = _json.loads(sys.argv[1])
 report = {'compiled': [], 'compile_errors': [], 'import_ok': None}
 for rel in TARGETS:
+    if not rel.endswith('.py'):
+        continue
     path = '/opt/openclaw-web/' + rel
     try:
         py_compile.compile(path, doraise=True, cfile='/tmp/_pc.pyc')
@@ -94,10 +106,10 @@ for rel in TARGETS:
 try:
     from app.services import agent_team_manager_delegation as mod
     from app.services.worker_runtime import workflow_runtime_compatibility
-    from app.services.chat_message_presentation import present_agent_message
+    from app.services.chat_message_presentation import message_presentation
     report['import_ok'] = bool(
         mod.enabled is not None and mod.delegate
-        and workflow_runtime_compatibility and present_agent_message)
+        and workflow_runtime_compatibility and message_presentation)
     report['symbols'] = sorted(
         name for name in ('delegate', 'revoke', 'state', 'due_for_revoke',
                           'enabled', 'HISTORY_LIMIT') if hasattr(mod, name))
@@ -122,6 +134,9 @@ def _git_blob(revision, rel):
 
 def _live_merge(rel, live, local):
     """Return live production plus this release's changes, or fail closed."""
+    markers = LIVE_RELEASE_MARKERS.get(rel, ())
+    if markers and all(marker in live for marker in markers):
+        return normalise(live), 'already_live_merged'
     revision = LIVE_MERGE_BASE[rel]
     base = _git_blob(revision, rel)
     with tempfile.TemporaryDirectory(prefix='hub-live-merge-') as raw_dir:
