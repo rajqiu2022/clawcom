@@ -41,6 +41,8 @@ OCCURRENCE_TERMINAL = {
     'completed', 'blocked', 'failed', 'skipped', 'cancelled',
     'blocked_terminal', 'analysis_incomplete',
 }
+MISSION_UNSTARTED_STAGE_STATES = {'ready', 'scheduled'}
+MISSION_CLOSEOUT_CONTRACT = 'hub.plan_supervision.closeout.v1'
 PLAN_BLOCK_REASON_CODES = frozenset({
     'owner_cancelled', 'global_environment_unavailable',
     'global_release_invalid', 'global_security_or_compliance',
@@ -1021,12 +1023,14 @@ def sync_plan_stages(sup, now=None):
     """Append immutable stages for newly assigned non-terminal TestTasks."""
     if not sup or not sup.mission_id or not sup.team_id:
         return 0
+    now = now or _now()
+    if mission_expiry_state(sup, now):
+        return 0
     team = db.session.get(AgentTeam, sup.team_id)
     mission = db.session.get(WorkflowMission, sup.mission_id)
     binding = db.session.get(AgentTeamMission, sup.mission_id)
     if not team or not mission or not binding:
         fail('PLAN_MISSION_INCOMPLETE', '计划 Mission 缺少团队绑定', 409)
-    now = now or _now()
     materialize_task_occurrences(sup, now)
     existing = {}
     existing_occurrences = {}
@@ -1359,11 +1363,63 @@ def available(sup, now=None):
     now = now or _now()
     plan = db.session.get(TestPlan, sup.plan_id)
     claw = db.session.get(OpenClawInstance, sup.orchestrator_claw_id)
+    mission = (db.session.get(WorkflowMission, sup.mission_id)
+               if sup and sup.mission_id else None)
+    mission_available = bool(
+        not sup.mission_id
+        or (mission and mission.effective_status(now) == 'active'))
     return bool(plan and plan.status == 'active' and plan.project_id
                 and team_binding_valid(sup.team_id, plan.project_id, sup.orchestrator_claw_id)
                 and claw and claw.status != 'deleted' and claw.project_id == plan.project_id
+                and mission_available
                 and sup.status not in ('stopped', 'expired', 'blocked_owner_gate')
                 and datetime.combine(plan.start_date, time.min) <= now < ends_at(plan))
+
+
+def mission_expiry_state(sup, now=None):
+    """Return the authoritative Mission/Plan expiry boundary, if crossed."""
+    if not sup:
+        return None
+    now = now or _now()
+    plan = db.session.get(TestPlan, sup.plan_id)
+    mission = (db.session.get(WorkflowMission, sup.mission_id)
+               if sup.mission_id else None)
+    plan_end = ends_at(plan) if plan else None
+    mission_end = mission.expires_at if mission else None
+    reason = None
+    boundary = None
+    if mission and mission.status == 'expired':
+        reason = 'mission_status_expired'
+        boundary = mission_end or plan_end or now
+    elif mission and mission.effective_status(now) == 'expired':
+        reason = 'mission_expired'
+        boundary = mission_end
+    elif plan_end and now >= plan_end:
+        reason = 'plan_expired'
+        boundary = plan_end
+    if not reason:
+        return None
+    return {
+        'reason': reason,
+        'boundary_at': boundary,
+        'plan_ends_at': plan_end,
+        'mission_expires_at': mission_end,
+        'mission': mission,
+    }
+
+
+def require_mission_not_expired(sup, now=None):
+    """Fence every explicit manager dispatch/recovery path after expiry."""
+    now = now or _now()
+    state = mission_expiry_state(sup, now)
+    if state:
+        fail('PLAN_MISSION_EXPIRED',
+             '计划 Mission 已到期并进入收口，禁止继续派发或创建恢复阶段', 409)
+    mission = (db.session.get(WorkflowMission, sup.mission_id)
+               if sup and sup.mission_id else None)
+    if mission and mission.effective_status(now) != 'active':
+        fail('PLAN_MISSION_INACTIVE', '计划 Mission 当前不可调度', 409)
+    return mission
 
 
 def valid_plan_owner_gate(sup):
@@ -1454,6 +1510,126 @@ def stop(sup, reason):
     sup.turn_deadline_at = None
 
 
+def close_expired_mission_supervision(sup, now=None):
+    """Atomically close one expired Mission/Supervisor and persist a receipt.
+
+    Started work and terminal evidence are preserved. Only stages that never
+    started are cancelled, so a stale scheduler cannot dispatch them later.
+    """
+    now = now or _now()
+    state = mission_expiry_state(sup, now)
+    if not state:
+        return None
+    mission = state['mission']
+    boundary = state['boundary_at'] or now
+    command_key = 'mission-expiry:%s:%s' % (
+        mission.id if mission else 'none', boundary.isoformat())
+    old = PlanSupervisorReceipt.query.filter_by(
+        plan_id=sup.plan_id, action='mission_expiry_closeout',
+        command_key=command_key).first()
+    if old:
+        return dict(old.response_json, replayed=True)
+
+    previous_supervisor_status = sup.status
+    previous_mission_status = mission.status if mission else None
+    cancelled_stage_ids = []
+    preserved_stage_ids = []
+    cleared_occurrence_ids = []
+    cleared_task_ids = set()
+    stages = (MissionStage.query.filter_by(mission_id=mission.id)
+              .order_by(MissionStage.id).with_for_update().all()
+              if mission else [])
+    for stage in stages:
+        if stage.state not in MISSION_UNSTARTED_STAGE_STATES:
+            preserved_stage_ids.append(stage.id)
+            continue
+        stage.state = 'cancelled'
+        stage.last_reason_code = 'mission_expired_before_dispatch'
+        stage.fencing_token = int(stage.fencing_token or 0) + 1
+        stage.version = int(stage.version or 1) + 1
+        cancelled_stage_ids.append(stage.id)
+        task_id = _stage_task_id(stage)
+        if task_id:
+            cleared_task_ids.add(task_id)
+
+    if cancelled_stage_ids:
+        occurrences = TestTaskOccurrence.query.filter(
+            TestTaskOccurrence.mission_stage_id.in_(cancelled_stage_ids)
+        ).with_for_update().all()
+        for occurrence in occurrences:
+            if occurrence.status in ('scheduled', 'ready'):
+                occurrence.status = 'cancelled'
+            occurrence.next_action = 'mission_expired'
+            occurrence.recommended_action = 'plan_closed'
+            occurrence.next_check_at = None
+            occurrence.next_probe_at = None
+            occurrence.condition_state = 'mission_expired'
+            occurrence.resume_fencing_token = int(
+                occurrence.resume_fencing_token or 0) + 1
+            cleared_occurrence_ids.append(occurrence.id)
+        for task in TestTask.query.filter(
+                TestTask.id.in_(sorted(cleared_task_ids))).all():
+            task.next_check_at = None
+            task.next_probe_at = None
+            task.next_action = 'mission_expired'
+            task.recommended_action = 'plan_closed'
+            task.condition_state = 'mission_expired'
+
+    if mission and mission.status == 'active':
+        mission.status = 'expired'
+        mission.version = int(mission.version or 1) + 1
+    stop(sup, 'expired')
+    sup.resume_condition = 'mission_expired'
+
+    request_payload = {
+        'contract': MISSION_CLOSEOUT_CONTRACT,
+        'plan_id': sup.plan_id,
+        'mission_id': mission.id if mission else None,
+        'reason': state['reason'],
+        'boundary_at': boundary.isoformat(),
+    }
+    record = PlanSupervisorReceipt(
+        plan_id=sup.plan_id, action='mission_expiry_closeout',
+        command_key=command_key, request_hash=digest(request_payload),
+        response_json={}, created_at=now)
+    db.session.add(record)
+    db.session.flush()
+    result = {
+        'contract': MISSION_CLOSEOUT_CONTRACT,
+        'receipt_id': record.id,
+        'replayed': False,
+        'plan_id': sup.plan_id,
+        'mission_id': mission.id if mission else None,
+        'reason': state['reason'],
+        'closed_at': now.isoformat() + '+08:00',
+        'boundary_at': boundary.isoformat() + '+08:00',
+        'previous_supervisor_status': previous_supervisor_status,
+        'supervisor_status': sup.status,
+        'previous_mission_status': previous_mission_status,
+        'mission_status': mission.status if mission else None,
+        'next_check_at_cleared': sup.next_check_at is None,
+        'cancelled_unstarted_stage_ids': cancelled_stage_ids,
+        'preserved_started_or_terminal_stage_ids': preserved_stage_ids,
+        'cleared_occurrence_ids': cleared_occurrence_ids,
+        'cleared_test_task_ids': sorted(cleared_task_ids),
+    }
+    record.response_json = result
+    observations = dict(sup.observations_json or {})
+    observations['mission_closeout'] = dict(result)
+    sup.observations_json = observations
+    add_event(sup.plan_id, 'mission_supervision_closed', [
+        'mission-supervision-closed', mission.id if mission else None,
+        boundary.isoformat(),
+    ], {
+        'receipt_id': record.id,
+        'contract': MISSION_CLOSEOUT_CONTRACT,
+        'reason': state['reason'],
+        'cancelled_unstarted_stage_count': len(cancelled_stage_ids),
+        'preserved_started_or_terminal_stage_count': len(preserved_stage_ids),
+    }, now)
+    return result
+
+
 def ingest(sup):
     # Query unsequenced rows, NOT id > cursor: a lower ID may commit later.
     rows = PlanSupervisorEvent.query.filter_by(plan_id=sup.plan_id, sequence=None).order_by(
@@ -1470,6 +1646,8 @@ def pump(sup, now=None):
     """Create at most one durable wake. SSE is only an optimization after commit."""
     now = now or _now()
     plan = db.session.get(TestPlan, sup.plan_id)
+    if close_expired_mission_supervision(sup, now):
+        return None
     if not plan or now >= ends_at(plan):
         if sup.status != 'expired':
             stop(sup, 'expired')
@@ -2186,6 +2364,8 @@ def promote_and_dispatch_due_occurrences(sup, now=None):
     if not sup or not sup.mission_id:
         return []
     now = now or _now()
+    if mission_expiry_state(sup, now):
+        return []
     wake_ids = []
     rows = (TestTaskOccurrence.query.filter(
         TestTaskOccurrence.plan_id == sup.plan_id,
@@ -2378,6 +2558,7 @@ def dispatch_test_task(sup, manager_claw_id, test_task_id, body):
     """
     if not sup or not sup.team_id or not sup.mission_id:
         fail('PLAN_MISSION_INCOMPLETE', '计划尚未建立团队 Mission', 409)
+    require_mission_not_expired(sup)
     retry_value = body.get('retry_max', 1)
     if isinstance(retry_value, bool):
         fail('AGENT_TASK_RETRY_INVALID', 'retry_max 须为 0 到 3 的整数', 400)
@@ -2493,6 +2674,7 @@ def create_terminal_task_attempt(sup, manager_claw_id, test_task_id, body,
     now = now or _now()
     if not sup or not sup.team_id or not sup.mission_id:
         fail('PLAN_MISSION_INCOMPLETE', '计划尚未建立团队 Mission', 409)
+    require_mission_not_expired(sup, now)
     team = db.session.get(AgentTeam, sup.team_id)
     plan = db.session.get(TestPlan, sup.plan_id)
     if (not team or team.status != 'active' or not plan
@@ -2614,6 +2796,7 @@ def reassign_ready_task_stage(sup, manager_claw_id, test_task_id, body,
     now = now or _now()
     if not sup or not sup.team_id or not sup.mission_id:
         fail('PLAN_MISSION_INCOMPLETE', '计划尚未建立团队 Mission', 409)
+    require_mission_not_expired(sup, now)
     team = db.session.get(AgentTeam, sup.team_id)
     plan = db.session.get(TestPlan, sup.plan_id)
     if (not team or team.status != 'active' or not plan
@@ -3712,6 +3895,8 @@ def advance_occurrence_actions(sup, now=None):
     if not sup or not sup.mission_id:
         return []
     now = now or _now()
+    if mission_expiry_state(sup, now):
+        return []
     wake_ids = []
     rows = (TestTaskOccurrence.query.filter(
         TestTaskOccurrence.plan_id == sup.plan_id,
@@ -3935,6 +4120,9 @@ def advance_occurrence_actions(sup, now=None):
 def dispatch_ready_control_stages(sup, now=None):
     """Make recovery stages real work instead of data-only ready rows."""
     if not sup or not sup.mission_id:
+        return []
+    now = now or _now()
+    if mission_expiry_state(sup, now):
         return []
     active = _plan_control_tasks(sup)
     wake_ids = []
@@ -4520,6 +4708,7 @@ def mission_guard(mission_id, claw_id, body):
     if sup:
         if not enabled():
             fail('PLAN_SUPERVISION_DISABLED', '计划监督已禁用', 503)
+        require_mission_not_expired(sup)
         require_lease(sup, claw_id, lease_credentials(body))
     return sup
 
@@ -5090,6 +5279,9 @@ def sweep(now=None):
         sup = locked(plan_id)
         plan = db.session.get(TestPlan, plan_id)
         member_wake_ids = []
+        if close_expired_mission_supervision(sup, now):
+            db.session.commit()
+            continue
         repair_recoverable_state(sup, now)
         # Ordinary AgentTasks can become terminal in the timeout watcher rather
         # than through the result endpoint.  Reconcile them even while the

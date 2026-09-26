@@ -66,6 +66,8 @@ FILES = (
     'static/js/agent_teams.js',
     'templates/agent_teams.html',
 )
+REPO_FILES = ('ops/reconcile_plan_supervision.py',)
+ALL_FILES = FILES + REPO_FILES
 # Files the deploy must never replace: production runs ahead of this branch.
 GUARDED = ('app/api/__init__.py',)
 
@@ -230,8 +232,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
     stamp = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
 
-    local = {rel: (LOCAL_ROOT / rel).read_bytes() for rel in FILES}
-    missing = [rel for rel in FILES if rel not in local or not local[rel]]
+    local = {
+        rel: ((ROOT / rel) if rel in REPO_FILES else
+              (LOCAL_ROOT / rel)).read_bytes()
+        for rel in ALL_FILES
+    }
+    missing = [rel for rel in ALL_FILES if rel not in local or not local[rel]]
     if missing:
         print('LOCAL_MISSING', missing)
         return 2
@@ -251,7 +257,7 @@ def main(argv=None):
                 }
             upload = []
             candidates = {}
-            for rel in FILES:
+            for rel in ALL_FILES:
                 remote = REMOTE + '/' + rel
                 live = read(sftp, remote)
                 candidate = normalise(local[rel])
@@ -302,7 +308,7 @@ def main(argv=None):
             report['uploaded'] = upload
 
             mismatched = []
-            for rel in FILES:
+            for rel in ALL_FILES:
                 live = read(sftp, REMOTE + '/' + rel)
                 ok = live is not None and digest(live) == digest(candidates[rel])
                 report['files'][rel]['verified'] = ok
@@ -322,7 +328,8 @@ def main(argv=None):
                 output = command(
                     client,
                     'cd %s && PYTHONPATH=%s SKIP_AUTO_MIGRATE=1 ./venv/bin/python %s/verify.py %s'
-                    % (REMOTE, REMOTE, stage, shlex.quote(json.dumps(list(FILES)))),
+                    % (REMOTE, REMOTE, stage,
+                       shlex.quote(json.dumps(list(ALL_FILES)))),
                     timeout=180)
                 report['verify'] = json.loads(output.split('VERIFY ', 1)[1])
             finally:

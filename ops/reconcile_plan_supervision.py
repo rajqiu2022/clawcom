@@ -32,6 +32,8 @@ def snapshot(plan_id):
         'next_check_at': str(sup.next_check_at) if sup.next_check_at else None,
         'mission_id': mission.id if mission else None,
         'mission_status': mission.status if mission else None,
+        'mission_effective_status': (
+            mission.effective_status() if mission else None),
         'mission_main_claw_id': mission.main_claw_id if mission else None,
         'mission_expires_at': str(mission.expires_at) if mission else None,
         'allowed_worker_claw_ids': (
@@ -41,12 +43,19 @@ def snapshot(plan_id):
 
 def apply(plan_id):
     sup, _mission, before = snapshot(plan_id)
-    supervision.ensure_manager_tenure(sup)
-    supervision.ensure_team_mission(sup)
-    supervision.enqueue_schedule_ticks(sup)
+    closeout = supervision.close_expired_mission_supervision(sup)
+    if not closeout:
+        supervision.ensure_manager_tenure(sup)
+        supervision.ensure_team_mission(sup)
+        supervision.enqueue_schedule_ticks(sup)
     db.session.commit()
     _sup, _mission, after = snapshot(plan_id)
-    return {'changed': before != after, 'before': before, 'after': after}
+    return {
+        'changed': before != after,
+        'before': before,
+        'after': after,
+        'closeout_receipt': closeout,
+    }
 
 
 def main():

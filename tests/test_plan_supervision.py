@@ -376,6 +376,96 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(1, PlanSupervisorEvent.query.filter_by(
             kind='mission_reconciled').count())
 
+    def test_expired_mission_atomically_closes_supervisor_and_unstarted_work(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['ios']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='到期后不得派发', status='assigned',
+            assignee_claw_id=self.other_claw.id, task_type='performance',
+            start_date=self.plan.start_date, end_date=self.plan.end_date,
+            schedule_enabled=True, recurrence_type='daily',
+            not_before_time='00:00', auto_dispatch=False,
+            execution_role='member_work')
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'mission-closeout-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        supervisor = self.sup()
+        mission = db.session.get(WorkflowMission, supervisor.mission_id)
+        occurrence = TestTaskOccurrence.query.filter_by(
+            test_task_id=task.id).one()
+        stage = db.session.get(MissionStage, occurrence.mission_stage_id)
+        expired_at = _now() + timedelta(minutes=1)
+        mission.expires_at = expired_at
+        supervisor.next_check_at = expired_at + timedelta(hours=1)
+        task.next_check_at = expired_at + timedelta(hours=1)
+        occurrence.next_check_at = expired_at + timedelta(hours=1)
+        db.session.commit()
+
+        self.assertEqual(svc.sweep(now=expired_at), 0)
+        self.assertEqual('expired', supervisor.status)
+        self.assertIsNone(supervisor.next_check_at)
+        self.assertEqual('mission_expired', supervisor.resume_condition)
+        self.assertIsNone(supervisor.wake_message_id)
+        self.assertEqual('expired', mission.status)
+        self.assertEqual('cancelled', stage.state)
+        self.assertEqual('mission_expired_before_dispatch',
+                         stage.last_reason_code)
+        self.assertEqual('cancelled', occurrence.status)
+        self.assertIsNone(occurrence.next_check_at)
+        self.assertIsNone(task.next_check_at)
+        self.assertEqual(0, AgentTask.query.count())
+
+        receipt = PlanSupervisorReceipt.query.filter_by(
+            plan_id=self.plan.id,
+            action='mission_expiry_closeout').one()
+        self.assertEqual('hub.plan_supervision.closeout.v1',
+                         receipt.response_json['contract'])
+        self.assertTrue(receipt.response_json['next_check_at_cleared'])
+        self.assertEqual([stage.id], receipt.response_json[
+            'cancelled_unstarted_stage_ids'])
+        self.assertEqual(1, PlanSupervisorEvent.query.filter_by(
+            plan_id=self.plan.id,
+            kind='mission_supervision_closed').count())
+        self.assertEqual(receipt.id, supervisor.observations_json[
+            'mission_closeout']['receipt_id'])
+
+        self.assertEqual(svc.sweep(
+            now=expired_at + timedelta(minutes=1)), 0)
+        self.assertEqual(1, PlanSupervisorReceipt.query.filter_by(
+            plan_id=self.plan.id,
+            action='mission_expiry_closeout').count())
+
+    def test_expired_mission_rejects_direct_manager_dispatch(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['editor']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='过期派发', status='assigned',
+            assignee_claw_id=self.other_claw.id, task_type='automation')
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'mission-expired-dispatch-start',
+            'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        mission = db.session.get(WorkflowMission, self.sup().mission_id)
+        mission.expires_at = _now() - timedelta(seconds=1)
+        db.session.commit()
+
+        with self.assertRaises(svc.SupervisionError) as raised:
+            svc.dispatch_test_task(
+                self.sup(), self.main_claw.id, task.id,
+                {'command_key': 'expired-dispatch'})
+        self.assertEqual('PLAN_MISSION_EXPIRED', raised.exception.code)
+        self.assertEqual(0, AgentTask.query.count())
+
     def test_stage_truth_exposes_new_attempt_and_controlled_reassignment(self):
         team = self.scoped_team()
         candidate = OpenClawInstance(
