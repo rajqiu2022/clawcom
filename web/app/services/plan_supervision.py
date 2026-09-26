@@ -1484,7 +1484,12 @@ def add_event(plan_id, kind, key, payload=None, now=None):
     table = PlanSupervisorEvent.__table__
     statement = table.insert().values(plan_id=plan_id, event_key=digest(key), kind=kind,
                                      payload_json=payload or {}, created_at=now or _now())
-    dialect = db.session.get_bind().dialect.name
+    try:
+        dialect = db.session.get_bind().dialect.name
+    except TypeError:
+        # Flask-SQLAlchemy 2.x delegates a legacy ``bind`` keyword to older
+        # SQLAlchemy sessions. Production still carries that combination.
+        dialect = db.engine.dialect.name
     if dialect == 'sqlite':
         statement = statement.prefix_with('OR IGNORE')
     elif dialect in ('mysql', 'mariadb'):
