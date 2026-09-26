@@ -132,11 +132,26 @@ def _git_blob(revision, rel):
         ['git', 'show', '%s:web/%s' % (revision, rel)], cwd=ROOT)
 
 
+def _ensure_workflow_identity_helpers(candidate, local):
+    marker = b'def _has_explicit_step_acting_identity'
+    if marker in candidate:
+        return candidate
+    start = local.index(marker)
+    end = local.index(b'def _resolve_step_target_claw_ids', start)
+    insert_at = candidate.index(b'def _resolve_step_target_claw_ids')
+    return candidate[:insert_at] + local[start:end] + candidate[insert_at:]
+
+
 def _live_merge(rel, live, local):
     """Return live production plus this release's changes, or fail closed."""
     markers = LIVE_RELEASE_MARKERS.get(rel, ())
     if markers and all(marker in live for marker in markers):
         return normalise(live), 'already_live_merged'
+    if (rel == 'app/api/workflows.py'
+            and b'workflow_runtime_compatibility' in live
+            and b"config['execution_target_source']" in live):
+        return normalise(_ensure_workflow_identity_helpers(live, local)), \
+            'complete_partial_live_patch'
     revision = LIVE_MERGE_BASE[rel]
     base = _git_blob(revision, rel)
     with tempfile.TemporaryDirectory(prefix='hub-live-merge-') as raw_dir:
@@ -181,7 +196,8 @@ def _live_merge(rel, live, local):
             raise RuntimeError(
                 'live additive patch conflict for %s (rc=%s, rejects=%s)' %
                 (rel, proc.returncode, len(rejects)))
-        return normalise(target.read_bytes()), 'additive_live_patch'
+        candidate = _ensure_workflow_identity_helpers(target.read_bytes(), local)
+        return normalise(candidate), 'additive_live_patch'
 
 
 def command(client, cmd, timeout=120):
