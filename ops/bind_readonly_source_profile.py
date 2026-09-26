@@ -9,7 +9,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WEB = ROOT / 'web'
+WEB = ROOT if (ROOT / 'app').is_dir() else ROOT / 'web'
 if str(WEB) not in sys.path:
     sys.path.insert(0, str(WEB))
 
