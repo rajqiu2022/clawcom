@@ -57,7 +57,10 @@ def refresh_worker_releases():
     data = request.get_json(silent=True) or {}
     platform = str(data.get('platform') or 'linux-x86_64').strip().lower()
     if platform not in SUPPORTED_PLATFORMS:
-        return jsonify({'error': 'platform 仅支持 linux-x86_64 / windows-x86_64'}), 400
+        return jsonify({
+            'error': 'platform 仅支持 linux-x86_64 / windows-x86_64 / '
+                     'macos-arm64 / macos-x86_64',
+        }), 400
     try:
         record, created = import_latest_candidate(actor, platform=platform)
         _audit('import', record, actor, {

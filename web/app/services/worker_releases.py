@@ -23,7 +23,17 @@ from app.models import WorkerRelease
 _SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
 _COMMIT_RE = re.compile(r'^[0-9a-f]{40}$')
 PLATFORM = 'linux-x86_64'
-SUPPORTED_PLATFORMS = ('linux-x86_64', 'windows-x86_64')
+SUPPORTED_PLATFORMS = (
+    'linux-x86_64',
+    'windows-x86_64',
+    'macos-arm64',
+    'macos-x86_64',
+)
+POSIX_PLATFORM_INSTALL_ENTRIES = {
+    'linux-x86_64': 'scripts/install-linux.sh',
+    'macos-arm64': 'scripts/install-macos.sh',
+    'macos-x86_64': 'scripts/install-macos.sh',
+}
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_PACKAGE_FILES = 5000
 MAX_PACKAGE_FILE_BYTES = 64 * 1024 * 1024
@@ -90,8 +100,10 @@ def _digest_file_value(path: Path, expected_name: str) -> str:
     return parts[0]
 
 
-def _verify_linux_archive(path: Path, package_sha256: str,
-                          source_commit: str) -> None:
+def _verify_posix_archive(path: Path, package_sha256: str,
+                          source_commit: str, platform: str) -> None:
+    install_entry = POSIX_PLATFORM_INSTALL_ENTRIES[platform]
+    label = 'Linux' if platform == PLATFORM else 'macOS'
     expected_manifest_name = 'claw-worker/release/package-manifest.json'
     with tarfile.open(path, 'r:gz') as archive:
         members = archive.getmembers()
@@ -99,19 +111,19 @@ def _verify_linux_archive(path: Path, package_sha256: str,
                 or any(item.size < 0 or item.size > MAX_PACKAGE_FILE_BYTES
                        for item in members)
                 or sum(item.size for item in members) > MAX_PACKAGE_TOTAL_BYTES):
-            raise ValueError('Worker Linux 归档超过安全大小限制')
+            raise ValueError(f'Worker {label} 归档超过安全大小限制')
         names = [member.name for member in members]
         if len(names) != len(set(names)) or expected_manifest_name not in names:
-            raise ValueError('Worker Linux 归档成员非法')
+            raise ValueError(f'Worker {label} 归档成员非法')
         payload = {}
         package_bytes = None
         for member in members:
             pure = PurePosixPath(member.name)
             if pure.is_absolute() or '..' in pure.parts or not member.isfile():
-                raise ValueError('Worker Linux 归档包含不安全成员')
+                raise ValueError(f'Worker {label} 归档包含不安全成员')
             stream = archive.extractfile(member)
             if stream is None:
-                raise ValueError('Worker Linux 归档成员不可读')
+                raise ValueError(f'Worker {label} 归档成员不可读')
             content = stream.read()
             if member.name == expected_manifest_name:
                 if len(content) > 4 * 1024 * 1024:
@@ -123,8 +135,8 @@ def _verify_linux_archive(path: Path, package_sha256: str,
         raise ValueError('Worker package Manifest SHA-256 不匹配')
     package = _json_object(package_bytes, 'package-manifest.json')
     if (package.get('source', {}).get('commit') != source_commit
-            or package.get('target', {}).get('platform') != PLATFORM
-            or package.get('target', {}).get('install_entry') != 'scripts/install-linux.sh'):
+            or package.get('target', {}).get('platform') != platform
+            or package.get('target', {}).get('install_entry') != install_entry):
         raise ValueError('Worker package 来源或安装入口不匹配')
     files = package.get('files')
     if not isinstance(files, list):
@@ -219,7 +231,9 @@ def verify_catalog_release(release_root: str | Path,
                            release_id: str | None = None,
                            platform: str = PLATFORM) -> VerifiedWorkerRelease:
     if platform not in SUPPORTED_PLATFORMS:
-        raise ValueError('Worker release platform 仅支持 linux-x86_64 / windows-x86_64')
+        raise ValueError(
+            'Worker release platform 仅支持 linux-x86_64 / windows-x86_64 / '
+            'macos-arm64 / macos-x86_64')
     root = Path(release_root).resolve(strict=True)
     index_path = _safe_child(root, 'index.json', 'Worker release index')
     index_digest = _digest_file_value(
@@ -266,7 +280,7 @@ def verify_catalog_release(release_root: str | Path,
             or not isinstance(size, int) or size <= 0
             or size > MAX_ARTIFACT_BYTES
             or entry.get('install_entry') != (
-                'scripts/install-linux.sh' if platform == PLATFORM else 'Setup.ps1')):
+                POSIX_PLATFORM_INSTALL_ENTRIES.get(platform, 'Setup.ps1'))):
         raise ValueError(f'Worker {platform} artifact 元数据非法')
     artifact_path = _safe_child(release_path.parent, entry.get('artifact'),
                                 'Worker Linux artifact')
@@ -286,8 +300,8 @@ def verify_catalog_release(release_root: str | Path,
             or platform_manifest.get('artifact', {}).get('size') != size
             or not _SHA256_RE.fullmatch(package_sha)):
         raise ValueError('Worker platform Manifest 绑定非法')
-    if platform == PLATFORM:
-        _verify_linux_archive(artifact_path, package_sha, commit)
+    if platform in POSIX_PLATFORM_INSTALL_ENTRIES:
+        _verify_posix_archive(artifact_path, package_sha, commit, platform)
     else:
         _verify_windows_archive(artifact_path, package_sha, commit)
     return VerifiedWorkerRelease(

@@ -66,6 +66,13 @@ class WorkerReleaseContractTest(unittest.TestCase):
         self.assertTrue(release.artifact_path.is_file())
 
     @unittest.skipUnless(WORKER_CATALOG.is_dir(), 'local Worker release catalog unavailable')
+    def test_latest_intel_macos_worker_catalog_is_importable(self):
+        release = verify_catalog_release(
+            WORKER_CATALOG, platform='macos-x86_64')
+        self.assertEqual('macos-x86_64', release.platform)
+        self.assertTrue(release.artifact_path.is_file())
+
+    @unittest.skipUnless(WORKER_CATALOG.is_dir(), 'local Worker release catalog unavailable')
     def test_tampered_worker_artifact_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             copied = Path(temp) / 'worker-releases'
@@ -146,6 +153,18 @@ class WorkerReleaseImportTest(unittest.TestCase):
         self.assertEqual(linux.release_id, windows.release_id)
         self.assertEqual('windows-x86_64', windows.platform)
         self.assertEqual(2, WorkerRelease.query.count())
+
+    def test_import_macos_release_is_platform_scoped(self):
+        environment = {
+            'WORKER_RELEASE_REPOSITORY_PATH': str(WORKER_CATALOG.parents[1]),
+            'WORKER_RELEASE_STORE_ROOT': str(Path(self.temp.name) / 'store'),
+        }
+        with patch.dict('os.environ', environment, clear=False):
+            macos, created = import_latest_candidate(
+                'admin', platform='macos-x86_64')
+        self.assertTrue(created)
+        self.assertEqual('macos-x86_64', macos.platform)
+        self.assertEqual(1, WorkerRelease.query.count())
 
 
 if __name__ == '__main__':
