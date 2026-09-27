@@ -935,9 +935,10 @@ def manage_system_context_policy(claw_id):
     if not isinstance(data, dict) or set(data) != {'policy'}:
         return jsonify({'error': '请求体仅允许 policy 字段'}), 400
 
-    if not ((cfg and (cfg.agent_type or '').lower() == 'codex') or
+    runtime = _worker_runtime_payload(claw, cfg, query_if_missing=False)
+    if not (runtime.get('has_worker_runtime') or
             _has_registered_codex_agent(claw)):
-        return jsonify({'error': '仅已注册的 Codex Worker 可启用该策略'}), 400
+        return jsonify({'error': '仅已注册或已上报身份的 Worker 可启用该策略'}), 400
 
     raw_policy = data.get('policy')
     try:

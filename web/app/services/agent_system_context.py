@@ -23,6 +23,7 @@ _SYSTEM_CONTEXT_POLICY_FIELDS = {
     'deepflow_release_required_definition_ids',
     'remote_source_id',
     'remote_source_ids',
+    'tapd_mcp',
 }
 _CODEX_ORCHESTRATOR_FIELDS = {
     'enabled', 'session_key', 'resume_on', 'allowed_next_flows',
@@ -34,6 +35,10 @@ _WORKFLOW_TERMINAL_STATUSES = {
 }
 _SESSION_KEY_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9:._-]{0,127}')
 _REMOTE_SOURCE_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+_SECRET_KEY_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_-]{0,119}')
+_TAPD_MCP_FIELDS = {
+    'enabled', 'credential_secret_key', 'server', 'read_only',
+}
 _CODEX_HUB_API_DISCOVERY_RULE = {
     'id': 0,
     'name': 'codex_claw_hub_delayed_tool_discovery',
@@ -294,6 +299,24 @@ def validate_system_context_policy(value: Any) -> dict[str, Any]:
         result['deepflow_release_required_definition_ids'] = _definition_ids(
             value.get('deepflow_release_required_definition_ids'),
             field='deepflow_release_required_definition_ids')
+    if 'tapd_mcp' in value:
+        tapd = value.get('tapd_mcp')
+        if (not isinstance(tapd, dict)
+                or set(tapd) - _TAPD_MCP_FIELDS
+                or tapd.get('enabled') is not True
+                or tapd.get('read_only') is not True
+                or tapd.get('server') != 'tapd'):
+            raise ValueError('tapd_mcp policy is invalid')
+        credential_secret_key = _as_text(
+            tapd.get('credential_secret_key'))
+        if _SECRET_KEY_RE.fullmatch(credential_secret_key) is None:
+            raise ValueError('tapd_mcp.credential_secret_key is invalid')
+        result['tapd_mcp'] = {
+            'enabled': True,
+            'credential_secret_key': credential_secret_key,
+            'server': 'tapd',
+            'read_only': True,
+        }
     if 'codex_orchestrator' not in value:
         return result
     raw = value.get('codex_orchestrator')
@@ -366,7 +389,8 @@ def _resolve_workflow_policy(
             int(item) for item in workflow_create_definition_ids
             if type(item) is int and item > 0
         })
-    if _as_text(runtime_agent_type).lower() != 'codex' or configured_policy is None:
+    is_codex = _as_text(runtime_agent_type).lower() == 'codex'
+    if configured_policy is None:
         if acl_ids is None:
             return {}, []
         return {'allowed_workflow_create_definition_ids': acl_ids}, []
@@ -374,8 +398,17 @@ def _resolve_workflow_policy(
         configured = validate_system_context_policy(configured_policy)
     except ValueError:
         return {'allowed_workflow_create_definition_ids': []}, [
-            'CODEX_ORCHESTRATOR_POLICY_INVALID',
+            ('CODEX_ORCHESTRATOR_POLICY_INVALID'
+             if is_codex else 'SYSTEM_CONTEXT_POLICY_INVALID'),
         ]
+    if not is_codex:
+        result = (
+            {'allowed_workflow_create_definition_ids': acl_ids}
+            if acl_ids is not None else {}
+        )
+        if configured.get('tapd_mcp'):
+            result['tapd_mcp'] = dict(configured['tapd_mcp'])
+        return result, []
     if acl_ids is None:
         return {'allowed_workflow_create_definition_ids': []}, [
             'WORKFLOW_CREATE_GRANTS_UNAVAILABLE',
@@ -388,6 +421,8 @@ def _resolve_workflow_policy(
     result: dict[str, Any] = {
         'allowed_workflow_create_definition_ids': effective_ids,
     }
+    if configured.get('tapd_mcp'):
+        result['tapd_mcp'] = dict(configured['tapd_mcp'])
     if configured.get('remote_source_ids'):
         result['remote_source_ids'] = list(
             configured['remote_source_ids'])

@@ -382,6 +382,44 @@ class AgentSystemContextTests(unittest.TestCase):
             [12, 25, 26], policy['allowed_workflow_create_definition_ids'])
         self.assertNotIn('codex_orchestrator', policy)
 
+    def test_codebuddy_receives_tapd_readonly_policy_without_secret_value(self):
+        payload = agent_system_context.build_agent_system_context(
+            self.claw,
+            'codebuddy',
+            [],
+            [],
+            workflow_create_definition_ids=[],
+            configured_policy={
+                'allowed_workflow_create_definition_ids': [],
+                'tapd_mcp': {
+                    'enabled': True,
+                    'credential_secret_key': 'tapd-mcp',
+                    'server': 'tapd',
+                    'read_only': True,
+                },
+            },
+        )
+
+        self.assertEqual({
+            'enabled': True,
+            'credential_secret_key': 'tapd-mcp',
+            'server': 'tapd',
+            'read_only': True,
+        }, payload['system_context']['policy']['tapd_mcp'])
+
+    def test_tapd_policy_rejects_inline_credentials(self):
+        with self.assertRaises(ValueError):
+            agent_system_context.validate_system_context_policy({
+                'allowed_workflow_create_definition_ids': [],
+                'tapd_mcp': {
+                    'enabled': True,
+                    'credential_secret_key': 'tapd-mcp',
+                    'server': 'tapd',
+                    'read_only': True,
+                    'access_token': 'must-not-be-stored',
+                },
+            })
+
     def test_policy_validator_rejects_unknown_or_secret_fields(self):
         with self.assertRaises(ValueError):
             agent_system_context.validate_system_context_policy({
