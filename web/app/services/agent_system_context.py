@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import urllib.parse
 from typing import Any, Iterable
 
 
@@ -37,7 +38,12 @@ _SESSION_KEY_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9:._-]{0,127}')
 _REMOTE_SOURCE_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
 _SECRET_KEY_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_-]{0,119}')
 _TAPD_MCP_FIELDS = {
-    'enabled', 'credential_secret_key', 'server', 'read_only',
+    'enabled', 'endpoint', 'credential_secret_key', 'server', 'read_only',
+    'allow_insecure_http', 'credential_env', 'credential_header',
+    'credential_prefix',
+}
+_TAPD_CREDENTIAL_ENV_NAMES = {
+    'TAPD_ACCESS_TOKEN', 'TAPD_TOKEN', 'TAIHU_TOKEN', 'TAI_APP_TOKEN',
 }
 _CODEX_HUB_API_DISCOVERY_RULE = {
     'id': 0,
@@ -307,16 +313,52 @@ def validate_system_context_policy(value: Any) -> dict[str, Any]:
                 or tapd.get('read_only') is not True
                 or tapd.get('server') != 'tapd'):
             raise ValueError('tapd_mcp policy is invalid')
+        endpoint = _as_text(tapd.get('endpoint'))
+        parsed_endpoint = urllib.parse.urlsplit(endpoint)
+        if (not endpoint
+                or len(endpoint.encode('utf-8', 'replace')) > 2048
+                or parsed_endpoint.scheme not in {'https', 'http'}
+                or not parsed_endpoint.hostname
+                or parsed_endpoint.username is not None
+                or parsed_endpoint.password is not None
+                or parsed_endpoint.query
+                or parsed_endpoint.fragment
+                or (parsed_endpoint.scheme == 'http'
+                    and tapd.get('allow_insecure_http') is not True)):
+            raise ValueError('tapd_mcp.endpoint is invalid')
         credential_secret_key = _as_text(
             tapd.get('credential_secret_key'))
         if _SECRET_KEY_RE.fullmatch(credential_secret_key) is None:
             raise ValueError('tapd_mcp.credential_secret_key is invalid')
+        credential_env = _as_text(
+            tapd.get('credential_env') or 'TAPD_ACCESS_TOKEN')
+        if credential_env not in _TAPD_CREDENTIAL_ENV_NAMES:
+            raise ValueError('tapd_mcp.credential_env is invalid')
+        credential_header = _as_text(
+            tapd.get('credential_header') or 'Authorization')
+        if re.fullmatch(
+                r'[A-Za-z0-9][A-Za-z0-9-]{0,63}',
+                credential_header) is None:
+            raise ValueError('tapd_mcp.credential_header is invalid')
+        credential_prefix = tapd.get('credential_prefix', 'Bearer ')
+        if (not isinstance(credential_prefix, str)
+                or len(credential_prefix) > 32
+                or any(ord(char) < 32 or ord(char) > 126
+                       for char in credential_prefix)
+                or any(char in credential_prefix for char in '${}')):
+            raise ValueError('tapd_mcp.credential_prefix is invalid')
         result['tapd_mcp'] = {
             'enabled': True,
+            'endpoint': endpoint,
             'credential_secret_key': credential_secret_key,
             'server': 'tapd',
             'read_only': True,
+            'credential_env': credential_env,
+            'credential_header': credential_header,
+            'credential_prefix': credential_prefix,
         }
+        if parsed_endpoint.scheme == 'http':
+            result['tapd_mcp']['allow_insecure_http'] = True
     if 'codex_orchestrator' not in value:
         return result
     raw = value.get('codex_orchestrator')

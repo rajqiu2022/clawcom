@@ -393,18 +393,26 @@ class AgentSystemContextTests(unittest.TestCase):
                 'allowed_workflow_create_definition_ids': [],
                 'tapd_mcp': {
                     'enabled': True,
+                    'endpoint': 'https://mcp-oa.tapd.woa.com/mcp/',
                     'credential_secret_key': 'tapd-mcp',
                     'server': 'tapd',
                     'read_only': True,
+                    'credential_env': 'TAPD_ACCESS_TOKEN',
+                    'credential_header': 'X-Tapd-Access-Token',
+                    'credential_prefix': '',
                 },
             },
         )
 
         self.assertEqual({
             'enabled': True,
+            'endpoint': 'https://mcp-oa.tapd.woa.com/mcp/',
             'credential_secret_key': 'tapd-mcp',
             'server': 'tapd',
             'read_only': True,
+            'credential_env': 'TAPD_ACCESS_TOKEN',
+            'credential_header': 'X-Tapd-Access-Token',
+            'credential_prefix': '',
         }, payload['system_context']['policy']['tapd_mcp'])
 
     def test_tapd_policy_rejects_inline_credentials(self):
@@ -413,12 +421,47 @@ class AgentSystemContextTests(unittest.TestCase):
                 'allowed_workflow_create_definition_ids': [],
                 'tapd_mcp': {
                     'enabled': True,
+                    'endpoint': 'https://mcp-oa.tapd.woa.com/mcp/',
                     'credential_secret_key': 'tapd-mcp',
                     'server': 'tapd',
                     'read_only': True,
                     'access_token': 'must-not-be-stored',
                 },
             })
+
+    def test_tapd_policy_requires_safe_endpoint_contract(self):
+        base = {
+            'enabled': True,
+            'credential_secret_key': 'tapd-mcp',
+            'server': 'tapd',
+            'read_only': True,
+        }
+        for endpoint in (
+                '', 'ftp://mcp.example.test/mcp',
+                'https://user:password@mcp.example.test/mcp',
+                'https://mcp.example.test/mcp?token=secret'):
+            with (self.subTest(endpoint=endpoint),
+                  self.assertRaisesRegex(ValueError, 'tapd_mcp.endpoint')):
+                agent_system_context.validate_system_context_policy({
+                    'allowed_workflow_create_definition_ids': [],
+                    'tapd_mcp': {**base, 'endpoint': endpoint},
+                })
+        with self.assertRaisesRegex(ValueError, 'tapd_mcp.endpoint'):
+            agent_system_context.validate_system_context_policy({
+                'allowed_workflow_create_definition_ids': [],
+                'tapd_mcp': {
+                    **base, 'endpoint': 'http://mcp.example.test/mcp',
+                },
+            })
+        policy = agent_system_context.validate_system_context_policy({
+            'allowed_workflow_create_definition_ids': [],
+            'tapd_mcp': {
+                **base,
+                'endpoint': 'http://mcp.example.test/mcp',
+                'allow_insecure_http': True,
+            },
+        })
+        self.assertTrue(policy['tapd_mcp']['allow_insecure_http'])
 
     def test_policy_validator_rejects_unknown_or_secret_fields(self):
         with self.assertRaises(ValueError):
