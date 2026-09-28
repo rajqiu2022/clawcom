@@ -26,7 +26,12 @@ def _capture(session, flush_context):
             return new or any(inspect(obj).attrs[name].history.has_changes() for name in names)
         if isinstance(obj, TestTask) and changed(('status', 'assignee_claw_id', 'progress')):
             plans = [obj.plan_id]
-            kind, key = 'task_changed', ['task', obj.id, obj.status, obj.updated_at]
+            blocked_transition = (
+                obj.status in ('blocked', 'failed')
+                and (new or inspect(obj).attrs.status.history.has_changes())
+            )
+            kind = 'task_blocked' if blocked_transition else 'task_changed'
+            key = ['task', obj.id, obj.status, obj.updated_at]
             payload = {'task_id': obj.id, 'status': obj.status, 'progress': obj.progress}
         elif isinstance(obj, TestPlan) and changed(('status', 'start_date', 'end_date', 'project_id')):
             plans = [obj.id]

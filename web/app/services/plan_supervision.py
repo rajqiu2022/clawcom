@@ -12,6 +12,7 @@ from app.models import (AgentTask, AgentTeam, AgentTeamMember,
                         AgentTeamMemberTask, AgentTeamMission,
                         AnalysisRefreshBatch, AuditLog, CapabilityGap,
                         ClawMessage, ClawSidecarConfig, MissionStage,
+                        ChatRoomMember,
                         OpenClawInstance,
                         RequirementItem, TestIteration, TestPlan, TestReport,
                         TestPlanReport, TestTask, TestTaskOccurrence, WorkflowMission,
@@ -142,8 +143,9 @@ def team_capability(team_id):
             },
             'owner_notification_policy': {
                 'enabled': True,
-                'delivery': 'agent_wecom',
-                'fallback': 'hub_receipt_only',
+                'delivery': 'hub_dual_outbox',
+                'channels': ['agent_wecom_outbox', 'team_chat'],
+                'fallback': 'independent_channel_retry',
                 'notify_on': [
                     'blocked', 'run_terminal', 'heartbeat_anomaly', 'stale',
                     'occurrence_owner_gate', 'occurrence_due_unresolved',
@@ -1838,7 +1840,7 @@ def ingest(sup):
     for row in rows:
         sup.cursor += 1
         row.sequence = sup.cursor
-        if row.kind in ('task_changed', 'run_changed', 'step_progress', 'run_created'):
+        if row.kind in ('task_changed', 'task_blocked', 'run_changed', 'step_progress', 'run_created'):
             sup.last_progress_at = max(sup.last_progress_at or row.created_at, row.created_at)
     return rows
 
@@ -1908,7 +1910,7 @@ def pump(sup, now=None):
     urgent = PlanSupervisorEvent.query.filter(
         PlanSupervisorEvent.plan_id == sup.plan_id,
         PlanSupervisorEvent.sequence > sup.acknowledged_cursor,
-        PlanSupervisorEvent.kind.in_(['run_terminal', 'heartbeat_anomaly', 'stale',
+        PlanSupervisorEvent.kind.in_(['task_blocked', 'run_terminal', 'heartbeat_anomaly', 'stale',
                                       'supervisor_lease_expired', 'plan_started',
                                       'occurrence_owner_gate',
                                       'occurrence_recovery_failed',
@@ -1917,7 +1919,8 @@ def pump(sup, now=None):
                                       'supervision_report_updated',
                                       'control_action_terminal',
                                       'run_recovery_required',
-                                      'run_reconciliation_resolved'])).first()
+                                      'run_reconciliation_resolved',
+                                      'task_agent_terminal'])).first()
     if not due and not urgent and sup.last_wake_at and now < sup.last_wake_at + timedelta(seconds=60):
         return None
     if due:
@@ -1947,11 +1950,15 @@ def pump(sup, now=None):
                            '终态普通任务需要重试时，使用态势 actionable_gaps 提供的 '
                            'new-attempt 端点；ready 阶段需要换人时，使用 available_actions '
                            '提供的 reassign 端点和 expected_stage_version。不得靠自然语言假装已恢复。'
+                           '普通任务 blocked/failed 事件必须立即核对原因并提交可回读动作：'
+                           '自救、规范转派给已验证具备能力的成员，或请求人工协助；'
+                           '不能仅回复 wait 让该阻断静默悬置。'
                            '计划最终日到达 day_close 后，完成日终收口时省略 next_check_at，'
                            '并提交 resume_condition=end_of_plan；Hub 会在计划边界自动终止监督。'
                            '禁止模型轮询；正常心跳和无变化检查不通知 Owner。'
-                           'decision 返回 owner_notification.required=true 时，使用本 Agent 自己的企微通道'
-                           '向 Owner 汇报；不得调用 Hub /wecom/send 或 SendRTXInfo。'}, ensure_ascii=False))
+                           '阻断通知由 Hub 分别写入企微和团队聊天室持久队列；'
+                           '你只需在自救恢复、换人重派、请求 Owner 协助中选择并执行动作，'
+                           '不要重复发送通知，也不得调用 Hub /wecom/send 或 SendRTXInfo。'}, ensure_ascii=False))
     db.session.add(message)
     db.session.flush()
     sup.wake_message_id = message.id
@@ -2916,6 +2923,27 @@ def create_terminal_task_attempt(sup, manager_claw_id, test_task_id, body,
             and (type(expected) is not int
                  or expected != int(previous.stage_version or 1))):
         fail('TEST_TASK_STAGE_VERSION_CONFLICT', 'Stage 已变化，请回读后重试', 409)
+    assignee_claw_id = body.get('assignee_claw_id', task.assignee_claw_id)
+    if type(assignee_claw_id) is not int or assignee_claw_id <= 0:
+        fail('TEST_TASK_ASSIGNEE_INVALID', '恢复尝试须指定有效执行者', 400)
+    capability_match = None
+    if assignee_claw_id != task.assignee_claw_id:
+        member = AgentTeamMember.query.filter_by(
+            team_id=team.id,
+            claw_id=assignee_claw_id,
+            role_key=previous.role_key,
+        ).first()
+        claw = db.session.get(OpenClawInstance, assignee_claw_id)
+        if (not member or not claw or claw.status == 'deleted'
+                or claw.project_id != plan.project_id):
+            fail('TEST_TASK_ASSIGNEE_NOT_ALLOWED',
+                 '目标执行者不是同项目同岗位的有效团队成员', 409)
+        matched, capability_match = _candidate_assignment_match(
+            sup, previous, None, member, claw)
+        if not matched:
+            fail('TEST_TASK_ASSIGNEE_NOT_EQUIVALENT',
+                 '目标执行者不满足能力或资源约束：%s'
+                 % capability_match.get('reason'), 409)
 
     def apply():
         previous.state = 'cancelled'
@@ -2929,13 +2957,18 @@ def create_terminal_task_attempt(sup, manager_claw_id, test_task_id, body,
             'reason': reason,
             'created_at': now.isoformat() + '+08:00',
             'created_by_claw_id': manager_claw_id,
+            'assigned_claw_id': assignee_claw_id,
+            'reassigned_from_claw_id': (
+                task.assignee_claw_id
+                if assignee_claw_id != task.assignee_claw_id else None),
+            'capability_match': capability_match,
         }
         new_stage = MissionStage(
             mission_id=sup.mission_id,
             stage_key=stage_key,
             stage_version=int(previous.stage_version or 1) + 1,
             role_key=previous.role_key,
-            assigned_claw_id=task.assignee_claw_id,
+            assigned_claw_id=assignee_claw_id,
             state='ready',
             input_snapshot_json=snapshot,
             evidence_refs_json=list(previous.evidence_refs_json or []),
@@ -2960,6 +2993,8 @@ def create_terminal_task_attempt(sup, manager_claw_id, test_task_id, body,
                 'input_snapshot': row.input_snapshot_json or {},
             } for row in stages])
             mission.version = int(mission.version or 1) + 1
+        previous_assignee = task.assignee_claw_id
+        task.assignee_claw_id = assignee_claw_id
         task.status = 'pending'
         task.condition_state = 'recovery_ready'
         task.next_action = 'manager_dispatch'
@@ -2977,6 +3012,8 @@ def create_terminal_task_attempt(sup, manager_claw_id, test_task_id, body,
             'stage_key': new_stage.stage_key,
             'stage_version': new_stage.stage_version,
             'reason': reason,
+            'from_claw_id': previous_assignee,
+            'to_claw_id': assignee_claw_id,
         }, now)
         sup.next_check_at = now
         return {
@@ -4362,6 +4399,119 @@ def dispatch_ready_control_stages(sup, now=None):
     return sorted(set(wake_ids))
 
 
+def _queue_block_notifications(sup, source_key, summary, now=None,
+                               test_task_id=None, agent_task_id=None):
+    """Persist independent WeCom and Team-chat notifications for a blocker."""
+    now = now or _now()
+    if not sup or not sup.orchestrator_claw_id:
+        return {'wecom_message_id': None, 'chat_message_id': None}
+    stable = hashlib.sha256(
+        ('%s:%s:%s' % (sup.plan_id, source_key, summary)).encode('utf-8')
+    ).hexdigest()[:24]
+    notification_id = 'plan-block:%s:%s' % (sup.plan_id, stable)
+    text = '计划 #%s 出现执行阻断' % sup.plan_id
+    if test_task_id:
+        text += '，任务 #%s' % test_task_id
+    text += '：%s' % (str(summary or '请经理处理')[:2000])
+    payload = json.dumps({
+        'schema': 1,
+        'notification_id': notification_id,
+        'plan_id': sup.plan_id,
+        'test_task_id': test_task_id,
+        'agent_task_id': agent_task_id,
+        'text': text,
+    }, ensure_ascii=False, sort_keys=True)
+    wecom = ClawMessage.query.filter_by(
+        claw_id=sup.orchestrator_claw_id,
+        msg_type='owner_notification',
+        direction='to_claw',
+        content=payload,
+    ).first()
+    if wecom is None:
+        wecom = ClawMessage(
+            claw_id=sup.orchestrator_claw_id,
+            sender_name='Hub Plan Supervisor',
+            msg_type='owner_notification',
+            direction='to_claw',
+            status='pending',
+            content=payload,
+        )
+        db.session.add(wecom)
+        db.session.flush()
+
+    event_key = digest([
+        'block-notification', notification_id,
+    ])
+    add_event(sup.plan_id, 'block_notification_queued', [
+        'block-notification', notification_id,
+    ], {
+        'notification_id': notification_id,
+        'wecom_message_id': wecom.id,
+        'chat_message_id': None,
+        'chat_status': 'pending' if sup.team_id else 'not_applicable',
+        'chat_attempts': 0,
+        'text': text,
+        'test_task_id': test_task_id,
+        'agent_task_id': agent_task_id,
+        'channels': ['agent_wecom_outbox', 'team_chat'],
+    }, now)
+    event = PlanSupervisorEvent.query.filter_by(
+        plan_id=sup.plan_id, event_key=event_key).first()
+    if event and sup.team_id:
+        _deliver_block_chat(sup, event, now)
+    return {
+        'notification_id': notification_id,
+        'wecom_message_id': wecom.id,
+        'chat_message_id': (event.payload_json or {}).get('chat_message_id') if event else None,
+    }
+
+
+def _deliver_block_chat(sup, event, now=None):
+    """Retry one channel independently; a chat failure cannot drop WeCom."""
+    now = now or _now()
+    payload = dict(event.payload_json or {})
+    if payload.get('chat_status') in ('sent', 'not_applicable'):
+        return
+    attempts = int(payload.get('chat_attempts') or 0)
+    retry_at = payload.get('chat_next_attempt_at')
+    if retry_at and datetime.fromisoformat(retry_at) > now:
+        return
+    try:
+        with db.session.begin_nested():
+            team = db.session.get(AgentTeam, sup.team_id)
+            if not team or team.status != 'active':
+                raise LookupError('team_not_active')
+            from app.services.agent_team_chat import sync_team_room
+            from app.services.chat_rooms import post_message
+            room = sync_team_room(team)
+            sender = ChatRoomMember.query.filter_by(
+                room_id=room.id,
+                claw_id=sup.orchestrator_claw_id,
+                status='active',
+            ).first()
+            if sender is None:
+                raise LookupError('manager_room_member_missing')
+            message, _ = post_message(
+                room, sender,
+                '[Hub阻断通知] ' + str(payload.get('text') or ''),
+                payload['notification_id'], [], commit=False,
+            )
+        payload.update(chat_status='sent', chat_message_id=message.id,
+                       chat_attempts=attempts + 1, chat_next_attempt_at=None)
+    except Exception as exc:
+        payload.update(
+            chat_status='retryable', chat_attempts=attempts + 1,
+            chat_error=type(exc).__name__,
+            chat_next_attempt_at=(now + timedelta(seconds=min(
+                900, 30 * (2 ** min(attempts, 5))))).isoformat(),
+        )
+        current_app.logger.warning(
+            'Plan block chat notification deferred: plan_id=%s event_id=%s error=%s',
+            sup.plan_id, event.id, type(exc).__name__,
+        )
+    event.payload_json = payload
+
+
 def record_agent_task_terminal(agent_task, result, status, now=None):
     control = _agent_task_control_link(agent_task)
     if control:
@@ -4455,6 +4605,19 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
         'occurrence_status': occurrence.status if occurrence else None,
         'summary': summary,
     }, now)
+    if projected not in ('completed', 'skipped'):
+        _queue_block_notifications(
+            sup,
+            'agent-task:%s:attempt:%s' % (
+                agent_task.task_id, int(agent_task.attempt_no or 0)),
+            summary or stage.last_reason_code,
+            now=now,
+            test_task_id=task.id,
+            agent_task_id=agent_task.task_id,
+        )
+        # The event is urgent and the next pump must create a fresh manager
+        # Turn immediately, independent of the ordinary schedule tick.
+        sup.next_check_at = now
     if occurrence and occurrence.owner_gate:
         add_event(sup.plan_id, 'occurrence_owner_gate', [
             'occurrence-owner-gate-terminal', occurrence.id,
@@ -4820,6 +4983,14 @@ def decide(sup, claw_id, body, now=None):
             'occurrence_owner_gate', 'occurrence_due_unresolved',
             'supervision_report_updated', 'control_action_terminal')
             if kind in event_kinds)
+        notification_receipt = None
+        if notification_reasons:
+            notification_receipt = _queue_block_notifications(
+                sup,
+                'manager-decision:%s' % body.get('command_key'),
+                summary,
+                now=now,
+            )
         sup.acknowledged_cursor = sup.lease_cursor
         sup.last_decision_json = {
             'outcome': effective_outcome,
@@ -4895,8 +5066,10 @@ def decide(sup, claw_id, body, now=None):
                 'required': bool(notification_reasons),
                 'reasons': notification_reasons,
                 'event_kinds': event_kinds,
-                'delivery': 'agent_wecom',
-                'status': ('agent_action_required' if notification_reasons
+                'delivery': 'hub_dual_outbox',
+                'channels': ['agent_wecom_outbox', 'team_chat'],
+                'receipts': notification_receipt or {},
+                'status': ('queued' if notification_reasons
                            else 'not_required'),
             },
         }
@@ -5305,6 +5478,7 @@ def stage_truth_snapshot(sup):
     rows, gaps, pending_controls = [], [], []
     can_create_attempt = False
     can_reassign = False
+    can_request_help = False
     for stage in stages:
         task_id = _stage_task_id(stage)
         task = db.session.get(TestTask, task_id) if task_id else None
@@ -5416,12 +5590,37 @@ def stage_truth_snapshot(sup):
                             stage.stage_version or 1),
                     }]
                 can_create_attempt = True
+                alternate, match = _alternate_executor(
+                    sup, stage, stage.assigned_claw_id)
+                if alternate:
+                    gap['available_actions'].append({
+                        'action': 'create_reassigned_task_attempt',
+                        'method': 'POST',
+                        'endpoint': (
+                            '/api/v1/test-plans/%s/supervision/tasks/%s/'
+                            'new-attempt' % (sup.plan_id, task.id)),
+                        'test_task_id': task.id,
+                        'expected_stage_version': int(
+                            stage.stage_version or 1),
+                        'suggested_assignee_claw_id': alternate,
+                        'capability_match': match,
+                    })
+                    can_reassign = True
+                gap['available_actions'].append({
+                    'action': 'request_owner_assistance',
+                    'contract': 'decision.owner_notification.required=true',
+                    'test_task_id': task.id,
+                })
+                can_request_help = True
             gaps.append(gap)
     actions = ['wait', 'dispatch_ready_stage', 'recover_run']
     if can_create_attempt:
         actions.append('create_terminal_task_attempt')
     if can_reassign:
         actions.append('reassign_ready_stage')
+        actions.append('create_reassigned_task_attempt')
+    if can_request_help:
+        actions.append('request_owner_assistance')
     if any(row['action_kind'] == 'manager_review'
            for row in pending_controls):
         actions.append('review_manager_action')
@@ -5488,6 +5687,11 @@ def sweep(now=None):
             db.session.commit()
             continue
         repair_recoverable_state(sup, now)
+        for notice in PlanSupervisorEvent.query.filter_by(
+                plan_id=plan_id, kind='block_notification_queued').order_by(
+                PlanSupervisorEvent.id).all():
+            if (notice.payload_json or {}).get('chat_status') in ('pending', 'retryable'):
+                _deliver_block_chat(sup, notice, now)
         # Ordinary AgentTasks can become terminal in the timeout watcher rather
         # than through the result endpoint.  Reconcile them even while the
         # supervisor is waiting/blocked so stale "running" UI never persists.

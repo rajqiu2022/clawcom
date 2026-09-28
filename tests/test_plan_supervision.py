@@ -8,6 +8,7 @@ import test_workflow_missions_api as fixtures
 from app import db
 from app.models import (AgentTask, AgentTeam, AgentTeamMember, AgentTeamMission, MissionStage,
                         OpenClawInstance, TestPlan, TestTask, TestTaskOccurrence, ClawMessage,
+                        ChatRoomMessage,
                         WorkflowRun, WorkflowRunStep,
                         WorkflowMission, WorkflowMissionDispatch, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
@@ -602,6 +603,13 @@ class PlanSupervisionTest(unittest.TestCase):
                          retry['expected_stage_version'])
         self.assertIn('create_terminal_task_attempt',
                       truth['allowed_actions'])
+        self.assertIn('request_owner_assistance', truth['allowed_actions'])
+        reassigned_attempt = next(
+            item for item in gap['available_actions']
+            if item['action'] == 'create_reassigned_task_attempt')
+        self.assertEqual(
+            self.other_claw.id,
+            reassigned_attempt['suggested_assignee_claw_id'])
 
     def test_manager_goal_brief_and_commitment_audit_are_durable(self):
         team = self.scoped_team()
@@ -687,7 +695,7 @@ class PlanSupervisionTest(unittest.TestCase):
                 mission_id=self.sup().mission_id, stage_key=stage_key).one().state)
         self.wake.assert_any_call(self.other_claw.id)
 
-    def test_key_decision_delegates_owner_notice_to_agent_and_quiet_wait_stays_silent(self):
+    def test_key_decision_queues_owner_notice_and_quiet_wait_stays_silent(self):
         self.start()
         self.claim()
         blocked = {
@@ -700,11 +708,18 @@ class PlanSupervisionTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.json)
             self.assertEqual(
                 response.json['owner_notification']['status'],
-                'agent_action_required')
+                'queued')
             self.assertEqual(
                 response.json['owner_notification']['reasons'], ['blocked'])
             self.assertEqual(
-                response.json['owner_notification']['delivery'], 'agent_wecom')
+                response.json['owner_notification']['delivery'],
+                'hub_dual_outbox')
+            self.assertIsNotNone(
+                response.json['owner_notification']['receipts'][
+                    'wecom_message_id'])
+            self.assertEqual(
+                1, ClawMessage.query.filter_by(
+                    msg_type='owner_notification').count())
             send.assert_not_called()
             replay = self.post('decision', blocked)
             self.assertEqual(replay.status_code, 200, replay.json)
@@ -725,6 +740,31 @@ class PlanSupervisionTest(unittest.TestCase):
             self.assertEqual(
                 response.json['owner_notification']['status'], 'not_required')
             send.assert_not_called()
+
+    def test_block_chat_retry_does_not_roll_back_wecom_queue(self):
+        team = self.scoped_team()
+        start = self.post('start', {
+            'command_key': 'chat-retry-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id,
+        })
+        self.assertEqual(start.status_code, 200, start.json)
+        self.agent()
+        sup = self.sup()
+        with patch('app.services.chat_rooms.post_message', side_effect=RuntimeError('offline')):
+            receipt = svc._queue_block_notifications(
+                sup, 'test-task:269', 'TAPD 暂不可用', test_task_id=269)
+            db.session.commit()
+        notice = PlanSupervisorEvent.query.filter_by(
+            plan_id=self.plan.id, kind='block_notification_queued').one()
+        self.assertIsNotNone(receipt['wecom_message_id'])
+        self.assertEqual('pending', db.session.get(
+            ClawMessage, receipt['wecom_message_id']).status)
+        self.assertEqual('retryable', notice.payload_json['chat_status'])
+        svc._deliver_block_chat(
+            sup, notice, now=_now() + timedelta(minutes=1))
+        db.session.commit()
+        self.assertEqual('sent', notice.payload_json['chat_status'])
+        self.assertIsNotNone(notice.payload_json['chat_message_id'])
 
     def test_stage_block_keeps_supervisor_running_while_undispatched_stages_remain(self):
         team = self.scoped_team()
@@ -1136,6 +1176,20 @@ class PlanSupervisionTest(unittest.TestCase):
         db.session.commit()
         self.assertEqual(expire_stale_ordinary_tasks(), 1)
         self.assertEqual(task.status, 'blocked')
+        self.assertEqual(
+            1,
+            ClawMessage.query.filter_by(
+                claw_id=self.main_claw.id,
+                msg_type='owner_notification',
+            ).count(),
+        )
+        self.assertEqual(1, ChatRoomMessage.query.count())
+        urgent = svc.PlanSupervisorEvent.query.filter_by(
+            plan_id=self.plan.id,
+            kind='task_agent_terminal',
+        ).one()
+        self.assertIsNotNone(urgent)
+        self.assertLessEqual(self.sup().next_check_at, _now())
 
         recovered = self.client.post(
             self.base + '/tasks/%s/new-attempt' % task.id,
@@ -1912,6 +1966,25 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(result.status_code, 200, result.json)
         self.assertEqual(self.sup().status, 'pending')
         self.assertGreater(self.sup().cursor, self.sup().acknowledged_cursor)
+
+    def test_blocked_task_bypasses_supervisor_cooldown(self):
+        self.start()
+        self.claim()
+        result = self.post('decision', self.wait_body())
+        self.assertEqual(result.status_code, 200, result.json)
+        sup = self.sup()
+        self.assertIsNone(sup.wake_message_id)
+        self.assertGreater(sup.next_check_at, _now() + timedelta(minutes=1))
+        svc.add_event(self.plan.id, 'task_blocked', ['task', 269, 'blocked'], {
+            'task_id': 269, 'status': 'blocked',
+        })
+        db.session.commit()
+        target = svc.pump(sup)
+        db.session.commit()
+        self.assertEqual(self.main_claw.id, target)
+        self.assertIsNotNone(self.sup().wake_message_id)
+        wake = db.session.get(ClawMessage, self.sup().wake_message_id)
+        self.assertIn('自救', json.loads(wake.content)['instruction'])
 
     def test_late_lower_event_id_is_sequenced_not_skipped(self):
         self.start()
