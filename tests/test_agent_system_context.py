@@ -117,6 +117,7 @@ class AgentSystemContextTests(unittest.TestCase):
         runtime = payload['system_context']['policy']['manager_runtime']
         self.assertEqual('test_manager', identity['role'])
         self.assertEqual('专用测试经理 / Owner 代理', identity['title'])
+        self.assertEqual('持续版本质量管理', identity['objective'])
         self.assertEqual(1, identity['team_id'])
         self.assertEqual('team-manager:1', runtime['session_scope'])
         self.assertEqual([244], runtime['required_skill_ids'])

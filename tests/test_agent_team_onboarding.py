@@ -58,6 +58,7 @@ class TeamOnboardingTest(unittest.TestCase):
         db.session.commit()
         context = build_team_context(self.other_claw)
         self.assertEqual(len(context), 1)
+        self.assertEqual(context[0]['objective'], '修复验证')
         self.assertEqual(context[0]['primary_manager_claw_id'], self.main_claw.id)
         self.assertIn('test_executor', context[0]['self']['roles'])
         self.assertNotIn('primary_manager', context[0]['self']['roles'])

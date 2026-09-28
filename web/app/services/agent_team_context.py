@@ -32,7 +32,8 @@ def team_snapshot(team, claw_id, names):
             value['effective_role_key'] = 'test_executor'
         return value
     return {
-        'team_id': team.id, 'name': team.name, 'project_id': team.project_id,
+        'team_id': team.id, 'name': team.name, 'objective': team.objective,
+        'project_id': team.project_id,
         'version': team.version, 'status': team.status,
         'self': identity(claw_id),
         'primary_manager_claw_id': team.primary_manager_claw_id,
