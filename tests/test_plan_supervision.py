@@ -1958,6 +1958,41 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertEqual(svc.sweep(now=due + timedelta(seconds=1)), 0)
         self.assertEqual(self.sup().wake_message_id, msg)
 
+    def test_one_plan_scan_failure_does_not_starve_another_due_plan(self):
+        self.start()
+        self.claim()
+        self.post('decision', self.wait_body())
+        second = TestPlan(
+            name='Second supervised plan', project_id=self.project.id,
+            start_date=_now().date(),
+            end_date=(_now() + timedelta(days=7)).date(),
+            status='draft', created_by=self.admin.username)
+        db.session.add(second)
+        db.session.commit()
+        path = '/api/v1/test-plans/%s/supervision' % second.id
+        started = self.client.post(path + '/start', json={
+            'command_key': 'second-start',
+            'orchestrator_claw_id': self.main_claw.id,
+        }, headers=self._headers())
+        self.assertEqual(started.status_code, 200, started.json)
+        second_sup = db.session.get(PlanSupervisor, second.id)
+        due = self.sup().next_check_at
+        second_sup.status = 'pending'
+        second_sup.wake_message_id = None
+        second_sup.next_check_at = due
+        db.session.commit()
+        original = svc._sweep_one_plan
+
+        def fail_first(plan_id, now):
+            if plan_id == self.plan.id:
+                raise RuntimeError('one plan projection failed')
+            return original(plan_id, now)
+
+        with patch.object(svc, '_sweep_one_plan', side_effect=fail_first):
+            self.assertEqual(svc.sweep(now=due), 2)
+        self.assertIsNotNone(self.sup().wake_message_id)
+        self.assertIsNotNone(db.session.get(PlanSupervisor, second.id).wake_message_id)
+
     def test_expired_lease_can_recover_but_old_turn_cannot_write(self):
         self.start()
         first = self.claim()

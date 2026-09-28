@@ -9,6 +9,7 @@ import json
 import re
 import secrets
 from datetime import timedelta
+from flask import current_app
 
 from app import db
 from app.models import AgentTask, AuditLog, WorkerRelease, _now
@@ -436,6 +437,7 @@ def expire_stale_ordinary_tasks(now=None, limit=500):
         AgentTask.status.in_(('pending', 'running')),
     ).order_by(AgentTask.id.asc()).limit(limit).all())
     changed = 0
+    changed_plan_task_ids = []
     for task in rows:
         payload = task_payload(task)
         try:
@@ -462,6 +464,7 @@ def expire_stale_ordinary_tasks(now=None, limit=500):
                 'retryable': False,
             }, 'failed', now=now)
             changed += 1
+            changed_plan_task_ids.append(task.id)
             continue
         expired = False
         if task.status == 'running':
@@ -511,6 +514,15 @@ def expire_stale_ordinary_tasks(now=None, limit=500):
             }, 'failed', now=now)
         task.version = int(task.version or 0) + 1
         changed += 1
+        changed_plan_task_ids.append(task.id)
     if changed:
         db.session.commit()
+        for task_id in changed_plan_task_ids:
+            try:
+                plan_supervision.pump_agent_task_plan(
+                    db.session.get(AgentTask, task_id), now=now)
+            except Exception:
+                db.session.rollback()
+                current_app.logger.exception(
+                    'AgentTask timeout plan wake failed for task_id=%s', task_id)
     return changed

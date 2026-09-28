@@ -91,8 +91,36 @@ def task_window(start, end):
                 func.coalesce(TestTask.end_date, TestTask.start_date) >= start)
 
 
-def overview(team, period, raw_date, limit, offset):
+TASK_STATUS_FILTERS = {
+    'pending': (('assigned', 'pending'), ('scheduled', 'ready', 'dispatched')),
+    'in_progress': (('in_progress',), ('running',)),
+    'waiting_condition': (('waiting_condition',), ('waiting_condition',)),
+    'completed': (('completed',), ('completed',)),
+    'blocked': (('blocked', 'failed'), ('blocked', 'failed', 'analysis_incomplete')),
+    'skipped': (('skipped',), ('skipped',)),
+}
+
+
+def task_status_condition(task_status, anchor, overdue):
+    if task_status == 'overdue':
+        return overdue
+    template_statuses, occurrence_statuses = TASK_STATUS_FILTERS[task_status]
+    occurrence_match = db.session.query(TestTaskOccurrence.id).filter(
+        TestTaskOccurrence.test_task_id == TestTask.id,
+        TestTaskOccurrence.occurrence_date == anchor,
+        TestTaskOccurrence.status.in_(occurrence_statuses),
+    ).exists()
+    return or_(
+        and_(TestTask.schedule_enabled.is_(False),
+             TestTask.status.in_(template_statuses)),
+        and_(TestTask.schedule_enabled.is_(True), occurrence_match),
+    )
+
+
+def overview(team, period, raw_date, limit, offset, task_status='all'):
     _, manage = access(team)
+    if task_status not in ('all', 'overdue', *TASK_STATUS_FILTERS):
+        raise TeamError('TEAM_PLAN_STATUS_INVALID', '无效的任务状态筛选', 400)
     anchor, start, end = date_window(period, raw_date)
     plans = TestPlan.query.filter_by(team_id=team.id, project_id=team.project_id)
     tasks = TestTask.query.join(TestPlan).filter(TestPlan.team_id == team.id,
@@ -102,13 +130,16 @@ def overview(team, period, raw_date, limit, offset):
             and_(TestPlan.start_date <= end, TestPlan.end_date >= start),
             TestPlan.tasks.any(task_window(start, end))))
         tasks = tasks.filter(TestPlan.status != 'archived', task_window(start, end))
-    total = plans.count()
     counts = dict(tasks.with_entities(TestTask.status, func.count(TestTask.id)).group_by(TestTask.status).all())
     overdue = and_(TestTask.end_date < _now().date(), TestTask.status.notin_(['completed', 'skipped']))
     summary = {'total': sum(counts.values()), 'completed': counts.get('completed', 0),
                'in_progress': counts.get('in_progress', 0), 'blocked': counts.get('blocked', 0),
                'pending': counts.get('pending', 0) + counts.get('assigned', 0),
                'skipped': counts.get('skipped', 0), 'overdue': tasks.filter(overdue).count()}
+    if task_status != 'all':
+        tasks = tasks.filter(task_status_condition(task_status, anchor, overdue))
+        plans = plans.filter(TestPlan.id.in_(tasks.with_entities(TestTask.plan_id)))
+    total = plans.count()
     rows = plans.order_by(TestPlan.start_date.desc(), TestPlan.id.desc()).offset(offset).limit(limit).all()
     ids = [p.id for p in rows]
     from app.models_plan_supervision import PlanSupervisor
@@ -253,7 +284,8 @@ def overview(team, period, raw_date, limit, offset):
                        'end_date': str(t.end_date) if t.end_date else None,
                        'overdue': bool(t.end_date and t.end_date < _now().date() and t.status not in ('completed', 'skipped'))}
                       for t, name in preview]})
-    return {'team_id': team.id, 'can_manage': manage, 'period': period, 'date': str(anchor),
+    return {'team_id': team.id, 'can_manage': manage, 'period': period,
+            'task_status': task_status, 'date': str(anchor),
             'start_date': str(start) if period != 'all' else None,
             'end_date': str(end) if period != 'all' else None, 'timezone': 'Asia/Shanghai',
             'items': items, 'total': total, 'limit': limit, 'offset': offset, 'summary': summary}

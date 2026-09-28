@@ -5722,19 +5722,95 @@ def stage_truth_snapshot(sup):
     }
 
 
+def _sweep_one_plan(plan_id, now):
+    """Commit one Plan independently; never let auxiliary scans starve others."""
+    sup = locked(plan_id)
+    if not sup:
+        return 0
+    member_wake_ids = []
+    if close_expired_mission_supervision(sup, now):
+        db.session.commit()
+        return 0
+    repair_recoverable_state(sup, now)
+    for notice in PlanSupervisorEvent.query.filter_by(
+            plan_id=plan_id, kind='block_notification_queued').order_by(
+            PlanSupervisorEvent.id).all():
+        if (notice.payload_json or {}).get('chat_status') in ('pending', 'retryable'):
+            _deliver_block_chat(sup, notice, now)
+    # Ordinary AgentTasks can become terminal in the timeout watcher rather
+    # than through the result endpoint. Reconcile even while waiting/blocked.
+    reconcile_ordinary_task_truth(sup, now)
+    guard_execution_goals(sup, now)
+    if available(sup, now):
+        ensure_manager_tenure(sup, now)
+        if sup.team_id:
+            ensure_team_mission(sup, now=now)
+        # Scheduling is Hub-owned: materialize one dated instance and enforce
+        # not_before before creating a durable AgentTask.
+        sync_plan_stages(sup, now=now)
+        member_wake_ids = promote_and_dispatch_due_occurrences(sup, now=now)
+        member_wake_ids.extend(advance_occurrence_actions(sup, now=now))
+        member_wake_ids.extend(dispatch_ready_control_stages(sup, now=now))
+        member_wake_ids = sorted(set(member_wake_ids))
+        enqueue_schedule_ticks(sup, now)
+        reconcile_plan_truth(sup, now)
+        refresh_supervision_report(sup, now)
+        observations = dict(sup.observations_json or {})
+        for task in TestTask.query.filter_by(plan_id=plan_id).all():
+            payload = {'task_id': task.id, 'status': task.status}
+            add_event(plan_id, 'task_changed', ['task', task.id, task.status, task.updated_at], payload, now)
+        runs = (WorkflowRun.query.join(WorkflowMissionDispatch,
+            WorkflowMissionDispatch.workflow_run_id == WorkflowRun.id).filter(
+                WorkflowMissionDispatch.mission_id == sup.mission_id).all()) if sup.mission_id else []
+        for run in runs:
+            terminal = run.status not in RUN_ACTIVE_STATUSES
+            kind = 'run_terminal' if terminal else 'run_changed'
+            add_event(plan_id, kind, ['run', run.id, run.status, run.current_step_id, run.updated_at],
+                      {'run_id': run.id, 'status': run.status}, now)
+            if terminal:
+                record_workflow_terminal(run.id, now)
+                continue
+            for step in WorkflowRunStep.query.filter_by(run_id=run.id).all():
+                if step.status not in ('running', 'retrying'):
+                    continue
+                signature = digest([step.status, step.progress_phase, step.progress_percent,
+                                    step.progress_message, step.progress_json])
+                observation_key = 'step:%s' % step.id
+                old = observations.get(observation_key)
+                progress = (datetime.fromisoformat(old['changed_at']) if old and old['signature'] == signature
+                            else now if old else step.progress_at or step.started_at or run.created_at)
+                observations[observation_key] = {'signature': signature, 'changed_at': progress.isoformat()}
+                add_event(plan_id, 'step_progress', ['step-observation', step.id, signature],
+                          {'run_id': run.id, 'step_id': step.step_id, 'progress_percent': step.progress_percent}, now)
+                heartbeat = step.heartbeat_at or step.started_at or run.created_at
+                if progress and now - progress > timedelta(minutes=10):
+                    add_event(plan_id, 'stale', ['stale', step.id, progress],
+                              {'run_id': run.id, 'step_id': step.step_id}, now)
+                if heartbeat and now - heartbeat > timedelta(minutes=3):
+                    add_event(plan_id, 'heartbeat_anomaly', ['heartbeat', step.id, heartbeat],
+                              {'run_id': run.id, 'step_id': step.step_id}, now)
+        sup.observations_json = observations
+    target = pump(sup, now)
+    db.session.commit()
+    if target:
+        wake(target)
+    for member_claw_id in member_wake_ids:
+        wake(member_claw_id)
+    return int(bool(target)) + len(member_wake_ids)
+
+
 def sweep(now=None):
     """Backfill source state/health and pump due outboxes; never invoke a model."""
     if not enabled():
         return 0
     now = now or _now()
     count = 0
-    # Mission expiry is authoritative even when the legacy Supervisor row is
-    # already terminal or was never created. Close these rows before any Plan
-    # bootstrap/dispatch logic can observe them as runnable.
-    close_all_expired_missions(now)
-    # Repair active scoped team Plans that were activated before the durable
-    # supervision contract was deployed.  This is intentionally bounded and
-    # creates no Workflow Run; it only establishes the unique control chain.
+    try:
+        close_all_expired_missions(now)
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception(
+            'Expired Mission closeout failed; continuing independent Plan scans')
     candidates = TestPlan.query.filter(
         TestPlan.status == 'active', TestPlan.team_id.isnot(None),
         TestPlan.start_date <= now.date(), TestPlan.end_date >= now.date(),
@@ -5757,91 +5833,33 @@ def sweep(now=None):
             if target:
                 count += 1
                 wake(target)
-        except SupervisionError:
+        except Exception:
             db.session.rollback()
             current_app.logger.exception(
                 'Plan supervisor bootstrap failed for plan_id=%s', plan.id)
     ids = [r.plan_id for r in PlanSupervisor.query.filter(
         PlanSupervisor.status.notin_(['expired', 'stopped'])).order_by(
             PlanSupervisor.plan_id).all()]
-    # One small transaction per Plan. The caller's scheduler already serializes scans.
     for plan_id in ids:
-        sup = locked(plan_id)
-        plan = db.session.get(TestPlan, plan_id)
-        member_wake_ids = []
-        if close_expired_mission_supervision(sup, now):
-            db.session.commit()
-            continue
-        repair_recoverable_state(sup, now)
-        for notice in PlanSupervisorEvent.query.filter_by(
-                plan_id=plan_id, kind='block_notification_queued').order_by(
-                PlanSupervisorEvent.id).all():
-            if (notice.payload_json or {}).get('chat_status') in ('pending', 'retryable'):
-                _deliver_block_chat(sup, notice, now)
-        # Ordinary AgentTasks can become terminal in the timeout watcher rather
-        # than through the result endpoint.  Reconcile them even while the
-        # supervisor is waiting/blocked so stale "running" UI never persists.
-        reconcile_ordinary_task_truth(sup, now)
-        guard_execution_goals(sup, now)
-        if available(sup, now):
-            ensure_manager_tenure(sup, now)
-            if sup.team_id:
-                ensure_team_mission(sup, now=now)
-            # Scheduling is Hub-owned: materialize exactly one dated instance,
-            # enforce not_before, then create a durable AgentTask for templates
-            # that explicitly opted into automatic dispatch.
-            sync_plan_stages(sup, now=now)
-            member_wake_ids = promote_and_dispatch_due_occurrences(
-                sup, now=now)
-            member_wake_ids.extend(advance_occurrence_actions(sup, now=now))
-            member_wake_ids.extend(dispatch_ready_control_stages(sup, now=now))
-            member_wake_ids = sorted(set(member_wake_ids))
-            enqueue_schedule_ticks(sup, now)
-            reconcile_plan_truth(sup, now)
-            refresh_supervision_report(sup, now)
-            observations = dict(sup.observations_json or {})
-            for task in TestTask.query.filter_by(plan_id=plan_id).all():
-                payload = {'task_id': task.id, 'status': task.status}
-                add_event(plan_id, 'task_changed', ['task', task.id, task.status, task.updated_at], payload, now)
-            runs = (WorkflowRun.query.join(WorkflowMissionDispatch,
-                WorkflowMissionDispatch.workflow_run_id == WorkflowRun.id).filter(
-                    WorkflowMissionDispatch.mission_id == sup.mission_id).all()) if sup.mission_id else []
-            for run in runs:
-                terminal = run.status not in RUN_ACTIVE_STATUSES
-                kind = 'run_terminal' if terminal else 'run_changed'
-                add_event(plan_id, kind, ['run', run.id, run.status, run.current_step_id, run.updated_at],
-                          {'run_id': run.id, 'status': run.status}, now)
-                if terminal:
-                    record_workflow_terminal(run.id, now)
-                    continue
-                for step in WorkflowRunStep.query.filter_by(run_id=run.id).all():
-                    if step.status not in ('running', 'retrying'):
-                        continue
-                    signature = digest([step.status, step.progress_phase, step.progress_percent,
-                                        step.progress_message, step.progress_json])
-                    observation_key = 'step:%s' % step.id
-                    old = observations.get(observation_key)
-                    progress = (datetime.fromisoformat(old['changed_at']) if old and old['signature'] == signature
-                                else now if old else step.progress_at or step.started_at or run.created_at)
-                    observations[observation_key] = {'signature': signature, 'changed_at': progress.isoformat()}
-                    add_event(plan_id, 'step_progress', ['step-observation', step.id, signature],
-                              {'run_id': run.id, 'step_id': step.step_id, 'progress_percent': step.progress_percent}, now)
-                    heartbeat = step.heartbeat_at or step.started_at or run.created_at
-                    if progress and now - progress > timedelta(minutes=10):
-                        add_event(plan_id, 'stale', ['stale', step.id, progress],
-                                  {'run_id': run.id, 'step_id': step.step_id}, now)
-                    if heartbeat and now - heartbeat > timedelta(minutes=3):
-                        add_event(plan_id, 'heartbeat_anomaly', ['heartbeat', step.id, heartbeat],
-                                  {'run_id': run.id, 'step_id': step.step_id}, now)
-            sup.observations_json = observations
-        target = pump(sup, now)
-        db.session.commit()
-        if target:
-            count += 1
-            wake(target)
-        for member_claw_id in member_wake_ids:
-            count += 1
-            wake(member_claw_id)
+        try:
+            count += _sweep_one_plan(plan_id, now)
+        except Exception:
+            db.session.rollback()
+            current_app.logger.exception(
+                'Plan supervisor scan failed for plan_id=%s', plan_id)
+            # The health/dispatch projection may fail for one Plan. Preserve
+            # the durable due time and still attempt its minimal, fenced wake.
+            try:
+                sup = locked(plan_id)
+                target = pump(sup, now) if sup else None
+                db.session.commit()
+                if target:
+                    count += 1
+                    wake(target)
+            except Exception:
+                db.session.rollback()
+                current_app.logger.exception(
+                    'Plan supervisor due wake failed for plan_id=%s', plan_id)
     return count
 
 

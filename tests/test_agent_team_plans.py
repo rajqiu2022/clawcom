@@ -1,6 +1,6 @@
 """Explicit team ownership, manager authoring, schedule projections and no dispatch."""
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 import test_agent_teams_api as fixtures
 from app import db
@@ -8,7 +8,7 @@ from app.models import (AgentTask, AgentTeam, AgentTeamKnowledgeResource,
                         AgentTeamSkillResource, ClawMessage, KnowledgeEntry,
                         MissionStage, Skill, TestPlan, TestPlanReport,
                         TestReport, TestTask, TestTaskOccurrence,
-                        TestTaskReport, WorkflowRun, WorkflowMission)
+                        TestTaskReport, WorkflowRun, WorkflowMission, _now)
 from app.models_plan_supervision import PlanSupervisor
 
 
@@ -69,6 +69,8 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertIn('循环依赖', cycle.json['error'])
 
     def test_manager_binds_task_references_and_agent_task_receives_manifest(self):
+        self.body.update(start_date=str(_now().date()),
+                         end_date=str(_now().date() + timedelta(days=7)))
         self.app.config.update(
             PLAN_SUPERVISION_ENABLED=True,
             PLAN_SUPERVISION_TEAM_IDS=str(self.team_id),
@@ -185,6 +187,8 @@ class AgentTeamPlansTest(unittest.TestCase):
             occurrence.to_dict()['references']['reports'][0]['id'], report.id)
 
     def test_active_team_plan_bootstraps_supervisor_mission_and_task_stage(self):
+        self.body.update(start_date=str(_now().date()),
+                         end_date=str(_now().date() + timedelta(days=7)))
         self.app.config.update(
             PLAN_SUPERVISION_ENABLED=True,
             PLAN_SUPERVISION_TEAM_IDS=str(self.team_id),
@@ -295,6 +299,48 @@ class AgentTeamPlansTest(unittest.TestCase):
             {'daily', 'spanning', 'sunday', 'next week', 'undated', 'deadline only'})
         self.assertEqual(all_tasks['items'][0]['url'],'/testplans?plan_id=%s' % plan['id'])
 
+    def test_task_status_filter_matches_before_plan_pagination(self):
+        first = self.create(name='blocked plan')
+        second = self.create(name='completed plan')
+        db.session.add_all([
+            TestTask(plan_id=first['id'], name='failed task', status='blocked',
+                     start_date=date(2026, 9, 21), end_date=date(2026, 9, 21)),
+            TestTask(plan_id=second['id'], name='done task', status='completed',
+                     start_date=date(2026, 9, 21), end_date=date(2026, 9, 21)),
+        ])
+        db.session.commit()
+        result = self.client.get(
+            self.url + '?period=day&date=2026-09-21&task_status=blocked&limit=1',
+            headers=self._headers())
+        self.assertEqual(result.status_code, 200, result.json)
+        self.assertEqual(result.json['total'], 1)
+        self.assertEqual(result.json['summary']['total'], 2)
+        self.assertEqual(result.json['items'][0]['id'], first['id'])
+        self.assertEqual([task['name'] for task in result.json['items'][0]['tasks']],
+                         ['failed task'])
+
+    def test_task_status_filter_uses_scheduled_occurrence_not_template(self):
+        plan = self.create(name='recurring')
+        task = TestTask(plan_id=plan['id'], name='daily check', status='assigned',
+                        schedule_enabled=True, recurrence_type='daily',
+                        assignee_claw_id=self.other_claw.id,
+                        start_date=date(2026, 9, 21), end_date=date(2026, 9, 27))
+        db.session.add(task)
+        db.session.flush()
+        db.session.add(TestTaskOccurrence(
+            plan_id=plan['id'], test_task_id=task.id,
+            occurrence_date=date(2026, 9, 21),
+            not_before_at=datetime(2026, 9, 21, 10),
+            status='running', assignee_claw_id=self.other_claw.id))
+        db.session.commit()
+        path = self.url + '?period=day&date=2026-09-21&task_status='
+        running = self.client.get(path + 'in_progress', headers=self._headers())
+        self.assertEqual(running.status_code, 200, running.json)
+        self.assertEqual(running.json['total'], 1)
+        self.assertEqual(running.json['items'][0]['tasks'][0]['status'], 'running')
+        pending = self.client.get(path + 'pending', headers=self._headers())
+        self.assertEqual(pending.json['total'], 0)
+
     def test_overview_exposes_report_count_and_legacy_report(self):
         first = self.create(name='has report rows')
         second = self.create(name='legacy report only')
@@ -385,7 +431,8 @@ class AgentTeamPlansTest(unittest.TestCase):
         result = self.client.get(self.url+'?period=all&offset=6',headers=self._headers()).json
         self.assertEqual(result['total'],7)
         self.assertEqual(len(result['items']),1)
-        for query in ('period=month','date=bad','limit=25','offset=-1','date=9999-12-31&period=week'):
+        for query in ('period=month','date=bad','limit=25','offset=-1',
+                      'task_status=bogus','date=9999-12-31&period=week'):
             self.assertEqual(self.client.get(self.url+'?'+query,headers=self._headers()).status_code,400)
 
     def test_anonymous_and_foreign_project_cannot_read_team_plan(self):

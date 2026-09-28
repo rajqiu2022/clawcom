@@ -354,7 +354,8 @@ def team_test_plans(team_id):
     if limit > 24:
         raise TeamError('TEAM_VALIDATION_FAILED', '计划卡片每页最多 24 项', 400)
     return jsonify(overview(team, request.args.get('period', 'week'),
-                            request.args.get('date'), limit, offset))
+                            request.args.get('date'), limit, offset,
+                            request.args.get('task_status', 'all')))
 
 
 @api_bp.route('/agent-teams/<int:team_id>', methods=['GET'])
