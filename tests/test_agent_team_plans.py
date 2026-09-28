@@ -314,7 +314,9 @@ class AgentTeamPlansTest(unittest.TestCase):
             headers=self._headers())
         self.assertEqual(result.status_code, 200, result.json)
         self.assertEqual(result.json['total'], 1)
-        self.assertEqual(result.json['summary']['total'], 2)
+        self.assertEqual(result.json['summary']['total'], 1)
+        self.assertEqual(result.json['summary']['blocked'], 1)
+        self.assertEqual(result.json['summary']['completed'], 0)
         self.assertEqual(result.json['items'][0]['id'], first['id'])
         self.assertEqual([task['name'] for task in result.json['items'][0]['tasks']],
                          ['failed task'])
@@ -324,6 +326,9 @@ class AgentTeamPlansTest(unittest.TestCase):
             headers=self._headers())
         self.assertEqual(combined.status_code, 200, combined.json)
         self.assertEqual(combined.json['total'], 2)
+        self.assertEqual(combined.json['summary']['total'], 2)
+        self.assertEqual(combined.json['summary']['completed'], 1)
+        self.assertEqual(combined.json['summary']['blocked'], 1)
         self.assertEqual(combined.json['task_statuses'], ['blocked', 'completed'])
         self.assertEqual(combined.json['items'][0]['id'], first['id'])
         csv = self.client.get(
@@ -356,9 +361,12 @@ class AgentTeamPlansTest(unittest.TestCase):
         running = self.client.get(path + 'in_progress', headers=self._headers())
         self.assertEqual(running.status_code, 200, running.json)
         self.assertEqual(running.json['total'], 1)
+        self.assertEqual(running.json['summary']['total'], 1)
+        self.assertEqual(running.json['summary']['in_progress'], 1)
         self.assertEqual(running.json['items'][0]['tasks'][0]['status'], 'running')
         pending = self.client.get(path + 'pending', headers=self._headers())
         self.assertEqual(pending.json['total'], 0)
+        self.assertEqual(pending.json['summary']['total'], 0)
 
     def test_overview_exposes_report_count_and_legacy_report(self):
         first = self.create(name='has report rows')

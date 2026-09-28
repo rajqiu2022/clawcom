@@ -141,17 +141,18 @@ def overview(team, period, raw_date, limit, offset, task_statuses=None):
             and_(TestPlan.start_date <= end, TestPlan.end_date >= start),
             TestPlan.tasks.any(task_window(start, end))))
         tasks = tasks.filter(TestPlan.status != 'archived', task_window(start, end))
-    counts = dict(tasks.with_entities(TestTask.status, func.count(TestTask.id)).group_by(TestTask.status).all())
     overdue = and_(TestTask.end_date < _now().date(), TestTask.status.notin_(['completed', 'skipped']))
-    summary = {'total': sum(counts.values()), 'completed': counts.get('completed', 0),
-               'in_progress': counts.get('in_progress', 0), 'blocked': counts.get('blocked', 0),
-               'pending': counts.get('pending', 0) + counts.get('assigned', 0),
-               'skipped': counts.get('skipped', 0), 'overdue': tasks.filter(overdue).count()}
     if selected_statuses:
         tasks = tasks.filter(or_(*(
             task_status_condition(status, anchor, overdue)
             for status in selected_statuses)))
         plans = plans.filter(TestPlan.id.in_(tasks.with_entities(TestTask.plan_id)))
+    summary = {'total': tasks.count()}
+    for status in ('pending', 'in_progress', 'waiting_condition',
+                   'completed', 'blocked', 'skipped'):
+        summary[status] = tasks.filter(
+            task_status_condition(status, anchor, overdue)).count()
+    summary['overdue'] = tasks.filter(overdue).count()
     total = plans.count()
     rows = plans.order_by(TestPlan.start_date.desc(), TestPlan.id.desc()).offset(offset).limit(limit).all()
     ids = [p.id for p in rows]
