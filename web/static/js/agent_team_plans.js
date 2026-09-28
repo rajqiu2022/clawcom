@@ -4,13 +4,23 @@ const AgentTeamPlans = (() => {
     const $ = id => document.getElementById(id);
     const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const labels = {draft:'草稿',active:'进行中',completed:'已完成',archived:'归档',assigned:'已指派',pending:'待开始',in_progress:'执行中',waiting_condition:'等待条件',scheduled:'等待到点',ready:'待派发',dispatched:'待领取',running:'执行中',failed:'失败',cancelled:'已取消',blocked:'阻塞',skipped:'已跳过'};
-    const statusOptions = [['all','全部状态'],['pending','待开始'],['in_progress','执行中'],['waiting_condition','等待条件'],['completed','已完成'],['blocked','阻塞 / 失败'],['skipped','已跳过'],['overdue','已逾期']];
-    let team = null, epoch = 0, requestId = 0, reportRequestId = 0, reportContext = null, period = 'week', day = '', taskStatus = 'all', offset = 0, mode = 'new', saving = false;
+    const statusOptions = [['pending','待开始'],['in_progress','执行中'],['waiting_condition','等待条件'],['completed','已完成'],['blocked','阻塞 / 失败'],['skipped','已跳过'],['overdue','已逾期']];
+    let team = null, epoch = 0, requestId = 0, reportRequestId = 0, reportContext = null, period = 'week', day = '', taskStatuses = [], offset = 0, mode = 'new', saving = false;
     function today() { return new Intl.DateTimeFormat('sv-SE', {timeZone:'Asia/Shanghai'}).format(new Date()); }
+    function statusSummary() {
+        if (!taskStatuses.length) return '全部状态';
+        return taskStatuses.length === 1
+            ? statusOptions.find(([key])=>key===taskStatuses[0])?.[1] || '已选 1 项'
+            : `已选 ${taskStatuses.length} 项`;
+    }
+    function refreshStatusSummary() {
+        const node = $('at-plan-status-summary');
+        if (node) node.textContent = statusSummary();
+    }
     function reset() { ++epoch; ++requestId; ++reportRequestId; team = null; $('at-plan-dialog').close(); $('at-plan-reports-dialog').close(); }
     function frame() {
         $('at-plans-root').innerHTML = `<section class="at-plan-workspace"><header class="at-plan-toolbar"><div><span class="at-eyebrow">TEAM SCHEDULE</span><h3>测试计划与任务</h3></div><div><button id="at-plan-refresh" type="button" class="btn btn-secondary btn-sm"><span class="at-refresh-icon" aria-hidden="true">↻</span> 刷新状态</button> <button type="button" class="btn btn-secondary btn-sm" id="at-plan-link" hidden>关联已有计划</button> <button type="button" class="btn btn-primary btn-sm" id="at-plan-create" hidden>＋ 新建计划</button></div></header>
-        <div class="at-plan-filters"><div role="group" aria-label="排期范围">${[['day','每日'],['week','每周'],['all','全部']].map(([key,label])=>`<button type="button" data-period="${key}" aria-pressed="${key===period}">${label}</button>`).join('')}</div><label>基准日期 <input id="at-plan-date" type="date" class="form-input" value="${day}" ${period==='all'?'disabled':''}></label><button id="at-plan-today" type="button" class="btn btn-ghost btn-sm">回到今天</button><label>任务状态 <select id="at-plan-status" class="form-input" aria-label="筛选任务状态">${statusOptions.map(([key,label])=>`<option value="${key}" ${key===taskStatus?'selected':''}>${label}</option>`).join('')}</select></label></div>
+        <div class="at-plan-filters"><div role="group" aria-label="排期范围">${[['day','每日'],['week','每周'],['all','全部']].map(([key,label])=>`<button type="button" data-period="${key}" aria-pressed="${key===period}">${label}</button>`).join('')}</div><label>基准日期 <input id="at-plan-date" type="date" class="form-input" value="${day}" ${period==='all'?'disabled':''}></label><button id="at-plan-today" type="button" class="btn btn-ghost btn-sm">回到今天</button><details class="at-plan-status-filter" id="at-plan-status-menu"><summary>任务状态 <strong id="at-plan-status-summary" aria-live="polite">${statusSummary()}</strong><span aria-hidden="true">⌄</span></summary><div class="at-plan-status-options">${statusOptions.map(([key,label])=>`<label><input type="checkbox" name="at-plan-status" value="${key}" ${taskStatuses.includes(key)?'checked':''}><span>${label}</span></label>`).join('')}<button id="at-plan-status-clear" type="button" class="btn btn-ghost btn-sm">清除筛选 · 显示全部</button></div></details></div>
         <p id="at-plan-range" class="at-help"></p><div id="at-plan-summary" class="at-plan-summary"></div><div id="at-plan-recovery" class="at-plan-recovery" hidden></div><p id="at-plan-note" class="at-help" role="status"></p><div id="at-plan-cards" class="at-plan-grid"></div><div id="at-plan-pages" class="at-pager"></div>
         <p class="at-help">按实际测试任务排期交集展示（北京时间，周一至周日），完成比例不含任务链。跨日任务会在对应日期出现；未排期任务请在“全部”查看。日期筛选不代表重复执行或自动调度。</p></section>`;
     }
@@ -207,7 +217,8 @@ const AgentTeamPlans = (() => {
         $('at-plan-note').textContent = '正在读取测试计划…';
         $('at-plan-cards').setAttribute('aria-busy','true');
         try {
-            const data = await API.get(`/agent-teams/${id}/test-plans?period=${period}&date=${encodeURIComponent(day)}&task_status=${encodeURIComponent(taskStatus)}&limit=6&offset=${page}`);
+            const statusQuery = taskStatuses.map(status=>`&task_status=${encodeURIComponent(status)}`).join('');
+            const data = await API.get(`/agent-teams/${id}/test-plans?period=${period}&date=${encodeURIComponent(day)}${statusQuery}&limit=6&offset=${page}`);
             if (generation!==epoch || turn!==requestId) return;
             $('at-plan-create').hidden = !data.can_manage || team.status!=='active';
             $('at-plan-link').hidden = !data.can_manage || team.status!=='active';
@@ -215,7 +226,7 @@ const AgentTeamPlans = (() => {
             const s = data.summary;
             $('at-plan-summary').innerHTML = [['范围内任务',s.total],['执行中',s.in_progress],['已完成',s.completed],['阻塞',s.blocked],['已逾期',s.overdue]].map(([label,count])=>`<div><strong>${count}</strong><span>${label}</span></div>`).join('');
             renderRecovery(data.items);
-            $('at-plan-cards').innerHTML = data.items.length ? data.items.map(p=>`<article class="at-plan-card" data-plan-card="${esc(p.id)}"><header><span class="at-eyebrow">PLAN #${p.id}</span>${badge(p.status)}</header><h4><a href="${esc(p.url)}">${esc(p.name)} ↗</a></h4><p class="at-help">${esc(p.start_date)} → ${esc(p.end_date)}</p>${supervision(p)}<div class="at-progress"><progress max="100" value="${p.progress}" aria-label="计划任务完成比例"></progress><span>${p.completed_tasks}/${p.total_tasks} 已完成</span></div><div class="at-plan-section">${taskStatus==='all'?(period==='all'?'全部任务':'当前范围任务'):'匹配状态任务'} <strong>${p.period_tasks}</strong>${p.unscheduled_tasks&&taskStatus==='all'?`<span>另有 ${p.unscheduled_tasks} 项未排期</span>`:''}</div><ul data-plan-tasks="${esc(p.id)}">${p.tasks.map((t,index)=>task(t,p.id,index>=5)).join('') || '<li class="at-help">当前范围暂无已排期任务</li>'}</ul><footer><span class="at-help">${p.tasks.length>5?`<button type="button" class="btn btn-secondary btn-sm at-plan-task-toggle" data-plan-task-toggle="${esc(p.id)}" aria-expanded="false">查看全部 ${p.tasks.length} 项</button>`:'进度来自测试计划记录'}</span><div class="at-plan-actions"><button type="button" class="at-plan-report" data-plan-reports="${esc(p.id)}" data-plan-name="${esc(p.name)}" aria-label="查看计划 #${esc(p.id)} 的关联报告">📄 报告 <b data-report-count ${p.report_count?'':'hidden'}>${esc(p.report_count)}</b></button><a href="${esc(p.url)}">查看计划详情 →</a></div></footer></article>`).join('') : `<div class="at-empty">${taskStatus==='all'?'当前范围暂无团队计划。<br>可切换日期、“全部”，或由测试经理新建 / 关联已有计划。':'当前范围没有符合该状态的任务。可切换状态或日期查看。'}</div>`;
+            $('at-plan-cards').innerHTML = data.items.length ? data.items.map(p=>`<article class="at-plan-card" data-plan-card="${esc(p.id)}"><header><span class="at-eyebrow">PLAN #${p.id}</span>${badge(p.status)}</header><h4><a href="${esc(p.url)}">${esc(p.name)} ↗</a></h4><p class="at-help">${esc(p.start_date)} → ${esc(p.end_date)}</p>${supervision(p)}<div class="at-progress"><progress max="100" value="${p.progress}" aria-label="计划任务完成比例"></progress><span>${p.completed_tasks}/${p.total_tasks} 已完成</span></div><div class="at-plan-section">${!taskStatuses.length?(period==='all'?'全部任务':'当前范围任务'):'匹配状态任务'} <strong>${p.period_tasks}</strong>${p.unscheduled_tasks&&!taskStatuses.length?`<span>另有 ${p.unscheduled_tasks} 项未排期</span>`:''}</div><ul data-plan-tasks="${esc(p.id)}">${p.tasks.map((t,index)=>task(t,p.id,index>=5)).join('') || '<li class="at-help">当前范围暂无已排期任务</li>'}</ul><footer><span class="at-help">${p.tasks.length>5?`<button type="button" class="btn btn-secondary btn-sm at-plan-task-toggle" data-plan-task-toggle="${esc(p.id)}" aria-expanded="false">查看全部 ${p.tasks.length} 项</button>`:'进度来自测试计划记录'}</span><div class="at-plan-actions"><button type="button" class="at-plan-report" data-plan-reports="${esc(p.id)}" data-plan-name="${esc(p.name)}" aria-label="查看计划 #${esc(p.id)} 的关联报告">📄 报告 <b data-report-count ${p.report_count?'':'hidden'}>${esc(p.report_count)}</b></button><a href="${esc(p.url)}">查看计划详情 →</a></div></footer></article>`).join('') : `<div class="at-empty">${!taskStatuses.length?'当前范围暂无团队计划。<br>可切换日期、“全部”，或由测试经理新建 / 关联已有计划。':'当前范围没有符合所选状态的任务。可调整状态或日期查看。'}</div>`;
             $('at-plan-pages').innerHTML = `<span class="at-muted">${data.total?page+1:0}–${page+data.items.length} / ${data.total} 个计划</span><button type="button" class="btn btn-secondary btn-sm" data-plan-page="${Math.max(0,page-6)}" ${page===0?'disabled':''}>上一页</button><button type="button" class="btn btn-secondary btn-sm" data-plan-page="${page+6}" ${page+data.items.length>=data.total?'disabled':''}>下一页</button>`;
             $('at-plan-note').textContent = data.can_manage?'可创建草稿计划，或将同项目已有计划关联到本团队。':'计划由团队测试经理或项目管理员维护。';
             return true;
@@ -297,7 +308,14 @@ const AgentTeamPlans = (() => {
         if(value==='knowledge' || value==='skills') AgentTeamResources.refresh();
     }
     $('at-detail').addEventListener('keydown',event=>{if(event.target.matches('[data-team-tab]') && ['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const keys=['members','chat','plans','knowledge','skills'], current=keys.indexOf(event.target.dataset.teamTab);const next=event.key==='Home'?keys[0]:event.key==='End'?keys[keys.length-1]:keys[(current+(event.key==='ArrowRight'?1:-1)+keys.length)%keys.length];tab(next);$(`at-tab-${next}`).focus();}});
-    $('at-detail').addEventListener('change',event=>{if(event.target.id==='at-plan-date' && event.target.value){day=event.target.value;load();}if(event.target.id==='at-plan-status'){taskStatus=event.target.value;load();}});
+    $('at-detail').addEventListener('change',event=>{
+        if(event.target.id==='at-plan-date' && event.target.value){day=event.target.value;load();}
+        if(event.target.name==='at-plan-status'){
+            taskStatuses = [...document.querySelectorAll('#at-plan-status-menu input[name="at-plan-status"]:checked')].map(input=>input.value);
+            refreshStatusSummary();
+            load();
+        }
+    });
     $('at-detail').addEventListener('click',event=>{
         const button=event.target.closest('button'); if(!button || button.disabled) return;
         if(button.dataset.teamTab) tab(button.dataset.teamTab);
@@ -305,6 +323,12 @@ const AgentTeamPlans = (() => {
         if(button.dataset.planPage) load(Number(button.dataset.planPage));
         if(button.id==='at-plan-refresh') refreshStatus(button);
         if(button.id==='at-plan-today'){day=today();frame();load();}
+        if(button.id==='at-plan-status-clear'){
+            taskStatuses=[];
+            document.querySelectorAll('#at-plan-status-menu input[name="at-plan-status"]').forEach(input=>{input.checked=false;});
+            refreshStatusSummary();
+            load();
+        }
         if(button.id==='at-plan-create') open('new');
         if(button.id==='at-plan-link') open('link');
         if(button.dataset.planResume) resumeSupervision(button);
@@ -329,5 +353,5 @@ const AgentTeamPlans = (() => {
         if(button.dataset.planReports) openReports({scope:'plan',planId:button.dataset.planReports,name:button.dataset.planName});
         if(button.dataset.taskReports) openReports({scope:'task',planId:button.dataset.planId,taskId:button.dataset.taskReports,name:button.dataset.taskName});
     });
-    return {reset, mount:async value=>{team=value;period='week';day=today();taskStatus='all';frame();await load();}};
+    return {reset, mount:async value=>{team=value;period='week';day=today();taskStatuses=[];frame();await load();}};
 })();

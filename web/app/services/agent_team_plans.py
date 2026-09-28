@@ -117,10 +117,21 @@ def task_status_condition(task_status, anchor, overdue):
     )
 
 
-def overview(team, period, raw_date, limit, offset, task_status='all'):
-    _, manage = access(team)
-    if task_status not in ('all', 'overdue', *TASK_STATUS_FILTERS):
+def normalize_task_statuses(raw_statuses):
+    values = [raw_statuses] if isinstance(raw_statuses, str) else list(raw_statuses or ())
+    selected = list(dict.fromkeys(
+        item.strip() for value in values for item in value.split(',')
+    ))
+    if not selected or selected == ['all']:
+        return ()
+    if any(item not in ('overdue', *TASK_STATUS_FILTERS) for item in selected):
         raise TeamError('TEAM_PLAN_STATUS_INVALID', '无效的任务状态筛选', 400)
+    return tuple(selected)
+
+
+def overview(team, period, raw_date, limit, offset, task_statuses=None):
+    _, manage = access(team)
+    selected_statuses = normalize_task_statuses(task_statuses)
     anchor, start, end = date_window(period, raw_date)
     plans = TestPlan.query.filter_by(team_id=team.id, project_id=team.project_id)
     tasks = TestTask.query.join(TestPlan).filter(TestPlan.team_id == team.id,
@@ -136,8 +147,10 @@ def overview(team, period, raw_date, limit, offset, task_status='all'):
                'in_progress': counts.get('in_progress', 0), 'blocked': counts.get('blocked', 0),
                'pending': counts.get('pending', 0) + counts.get('assigned', 0),
                'skipped': counts.get('skipped', 0), 'overdue': tasks.filter(overdue).count()}
-    if task_status != 'all':
-        tasks = tasks.filter(task_status_condition(task_status, anchor, overdue))
+    if selected_statuses:
+        tasks = tasks.filter(or_(*(
+            task_status_condition(status, anchor, overdue)
+            for status in selected_statuses)))
         plans = plans.filter(TestPlan.id.in_(tasks.with_entities(TestTask.plan_id)))
     total = plans.count()
     rows = plans.order_by(TestPlan.start_date.desc(), TestPlan.id.desc()).offset(offset).limit(limit).all()
@@ -285,7 +298,8 @@ def overview(team, period, raw_date, limit, offset, task_status='all'):
                        'overdue': bool(t.end_date and t.end_date < _now().date() and t.status not in ('completed', 'skipped'))}
                       for t, name in preview]})
     return {'team_id': team.id, 'can_manage': manage, 'period': period,
-            'task_status': task_status, 'date': str(anchor),
+            'task_status': ','.join(selected_statuses) if selected_statuses else 'all',
+            'task_statuses': list(selected_statuses), 'date': str(anchor),
             'start_date': str(start) if period != 'all' else None,
             'end_date': str(end) if period != 'all' else None, 'timezone': 'Asia/Shanghai',
             'items': items, 'total': total, 'limit': limit, 'offset': offset, 'summary': summary}

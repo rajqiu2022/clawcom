@@ -318,6 +318,25 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(result.json['items'][0]['id'], first['id'])
         self.assertEqual([task['name'] for task in result.json['items'][0]['tasks']],
                          ['failed task'])
+        combined = self.client.get(
+            self.url + '?period=day&date=2026-09-21&task_status=blocked'
+                       '&task_status=completed&limit=1&offset=1',
+            headers=self._headers())
+        self.assertEqual(combined.status_code, 200, combined.json)
+        self.assertEqual(combined.json['total'], 2)
+        self.assertEqual(combined.json['task_statuses'], ['blocked', 'completed'])
+        self.assertEqual(combined.json['items'][0]['id'], first['id'])
+        csv = self.client.get(
+            self.url + '?period=day&date=2026-09-21&task_status=blocked,completed',
+            headers=self._headers())
+        self.assertEqual(csv.json['total'], 2)
+        self.assertEqual(csv.json['task_statuses'], ['blocked', 'completed'])
+        deduplicated = self.client.get(
+            self.url + '?period=day&date=2026-09-21'
+                       '&task_status=blocked&task_status=blocked',
+            headers=self._headers())
+        self.assertEqual(deduplicated.json['task_statuses'], ['blocked'])
+        self.assertEqual(len(deduplicated.json['items'][0]['tasks']), 1)
 
     def test_task_status_filter_uses_scheduled_occurrence_not_template(self):
         plan = self.create(name='recurring')
@@ -432,7 +451,8 @@ class AgentTeamPlansTest(unittest.TestCase):
         self.assertEqual(result['total'],7)
         self.assertEqual(len(result['items']),1)
         for query in ('period=month','date=bad','limit=25','offset=-1',
-                      'task_status=bogus','date=9999-12-31&period=week'):
+                      'task_status=bogus','task_status=all&task_status=blocked',
+                      'date=9999-12-31&period=week'):
             self.assertEqual(self.client.get(self.url+'?'+query,headers=self._headers()).status_code,400)
 
     def test_anonymous_and_foreign_project_cannot_read_team_plan(self):
