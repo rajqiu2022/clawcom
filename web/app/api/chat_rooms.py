@@ -19,8 +19,11 @@ from app.models import (
     ChatRoomImage,
     ChatRoomMember,
     ChatRoomMessage,
+    ChatRoomMention,
     OpenClawInstance,
     User,
+    WorkflowDefinition,
+    WorkflowRun,
 )
 from app.services.chat_rooms import (
     add_registered_member,
@@ -671,3 +674,106 @@ def update_chat_room_delivery(room_id, delivery_id):
         delivery.read_at = now
     db.session.commit()
     return jsonify(_delivery_payload(delivery))
+
+
+@api_bp.route(
+    '/chat-rooms/<int:room_id>/deliveries/<int:delivery_id>/workflow-runs',
+    methods=['POST'])
+def create_room_delivery_workflow_run(room_id, delivery_id):
+    """Start one Flow for an explicit Owner-to-Agent room instruction.
+
+    The Worker still supplies the trusted Flow bindings. Here Hub verifies
+    both the original human sender and the authenticated receiving Agent;
+    neither a room role nor the Agent token alone authorizes the other.
+    """
+    blocked = _disabled()
+    if blocked:
+        return blocked
+    room, member, error = _room_and_member(room_id)
+    if error:
+        return error
+    if member.member_type != 'agent' or not member.claw_id or not room.team_id:
+        return _error(PermissionError('ROOM_FLOW_AGENT_REQUIRED'))
+    delivery = ChatRoomDelivery.query.filter_by(
+        id=delivery_id, room_id=room.id, member_id=member.id,
+        notify_agent=True).first()
+    # Lock the source message, not one Agent's delivery: multiple mentioned
+    # Agents must not race to create different Runs for the same instruction.
+    message = (
+        ChatRoomMessage.query.filter_by(
+            id=delivery.message_id, room_id=room.id).with_for_update().first()
+        if delivery else None)
+    sender = message.sender if message else None
+    if (
+        not message or message.status != 'active'
+        or not sender or sender.status != 'active'
+        or sender.member_type != 'user' or sender.role not in ('owner', 'admin')
+        or not sender.user_id
+        or not ChatRoomMention.query.filter_by(
+            message_id=message.id, mention_type='member',
+            member_id=member.id).first()
+    ):
+        return _error(PermissionError('ROOM_FLOW_OWNER_MENTION_REQUIRED'))
+    sender_user = db.session.get(User, sender.user_id)
+    if not sender_user or sender_user.role == 'guest':
+        return _error(PermissionError('ROOM_FLOW_SENDER_UNAVAILABLE'))
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or type(data.get('definition_id')) is not int:
+        return _error(ValueError('ROOM_FLOW_DEFINITION_REQUIRED'))
+    definition = db.session.get(WorkflowDefinition, data['definition_id'])
+    if not definition or definition.project_id != room.project_id:
+        return _error(PermissionError('ROOM_FLOW_PROJECT_MISMATCH'))
+    from app.api.workflows import (
+        _definition_acl, _definition_editor_acl,
+        _workflow_run_create_payload, create_workflow_run)
+    from app.api.auth_utils import user_project_ids
+    from app.services.workflows import can_execute_workflow, can_view_workflow
+    is_admin = sender_user.role in ('admin', 'super_admin')
+    if not (
+        can_view_workflow(
+            definition.visibility_scope or 'project', definition.owner_type,
+            definition.owner_id, definition.project_id, 'user', sender_user.id,
+            user_project_ids(sender_user), is_admin=is_admin)
+        and can_execute_workflow(
+            definition.owner_type, definition.owner_id,
+            _definition_acl(definition), 'user', sender_user.id,
+            is_admin=is_admin,
+            editor_acl=_definition_editor_acl(definition))
+    ):
+        return _error(PermissionError('ROOM_FLOW_SENDER_NOT_AUTHORIZED'))
+    expected_correlation = f'hub-room:{room.id}:{message.id}'
+    expected_key = f'room-flow:{room.id}:{message.id}'
+    start_vars = data.get('start_vars')
+    if (
+        not set(data).issubset({
+            'definition_id', 'reason', 'trigger_source', 'correlation_id',
+            'worker_claw_id', 'executor_claw_ids', 'start_vars',
+        })
+        or data.get('trigger_source') != 'hub_team_room'
+        or data.get('correlation_id') != expected_correlation
+        or request.headers.get('Idempotency-Key') != expected_key
+        or data.get('worker_claw_id') != member.claw_id
+        or data.get('executor_claw_ids') != [member.claw_id]
+        or not isinstance(start_vars, dict)
+        or start_vars.get('worker_claw_id') != member.claw_id
+        or not isinstance(data.get('reason'), str)
+        or not data['reason'].strip()
+    ):
+        return _error(ValueError('ROOM_FLOW_BINDING_INVALID'))
+    existing = WorkflowRun.query.filter_by(
+        correlation_id=expected_correlation,
+        trigger_source='hub_team_room').first()
+    if existing:
+        if existing.definition_id != definition.id:
+            return _error(ValueError('ROOM_FLOW_ALREADY_STARTED'), 409)
+        if existing.idempotency_key != expected_key:
+            return _error(ValueError('ROOM_FLOW_IDEMPOTENCY_MISMATCH'), 409)
+        workflow_start = (
+            (existing.context_json or {}).get('workflow_start') or {})
+        if workflow_start.get('worker_claw_id') != member.claw_id:
+            return _error(ValueError('ROOM_FLOW_ALREADY_STARTED'), 409)
+        return jsonify(_workflow_run_create_payload(
+            existing, compact=True, idempotent_replay=True)), 200
+    # The normal create endpoint applies the receiving Agent's Flow ACL,
+    # freezes the Definition, and uses its durable idempotency/readback path.
+    return create_workflow_run()

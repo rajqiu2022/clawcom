@@ -385,6 +385,17 @@ def complete_task(task, data, now=None):
         raise AgentTaskContractError(
             'AGENT_TASK_STATUS_INVALID',
             'status must be completed, failed, blocked or waiting_condition', 400)
+    from app.services import plan_supervision
+    if status == 'completed':
+        delivery_gap = plan_supervision.ordinary_task_delivery_gap(task, result)
+        if delivery_gap:
+            code, reason = delivery_gap
+            result = dict(result)
+            result.update(status='blocked', error_code=code,
+                          reason=reason, retryable=False,
+                          summary=(str(result.get('summary') or '') +
+                                   '\n交付验收未通过：' + reason).strip()[:8000])
+            status = 'blocked'
     error_code = str(result.get('error_code') or '').strip().lower()
     retryable = (result.get('retryable') is True
                  or error_code in HUB_RETRYABLE_RESULT_CODES)
@@ -398,7 +409,6 @@ def complete_task(task, data, now=None):
         task.assigned_at = None
         task.version = int(task.version or 0) + 1
         task.error = str(result.get('reason') or data.get('error') or '')[:2000]
-        from app.services import plan_supervision
         plan_supervision.record_agent_task_retry_pending(
             task, now=now)
         db.session.commit()
@@ -412,7 +422,6 @@ def complete_task(task, data, now=None):
     task.lease_expires_at = None
     task.claim_token = None
     task.version = int(task.version or 0) + 1
-    from app.services import plan_supervision
     projection = None
     if status == 'waiting_condition':
         projection = plan_supervision.record_agent_task_waiting_condition(
@@ -424,7 +433,7 @@ def complete_task(task, data, now=None):
     if isinstance(projection, dict) and projection.get('wake_claw_id'):
         plan_supervision.wake(projection['wake_claw_id'])
     plan_supervision.pump_agent_task_plan(task)
-    return 'waiting_condition' if status == 'waiting_condition' else 'completed'
+    return status
 
 
 def expire_stale_ordinary_tasks(now=None, limit=500):

@@ -40,6 +40,8 @@ from flask import Flask  # noqa: E402
 from app import db  # noqa: E402
 from app.api import api_bp  # noqa: E402
 from app.models import (  # noqa: E402
+    AgentTeam,
+    ChatRoom,
     ChatRoomDelivery,
     ChatRoomImage,
     ChatRoomGuestSession,
@@ -48,6 +50,8 @@ from app.models import (  # noqa: E402
     OpenClawInstance,
     Project,
     User,
+    WorkflowDefinition,
+    WorkflowRun,
     hash_token,
 )
 from app.services.chat_rooms import pending_agent_events  # noqa: E402
@@ -125,6 +129,163 @@ class ChatRoomsApiTest(unittest.TestCase):
             json={'type': 'agent', 'id': self.agent.id})
         self.assertEqual(add_agent.status_code, 201, add_agent.get_json())
         return room, add_agent.get_json()
+
+    def _create_team_flow_instruction(self, *, sender_id=None, mention=True):
+        self._login(self.owner.id)
+        room, agent_member = self._create_room()
+        manager = OpenClawInstance(
+            name='小策', safe_name=f'room-manager-{room["id"]}',
+            claw_tag=f'claw-room-manager-{room["id"]}',
+            owner=self.owner.username, role='test_manager',
+            project_id=self.project.id,
+            api_token_hash=hash_token(f'room-manager-token-{room["id"]}'),
+            status='工作')
+        db.session.add(manager)
+        db.session.flush()
+        manager_response = self.client.post(
+            f'/api/v1/chat-rooms/{room["id"]}/members',
+            json={'type': 'agent', 'id': manager.id})
+        self.assertEqual(manager_response.status_code, 201,
+                         manager_response.get_json())
+        team = AgentTeam(
+            project_id=self.project.id, name=f'room-team-{room["id"]}',
+            objective='test', primary_manager_claw_id=manager.id,
+            policy_json={})
+        definition = WorkflowDefinition(
+            workflow_key=f'room-flow-{room["id"]}', name='Room Flow',
+            project_id=self.project.id,
+            definition_json={'name': 'Room Flow', 'steps': []},
+            owner_type='user', owner_id=self.owner.id,
+            executor_acl_json={
+                'claw_ids': [self.agent.id],
+                'user_ids': [self.owner.id],
+            },
+            visibility_scope='project')
+        db.session.add_all([team, definition])
+        db.session.flush()
+        db.session.get(ChatRoom, room['id']).team_id = team.id
+        db.session.commit()
+        self._login(sender_id or self.owner.id)
+        sent = self.client.post(
+            f'/api/v1/chat-rooms/{room["id"]}/messages',
+            json={
+                'content': '请运行这个 Flow',
+                'mentions': ([{'type': 'member', 'member_id': agent_member['id']}]
+                             if mention else []),
+            },
+            headers={'Idempotency-Key': f'room-flow-message-{room["id"]}'})
+        self.assertEqual(sent.status_code, 201, sent.get_json())
+        delivery = ChatRoomDelivery.query.filter_by(
+            message_id=sent.get_json()['id'], member_id=agent_member['id']).one()
+        self._login(None)
+        return room, definition, delivery, sent.get_json()
+
+    def _start_room_flow(self, room, definition, delivery, message, **overrides):
+        body = {
+            'definition_id': definition.id,
+            'reason': 'Owner明确要求运行',
+            'trigger_source': 'hub_team_room',
+            'correlation_id': f'hub-room:{room["id"]}:{message["id"]}',
+            'worker_claw_id': self.agent.id,
+            'executor_claw_ids': [self.agent.id],
+            'start_vars': {'worker_claw_id': self.agent.id},
+        }
+        body.update(overrides)
+        return self.client.post(
+            f'/api/v1/chat-rooms/{room["id"]}/deliveries/{delivery.id}/workflow-runs',
+            json=body,
+            headers={
+                'Authorization': f'Bearer {self.agent_token}',
+                'Idempotency-Key': f'room-flow:{room["id"]}:{message["id"]}',
+            })
+
+    def test_owner_direct_mention_starts_one_verified_room_flow(self):
+        room, definition, delivery, message = self._create_team_flow_instruction()
+        event = next(payload for name, payload in pending_agent_events(self.agent.id)
+                     if name == 'room_message')
+        self.assertEqual(delivery.member_id, event['delivery']['member_id'])
+        team = db.session.get(AgentTeam, db.session.get(ChatRoom, room['id']).team_id)
+        manager_member_id = event['team_authority']['manager_member_id']
+        self.assertIsInstance(manager_member_id, int)
+        self.assertNotEqual(room['owner_member_id'], manager_member_id)
+        first = self._start_room_flow(room, definition, delivery, message)
+        self.assertEqual(first.status_code, 201, first.get_json())
+        reply = self.client.post(
+            f'/api/v1/chat-rooms/{room["id"]}/messages',
+            json={
+                'content': f'Run #{first.get_json()["id"]} 已启动。',
+                'reply_to_message_id': message['id'],
+                'origin_delivery_id': delivery.id,
+                'mentions': [{
+                    'type': 'member', 'member_id': manager_member_id,
+                }],
+            },
+            headers={
+                'Authorization': f'Bearer {self.agent_token}',
+                'Idempotency-Key': 'room-flow-reply',
+            })
+        self.assertEqual(reply.status_code, 201, reply.get_json())
+        manager_event = next(
+            payload for name, payload in pending_agent_events(
+                team.primary_manager_claw_id) if name == 'room_message')
+        self.assertEqual(
+            {'run_id': first.get_json()['id'],
+             'definition_id': definition.id},
+            manager_event['message']['verified_flow_followup'])
+        definition.definition_json = {
+            'name': 'Room Flow (new version)', 'steps': [],
+        }
+        definition.version = 2
+        db.session.commit()
+        second = self._start_room_flow(room, definition, delivery, message)
+        self.assertEqual(second.status_code, 200, second.get_json())
+        self.assertEqual(first.get_json()['id'], second.get_json()['id'])
+        another = WorkflowDefinition(
+            workflow_key='room-flow-other', name='Other Room Flow',
+            project_id=self.project.id,
+            definition_json={'name': 'Other Room Flow', 'steps': []},
+            owner_type='user', owner_id=self.owner.id,
+            executor_acl_json={'claw_ids': [self.agent.id]},
+            visibility_scope='project')
+        db.session.add(another)
+        db.session.commit()
+        conflict = self._start_room_flow(room, another, delivery, message)
+        self.assertEqual(conflict.status_code, 409, conflict.get_json())
+        self.assertEqual(
+            conflict.get_json()['code'], 'ROOM_FLOW_ALREADY_STARTED')
+        self.assertEqual(WorkflowRun.query.count(), 1)
+
+    def test_room_flow_requires_owner_mention_and_binding(self):
+        for sender_id, mention, expected in (
+            (self.owner.id, False, 'ROOM_FLOW_OWNER_MENTION_REQUIRED'),
+            (self.reviewer.id, True, 'ROOM_FLOW_OWNER_MENTION_REQUIRED'),
+        ):
+            with self.subTest(sender_id=sender_id, mention=mention):
+                room, definition, delivery, message = (
+                    self._create_team_flow_instruction(
+                        sender_id=sender_id, mention=mention))
+                denied = self._start_room_flow(room, definition, delivery, message)
+                self.assertEqual(denied.status_code, 403, denied.get_json())
+                self.assertEqual(denied.get_json()['code'], expected)
+        room, definition, delivery, message = self._create_team_flow_instruction()
+        denied = self._start_room_flow(
+            room, definition, delivery, message,
+            worker_claw_id=self.agent.id + 1)
+        self.assertEqual(denied.status_code, 400, denied.get_json())
+        self.assertEqual(denied.get_json()['code'], 'ROOM_FLOW_BINDING_INVALID')
+        self.assertEqual(WorkflowRun.query.count(), 0)
+
+    def test_room_owner_role_does_not_grant_flow_execution_acl(self):
+        room, definition, delivery, message = (
+            self._create_team_flow_instruction(sender_id=self.reviewer.id))
+        sender = db.session.get(ChatRoomMember, message['sender_member_id'])
+        sender.role = 'owner'
+        db.session.commit()
+        denied = self._start_room_flow(room, definition, delivery, message)
+        self.assertEqual(denied.status_code, 403, denied.get_json())
+        self.assertEqual(
+            denied.get_json()['code'], 'ROOM_FLOW_SENDER_NOT_AUTHORIZED')
+        self.assertEqual(WorkflowRun.query.count(), 0)
 
     def test_message_idempotency_and_agent_mention_gate(self):
         room, agent_member = self._create_room()

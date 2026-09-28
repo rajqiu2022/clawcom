@@ -10,7 +10,7 @@ from app.models import (AgentTask, AgentTeam, AgentTeamMember, AgentTeamMission,
                         OpenClawInstance, TestPlan, TestTask, TestTaskOccurrence, ClawMessage,
                         ChatRoomMessage,
                         WorkflowRun, WorkflowRunStep,
-                        WorkflowMission, WorkflowMissionDispatch, _now)
+                        WorkflowMission, WorkflowMissionDispatch, TestReport, _now)
 from app.models_plan_supervision import PlanSupervisor, PlanSupervisorEvent, PlanSupervisorReceipt
 from app.services import plan_supervision as svc
 from app.services.agent_tasks import (claim_pending_tasks, complete_task,
@@ -64,6 +64,110 @@ class PlanSupervisionTest(unittest.TestCase):
 
     def credentials(self):
         return {'worker_id': 'worker-A', 'fencing_token': self.sup().fencing_token}
+
+    def published_task_report(self, task):
+        report = TestReport(
+            title='Task delivery', project_id=self.plan.project_id,
+            source_ref_type='test_task', source_ref_id=task.id,
+            status='published', content='Verified delivery',
+        )
+        db.session.add(report)
+        db.session.flush()
+        return report
+
+    def test_delivery_gate_requires_owned_published_report_and_fresh_tapd(self):
+        task = TestTask(plan_id=self.plan.id, name='TAPD risk analysis')
+        db.session.add(task)
+        db.session.flush()
+        agent_task = AgentTask(payload=json.dumps({
+            'contract': 'hub.plan_test_task.agent_task.v1',
+            'test_plan_id': self.plan.id, 'test_task_id': task.id,
+            'mission_id': 1, 'mission_stage_id': 1, 'stage_key': 'test',
+            'acceptance': {'report_to_hub': True},
+        }), created_at=_now() - timedelta(minutes=1))
+        result = {'status': 'passed', 'summary': '已完成'}
+        self.assertIsNone(svc.ordinary_task_delivery_gap(agent_task, result))
+        task.action_metadata_json = {'delivery_acceptance': {
+            'published_report': True, 'tapd_entities': ['bugs', 'requirements']}}
+        self.assertEqual('DELIVERY_ACCEPTANCE_INCOMPLETE',
+                         svc.ordinary_task_delivery_gap(agent_task, result)[0])
+        other = TestReport(title='Wrong task', project_id=self.plan.project_id,
+                           source_ref_type='test_task', source_ref_id=task.id + 1,
+                           status='published')
+        db.session.add(other)
+        db.session.flush()
+        self.assertEqual('DELIVERY_ACCEPTANCE_INCOMPLETE',
+                         svc.ordinary_task_delivery_gap(agent_task, result)[0])
+        report = TestReport(title='Draft', project_id=self.plan.project_id,
+                            source_ref_type='test_task', source_ref_id=task.id,
+                            status='draft')
+        db.session.add(report)
+        db.session.flush()
+        self.assertEqual('DELIVERY_ACCEPTANCE_INCOMPLETE',
+                         svc.ordinary_task_delivery_gap(agent_task, result)[0])
+        report.status = 'published'
+        self.assertEqual('DELIVERY_ACCEPTANCE_INCOMPLETE',
+                         svc.ordinary_task_delivery_gap(agent_task, {
+                             'status': 'passed',
+                             'evidence': {'stories': 'mcp_output_invalid',
+                                          'bugs': {'count': 7}},
+                         })[0])
+        verified = {'status': 'passed', 'outputs': {'tapd_verification': {
+            key: {'status': 'verified', 'source': 'tapd',
+                  'observed_at': _now().isoformat()}
+            for key in ('bugs', 'requirements')}}}
+        self.assertIsNone(svc.ordinary_task_delivery_gap(agent_task, verified))
+        task.action_metadata_json = {'delivery_acceptance': {
+            'published_report': True, 'shared_report': True}}
+        self.assertEqual('DELIVERY_ACCEPTANCE_INCOMPLETE',
+                         svc.ordinary_task_delivery_gap(agent_task, verified)[0])
+        report.is_shared = True
+        report.share_token = 'test-share-token'
+        self.assertIsNone(svc.ordinary_task_delivery_gap(agent_task, verified))
+
+    def test_delivery_gap_blocks_task_projection_without_erasing_agent_result(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['analysis']))
+        self.plan.team_id = team.id
+        task = TestTask(
+            plan_id=self.plan.id, name='核验 TAPD 并发布报告',
+            status='pending', progress=30, assignee_claw_id=self.other_claw.id,
+            action_metadata_json={'delivery_acceptance': {
+                'published_report': True, 'tapd_entities': ['bugs', 'requirements']}})
+        db.session.add(task)
+        db.session.commit()
+        self.post('start', {
+            'command_key': 'delivery-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.agent()
+        response = self.client.post(self.base + '/agent-tasks', json={
+            'command_key': 'delivery-dispatch', 'test_task_id': task.id,
+        }, headers=self._headers(self.main_token))
+        self.assertEqual(response.status_code, 201, response.json)
+        agent_task = claim_pending_tasks(self.other_claw.id)[0]
+        self.assertEqual(json.loads(agent_task.payload)['acceptance']['delivery'],
+                         task.action_metadata_json['delivery_acceptance'])
+        complete_task(agent_task, {
+            'claim_token': agent_task.claim_token,
+            'attempt_no': agent_task.attempt_no,
+            'fencing_token': agent_task.fencing_token,
+            'status': 'completed',
+            'result': {'status': 'passed', 'summary': '已完成代码分析',
+                       'outputs': {'freshness': {'tapd': 'unknown/stale'}}},
+        })
+        self.assertEqual(agent_task.status, 'blocked')
+        self.assertEqual(agent_task.terminal_reason,
+                         'DELIVERY_ACCEPTANCE_INCOMPLETE')
+        self.assertEqual(task.status, 'blocked')
+        self.assertLess(task.progress, 100)
+        self.assertIn('交付验收未通过', task.result_summary)
+        stage = MissionStage.query.filter_by(
+            mission_id=self.sup().mission_id,
+            stage_key='test_task_%s' % task.id).one()
+        self.assertEqual(stage.state, 'blocked')
+        self.assertEqual(svc.reconcile_ordinary_task_truth(self.sup()), 0)
 
     def wait_body(self, **changes):
         body = {'command_key': 'decision-1', **self.credentials(), 'cursor': self.sup().lease_cursor,
@@ -1002,6 +1106,7 @@ class PlanSupervisionTest(unittest.TestCase):
         self.assertTrue(policy['local_git_commit_allowed'])
         self.assertFalse(policy['git_push_allowed'])
         self.assertFalse(policy['deployment_allowed'])
+        self.published_task_report(baseline)
         complete_task(agent_task, {
             'claim_token': agent_task.claim_token,
             'attempt_no': agent_task.attempt_no,
@@ -1082,6 +1187,7 @@ class PlanSupervisionTest(unittest.TestCase):
         agent_task = claimed[0]
         self.assertEqual(db.session.get(TestTask, task.id).status, 'in_progress')
         self.assertEqual(db.session.get(MissionStage, stage.id).state, 'running')
+        self.published_task_report(task)
         complete_task(agent_task, {
             'claim_token': agent_task.claim_token,
             'attempt_no': agent_task.attempt_no,
@@ -1291,6 +1397,7 @@ class PlanSupervisionTest(unittest.TestCase):
 
         agent_task = claim_pending_tasks(
             self.other_claw.id, now=due + timedelta(minutes=2))[0]
+        self.published_task_report(task)
         complete_task(agent_task, {
             'claim_token': agent_task.claim_token,
             'attempt_no': agent_task.attempt_no,

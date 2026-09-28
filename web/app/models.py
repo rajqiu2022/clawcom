@@ -5789,6 +5789,8 @@ class TestTask(db.Model):
                 if self.next_check_at else None),
             'owner_gate': bool(self.owner_gate),
             'action_metadata': self.action_metadata_json or {},
+            'delivery_acceptance': (self.action_metadata_json or {}).get(
+                'delivery_acceptance', {}),
             'checkpoint': self.checkpoint_json or {},
             'resume_contract': self.resume_contract_json or {},
             'condition_state': self.condition_state or '',

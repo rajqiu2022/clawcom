@@ -1451,6 +1451,30 @@ def list_test_task_reference_options(plan_id):
     return jsonify(task_reference_options(plan))
 
 
+def _normalize_delivery_acceptance(value):
+    """Opt-in, task-local completion criteria; never infer them from prose."""
+    if not isinstance(value, dict):
+        raise ValueError('delivery_acceptance 必须为对象')
+    allowed = {'published_report', 'shared_report', 'tapd_entities'}
+    if set(value) - allowed:
+        raise ValueError('delivery_acceptance 包含未知字段')
+    for key in ('published_report', 'shared_report'):
+        if key in value and not isinstance(value[key], bool):
+            raise ValueError('%s 必须为布尔值' % key)
+    if value.get('shared_report') and not value.get('published_report'):
+        raise ValueError('shared_report 要求同时启用 published_report')
+    entities = value.get('tapd_entities', [])
+    if (not isinstance(entities, list)
+            or any(item not in ('bugs', 'requirements') for item in entities)
+            or len(entities) != len(set(entities))):
+        raise ValueError('tapd_entities 仅支持 bugs/requirements 且不得重复')
+    return {key: value for key, value in {
+        'published_report': value.get('published_report', False),
+        'shared_report': value.get('shared_report', False),
+        'tapd_entities': entities,
+    }.items() if value}
+
+
 @api_bp.route('/test-plans/<int:plan_id>/tasks', methods=['POST'])
 def create_test_task(plan_id):
     """创建测试任务"""
@@ -1495,6 +1519,8 @@ def create_test_task(plan_id):
         data.get('library_id'), data.get('case_filter'))
     try:
         references = normalize_task_references(data, plan)
+        delivery_acceptance = _normalize_delivery_acceptance(
+            data.get('delivery_acceptance', {}))
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     task = TestTask(
@@ -1512,6 +1538,8 @@ def create_test_task(plan_id):
         status=data.get('status', 'assigned'),
         created_by=created_by,
         depends_on_task_ids_json=dependency_ids,
+        action_metadata_json={'delivery_acceptance': delivery_acceptance}
+        if delivery_acceptance else None,
         **references,
         **schedule,
     )
@@ -1566,13 +1594,15 @@ def update_test_task(plan_id, task_id):
 
     reference_fields = {
         'reference_skill_ids', 'reference_knowledge_ids',
-        'reference_report_ids'}
+        'reference_report_ids', 'delivery_acceptance'}
     if reference_fields.intersection(data or {}):
         user = _get_current_user()
         if not _can_edit_plan(user, plan):
             return jsonify({'error': '仅测试经理或计划管理员可绑定任务参考资料'}), 403
     try:
         references = normalize_task_references(data or {}, plan, task)
+        delivery_acceptance = (_normalize_delivery_acceptance(
+            data['delivery_acceptance']) if 'delivery_acceptance' in data else None)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
 
@@ -1645,6 +1675,10 @@ def update_test_task(plan_id, task_id):
         setattr(task, field, value)
     for field, value in references.items():
         setattr(task, field, value)
+    if delivery_acceptance is not None:
+        metadata = dict(task.action_metadata_json or {})
+        metadata['delivery_acceptance'] = delivery_acceptance
+        task.action_metadata_json = metadata
     task.depends_on_task_ids_json = dependency_ids
 
     # tapd_bug_ids

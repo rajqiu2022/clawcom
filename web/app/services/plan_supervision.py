@@ -2360,6 +2360,21 @@ def _agent_task_plan_link(agent_task):
         return None
 
 
+def ordinary_task_delivery_gap(agent_task, result):
+    """Apply only the task's explicit delivery contract to terminal results."""
+    link = _agent_task_plan_link(agent_task)
+    if not link:
+        return None
+    task = db.session.get(TestTask, link['test_task_id'])
+    if not task:
+        return None
+    occurrence = _linked_occurrence(link)
+    reason = _delivery_acceptance_failure(
+        task, occurrence, agent_task,
+        result if isinstance(result, dict) else {})
+    return ('DELIVERY_ACCEPTANCE_INCOMPLETE', reason) if reason else None
+
+
 def _agent_task_control_link(agent_task):
     try:
         payload = json.loads(agent_task.payload or '{}')
@@ -2584,6 +2599,7 @@ def _create_plan_agent_task(sup, task, stage, command_key, instruction,
         'acceptance': {
             'result_contract': 'ordinary_agent_task',
             'report_to_hub': True,
+            'delivery': _delivery_acceptance(task),
         },
     }
     if occurrence:
@@ -4598,6 +4614,53 @@ def _deliver_block_chat(sup, event, now=None):
     event.payload_json = payload
 
 
+def _delivery_acceptance(task):
+    """Only explicit task-scoped requirements may block ordinary work."""
+    metadata = task.action_metadata_json or {}
+    value = metadata.get('delivery_acceptance') if isinstance(metadata, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def _delivery_acceptance_failure(task, occurrence, agent_task, result):
+    criteria = _delivery_acceptance(task)
+    if not criteria:
+        return None
+    failures = []
+    if criteria.get('published_report'):
+        plan = db.session.get(TestPlan, task.plan_id)
+        if not plan:
+            return '任务所属计划不存在'
+        reports = TestReport.query.filter_by(
+            source_ref_type='test_task', source_ref_id=task.id,
+            project_id=plan.project_id,
+            is_deleted=False).all()
+        if occurrence:
+            reports = [row for row in reports if row.created_at
+                       and row.created_at.date() == occurrence.occurrence_date]
+        reports = [row for row in reports if row.status in ('published', 'revised')
+                   and row.updated_at and agent_task.created_at
+                   and row.updated_at >= agent_task.created_at]
+        if criteria.get('shared_report'):
+            reports = [row for row in reports if row.is_shared and row.share_token]
+        if not reports:
+            failures.append('未找到本任务本次执行形成的已发布'
+                            + ('且已分享' if criteria.get('shared_report') else '')
+                            + '报告')
+    entities = criteria.get('tapd_entities') or []
+    if entities:
+        outputs = result.get('outputs') or {}
+        verification = (outputs.get('tapd_verification') or {}
+                        if isinstance(outputs, dict) else {})
+        for entity in entities:
+            fact = verification.get(entity) if isinstance(verification, dict) else None
+            if (not isinstance(fact, dict)
+                    or fact.get('status') != 'verified'
+                    or not fact.get('observed_at')
+                    or fact.get('source') != 'tapd'):
+                failures.append('TAPD %s 实时核验缺失或失败' % entity)
+    return '；'.join(failures) if failures else None
+
+
 def record_agent_task_terminal(agent_task, result, status, now=None):
     control = _agent_task_control_link(agent_task)
     if control:
@@ -4623,8 +4686,14 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
     result = result if isinstance(result, dict) else {}
     provider_status = str(result.get('status') or '').lower()
     summary = str(result.get('summary') or result.get('reason') or '')[:8000]
+    acceptance_failure = (
+        _delivery_acceptance_failure(task, occurrence, agent_task, result)
+        if status == 'completed' and provider_status != 'skipped' else None)
     if status == 'completed' and provider_status == 'skipped':
         projected, stage.state = 'skipped', 'skipped'
+    elif acceptance_failure:
+        projected, stage.state = 'blocked', 'blocked'
+        summary = (summary + '\n交付验收未通过：' + acceptance_failure)[:8000]
     elif status == 'completed':
         projected, stage.state = 'completed', 'completed'
     elif status == 'blocked':
@@ -4645,7 +4714,8 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
             occurrence.owner_gate = False
         else:
             _apply_terminal_action(
-                occurrence, result.get('error_code') or status,
+                occurrence, ('DELIVERY_ACCEPTANCE_INCOMPLETE' if acceptance_failure
+                             else result.get('error_code') or status),
                 summary, now)
         occurrence.attempt_count = max(
             int(occurrence.attempt_count or 0),
@@ -4654,6 +4724,9 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
         task.status = ('blocked' if projected == 'failed' else projected)
         if projected == 'completed':
             task.progress = 100
+        elif (acceptance_failure or
+              result.get('error_code') == 'DELIVERY_ACCEPTANCE_INCOMPLETE'):
+            task.progress = min(int(task.progress or 0), 99)
         task.result_summary = summary
         task.condition_state = (
             '' if projected in ('completed', 'skipped') else projected)
@@ -4666,6 +4739,7 @@ def record_agent_task_terminal(agent_task, result, status, now=None):
         task.next_action = (
             'none' if projected in ('completed', 'skipped') else 'manager_review')
     stage.last_reason_code = str(
+        'DELIVERY_ACCEPTANCE_INCOMPLETE' if acceptance_failure else
         result.get('error_code') or status or 'agent_task_terminal')[:80]
     evidence = result.get('evidence')
     if evidence:
@@ -4775,10 +4849,6 @@ def reconcile_ordinary_task_truth(sup, now=None):
         if not terminal:
             continue
         projected_status, task_status, stage_state = terminal
-        truth_status = occurrence.status if occurrence else task.status
-        expected_status = projected_status if occurrence else task_status
-        if truth_status == expected_status and stage.state == stage_state:
-            continue
         try:
             result = json.loads(agent_task.result or '{}')
         except (TypeError, ValueError):
@@ -4788,8 +4858,17 @@ def reconcile_ordinary_task_truth(sup, now=None):
         result.setdefault('status', projected_status)
         result.setdefault('error_code', agent_task.terminal_reason or '')
         result.setdefault('reason', agent_task.error or '')
+        if (projected_status == 'completed'
+                and result.get('status') != 'skipped'
+                and _delivery_acceptance_failure(
+                    task, occurrence, agent_task, result)):
+            projected_status = task_status = stage_state = 'blocked'
+        truth_status = occurrence.status if occurrence else task.status
+        expected_status = projected_status if occurrence else task_status
+        if truth_status == expected_status and stage.state == stage_state:
+            continue
         record_agent_task_terminal(
-            agent_task, result, projected_status, now=now)
+            agent_task, result, agent_task.status, now=now)
         count += 1
     return count
 

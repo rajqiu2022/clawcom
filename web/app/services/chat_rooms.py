@@ -29,6 +29,7 @@ from app.models import (
     ChatRoomMessage,
     OpenClawInstance,
     User,
+    WorkflowRun,
 )
 
 
@@ -46,6 +47,7 @@ def _team_room_authority(room, claw_id):
         'team_id': room.team_id if room else None,
         'project_id': room.project_id if room else None,
         'manager_session_scope': None,
+        'manager_member_id': None,
         'allowed_business_actions': [],
         'hard_gates': [
             'cross_project_write', 'credential_export',
@@ -58,6 +60,11 @@ def _team_room_authority(room, claw_id):
     team = db.session.get(AgentTeam, room.team_id)
     if not team or team.status != 'active' or team.project_id != room.project_id:
         return authority
+    manager_member = ChatRoomMember.query.filter_by(
+        room_id=room.id, claw_id=team.primary_manager_claw_id,
+        member_type='agent', status='active').first()
+    authority['manager_member_id'] = (
+        manager_member.id if manager_member else None)
     if int(team.primary_manager_claw_id or 0) != int(claw_id or 0):
         return authority
     authority.update({
@@ -569,6 +576,52 @@ def guest_path_allowed(path, method):
         or (parts[4] in ('messages', 'read') and method == 'POST'))
 
 
+def _verified_room_flow_followup(room, message, recipient):
+    """Expose a Run receipt to the manager only after Hub verifies its origin."""
+    sender = message.sender
+    if (
+        not room.team_id or not recipient or recipient.member_type != 'agent'
+        or not _team_room_authority(room, recipient.claw_id)['can_manage']
+        or not sender or sender.member_type != 'agent'
+        or not message.origin_delivery_id or not message.reply_to_message_id
+        or not ChatRoomMention.query.filter_by(
+            message_id=message.id, mention_type='member',
+            member_id=recipient.id).first()
+    ):
+        return None
+    source_delivery = db.session.get(ChatRoomDelivery, message.origin_delivery_id)
+    if (
+        not source_delivery or source_delivery.room_id != room.id
+        or source_delivery.member_id != sender.id
+        or source_delivery.message_id != message.reply_to_message_id
+    ):
+        return None
+    source_message = db.session.get(ChatRoomMessage, source_delivery.message_id)
+    source_sender = source_message.sender if source_message else None
+    if (
+        not source_sender or source_sender.member_type != 'user'
+        or source_sender.role not in ('owner', 'admin')
+        or not ChatRoomMention.query.filter_by(
+            message_id=source_message.id, mention_type='member',
+            member_id=sender.id).first()
+    ):
+        return None
+    run = WorkflowRun.query.filter_by(
+        correlation_id=f'hub-room:{room.id}:{source_message.id}',
+        trigger_source='hub_team_room').first()
+    if not run or run.project_id != room.project_id:
+        return None
+    context = run.context_json if isinstance(run.context_json, dict) else {}
+    start = context.get('workflow_start') or {}
+    try:
+        worker_claw_id = int(start.get('worker_claw_id') or 0)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if worker_claw_id != int(sender.claw_id or 0):
+        return None
+    return {'run_id': run.id, 'definition_id': run.definition_id}
+
+
 def pending_agent_events(claw_id, limit=50):
     """领取一个 Agent 的聊天室事件；事件与旧 message 事件分离。"""
     events = []
@@ -632,15 +685,21 @@ def pending_agent_events(claw_id, limit=50):
                         ChatRoomMessage.id.desc()).limit(12).all())
                 history_rows.reverse()
                 history = [serialize_message(row) for row in history_rows]
+            message_payload = serialize_message(message)
+            followup = _verified_room_flow_followup(
+                room, message, db.session.get(ChatRoomMember, delivery.member_id))
+            if followup:
+                message_payload['verified_flow_followup'] = followup
             events.append(('room_message', {
                 'delivery_id': delivery.id,
                 'delivery': {
                     'id': delivery.id, 'status': delivery.status,
+                    'member_id': delivery.member_id,
                     'processing_at': (str(delivery.processing_at)
                                       if delivery.processing_at else None),
                 },
                 'room': room.to_dict(),
-                'message': serialize_message(message),
+                'message': message_payload,
                 'history': history,
                 'team_authority': _team_room_authority(room, claw_id),
             }))
