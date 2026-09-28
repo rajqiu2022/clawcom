@@ -14,6 +14,10 @@ Worker 接线要求：
 4. 对 Run 恢复调用 Hub recover API 获取实际准许动作。不要自行增加“必须找到历史签名 shutdown receipt”等全局门槛。旧执行缺回执时做当前状态对账，明确标记为**事后观察**，不能伪造历史回执。
 5. 不得自动丢弃他人未提交改动、提交/推送 RacingGoUnity 工程、伪造设备/Unity/报告证据，或绕过同一资源的互斥租约。共享工作区 dirty 时优先使用独立工作区，若当前 Flow 仍固定路径则把它识别为 DeepFlow 接线缺口，不重复原地重试。
 
+当前小策已安装 Worker 的具体接线点：`sidecar_v2.py::_plan_supervisor_prompt` 只有 `ready_stages` 非空时才注入“必须行动”的经理规则；`_manager_decision_details` 在没有 ready Stage 时可直接返回空决定。应让经理每次唤醒先检查目标、独立工作面、到点任务和阻断恢复，再选择行动；Stage 决定字段只约束本次 ready Stage，不能替代普通直接协作。启用 `hub.plan_execution.v1` 时，由 Hub 出票的限制只针对该计划的 ready Stage，不应禁止经理通过团队消息安排其他授权工作。Worker 不要重新引入一个全局 AgentTask 前置门禁。
+
+当前 Run #954 的 `baseline_prepare` 因 6 个受跟踪文件的既有改动而被 DeepFlow 拦截。Hub `recover` 只有在节点 `requires_reconciliation` 为真时才强制执行对账；#954 当前没有此标记。任务 #276 自己额外写了“必须有历史签名 shutdown/cleanup receipt”，这不是通用 Hub 合同。即使撤销该额外要求，在同一脏目录原地恢复仍会重复失败；下一步是保存差异和哈希，评估独立工作区与新基线合同，而不是放宽到自动 `reset`。
+
 验收至少覆盖：Owner 直接请小魏做设备探测而无 TestTask；小魏在 Hub 留下真实工作状态、证据和结果；小策自动发现并持续跟进；一个 blocked Run 不影响小马代码分析和小安复核；需要 Flow 的工作产生真实 Run/claim/heartbeat；共享 dev2 有未提交改动时证据得到保留，Agent 不执行清理或无意义重复恢复。
 
 本合同只改变团队协作默认行为。已有 Workflow 的冻结定义、实际资源锁和外部通知授权仍按各自合同执行；需要调整 DeepFlow 的固定工作区绑定时，发布新的不可变 Release 后再切换线上 Flow。
