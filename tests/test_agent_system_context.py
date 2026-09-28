@@ -89,6 +89,42 @@ class AgentSystemContextTests(unittest.TestCase):
         self.assertEqual('完整规则正文 19', payload['rules'][0]['content'])
         self.assertEqual('codex', payload['system_context']['identity']['provider'])
 
+    def test_primary_team_manager_gets_dedicated_runtime_identity(self):
+        team = {
+            'team_id': 1,
+            'name': 'RacingGO Agent团队',
+            'objective': '持续版本质量管理',
+            'status': 'active',
+            'primary_manager_claw_id': self.claw.id,
+            'self': {
+                'claw_id': self.claw.id,
+                'effective_role_key': 'test_manager',
+                'manager_kind': 'primary',
+                'has_manager_authority': True,
+            },
+            'plan_supervision': {
+                'manager_runtime': {
+                    'required_skill_ids': [244],
+                    'critical_rules': ['必须真实执行并回读。'],
+                },
+            },
+        }
+
+        payload = agent_system_context.build_agent_system_context(
+            self.claw, 'codex', [], [], agent_teams=[team])
+
+        identity = payload['system_context']['identity']
+        runtime = payload['system_context']['policy']['manager_runtime']
+        self.assertEqual('test_manager', identity['role'])
+        self.assertEqual('专用测试经理 / Owner 代理', identity['title'])
+        self.assertEqual(1, identity['team_id'])
+        self.assertEqual('team-manager:1', runtime['session_scope'])
+        self.assertEqual([244], runtime['required_skill_ids'])
+        self.assertEqual(
+            ['wecom_owner', 'team_chat', 'plan_supervisor',
+             'formal_delegation'],
+            runtime['serialized_channels'])
+
     def test_primary_active_profile_is_selected_deterministically(self):
         payload = agent_system_context.build_agent_system_context(
             self.claw,

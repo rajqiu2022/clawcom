@@ -995,6 +995,13 @@ class PlanSupervisionTest(unittest.TestCase):
         }, headers=self._headers(self.main_token))
         self.assertEqual(dispatched.status_code, 201, dispatched.json)
         agent_task = claim_pending_tasks(self.other_claw.id)[0]
+        policy = json.loads(agent_task.payload)['side_effect_policy']
+        self.assertEqual(policy['mode'], 'task_scoped')
+        self.assertTrue(policy['local_workspace_mutations_allowed'])
+        self.assertTrue(policy['same_project_hub_writes_allowed'])
+        self.assertTrue(policy['local_git_commit_allowed'])
+        self.assertFalse(policy['git_push_allowed'])
+        self.assertFalse(policy['deployment_allowed'])
         complete_task(agent_task, {
             'claim_token': agent_task.claim_token,
             'attempt_no': agent_task.attempt_no,
@@ -1647,6 +1654,13 @@ class PlanSupervisionTest(unittest.TestCase):
         db.session.commit()
         control = AgentTask.query.filter_by(
             task_type='plan_control_action', claw_id=self.main_claw.id).one()
+        control_payload = json.loads(control.payload)
+        self.assertEqual(control_payload['side_effect_policy']['mode'],
+                         'manager_scoped')
+        self.assertTrue(control_payload['side_effect_policy'][
+            'same_project_hub_writes_allowed'])
+        self.assertIn('dispatch_member_task', control_payload[
+            'allowed_operations'])
         self.assertEqual(occurrence.next_action, 'await_manager_review')
         truth = svc.stage_truth_snapshot(self.sup())
         self.assertEqual(truth['pending_control_actions'][0][

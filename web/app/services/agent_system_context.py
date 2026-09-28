@@ -692,6 +692,42 @@ def build_agent_system_context(
         'missing_profile_behavior': 'continue_with_identity_and_rules',
     }
     policy.update(workflow_policy)
+    manager_teams = []
+    for team in teams:
+        if not isinstance(team, dict) or team.get('status') != 'active':
+            continue
+        identity = team.get('self')
+        if (not isinstance(identity, dict)
+                or identity.get('effective_role_key') != 'test_manager'
+                or identity.get('manager_kind') != 'primary'
+                or identity.get('has_manager_authority') is not True
+                or identity.get('claw_id') != getattr(claw, 'id', None)
+                or team.get('primary_manager_claw_id') != getattr(
+                    claw, 'id', None)):
+            continue
+        manager_teams.append(team)
+    manager_team = manager_teams[0] if len(manager_teams) == 1 else None
+    if manager_team:
+        capability = manager_team.get('plan_supervision') or {}
+        generated_runtime = capability.get('manager_runtime') or {}
+        policy['manager_runtime'] = {
+            'mode': 'dedicated_test_manager',
+            'team_id': manager_team.get('team_id'),
+            'session_scope': 'team-manager:%s' % manager_team.get('team_id'),
+            'serialized_channels': [
+                'wecom_owner', 'team_chat', 'plan_supervisor',
+                'formal_delegation',
+            ],
+            'execution_queue': 'manager_actions',
+            'action_receipt_required': True,
+            'required_skill_ids': list(
+                generated_runtime.get('required_skill_ids') or []),
+            'critical_rules': list(
+                generated_runtime.get('critical_rules') or [
+                    '已授权且当前可执行的动作必须实际执行并验证回执。',
+                    '没有Task/Run/claim/heartbeat证据时不得声称已派工或已启动。',
+                ]),
+        }
     mission_summaries = []
     for mission in list(workflow_missions or []):
         mission_id = (
@@ -704,13 +740,21 @@ def build_agent_system_context(
             })
     if mission_summaries:
         policy['active_workflow_missions'] = mission_summaries
+    identity_payload = {
+        'claw_id': getattr(claw, 'id', None),
+        'claw_name': _as_text(getattr(claw, 'name', '')),
+        'provider': _as_text(runtime_agent_type),
+    }
+    if manager_team:
+        identity_payload.update({
+            'role': 'test_manager',
+            'title': '专用测试经理 / Owner 代理',
+            'objective': _as_text(manager_team.get('objective')),
+            'team_id': manager_team.get('team_id'),
+        })
     system_context = {
         'schema_version': SYSTEM_CONTEXT_VERSION,
-        'identity': {
-            'claw_id': getattr(claw, 'id', None),
-            'claw_name': _as_text(getattr(claw, 'name', '')),
-            'provider': _as_text(runtime_agent_type),
-        },
+        'identity': identity_payload,
         'profile': active_profile,
         'rules': trusted_rules,
         'warnings': context_warnings,

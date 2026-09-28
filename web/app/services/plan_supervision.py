@@ -81,6 +81,11 @@ def team_binding_valid(team_id, project_id, claw_id):
 
 def team_capability(team_id):
     team = db.session.get(AgentTeam, team_id) if type(team_id) is int else None
+    team_policy = (team.policy_json or {}) if team else {}
+    manager_skill_ids = sorted({
+        int(item) for item in team_policy.get('manager_skill_ids', [])
+        if type(item) is int and item > 0
+    })
     schedule = ((team.policy_json or {}).get('supervision_schedule')
                 if team else None) or DEFAULT_SCHEDULE
     return {'enabled': team_enabled(team_id), 'contract': 'hub.plan_supervision.v1',
@@ -123,6 +128,49 @@ def team_capability(team_id):
                 'safety_boundary': (
                     'Hub validates identity, plan scope, fencing, idempotency '
                     'and audit only; the manager Agent chooses the business action.'
+                ),
+            },
+            'manager_runtime': {
+                'mode': 'dedicated_test_manager',
+                'session_scope': ('team-manager:%s' % team.id) if team else None,
+                'serialized_channels': [
+                    'wecom_owner', 'team_chat', 'plan_supervisor',
+                    'formal_delegation',
+                ],
+                'execution_queue': 'manager_actions',
+                'action_receipt_required': True,
+                'no_receipt_behavior': 'continue_or_report_blocker',
+                'required_skill_ids': manager_skill_ids,
+                'critical_rules': [
+                    '已授权且当前可执行的动作必须实际执行并验证回执。',
+                    '单个Stage阻断时继续推进其他无依赖、无资源冲突的Stage。',
+                    '没有Task/Run/claim/heartbeat证据时不得声称已派工或已启动。',
+                ],
+                'note': (
+                    '同一测试经理在所有入口恢复同一逻辑会话；查询可以直接答复，'
+                    '动作请求必须真实执行并回读任务/Run/claim/heartbeat。'
+                ),
+            },
+            'execution_authority': {
+                'member_default': 'task_scoped',
+                'manager_default': 'manager_scoped',
+                'task_scoped_allows': [
+                    'workspace_edit', 'workspace_execute', 'local_git_commit',
+                    'same_project_hub_business_write', 'evidence_publish',
+                ],
+                'manager_scoped_allows': [
+                    'manage_test_plan', 'dispatch_member_task',
+                    'recover_task', 'reassign_task', 'update_report',
+                    'request_owner_assistance_via_hub_outbox',
+                ],
+                'owner_gate_only': [
+                    'cross_project_write', 'credential_export',
+                    'destructive_delete', 'external_recipient_notification',
+                    'git_push', 'deployment',
+                ],
+                'note': (
+                    'Hub仅校验身份、项目/任务范围、fence、幂等和审计；'
+                    '任务范围内的实现步骤由执行Agent自主决定，跨任务取舍由测试经理决定。'
                 ),
             },
             'supervisor_states': [
@@ -2395,28 +2443,50 @@ def _create_control_agent_task(sup, stage, action_kind, instruction,
     task_id = 'plan_%s_control_%s_%s' % (
         sup.plan_id, stage.id,
         hashlib.sha256(seed.encode()).hexdigest()[:16])
-    # Control tasks are advisory/read-only unless a future, separately
-    # authenticated Owner approval binds an exact mutation manifest. A broad
-    # phrase such as "environment repair" must never become repository,
-    # deployment, or shared-environment write authority.
+    # Environment/evidence/reconciliation controls stay read-only.  A manager
+    # review is different: it is the team's durable, project-scoped business
+    # authority and may dispatch/recover/reassign through Hub APIs.  It still
+    # cannot export credentials, cross projects, delete destructively, push or
+    # deploy without a separate exact grant.
     allowed_operations = {
-        'manager_review': ['inspect_hub_state', 'submit_decision'],
+        'manager_review': [
+            'inspect_hub_state', 'manage_test_plan',
+            'dispatch_member_task', 'recover_task', 'reassign_task',
+            'request_owner_assistance', 'update_report', 'submit_decision',
+        ],
         'environment_repair': [
             'inspect_environment', 'diagnose', 'propose_patch'],
         'evidence_review': ['inspect_evidence', 'propose_findings'],
         'workflow_execution_reconciliation': [
             'inspect_execution', 'submit_reconciliation_receipt'],
     }.get(action_kind, ['inspect_hub_state'])
-    side_effect_policy = {
-        'mode': 'read_only',
-        'external_mutations_allowed': False,
-        'owner_approval_required': True,
-        'git_commit_allowed': False,
-        'git_push_allowed': False,
-        'deployment_allowed': False,
-        'shared_api_mutation_allowed': False,
-        'denial_code': 'EXTERNAL_MUTATION_APPROVAL_REQUIRED',
-    }
+    if action_kind == 'manager_review':
+        side_effect_policy = {
+            'mode': 'manager_scoped',
+            'same_project_hub_writes_allowed': True,
+            'task_dispatch_allowed': True,
+            'owner_assistance_channel': 'hub_dual_outbox',
+            'local_workspace_mutations_allowed': False,
+            'credential_export_allowed': False,
+            'cross_project_write_allowed': False,
+            'destructive_delete_allowed': False,
+            'git_commit_allowed': False,
+            'git_push_allowed': False,
+            'deployment_allowed': False,
+            'owner_approval_required': False,
+            'denial_code': 'MANAGER_SCOPE_EXCEEDED',
+        }
+    else:
+        side_effect_policy = {
+            'mode': 'read_only',
+            'external_mutations_allowed': False,
+            'owner_approval_required': True,
+            'git_commit_allowed': False,
+            'git_push_allowed': False,
+            'deployment_allowed': False,
+            'shared_api_mutation_allowed': False,
+            'denial_code': 'EXTERNAL_MUTATION_APPROVAL_REQUIRED',
+        }
     payload = {
         'contract': _PLAN_CONTROL_TASK_CONTRACT,
         'test_plan_id': sup.plan_id,
@@ -2495,6 +2565,22 @@ def _create_plan_agent_task(sup, task, stage, command_key, instruction,
         'task_type': task.task_type,
         'execution_role': task.execution_role or 'member_work',
         'references': serialize_task_references(task, occurrence),
+        'side_effect_policy': {
+            'mode': 'task_scoped',
+            'local_workspace_mutations_allowed': True,
+            'local_workspace_execution_allowed': True,
+            'local_git_commit_allowed': True,
+            'same_project_hub_writes_allowed': True,
+            'evidence_publish_allowed': True,
+            'credential_export_allowed': False,
+            'cross_project_write_allowed': False,
+            'destructive_delete_allowed': False,
+            'external_recipient_notification_allowed': False,
+            'git_push_allowed': False,
+            'deployment_allowed': False,
+            'escalation_owner': 'test_manager',
+            'denial_code': 'TASK_SCOPE_EXCEEDED',
+        },
         'acceptance': {
             'result_contract': 'ordinary_agent_task',
             'report_to_hub': True,

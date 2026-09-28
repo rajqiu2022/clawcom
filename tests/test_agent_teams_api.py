@@ -12,7 +12,7 @@ from app.models import (
     ChatRoomMember, ChatRoomMessage, ClawSidecarConfig, KnowledgeEntry,
     MissionStage, OpenClawInstance, Skill, WorkflowRun, hash_token,
 )
-from app.services.chat_rooms import pending_agent_events
+from app.services.chat_rooms import _team_room_authority, pending_agent_events
 
 
 class AgentTeamsApiTest(unittest.TestCase):
@@ -181,6 +181,20 @@ class AgentTeamsApiTest(unittest.TestCase):
         self.assertEqual(event['message']['id'], body['message']['id'])
         self.assertEqual(event['room']['team_id'], self.team_id)
         self.assertIn('history', event)
+        self.assertFalse(event['team_authority']['can_manage'])
+        self.assertEqual(event['team_authority']['mode'], 'reply_only')
+
+        manager_authority = _team_room_authority(
+            db.session.get(ChatRoom, room_id), self.main_claw.id)
+        self.assertTrue(manager_authority['can_manage'])
+        self.assertEqual(manager_authority['mode'], 'test_manager')
+        self.assertEqual(
+            manager_authority['manager_session_scope'],
+            f'team-manager:{self.team_id}')
+        self.assertIn('dispatch_member_task', manager_authority[
+            'allowed_business_actions'])
+        self.assertFalse(_team_room_authority(
+            db.session.get(ChatRoom, room_id), self.backup.id)['can_manage'])
 
         for claw, token in ((self.other_claw, self.other_token),
                             (self.backup, self.backup_token)):

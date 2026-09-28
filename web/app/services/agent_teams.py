@@ -101,7 +101,8 @@ def normalize_config(data, project_id):
         normalized.append({'claw_id': claw_id, 'role_key': role, 'specialties': sorted(set(specialties))})
     policy = data.get('policy')
     if not isinstance(policy, dict) or set(policy) - {
-            'allowed_definition_ids', 'max_child_runs', 'supervision_schedule'}:
+            'allowed_definition_ids', 'max_child_runs', 'supervision_schedule',
+            'manager_skill_ids'}:
         raise TeamError('TEAM_POLICY_INVALID', 'policy 包含不支持的字段', 400)
     ids = policy.get('allowed_definition_ids')
     if not isinstance(ids, list) or not ids or len(ids) > 100:
@@ -111,6 +112,13 @@ def normalize_config(data, project_id):
         flow = db.session.get(WorkflowDefinition, flow_id)
         if not flow or flow.project_id != project_id or flow.status != 'active':
             raise TeamError('TEAM_POLICY_INVALID', 'Flow 必须 active 且属于团队项目', 400)
+    manager_skill_ids = policy.get('manager_skill_ids') or []
+    if (not isinstance(manager_skill_ids, list)
+            or len(manager_skill_ids) > 32
+            or any(type(item) is not int or item <= 0
+                   for item in manager_skill_ids)):
+        raise TeamError(
+            'TEAM_POLICY_INVALID', 'manager_skill_ids 必须为正整数数组', 400)
     schedule = policy.get('supervision_schedule') or {
         'timezone': 'Asia/Shanghai',
         'morning_check': '09:30',
@@ -146,7 +154,8 @@ def normalize_config(data, project_id):
         'members': normalized,
         'policy': {'allowed_definition_ids': sorted(set(ids)),
                    'max_child_runs': integer(policy.get('max_child_runs', 20), 'max_child_runs', 1, 100),
-                   'supervision_schedule': normalized_schedule},
+                   'supervision_schedule': normalized_schedule,
+                   'manager_skill_ids': sorted(set(manager_skill_ids))},
     }
 
 

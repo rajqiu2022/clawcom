@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from app import db
 from app.services.chat_message_presentation import message_presentation
 from app.models import (
+    AgentTeam,
     ChatRoom,
     ChatRoomAudit,
     ChatRoomDelivery,
@@ -29,6 +30,47 @@ from app.models import (
     OpenClawInstance,
     User,
 )
+
+
+def _team_room_authority(room, claw_id):
+    """Return the Hub-authoritative action mode for one team-room delivery.
+
+    Chat membership alone never grants dispatch authority.  The current
+    primary manager (including an explicitly promoted delegate) receives the
+    manager route; every other member remains reply-only.  Endpoint-level Hub
+    authorization, fencing and idempotency still decide every write.
+    """
+    authority = {
+        'mode': 'reply_only',
+        'can_manage': False,
+        'team_id': room.team_id if room else None,
+        'project_id': room.project_id if room else None,
+        'manager_session_scope': None,
+        'allowed_business_actions': [],
+        'hard_gates': [
+            'cross_project_write', 'credential_export',
+            'destructive_delete', 'external_recipient_notification',
+            'git_push_or_deploy',
+        ],
+    }
+    if not room or not room.team_id:
+        return authority
+    team = db.session.get(AgentTeam, room.team_id)
+    if not team or team.status != 'active' or team.project_id != room.project_id:
+        return authority
+    if int(team.primary_manager_claw_id or 0) != int(claw_id or 0):
+        return authority
+    authority.update({
+        'mode': 'test_manager',
+        'can_manage': True,
+        'manager_session_scope': 'team-manager:%s' % team.id,
+        'allowed_business_actions': [
+            'inspect_team_state', 'manage_test_plan',
+            'dispatch_member_task', 'recover_task', 'reassign_task',
+            'request_owner_assistance', 'update_report',
+        ],
+    })
+    return authority
 
 
 def now_cst_naive():
@@ -600,6 +642,7 @@ def pending_agent_events(claw_id, limit=50):
                 'room': room.to_dict(),
                 'message': serialize_message(message),
                 'history': history,
+                'team_authority': _team_room_authority(room, claw_id),
             }))
             if delivery.status == 'unread':
                 delivery.status = 'delivered'
