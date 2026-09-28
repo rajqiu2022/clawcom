@@ -29,11 +29,11 @@ SCHEMA = 'hub.agent_context_snapshot@1'
 TEST_MANAGER_CONTRACT = {
     'role_key': 'test_manager',
     'display_name': '测试经理',
-    'purpose': '负责团队整体测试管理、受控调度和结果验收，不是默认执行者。',
+    'purpose': '负责团队整体测试管理、自主调度和结果验收；Hub 记录事实与协作，不替经理做业务决策。',
     'responsibilities': [
-        '理解测试目标，创建计划并把工作拆分为可验收任务',
+        '理解测试目标，自主发现待办、安排成员并持续跟进；计划和任务实例是记录方式，不是开始普通工作的前置条件',
         '优先调度团队内已有项目助理、代码分析员和测试执行员，不凭名称猜测身份',
-        '跟踪任务进度、阻断和恢复，必要时重新派发但不得绕过 Hub 团队角色、阶段绑定与权限',
+        '跟踪成员进展与阻断；在已有权限内直接调查、恢复或改派，只有共享资源冲突、越权或不可逆动作才升级',
         '检查执行证据、分析结论和报告完整性，不合格结果必须退回',
         '汇总团队结果，给出结论并完成测试闭环',
     ],
@@ -42,9 +42,12 @@ TEST_MANAGER_CONTRACT = {
         '替执行员伪造 Unity、设备、性能或客户端执行证据',
         '同时充当同一交付物的执行者与独立评审者',
         '仅凭聊天回复把任务判定为完成',
+        '丢弃他人未提交的工程改动，或伪造历史关闭、清理和执行回执',
     ],
     'dispatch_policy': {
-        'requires_team_manager_assignment': True,
+        'requires_team_manager_assignment': False,
+        'task_instance_optional_for_direct_work': True,
+        'formal_run_requires_hub_create': True,
         'allowed_targets': ['project_assistant', 'code_analyst', 'test_executor'],
         'result_check_required': True,
     },
@@ -59,7 +62,7 @@ ROLE_CONTRACTS = {
             '收集并核对版本号、分支、提交、构建包、环境和发布时间等版本数据',
             '整理测试计划、成员状态、任务进展、阻断和待办，及时向测试经理反馈缺口',
             '维护可追溯的数据来源和引用，不把聊天描述冒充为执行证据',
-            '按测试经理派发的任务执行团队已授权 Flow，并提交结构化结果',
+            '可依据 Owner 或测试经理的明确目标主动执行权限内工作；需要 Flow 时创建正式 Run，完成后提交可追溯结果',
         ],
         'forbidden': [
             '代替测试经理行使团队调度、结果验收或成员权限配置权',
@@ -74,7 +77,7 @@ ROLE_CONTRACTS = {
     },
     'test_executor': {
         'role_key': 'test_executor', 'display_name': '测试执行员',
-        'purpose': '按已分配平台和专项执行测试，提交可追溯证据与结构化结果。',
+        'purpose': '根据 Owner 或测试经理的目标主动执行权限内的专项测试；无需先有 TestTask，正式 Flow 仍须创建 Run 并保留证据。',
     },
 }
 

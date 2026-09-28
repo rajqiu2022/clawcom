@@ -89,6 +89,8 @@ def team_capability(team_id):
     schedule = ((team.policy_json or {}).get('supervision_schedule')
                 if team else None) or DEFAULT_SCHEDULE
     return {'enabled': team_enabled(team_id), 'contract': 'hub.plan_supervision.v1',
+            'ordinary_team_work_requires_supervisor': False,
+            'blocked_owner_gate_scope': 'scheduled_plan_only',
             'contract_extensions': [
                 'recoverable_states_v2', 'persistent_schedule_v1',
                 'terminal_projection_v1', 'authoritative_execution_v1',
@@ -144,7 +146,7 @@ def team_capability(team_id):
                 'critical_rules': [
                     '已授权且当前可执行的动作必须实际执行并验证回执。',
                     '单个Stage阻断时继续推进其他无依赖、无资源冲突的Stage。',
-                    '没有Task/Run/claim/heartbeat证据时不得声称已派工或已启动。',
+                    '正式Task/Flow以Task/Run/claim/heartbeat回执确认；普通直接协作以成员确认和真实活动上报确认，不能只凭经理口头安排声称已开工。',
                 ],
                 'note': (
                     '同一测试经理在所有入口恢复同一逻辑会话；查询可以直接答复，'

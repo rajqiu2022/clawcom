@@ -63,6 +63,8 @@ class TeamOnboardingTest(unittest.TestCase):
         self.assertIn('test_executor', context[0]['self']['roles'])
         self.assertNotIn('primary_manager', context[0]['self']['roles'])
         self.assertEqual(context[0]['shared_resources']['mode'], 'on_demand')
+        self.assertFalse(context[0]['collaboration_model']['ordinary_work_requires_test_task'])
+        self.assertFalse(context[0]['activity_reporting']['task_instance_required'])
         self.assertIn('/shared-resources', context[0]['shared_resources']['manifest_api'])
         self.assertEqual(
             context[0]['test_plans']['task_reference_contract']['read_policy'],
@@ -71,8 +73,13 @@ class TeamOnboardingTest(unittest.TestCase):
             'reference_skill_ids',
             context[0]['test_plans']['task_reference_contract']['fields'])
         payload = build_agent_system_context(self.other_claw, 'codebuddy', [], [], agent_teams=context)
+        self.assertEqual(payload['system_context']['policy']['team_collaboration_mode'],
+                         'agent_direct')
+        self.assertFalse(payload['system_context']['policy'][
+            'ordinary_team_work_requires_task_instance'])
         rule = next(r for r in payload['system_context']['rules'] if r['name'] == 'agent_team_identity')
         self.assertIn('不得由名字推断经理', rule['content'])
+        self.assertIn('普通工作无需先创建任务实例', rule['content'])
         self.assertNotIn('manager_session_id', rule['content'])
         outsider = OpenClawInstance(name='旁观者', safe_name='observer', claw_tag='observer',
                                    project_id=self.project.id, owner='other')

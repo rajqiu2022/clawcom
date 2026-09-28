@@ -162,7 +162,9 @@ def list_agent_teams():
 
 def _team_read_payload(team):
     from app.services.plan_supervision import team_capability
-    return dict(team.to_dict(), plan_supervision=team_capability(team.id))
+    from app.services.agent_team_context import COLLABORATION_MODEL
+    return dict(team.to_dict(), plan_supervision=team_capability(team.id),
+                collaboration_model=dict(COLLABORATION_MODEL))
 
 
 def _team_resource_editor(team, actor):
@@ -431,6 +433,8 @@ def list_team_member_activity(team_id):
         'report_contract': {'method':'POST', 'path':'/api/v1/agent-teams/%d/members/{claw_id}/activity' % team.id,
                             'self_only':True, 'recommended_interval_seconds':60,
                             'requires_expected_version':True,
+                            'task_instance_required':False,
+                            'working_without_task_requires_summary':True,
                             'task_types':list(activity.TASK_TYPES)}})
 
 

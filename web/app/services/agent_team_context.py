@@ -7,6 +7,17 @@ from app.services.agent_teams import TeamError, require_team_project
 from app.services.agent_context_snapshots import ROLE_CONTRACTS
 
 
+COLLABORATION_MODEL = {
+    'mode': 'agent_direct',
+    'ordinary_work_requires_test_task': False,
+    'ordinary_work_requires_manager_dispatch': False,
+    'owner_or_manager_instruction_can_start_work': True,
+    'formal_workflow_requires_run': True,
+    'hub_role': 'team_directory_messages_resources_and_evidence_ledger',
+    'boundary': 'Identity, project permission, shared-resource lease, idempotency and audit remain enforced.',
+}
+
+
 def team_snapshot(team, claw_id, names):
     from app.services.plan_supervision import team_capability
     people = roster(team)
@@ -45,9 +56,12 @@ def team_snapshot(team, claw_id, names):
         'activity_api': '/api/v1/agent-teams/%s/members/activity' % team.id,
         'activity_reporting': {
             'self_only': True,
+            'task_instance_required': False,
+            'working_without_task_requires_summary': True,
             'task_types': list(TASK_TYPES),
             'project_assistant_default_task_type': 'version_data',
         },
+        'collaboration_model': dict(COLLABORATION_MODEL),
         'workflow_permissions': {
             'source': 'active_team_selection',
             'allowed_definition_ids': list((team.policy_json or {}).get(
@@ -71,7 +85,7 @@ def team_snapshot(team, claw_id, names):
                                'task-reference-options'),
                            'read_policy': 'on_demand_before_execution',
                        },
-                       'note': '团队计划创建为草稿；排期概览不是自动执行调度。测试经理可给任务绑定团队 Skill、知识库及项目报告，执行者须按 references 地址读取。'},
+                       'note': '团队计划和任务用于排期与留痕；普通授权工作可依据 Owner 或经理目标直接开始。正式 Flow 须建立 Run，执行证据按实际来源回写。'},
         'shared_resources': {
             'manifest_api': '/api/v1/agent-teams/%s/shared-resources' % team.id,
             'mode': 'on_demand',

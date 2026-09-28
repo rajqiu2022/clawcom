@@ -666,9 +666,12 @@ def build_agent_system_context(
                 '团队岗位独立于 Claw 显示名、旧 role 和 Profile；以以下团队配置为准，'
                 '不得由名字推断经理。团队配置中的测试经理持续拥有调度权限，'
                 '直到被管理员移出或团队暂停；Supervisor 短租约仅用于回合并发 fencing。'
-                '使用当前实例受控 Hub 工具；工具缺失或身份不一致应停止并报告，'
+                '需要 Hub 写入、受控资源或正式 Flow 时使用当前实例受控 Hub 工具；'
+                '工具暂不可用时可继续已授权的本地只读调查并保存待同步证据，'
+                '不得声称已完成 Hub 写入或正式 Run。身份不一致应停止相关操作并报告。'
                 '禁止从 ~/.qclaw、其他实例配置、历史消息或记忆搜寻凭据替代当前身份。'
-                '仅能上报自身状态。操作前回读 definition_api 和 activity_api；'
+                '仅能上报自身状态。正式 Flow 创建前回读 definition_api，'
+                '跨成员调度或状态结论前回读 activity_api；普通工作无需先创建任务实例。'
                 '本快照不授予调度权限，也不代表当前空闲或实时状态。\n'
                 + json.dumps(teams, ensure_ascii=False, separators=(',', ':'))
             ),
@@ -725,9 +728,13 @@ def build_agent_system_context(
             'critical_rules': list(
                 generated_runtime.get('critical_rules') or [
                     '已授权且当前可执行的动作必须实际执行并验证回执。',
-                    '没有Task/Run/claim/heartbeat证据时不得声称已派工或已启动。',
+                    '正式Task/Flow以Task/Run/claim/heartbeat回执确认；普通直接协作以成员确认和真实活动上报确认，不能只凭经理口头安排声称已开工。',
                 ]),
         }
+    if teams:
+        policy['team_collaboration_mode'] = 'agent_direct'
+        policy['ordinary_team_work_requires_task_instance'] = False
+        policy['ordinary_team_work_requires_supervisor'] = False
     mission_summaries = []
     for mission in list(workflow_missions or []):
         mission_id = (

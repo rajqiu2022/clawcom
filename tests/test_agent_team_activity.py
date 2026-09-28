@@ -51,6 +51,23 @@ class TeamActivityTest(unittest.TestCase):
             member['authoritative_execution']['source'], 'agent_task_claim')
         self.assertIsNone(member['self_report']['state'])
 
+    def test_agent_can_report_direct_work_without_a_task_instance(self):
+        self.setup_activity()
+        first = self.report(task=None).get_json()
+        self.assertEqual(first['state'], 'working')
+        self.assertIsNone(first['task'])
+        self.assertEqual(AgentTeamMemberTask.query.count(), 0)
+        member = self.client.get(self.url).get_json()['member']
+        self.assertEqual(member['effective_state'], 'working')
+        self.assertEqual(member['summary'], '执行 Flow')
+        self.assertIsNone(member['current_task'])
+        blocked = self.report(1, 'environment-blocked', state='blocked',
+                              task=None, summary='设备离线，正在检查连接').get_json()
+        self.assertEqual(blocked['state'], 'blocked')
+        self.assertEqual(self.report(2, 'finished', state='idle', task=None,
+                                     summary='本轮排查结束').status_code, 200)
+        self.assertEqual(AgentTeamMemberTask.query.count(), 0)
+
     def test_current_progress_finish_and_history_no_claw_state_mutation(self):
         self.setup_activity()
         old = self.main_claw.status
@@ -123,7 +140,7 @@ class TeamActivityTest(unittest.TestCase):
 
     def test_invalid_payloads_do_not_create_rows(self):
         self.setup_activity()
-        bad = [dict(state='online'), dict(state='working', task=None), dict(expected_version=True),
+        bad = [dict(state='online'), dict(state='working', task=None, summary=''), dict(expected_version=True),
                dict(event_id='bad key'), dict(summary='x' * 501), dict(worker_claw_id=self.backup.id),
                dict(state='working', task={'task_key':'a','title':'t','task_type':[], 'status':'working'})]
         for changes in bad:

@@ -202,8 +202,10 @@ def ingest(team, claw_id, data):
         task.updated_at = now
         task.finished_at = now if task_state in TERMINAL else None
         db.session.flush()
-    elif state != 'idle' or current:
-        raise TeamError('TEAM_ACTIVITY_TASK_REQUIRED', '工作/阻塞状态须带任务；空闲前须显式结束当前任务', 400)
+    elif current:
+        raise TeamError('TEAM_ACTIVITY_TASK_REQUIRED', '空闲前须显式结束当前自报任务', 400)
+    elif state != 'idle' and not summary:
+        raise TeamError('TEAM_ACTIVITY_INVALID', '无任务实例时须说明正在做的工作或阻断', 400)
     if not status:
         status = AgentTeamMemberStatus(team_id=team.id, claw_id=claw_id)
         db.session.add(status)
