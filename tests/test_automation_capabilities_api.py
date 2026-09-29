@@ -224,6 +224,16 @@ class AutomationCapabilitiesApiTest(unittest.TestCase):
         self.assertEqual(ambiguous.get_json()['code'],
                          'PRODUCER_CLAW_ID_REQUIRED')
 
+    def test_capability_key_fits_mariadb_multi_producer_unique_index(self):
+        body = self._available_body('x' * 190, 'Overlong capability')
+        response = self.client.post(
+            '/api/v1/automation-capabilities', json=body,
+            headers={'Idempotency-Key': 'overlong-capability-key'})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()['code'],
+                         'AUTOMATION_CAPABILITY_INVALID')
+        self.assertEqual(AutomationCapability.query.count(), 0)
+
     def test_healthy_versioned_capability_auto_resolves_gap_and_requeues(self):
         gap = CapabilityGap(
             project_id=self.project.id,

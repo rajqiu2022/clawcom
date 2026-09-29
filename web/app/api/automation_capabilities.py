@@ -896,6 +896,10 @@ def upsert_automation_capability():
     if not key:
         return _error(
             'AUTOMATION_CAPABILITY_INVALID', 'key is required')
+    if len(key) > 189:
+        return _error(
+            'AUTOMATION_CAPABILITY_INVALID',
+            'key must not exceed 189 characters')
     try:
         idem_key = _idempotency_key(data)
     except ValueError as exc:

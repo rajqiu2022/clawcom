@@ -2958,9 +2958,10 @@ class AutomationCapability(db.Model):
     updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
 
     __table_args__ = (
-        db.UniqueConstraint(
-            'project_id', 'capability_key', 'producer_claw_id',
-            name='uq_automation_capability_project_key_producer'),
+        db.Index(
+            'uq_automation_capability_project_key_producer',
+            'project_id', 'capability_key', 'producer_claw_id', unique=True,
+            mysql_length={'capability_key': 189}),
         db.Index(
             'ix_automation_capability_project_status',
             'project_id', 'status'),
