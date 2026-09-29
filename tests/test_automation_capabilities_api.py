@@ -155,6 +155,75 @@ class AutomationCapabilitiesApiTest(unittest.TestCase):
             'AUTOMATION_CAPABILITY_VERSION_CONFLICT')
         self.assertEqual(AutomationCapability.query.count(), 1)
 
+    def test_same_capability_can_be_published_by_two_workers_independently(self):
+        second = OpenClawInstance(
+            name='Second RacingGO Worker', claw_tag='claw-capability-worker-2',
+            owner='capability_owner', project_id=self.project.id)
+        db.session.add(second)
+        db.session.commit()
+        key = 'racinggo.runner.control'
+        gap = CapabilityGap(
+            project_id=self.project.id, gap_key='runner-control-missing',
+            title='Runner unavailable', missing_capabilities_json=[key],
+            status='open')
+        db.session.add(gap)
+        db.session.commit()
+        first_body = self._available_body(key, 'Runner control')
+        second_body = self._available_body(
+            key, 'Runner control', producer_claw_id=second.id,
+            release_id='deepflow-release-worker-2')
+        first = self.client.post(
+            '/api/v1/automation-capabilities', json=first_body,
+            headers={'Idempotency-Key': 'first-worker-registration'})
+        second_result = self.client.post(
+            '/api/v1/automation-capabilities', json=second_body,
+            headers={'Idempotency-Key': 'second-worker-registration'})
+        self.assertEqual(first.status_code, 201, first.get_data(as_text=True))
+        self.assertEqual(second_result.status_code, 201,
+                         second_result.get_data(as_text=True))
+        self.assertNotEqual(first.get_json()['id'], second_result.get_json()['id'])
+        self.assertEqual(AutomationCapability.query.count(), 2)
+
+        listed = self.client.get('/api/v1/automation-capabilities',
+                                 query_string={'project_id': self.project.id})
+        self.assertEqual(listed.get_json()['total'], 2)
+        scoped = self.client.get('/api/v1/automation-capabilities',
+                                 query_string={
+                                     'project_id': self.project.id,
+                                     'producer_claw_id': second.id,
+                                 })
+        self.assertEqual(scoped.get_json()['total'], 1)
+        self.assertEqual(scoped.get_json()['items'][0]['producer_claw_id'],
+                         second.id)
+
+        updated = self.client.post(
+            '/api/v1/automation-capabilities',
+            json=dict(first_body, expected_version=1, status='degraded'),
+            headers={'Idempotency-Key': 'first-worker-degraded'})
+        self.assertEqual(updated.status_code, 200,
+                         updated.get_data(as_text=True))
+        self.assertEqual(updated.get_json()['status'], 'degraded')
+        db.session.refresh(db.session.get(
+            AutomationCapability, second_result.get_json()['id']))
+        self.assertEqual(db.session.get(
+            AutomationCapability, second_result.get_json()['id']).status,
+            'available')
+        db.session.refresh(gap)
+        self.assertEqual(gap.status, 'resolved')
+        self.assertEqual(
+            [second.id],
+            [source['producer_claw_id'] for source in
+             gap.resolution_json['capability_sources']],
+        )
+
+        ambiguous = self.client.post(
+            '/api/v1/automation-capabilities',
+            json={'project_id': self.project.id, 'key': key, 'name': 'Runner'},
+            headers={'Idempotency-Key': 'ambiguous-worker-update'})
+        self.assertEqual(ambiguous.status_code, 400)
+        self.assertEqual(ambiguous.get_json()['code'],
+                         'PRODUCER_CLAW_ID_REQUIRED')
+
     def test_healthy_versioned_capability_auto_resolves_gap_and_requeues(self):
         gap = CapabilityGap(
             project_id=self.project.id,

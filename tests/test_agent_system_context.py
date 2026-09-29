@@ -346,7 +346,7 @@ class AgentSystemContextTests(unittest.TestCase):
             {'id': 91, 'control_mode': 'agent_autonomous'},
             payload['system_context']['policy']['active_workflow_missions'])
 
-    def test_invalid_codex_policy_fails_closed(self):
+    def test_invalid_codex_policy_drops_optional_actions_but_preserves_live_acl(self):
         payload = agent_system_context.build_agent_system_context(
             self.claw,
             'codex',
@@ -363,10 +363,29 @@ class AgentSystemContextTests(unittest.TestCase):
         )
 
         policy = payload['system_context']['policy']
-        self.assertEqual([], policy['allowed_workflow_create_definition_ids'])
+        self.assertEqual([12, 25],
+                         policy['allowed_workflow_create_definition_ids'])
         self.assertNotIn('codex_orchestrator', policy)
         self.assertIn('CODEX_ORCHESTRATOR_POLICY_INVALID',
                       payload['context_warnings'])
+
+    def test_codex_live_acl_is_not_restricted_by_legacy_policy_ceiling(self):
+        payload = agent_system_context.build_agent_system_context(
+            self.claw,
+            'codex',
+            [],
+            [],
+            workflow_create_definition_ids=[12, 25],
+            configured_policy={
+                'allowed_workflow_create_definition_ids': [],
+            },
+        )
+
+        self.assertEqual(
+            [12, 25],
+            payload['system_context']['policy'][
+                'allowed_workflow_create_definition_ids'],
+        )
 
     def test_missing_acl_fails_closed_for_configured_codex_policy(self):
         payload = agent_system_context.build_agent_system_context(

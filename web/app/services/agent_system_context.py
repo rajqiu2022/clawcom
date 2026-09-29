@@ -439,7 +439,9 @@ def _resolve_workflow_policy(
     try:
         configured = validate_system_context_policy(configured_policy)
     except ValueError:
-        return {'allowed_workflow_create_definition_ids': []}, [
+        # An invalid optional policy must not revoke a live Flow ACL grant.
+        # Drop the unsafe optional fields, but keep Hub's authoritative ACL.
+        return {'allowed_workflow_create_definition_ids': acl_ids or []}, [
             ('CODEX_ORCHESTRATOR_POLICY_INVALID'
              if is_codex else 'SYSTEM_CONTEXT_POLICY_INVALID'),
         ]
@@ -455,11 +457,10 @@ def _resolve_workflow_policy(
         return {'allowed_workflow_create_definition_ids': []}, [
             'WORKFLOW_CREATE_GRANTS_UNAVAILABLE',
         ]
-    # Team selection is itself an administrator grant, independent of the
-    # legacy persisted ceiling. Intersect with live grants for revocation.
-    effective_ids = sorted(set(acl_ids).intersection(
-        set(configured['allowed_workflow_create_definition_ids']).union(
-            team_workflow_create_definition_ids)))
+    # The live Definition ACL (including editor and team grants) is the only
+    # human authorization for starting a Flow. The persisted list is retained
+    # for compatibility/config-change wakeups, never as a second ceiling.
+    effective_ids = acl_ids
     result: dict[str, Any] = {
         'allowed_workflow_create_definition_ids': effective_ids,
     }

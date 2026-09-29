@@ -532,6 +532,11 @@ class WorkflowWorkerContractApiTest(unittest.TestCase):
         self.assertEqual(
             response.get_json()['details']['actual']['runtime_mode'],
             'legacy_split')
+        self.assertTrue(response.get_json()['details']['authorization_granted'])
+        self.assertFalse(response.get_json()['details'][
+            'additional_permission_required'])
+        self.assertEqual(response.get_json()['details']['readiness_state'],
+                         'worker_setup_required')
         self.assertEqual(
             WorkflowRun.query.filter_by(definition_id=definition.id).count(), 0)
 

@@ -190,7 +190,7 @@ def _idempotent_replay_response(row, actor, idempotency_key, fingerprint):
     return jsonify(payload), 200
 
 
-def _commit_publish_or_recover(project_id, capability_key, actor,
+def _commit_publish_or_recover(project_id, capability_key, producer_claw_id, actor,
                                idempotency_key, fingerprint):
     """Recover an exactly-once response after a concurrent unique-key race."""
     try:
@@ -199,7 +199,8 @@ def _commit_publish_or_recover(project_id, capability_key, actor,
     except IntegrityError:
         db.session.rollback()
     row = AutomationCapability.query.filter_by(
-        project_id=project_id, capability_key=capability_key).first()
+        project_id=project_id, capability_key=capability_key,
+        producer_claw_id=producer_claw_id).first()
     if row:
         replay = _idempotent_replay_response(
             row, actor, idempotency_key, fingerprint)
@@ -677,6 +678,13 @@ def list_automation_capabilities():
     reconciliation = _expire_stale_capabilities(project_id)
     db.session.commit()
     query = AutomationCapability.query.filter_by(project_id=project_id)
+    producer_filter = request.args.get('producer_claw_id')
+    if producer_filter not in (None, ''):
+        try:
+            query = query.filter_by(producer_claw_id=int(producer_filter))
+        except (TypeError, ValueError):
+            return _error('INVALID_PRODUCER_CLAW_ID',
+                          'producer_claw_id must be an integer')
     if request.args.get('status'):
         query = query.filter_by(status=request.args['status'])
     if request.args.get('platform'):
@@ -688,7 +696,8 @@ def list_automation_capabilities():
     page = max(request.args.get('page', 1, type=int), 1)
     page_size = min(max(request.args.get('page_size', 50, type=int), 1), 200)
     rows = query.order_by(
-        AutomationCapability.capability_key.asc()).all()
+        AutomationCapability.capability_key.asc(),
+        AutomationCapability.producer_claw_id.asc()).all()
     if platform:
         rows = [row for row in rows if platform in (row.platforms_json or [])]
     total = len(rows)
@@ -746,6 +755,8 @@ def _publish_values(data, row, actor):
 
     producer = data.get(
         'producer_claw_id', row.producer_claw_id if row else None)
+    if row and producer in (None, ''):
+        producer = row.producer_claw_id
     if actor['type'] == 'claw':
         if producer not in (None, '', actor['id'], str(actor['id'])):
             raise PermissionError(
@@ -890,9 +901,29 @@ def upsert_automation_capability():
     except ValueError as exc:
         return _error('IDEMPOTENCY_KEY_REQUIRED', str(exc))
     fingerprint = _request_hash(data)
-    row = (AutomationCapability.query.filter_by(
+    producer = data.get('producer_claw_id')
+    if actor['type'] == 'claw':
+        producer = actor['id']
+    elif producer not in (None, ''):
+        try:
+            producer = int(producer)
+        except (TypeError, ValueError):
+            return _error('INVALID_PRODUCER_CLAW_ID',
+                          'producer_claw_id must be an integer')
+    else:
+        producer = None
+    matching = (AutomationCapability.query.filter_by(
         project_id=project_id, capability_key=key)
-        .with_for_update().first())
+        .with_for_update())
+    if producer is not None:
+        row = matching.filter_by(producer_claw_id=producer).first()
+    else:
+        rows = matching.limit(2).all()
+        if len(rows) > 1:
+            return _error('PRODUCER_CLAW_ID_REQUIRED',
+                          'producer_claw_id is required when multiple Workers '
+                          'publish the same capability')
+        row = rows[0] if rows else None
     created = row is None
     if row:
         replay = _idempotent_replay_response(
@@ -934,7 +965,8 @@ def upsert_automation_capability():
                 row.version, idem_key, fingerprint)
             event.payload_json = {'response': payload}
             recovered = _commit_publish_or_recover(
-                project_id, key, actor, idem_key, fingerprint)
+                project_id, key, values['producer_claw_id'], actor,
+                idem_key, fingerprint)
             if recovered:
                 return recovered
             return jsonify(payload), 200
@@ -969,7 +1001,8 @@ def upsert_automation_capability():
         'verification': row.verification_json or {},
     }
     recovered = _commit_publish_or_recover(
-        project_id, key, actor, idem_key, fingerprint)
+        project_id, key, values['producer_claw_id'], actor,
+        idem_key, fingerprint)
     if recovered:
         return recovered
     return jsonify(payload), 201 if created else 200

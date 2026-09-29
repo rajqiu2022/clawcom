@@ -457,11 +457,11 @@ def _definition_editor_acl(definition):
 
 
 def _sync_workflow_create_policy(definition, claw_ids):
-    """Mirror Flow Agent grants into the Codex Sidecar policy ceiling.
+    """Wake older Workers after a Flow ACL change.
 
-    Flow ACL remains the authority.  This persisted list is the second,
-    fail-closed Worker ceiling, so adding an editor/executor must raise it in
-    the same transaction or the UI grant would not become usable.
+    The live Flow ACL is the only human authorization. This legacy persisted
+    list is kept in sync for older Sidecars and to advance config_version so
+    current Workers promptly refresh their authoritative ACL-derived grants.
     """
     normalized_ids = sorted({
         int(value) for value in (claw_ids or [])
@@ -4292,11 +4292,15 @@ def create_workflow_run():
         if not compatibility['compatible']:
             return _workflow_api_error(
                 'WORKER_RUNTIME_INCOMPATIBLE',
-                'The selected Worker runtime is incompatible with this Workflow',
+                'Flow execution is authorized, but the selected Worker '
+                'environment is not ready for this Workflow',
                 status=409,
                 details={
                     'worker_claw_id': worker_claw_id,
                     'workflow_definition_id': definition.id,
+                    'authorization_granted': True,
+                    'readiness_state': 'worker_setup_required',
+                    'additional_permission_required': False,
                     **compatibility,
                 })
 

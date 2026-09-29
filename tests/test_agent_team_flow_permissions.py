@@ -302,10 +302,11 @@ class TeamFlowPermissionsTest(unittest.TestCase):
         self.assertEqual(response.get_json()['code'], 'MISSION_TEAM_GRANT_REVOKED')
         self.assertEqual(WorkflowRun.query.count(), 0)
 
-    def test_sidecar_invalid_policy_remains_closed_and_orchestrator_is_not_expanded(self):
+    def test_sidecar_invalid_policy_preserves_live_grant_without_orchestrator(self):
         from app.services.agent_system_context import _resolve_workflow_policy
         policy, warnings = _resolve_workflow_policy('codex', [55], {'broken': True}, [55])
-        self.assertEqual(policy['allowed_workflow_create_definition_ids'], [])
+        self.assertEqual(policy['allowed_workflow_create_definition_ids'], [55])
+        self.assertNotIn('codex_orchestrator', policy)
         self.assertIn('CODEX_ORCHESTRATOR_POLICY_INVALID', warnings)
         configured = {'allowed_workflow_create_definition_ids': [25], 'codex_orchestrator': {
             'enabled': True, 'session_key': 'test:orchestrator', 'resume_on': ['blocked'],
