@@ -234,6 +234,50 @@ class PlanSupervisionTest(unittest.TestCase):
         self.app.config['PLAN_SUPERVISION_TEAM_IDS'] = ''
         self.assertEqual(self.post('heartbeat', self.credentials()).status_code, 409)
 
+    def test_member_direct_activity_transition_wakes_manager_once(self):
+        team = self.scoped_team()
+        db.session.add(AgentTeamMember(
+            team_id=team.id, claw_id=self.other_claw.id,
+            role_key='test_executor', specialties_json=['mobile_package']))
+        self.plan.team_id = team.id
+        db.session.commit()
+        started = self.post('start', {
+            'command_key': 'activity-start', 'team_id': team.id,
+            'orchestrator_claw_id': self.main_claw.id})
+        self.assertEqual(started.status_code, 200, started.json)
+        self.agent()
+        self.claim()
+        self.assertEqual(self.post('decision', self.wait_body()).status_code, 200)
+        self.assertEqual(self.sup().status, 'waiting')
+        path = '/api/v1/agent-teams/%s/members/%s/activity' % (
+            team.id, self.other_claw.id)
+        body = {'event_id': 'direct-start', 'expected_version': 0,
+                'state': 'working', 'summary': '已开始设备探测'}
+        response = self.client.post(path, headers=self._headers(self.other_token), json=body)
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(self.sup().status, 'pending')
+        self.assertIsNotNone(self.sup().wake_message_id)
+        self.assertEqual(PlanSupervisorEvent.query.filter_by(
+            plan_id=self.plan.id, kind='team_member_activity_changed').count(), 1)
+        replay = self.client.post(path, headers=self._headers(self.other_token), json=body)
+        self.assertTrue(replay.json['replayed'])
+        self.assertEqual(PlanSupervisorEvent.query.filter_by(
+            plan_id=self.plan.id, kind='team_member_activity_changed').count(), 1)
+        self.claim('activity-claim')
+        self.assertEqual(self.post('decision', self.wait_body(
+            command_key='activity-wait')).status_code, 200)
+        heartbeat = dict(body, event_id='direct-heartbeat', expected_version=1)
+        self.assertEqual(self.client.post(path, headers=self._headers(self.other_token),
+                                         json=heartbeat).status_code, 200)
+        self.assertEqual(self.sup().status, 'waiting')
+        blocked = dict(body, event_id='direct-blocked', expected_version=2,
+                       state='blocked', summary='设备离线，等待恢复')
+        self.assertEqual(self.client.post(path, headers=self._headers(self.other_token),
+                                         json=blocked).status_code, 200)
+        self.assertEqual(self.sup().status, 'pending')
+        self.assertEqual(PlanSupervisorEvent.query.filter_by(
+            plan_id=self.plan.id, kind='team_member_activity_changed').count(), 2)
+
     def test_team_bootstrap_creates_member_stages_and_claim_receipt(self):
         team = self.scoped_team()
         db.session.add(AgentTeamMember(

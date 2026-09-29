@@ -138,7 +138,7 @@ def _key(value, field):
     return value
 
 
-def ingest(team, claw_id, data):
+def ingest(team, claw_id, data, on_transition=None):
     """Caller must hold the Team row lock, including first-report inserts."""
     allowed = {'event_id', 'expected_version', 'state', 'summary', 'task'}
     if set(data) - allowed:
@@ -158,6 +158,8 @@ def ingest(team, claw_id, data):
             raise TeamError('TEAM_ACTIVITY_EVENT_CONFLICT', '相同 event_id 不得改变请求内容')
         return dict(receipt.response_json, replayed=True)
     status = AgentTeamMemberStatus.query.filter_by(team_id=team.id, claw_id=claw_id).first()
+    previous_state = status.state if status else None
+    previous_task_id = status.current_task_id if status else None
     if expected != (status.version if status else 0):
         raise TeamError('TEAM_ACTIVITY_VERSION_CONFLICT', '状态版本已变化，请回读后上报；勿重放旧状态')
     state = data.get('state')
@@ -217,5 +219,9 @@ def ingest(team, claw_id, data):
               'event_id':event_id, 'source':'agent_self_report'}
     db.session.add(AgentTeamMemberReport(team_id=team.id, claw_id=claw_id, event_id=event_id,
         request_sha256=digest, task_id=task.id if task else None, response_json=result, created_at=now))
+    if on_transition and (
+            previous_state != state or previous_task_id != status.current_task_id):
+        if not (previous_state is None and state == 'idle' and task is None):
+            on_transition(team, claw_id, event_id, previous_state, state, now)
     db.session.commit()
     return dict(result, replayed=False)

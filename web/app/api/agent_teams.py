@@ -22,6 +22,7 @@ from app.services import agent_team_manager_delegation as delegation
 from app.services import plan_supervision as plan_supervision
 from app.services.agent_team_onboarding import queue_join_notifications, wake_join_recipients
 from app.models import AgentTeamMemberStatus, AgentTeamMemberTask, AgentTeamMemberReport
+from app.models_plan_supervision import PlanSupervisor
 from app.services.agent_teams import (
     EXECUTOR_SPECIALTIES, TEAM_ROLES, TeamError, integer, load_team,
     mission_team, normalize_config, require_manager, require_stage_member,
@@ -446,7 +447,40 @@ def team_member_activity(team_id, claw_id):
     if request.method == 'POST':
         if actor['type'] != 'claw' or actor['id'] != claw_id:
             raise TeamError('TEAM_ACTIVITY_SELF_ONLY', '仅 Agent 自身可上报；用户或其他 Agent 不可代报', 403)
-        return jsonify(activity.ingest(team, claw_id, _body()))
+        affected_plans = []
+
+        def record_transition(_team, _claw_id, event_id, before, after, now):
+            if not plan_supervision.enabled() or _team.status != 'active':
+                return
+            for sup in PlanSupervisor.query.filter_by(team_id=_team.id).all():
+                if not plan_supervision.available(sup, now):
+                    continue
+                plan_supervision.add_event(sup.plan_id, 'team_member_activity_changed',
+                    ['team-member-activity', _team.id, _claw_id, event_id], {
+                        'team_id': _team.id, 'claw_id': _claw_id,
+                        'from_state': before, 'to_state': after,
+                        'activity_event_id': event_id,
+                    }, now)
+                affected_plans.append(sup.plan_id)
+
+        result = activity.ingest(team, claw_id, _body(),
+                                 on_transition=record_transition)
+        # The member report and supervisor event are already committed as one
+        # transaction. If immediate delivery fails, the durable event remains
+        # available for the normal supervisor sweep.
+        for plan_id in affected_plans:
+            try:
+                sup = plan_supervision.locked(plan_id)
+                target = plan_supervision.pump(sup) if sup else None
+                db.session.commit()
+                if target:
+                    plan_supervision.wake(target)
+            except Exception:
+                db.session.rollback()
+                current_app.logger.exception(
+                    'Team activity supervisor wake failed for plan_id=%s',
+                    plan_id)
+        return jsonify(result)
     limit, offset = _pagination(default=20)
     status = AgentTeamMemberStatus.query.filter_by(team_id=team.id, claw_id=claw_id).first()
     current = db.session.get(AgentTeamMemberTask, status.current_task_id) if status and status.current_task_id else None

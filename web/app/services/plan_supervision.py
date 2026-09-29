@@ -1961,6 +1961,7 @@ def pump(sup, now=None):
         PlanSupervisorEvent.plan_id == sup.plan_id,
         PlanSupervisorEvent.sequence > sup.acknowledged_cursor,
         PlanSupervisorEvent.kind.in_(['task_blocked', 'run_terminal', 'heartbeat_anomaly', 'stale',
+                                      'team_member_activity_changed',
                                       'supervisor_lease_expired', 'plan_started',
                                       'occurrence_owner_gate',
                                       'occurrence_recovery_failed',
