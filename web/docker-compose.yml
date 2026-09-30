@@ -8,6 +8,7 @@ services:
       - "18800:18800"
     environment:
       - FLASK_ENV=production
+      - CODE_ANALYSIS_ENABLED=${CODE_ANALYSIS_ENABLED:-0}
       - MYSQL_HOST=${MYSQL_HOST:-127.0.0.1}
       - MYSQL_PORT=${MYSQL_PORT:-3306}
       - MYSQL_USER=${MYSQL_USER:-your_mysql_user}

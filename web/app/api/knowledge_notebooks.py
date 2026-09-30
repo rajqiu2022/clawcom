@@ -139,11 +139,16 @@ def _notebook(notebook_id, actor):
 
 
 def _journal_page(page_id, actor, lock=False):
-    query = KnowledgeEntry.query.filter_by(
-        id=page_id, entry_type='test_journal')
+    query = KnowledgeEntry.query.filter_by(id=page_id)
     if lock:
         query = query.with_for_update()
     row = query.first()
+    from app.services.resource_sharing import policy_for, resource_readable, can_write
+    policy = policy_for('knowledge', page_id)
+    if policy:
+        return row if row and (can_write(policy, actor) if lock else resource_readable('knowledge', row, actor)) else None
+    if row and row.entry_type != 'test_journal':
+        return None
     project_id = row.project_id if row else None
     if row and not project_id and row.notebook:
         project_id = row.notebook.project_id
@@ -454,7 +459,9 @@ def get_knowledge_journal_page(page_id):
     if not page:
         return _error('PAGE_NOT_FOUND', '纪要页面不存在或无权访问', 404)
     payload = page.to_dict()
-    payload['can_edit'] = not bool(page.archived_at)
+    from app.services.resource_sharing import policy_for, can_write
+    policy = policy_for('knowledge', page.id)
+    payload['can_edit'] = not bool(page.archived_at) and (not policy or can_write(policy, actor))
     return jsonify(payload)
 
 
@@ -502,8 +509,8 @@ def create_knowledge_revision(page_id):
     content = str(data.get('content') if data.get('content') is not None
                   else page.content or '')
     summary = str(data.get('change_summary') or '更新页面').strip()[:500]
-    if not title or not content:
-        return _error('INVALID_REVISION', '标题和正文不能为空', 400)
+    if not title:
+        return _error('INVALID_REVISION', '标题不能为空', 400)
     revision, error = _create_revision(
         page, actor, title, content, summary,
         data.get('expected_revision'), request.headers.get('Idempotency-Key'))
@@ -512,7 +519,7 @@ def create_knowledge_revision(page_id):
         return error
     if data.get('module_name'):
         module_name = str(data['module_name']).strip()[:100]
-        if module_name not in _modules(page.notebook.modules_json):
+        if not page.notebook or module_name not in _modules(page.notebook.modules_json):
             db.session.rollback()
             return _error('INVALID_MODULE', '所属模块不存在', 400)
         page.module_name = module_name
@@ -643,6 +650,11 @@ def permanently_delete_knowledge_journal_page(page_id):
     page = _journal_page(page_id, actor, lock=True)
     if not page:
         return _error('PAGE_NOT_FOUND', '纪要页面不存在或无权访问', 404)
+    from app.services.resource_sharing import enabled
+    if enabled():
+        from app.models import CodeAnalysisProject
+        if CodeAnalysisProject.query.filter_by(knowledge_id=page.id).first() or page.category == 'code_analysis_general':
+            return _error('KNOWLEDGE_IN_USE', '专项经验库仍在使用，请先更换关联；通用库不能删除', 409)
     data = request.get_json(silent=True) or {}
     if data.get('confirmed') is not True:
         return _error(

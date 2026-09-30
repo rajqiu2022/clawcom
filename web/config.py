@@ -6,6 +6,7 @@ load_dotenv()
 
 
 class Config:
+    CODE_ANALYSIS_ENABLED = os.getenv('CODE_ANALYSIS_ENABLED', '0') in ('1', 'true', 'yes', 'on')
     SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key')
 
     # 测试左移首期为纯增量能力，生产默认关闭；灰度项目确认后显式开启。

@@ -213,6 +213,7 @@ def _skill_resource(row):
 
 
 def _resource_manifest(team, actor):
+    from app.services.resource_sharing import policy_for, resource_readable
     knowledge = (AgentTeamKnowledgeResource.query
                  .filter_by(team_id=team.id)
                  .order_by(AgentTeamKnowledgeResource.id.desc()).all())
@@ -225,8 +226,10 @@ def _resource_manifest(team, actor):
         'schema_version': 1, 'team_id': team.id,
         'project_id': team.project_id, 'team_version': team.version,
         'can_manage': _team_resource_editor(team, actor),
-        'knowledge': [_knowledge_resource(row) for row in knowledge],
-        'skills': [_skill_resource(row) for row in skills],
+        'knowledge': [_knowledge_resource(row) for row in knowledge if
+                      not policy_for('knowledge', row.knowledge_id) or resource_readable('knowledge', row.knowledge, actor)],
+        'skills': [_skill_resource(row) for row in skills if
+                   not policy_for('skill', row.skill_id) or resource_readable('skill', row.skill, actor)],
         'pull_policy': {
             'mode': 'on_demand',
             'note': '清单只返回元数据；通过 pull_url 拉取完整内容，更新后同一 URL 始终读取最新版本。',
@@ -243,6 +246,7 @@ def team_shared_resources(team_id):
 
 @api_bp.route('/agent-teams/<int:team_id>/shared-resources/options', methods=['GET'])
 def team_shared_resource_options(team_id):
+    from app.services.resource_sharing import policy_for, resource_readable
     team = load_team(team_id)
     actor = _access(team.project_id)
     if not _team_resource_editor(team, actor):
@@ -251,9 +255,11 @@ def team_shared_resource_options(team_id):
                         AgentTeamKnowledgeResource.query.filter_by(team_id=team.id).all()}
     linked_skills = {row.skill_id for row in
                      AgentTeamSkillResource.query.filter_by(team_id=team.id).all()}
-    knowledge = (KnowledgeEntry.query.filter_by(project_id=team.project_id)
+    knowledge = (KnowledgeEntry.query
                  .order_by(KnowledgeEntry.updated_at.desc(), KnowledgeEntry.id.desc())
                  .limit(500).all())
+    knowledge = [e for e in knowledge if e.project_id == team.project_id or
+                 (policy_for('knowledge', e.id) and resource_readable('knowledge', e, actor))]
     skill_rows = (Skill.query.filter(
                       db.or_(Skill.is_deleted.is_(False), Skill.is_deleted.is_(None)),
                       db.or_(Skill.review_status != 'rejected', Skill.review_status.is_(None)))
@@ -261,9 +267,11 @@ def team_shared_resource_options(team_id):
     skills = []
     team_claw_ids = set(activity.roster(team))
     for skill in skill_rows:
+        if policy_for('skill', skill.id) and not resource_readable('skill', skill, actor):
+            continue
         projects = {int(value) for value in (skill.applicable_projects or [])
                     if str(value).isdigit()}
-        if projects and team.project_id not in projects:
+        if projects and team.project_id not in projects and not (policy_for('skill', skill.id) and resource_readable('skill', skill, actor)):
             continue
         if skill.visibility == 'private' and skill.owner_claw_id not in team_claw_ids:
             continue
@@ -282,11 +290,13 @@ def team_shared_resource_options(team_id):
 
 
 def _link_resource(team, actor, kind, resource_id):
+    from app.services.resource_sharing import policy_for, resource_readable
     if not _team_resource_editor(team, actor):
         raise TeamError('TEAM_RESOURCE_EDITOR_REQUIRED', '仅项目成员或团队 Agent 可维护共享资源', 403)
     if kind == 'knowledge':
         resource = db.session.get(KnowledgeEntry, resource_id)
-        if not resource or resource.project_id != team.project_id:
+        if not resource or (resource.project_id != team.project_id and not
+                (policy_for('knowledge', resource.id) and resource_readable('knowledge', resource, actor))):
             raise TeamError('TEAM_RESOURCE_SCOPE_INVALID', '知识不存在或不属于团队项目', 400)
         model, field = AgentTeamKnowledgeResource, 'knowledge_id'
     else:
@@ -298,7 +308,10 @@ def _link_resource(team, actor, kind, resource_id):
             raise TeamError('TEAM_RESOURCE_SCOPE_INVALID', '私有 Skill 不属于团队成员', 400)
         projects = {int(value) for value in (resource.applicable_projects or [])
                     if str(value).isdigit()}
-        if projects and team.project_id not in projects:
+        policy = policy_for('skill', resource.id)
+        if policy and not resource_readable('skill', resource, actor):
+            raise TeamError('TEAM_RESOURCE_SCOPE_INVALID', 'Skill 未共享给本团队项目', 400)
+        if not policy and projects and team.project_id not in projects:
             raise TeamError('TEAM_RESOURCE_SCOPE_INVALID', 'Skill 不适用于团队项目', 400)
         model, field = AgentTeamSkillResource, 'skill_id'
     existing = model.query.filter_by(team_id=team.id, **{field: resource_id}).first()

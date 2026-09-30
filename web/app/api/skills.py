@@ -113,6 +113,11 @@ def _can_edit(user, resource):
         + 项目 admin 可编辑其 managed_projects 范围内的资源
       - 私有 Skill：作者始终可编辑
     """
+    from app.services.resource_sharing import policy_for, can_write
+    from app.api.knowledge_notebooks import _actor
+    policy = policy_for('skill', resource.id)
+    if policy:
+        return can_write(policy, _actor())
     # A Skill explicitly curated into a team library is jointly maintained by
     # project people and that team's registered Agents. This does not widen
     # access to other Skills in the same project.
@@ -286,6 +291,10 @@ def list_skills():
     if semantic_search and not skills and not search_keyword:
         skills = _semantic_search_skills(semantic_search, user, review_filter, show_deleted)
 
+    from app.services.resource_sharing import policy_for, resource_readable
+    from app.api.knowledge_notebooks import _actor
+    skills = [s for s in skills if not policy_for('skill', s.id) or resource_readable('skill', s, _actor())]
+
     from app.services.skill_usage import (
         recent_skill_usage_counts,
         record_skill_content_accesses,
@@ -301,6 +310,9 @@ def list_skills():
     result = []
     for s in skills:
         d = s.to_dict()
+        from app.services.resource_sharing import policy_payload
+        policy = policy_for('skill', s.id)
+        d['sharing'] = policy_payload(policy) if policy else None
         if summary_only:
             # 市场列表只返回摘要。完整正文由详情接口按需读取并计入热度。
             d.pop('template_content', None)
@@ -1660,6 +1672,9 @@ def get_skill_raw(skill_id):
     不需要登录，公开访问（方便 OpenClaw 拉取）
     """
     skill = Skill.query.get_or_404(skill_id)
+    error = _skill_access_error(skill)
+    if error:
+        return error
     content = skill.template_content or ''
     md = f"# {skill.display_name}\n\n"
     if skill.description:
@@ -1705,6 +1720,11 @@ TEXT_ATTACHMENT_SUFFIXES = {'.md', '.txt', '.py', '.js', '.ts', '.sh', '.ps1', '
 def _skill_access_error(skill, write=False):
     from app.api.auth_utils import get_current_claw
     user = _get_current_user()
+    from app.services.resource_sharing import policy_for, can_read
+    from app.api.knowledge_notebooks import _actor
+    policy = policy_for('skill', skill.id)
+    if policy and not can_read(policy, _actor()):
+        return jsonify({'error': '无权查看此 Skill'}), 403
     if not user and not get_current_claw():
         return jsonify({'error': '未认证'}), 401
     can_edit = _can_edit(user, skill)

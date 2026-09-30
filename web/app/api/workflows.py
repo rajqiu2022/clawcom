@@ -4137,10 +4137,14 @@ def get_latest_workflow_definition_run(definition_id):
 
 @api_bp.route('/workflow-runs', methods=['POST'])
 def create_workflow_run():
+    return create_workflow_run_from_data(request.get_json() or {})
+
+
+def create_workflow_run_from_data(data, internal_idempotency=False, trusted_project_dispatch=False):
+    """Shared creation path: specialty launchers retain all normal ACL checks."""
     err = _require_actor()
     if err:
         return err
-    data = request.get_json() or {}
     definition = None
     legacy_definition_id = data.get('definition_id')
     workflow_definition_id = data.get('workflow_definition_id')
@@ -4175,9 +4179,17 @@ def create_workflow_run():
         return jsonify({'error': 'workflow definition 不存在'}), 404
     if not _can_execute_definition(definition):
         return jsonify({'error': '无权启动此 Workflow，请联系创建者添加执行权限'}), 403
+    if trusted_project_dispatch:
+        # Server-only specialty entry point. Never accept this permission from
+        # the HTTP body; callers already validate project and executor access.
+        from app.api.knowledge_notebooks import _actor, _can_access_project
+        if ((definition.definition_json or {}).get('context', {}).get('code_analysis_template') != 1
+                or definition.project_id != data.get('project_id')
+                or not _can_access_project(_actor(), definition.project_id)):
+            return jsonify({'error': '专项派发的项目或模板权限无效'}), 403
     body_idempotency_key = str(data.get('idempotency_key') or '').strip()
     header_idempotency_key = str(
-        request.headers.get('Idempotency-Key') or '').strip()
+        ('' if internal_idempotency else request.headers.get('Idempotency-Key')) or '').strip()
     if (body_idempotency_key and header_idempotency_key
             and body_idempotency_key != header_idempotency_key):
         return _workflow_api_error(
@@ -4245,6 +4257,7 @@ def create_workflow_run():
                     'worker_claw_id must be an integer')
             from app.services.agent_team_permissions import can_dispatch_to
             if (requested_worker_claw_id != caller_claw.id
+                    and not trusted_project_dispatch
                     and not _can_edit_definition(definition)
                     and not can_dispatch_to(caller_claw.id, requested_worker_claw_id, definition)):
                 return _workflow_api_error(

@@ -1973,6 +1973,7 @@ function renderPlanDetail(plan) {
                 <h3 style="margin:0;font-size:1rem;color:var(--text-primary)">${esc(plan.name)}</h3>
                 ${plan.description ? `<div style="font-size:0.82rem;color:var(--text-secondary);margin-top:4px">${esc(plan.description)}</div>` : ''}
             </div>
+            <a class="btn btn-ghost" href="/code-analysis?project_id=${Number(plan.project_id)}&plan_id=${Number(plan.id)}">创建代码分析</a>
         </div>
 
         <!-- 计划统计 -->

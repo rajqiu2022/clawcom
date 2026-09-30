@@ -767,6 +767,12 @@ def update_test_plan(plan_id):
 def delete_test_plan(plan_id):
     """删除测试计划"""
     plan = TestPlan.query.get_or_404(plan_id)
+    from app.services.resource_sharing import enabled
+    if enabled():
+        from app.models import CodeAnalysisJob
+        if CodeAnalysisJob.query.filter_by(plan_id=plan.id).first():
+            return jsonify({'code': 'PLAN_HAS_CODE_ANALYSIS',
+                            'error': '该计划关联了代码分析记录，请保留计划用于结果追溯'}), 409
     if plan.team_id:
         from app.services.agent_team_plans import access
         from app.services.agent_teams import load_team

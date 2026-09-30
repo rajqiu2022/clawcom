@@ -301,6 +301,15 @@ def _can_view(caller: dict | None, report: TestReport) -> bool:
     """
     if not caller:
         return False
+    from app.services.resource_sharing import enabled
+    if enabled():
+        from app.models import ShiftLeftAnalysisRun, CodeAnalysisJob
+        linked = CodeAnalysisJob.query.join(ShiftLeftAnalysisRun).filter(
+            ShiftLeftAnalysisRun.report_id == report.id).first()
+        if linked:
+            from app.api.knowledge_notebooks import _actor, _can_access_project
+            if not _can_access_project(_actor(), report.project_id):
+                return False
     status = report.status or 'draft'
     # 同项目成员对 draft/revised 的 ID 直查放行（含 hidden；abandoned 不放开）
     same_project_ok = (status in _SAME_PROJECT_VIEWABLE_STATUSES

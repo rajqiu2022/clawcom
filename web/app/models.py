@@ -9235,6 +9235,77 @@ class ShiftLeftAnalysisRun(db.Model):
         }
 
 
+class SharedResourcePolicy(db.Model):
+    """Explicit authenticated sharing; never changes canonical ownership."""
+    __tablename__ = 'shared_resource_policies'
+    id = db.Column(db.Integer, primary_key=True)
+    resource_kind = db.Column(db.String(20), nullable=False)
+    resource_id = db.Column(db.Integer, nullable=False)
+    owner_project_id = db.Column(db.Integer, db.ForeignKey('projects.id'))
+    scope = db.Column(db.String(20), nullable=False, default='project')
+    project_ids_json = db.Column(db.JSON)
+    created_by = db.Column(db.String(120), nullable=False)
+    revision = db.Column(db.Integer, nullable=False, default=1)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+    __table_args__ = (db.UniqueConstraint(
+        'resource_kind', 'resource_id', name='uq_shared_resource_identity'),)
+
+
+class CodeAnalysisProject(db.Model):
+    """Project defaults; knowledge/Skill content remains in existing stores."""
+    __tablename__ = 'code_analysis_projects'
+    project_id = db.Column(db.Integer, db.ForeignKey('projects.id'), primary_key=True)
+    knowledge_id = db.Column(db.Integer, db.ForeignKey('knowledge_entries.id'), nullable=False)
+    knowledge_ids_json = db.Column(db.JSON)
+    skill_id = db.Column(db.Integer, db.ForeignKey('skills.id'))
+    executor_claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'))
+    definition_id = db.Column(db.Integer, db.ForeignKey('workflow_definitions.id'))
+    repository_url = db.Column(db.String(1000), default='')
+    source_ref = db.Column(db.String(255), default='main')
+    revision = db.Column(db.Integer, nullable=False, default=1)
+    updated_at = db.Column(db.DateTime, default=_now, onupdate=_now)
+
+
+class CodeAnalysisJob(db.Model):
+    """Plan-scoped specialty projection of the canonical analysis Run."""
+    __tablename__ = 'code_analysis_jobs'
+    analysis_run_id = db.Column(db.Integer, db.ForeignKey('shift_left_analysis_runs.id'), primary_key=True)
+    plan_id = db.Column(db.Integer, db.ForeignKey('test_plans.id'), nullable=False, index=True)
+    executor_claw_id = db.Column(db.Integer, db.ForeignKey('openclaw_instances.id'), nullable=False)
+    definition_id = db.Column(db.Integer, db.ForeignKey('workflow_definitions.id'), nullable=False)
+    snapshot_json = db.Column(db.JSON, nullable=False)
+    request_key = db.Column(db.String(128), nullable=False, unique=True)
+    request_hash = db.Column(db.String(64), nullable=False)
+    created_at = db.Column(db.DateTime, default=_now)
+    analysis = db.relationship('ShiftLeftAnalysisRun')
+
+
+class CodeAnalysisDecision(db.Model):
+    """Append-only human disposition plus durable delivery/learning receipts."""
+    __tablename__ = 'code_analysis_decisions'
+    id = db.Column(db.Integer, primary_key=True)
+    finding_id = db.Column(db.Integer, db.ForeignKey('shift_left_findings.id'), nullable=False, index=True)
+    analysis_run_id = db.Column(db.Integer, db.ForeignKey('code_analysis_jobs.analysis_run_id'), nullable=False)
+    feedback_id = db.Column(db.Integer, db.ForeignKey('shift_left_finding_feedback.id'))
+    action = db.Column(db.String(20), nullable=False)
+    truth_label = db.Column(db.String(32), nullable=False, default='unknown')
+    reason = db.Column(db.Text, nullable=False)
+    snapshot_json = db.Column(db.JSON, nullable=False)
+    actor_name = db.Column(db.String(120), nullable=False)
+    request_key = db.Column(db.String(128), nullable=False, unique=True)
+    request_hash = db.Column(db.String(64), nullable=False)
+    submission_status = db.Column(db.String(24), default='not_requested')
+    bug_id = db.Column(db.String(64), default='')
+    learning_status = db.Column(db.String(24), nullable=False, default='pending')
+    learning_run_id = db.Column(db.Integer, db.ForeignKey('workflow_runs.id'))
+    learned_revision = db.Column(db.Integer)
+    learning_summary = db.Column(db.Text)
+    general_proposal = db.Column(db.Text)
+    general_published_revision = db.Column(db.Integer)
+    learning_result_hash = db.Column(db.String(64))
+    created_at = db.Column(db.DateTime, default=_now)
+
+
 class WorkflowEvidenceManifest(db.Model):
     """One revisioned evidence index and post-run verdict per Workflow Run."""
     __tablename__ = 'workflow_evidence_manifests'

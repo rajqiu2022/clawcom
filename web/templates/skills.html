@@ -351,6 +351,11 @@ async function loadSkills() {
 function filterSkillsForProject(skills, projectId = $('#filter-project').value) {
     if (!projectId) return skills;
     return skills.filter(skill => {
+        if (skill.sharing) {
+            return skill.sharing.scope === 'all'
+                || String(skill.sharing.owner_project_id) === String(projectId)
+                || (skill.sharing.scope === 'selected' && (skill.sharing.project_ids || []).some(id => String(id) === String(projectId)));
+        }
         const projects = skill.applicable_projects || [];
         return skill.scope === 'global' || projects.length === 0
             || projects.some(id => String(id) === String(projectId));

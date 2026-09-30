@@ -62,7 +62,7 @@ def require_auth():
     # 测试客户端可能在外层复用 app context；显式清除请求级临时身份，避免上一
     # 请求的协作 Token 泄漏到后续 Web session。真实 WSGI 请求中同样是安全 no-op。
     for cache_key in ('_collaboration_session', '_chat_guest_session',
-                      '_auth_claw', '_auth_user', '_auth_user_super'):
+                      '_auth_claw', '_auth_user', '_auth_user_super', '_resource_share_policies'):
         g.pop(cache_key, None)
     path = request.path
 
@@ -192,6 +192,7 @@ from app.api import openclaws, skills, knowledge, knowledge_notebooks, dashboard
 
 # 注册 Agent Hub 通信中心蓝图
 from app.api import plan_supervision  # noqa: F401
+from app.api import code_analysis  # noqa: F401
 
 api_bp.register_blueprint(agent_hub.agent_hub_bp, url_prefix='/agent-hub')
 

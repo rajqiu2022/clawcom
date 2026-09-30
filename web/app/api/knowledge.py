@@ -74,6 +74,11 @@ def _entry_payload(entry, favorite_ids=None):
 
 
 def _journal_entry_visible(entry):
+    from app.services.resource_sharing import policy_for, resource_readable
+    from app.api.knowledge_notebooks import _actor
+    policy = policy_for('knowledge', entry.id)
+    if policy:
+        return resource_readable('knowledge', entry, _actor())
     if getattr(entry, 'entry_type', 'article') != 'test_journal':
         return True
     from app.api.knowledge_notebooks import _actor, _can_access_project
@@ -134,6 +139,11 @@ def _owned_claw_ids(user, claw):
 
 
 def _may_manage_share(entry):
+    from app.services.resource_sharing import policy_for, can_write
+    policy = policy_for('knowledge', entry.id)
+    if policy:
+        from app.api.knowledge_notebooks import _actor
+        return can_write(policy, _actor())
     user = _get_current_user()
     claw = _get_current_openclaw()
     return can_manage_knowledge_share(
@@ -270,6 +280,7 @@ def list_knowledge():
     entries = query.order_by(
         KnowledgeEntry.created_at.desc()
     ).limit(200).all()
+    entries = [entry for entry in entries if _journal_entry_visible(entry)]
     favorite_ids = (
         _favorite_knowledge_ids(owner, [entry.id for entry in entries])
         if owner else set()
@@ -551,7 +562,8 @@ def unfavorite_knowledge(entry_id):
 def share_knowledge(entry_id):
     """启用或刷新匿名分享链接。"""
     entry = KnowledgeEntry.query.get_or_404(entry_id)
-    if entry.entry_type == 'test_journal':
+    from app.services.resource_sharing import policy_for
+    if entry.entry_type == 'test_journal' or policy_for('knowledge', entry.id):
         return jsonify({
             'error': '版本测试纪要当前仅允许项目内协作，不生成匿名外链',
             'code': 'JOURNAL_EXTERNAL_SHARE_DISABLED',
@@ -590,7 +602,8 @@ def update_knowledge(entry_id):
     entry = KnowledgeEntry.query.get_or_404(entry_id)
     if not _journal_entry_visible(entry):
         return jsonify({'error': '知识条目不存在'}), 404
-    if entry.entry_type == 'test_journal':
+    from app.services.resource_sharing import policy_for
+    if entry.entry_type == 'test_journal' or policy_for('knowledge', entry.id):
         return jsonify({
             'error': '版本纪要必须通过 revisions API 保存，不能原地覆盖',
             'code': 'VERSIONED_KNOWLEDGE_REQUIRES_REVISION',
@@ -620,7 +633,7 @@ def pending_reviews():
     entries = KnowledgeEntry.query.filter_by(
         status='pending_review'
     ).order_by(KnowledgeEntry.created_at.desc()).all()
-    return jsonify([e.to_dict() for e in entries])
+    return jsonify([e.to_dict() for e in entries if _journal_entry_visible(e)])
 
 
 @api_bp.route('/knowledge/<int:entry_id>/review', methods=['POST'])
@@ -765,7 +778,8 @@ def distribute_knowledge(entry_id):
 def delete_knowledge(entry_id):
     """删除知识条目"""
     entry = KnowledgeEntry.query.get_or_404(entry_id)
-    if entry.entry_type == 'test_journal':
+    from app.services.resource_sharing import policy_for
+    if entry.entry_type == 'test_journal' or policy_for('knowledge', entry.id):
         return jsonify({
             'error': '版本纪要不能物理删除，请通过归档保留历史',
             'code': 'VERSIONED_KNOWLEDGE_DELETE_FORBIDDEN',

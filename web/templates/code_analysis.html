@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}代码分析 - OpenClaw 管理系统{% endblock %}
+{% block nav_code_analysis %}active{% endblock %}
+{% block page_title %}代码分析{% endblock %}
+{% block head %}
+<style>
+.ca-header,.ca-toolbar,.ca-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;justify-content:space-between}
+.ca-header{margin-bottom:24px}.ca-header h1{margin:0 0 8px}.ca-note{color:var(--text-secondary);font-size:.85rem;line-height:1.7}
+.ca-panel{border:1px solid var(--border);border-radius:12px;background:var(--bg-card);padding:20px;margin-bottom:18px}
+.ca-tabs{display:flex;gap:8px;margin:20px 0}.ca-tabs button.active{color:var(--accent);border-color:var(--accent)}
+.ca-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.ca-field{display:flex;flex-direction:column;gap:7px}
+.ca-field input,.ca-field select,.ca-field textarea,.ca-toolbar select{background:var(--bg-primary);color:var(--text-primary);border:1px solid var(--border);border-radius:7px;padding:10px}
+.ca-field textarea{min-height:110px;resize:vertical}.ca-wide{grid-column:1/-1}.ca-table{width:100%;border-collapse:collapse;font-size:.87rem}
+.ca-table td,.ca-table th{text-align:left;padding:13px 10px;border-bottom:1px solid var(--border);vertical-align:top}.ca-table th{color:var(--text-secondary);font-weight:500}
+.ca-scroll{overflow-x:auto}.ca-empty{padding:32px;text-align:center;color:var(--text-secondary)}.ca-tag{font: .8rem monospace;color:var(--accent)}
+.ca-dialog{width:min(1080px,94vw);max-height:90vh;padding:0;border:1px solid var(--border);border-radius:12px;background:var(--bg-card);color:var(--text-primary)}
+.ca-dialog::backdrop{background:#0009}.ca-dialog header{display:flex;justify-content:space-between;align-items:center;padding:18px 22px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg-card);z-index:1}
+.ca-dialog main{padding:22px}.ca-dialog pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.8}.ca-dialog.full{width:98vw;max-width:none;height:96vh;max-height:96vh}
+.ca-error{color:var(--danger,#ef4444);padding:10px 0}.ca-pager{display:flex;justify-content:flex-end;gap:12px;align-items:center;margin-top:18px}
+@media(max-width:760px){.ca-grid{grid-template-columns:1fr}.ca-header{align-items:flex-start}.ca-panel{padding:14px}}
+</style>
+{% endblock %}
+{% block content %}
+<div class="ca-header">
+ <div><div class="ca-tag">CODE ANALYSIS / 人工反馈驱动</div><h1>项目代码分析</h1><div class="ca-note">从测试计划出发，分析潜在 Bug；人工处置后，持续沉淀项目与通用经验。</div></div>
+ <label>项目 <select id="ca-project" class="form-control" aria-label="选择项目"></select></label>
+</div>
+<div id="ca-error" class="ca-error" role="alert"></div>
+<div class="ca-tabs" role="tablist">
+ <button class="btn btn-ghost active" data-ca-tab="runs" role="tab" aria-selected="true">分析记录与问题</button>
+ <button class="btn btn-ghost" data-ca-tab="settings" role="tab" aria-selected="false">分析配置</button>
+ <button class="btn btn-ghost" data-ca-tab="knowledge" role="tab" aria-selected="false">知识与 Skill</button>
+</div>
+<section id="ca-content" aria-live="polite"></section>
+<dialog id="ca-dialog" class="ca-dialog" aria-labelledby="ca-dialog-title">
+ <header><h3 id="ca-dialog-title" style="margin:0"></h3><div><button class="btn btn-ghost" id="ca-full">全屏</button> <button class="btn btn-ghost" id="ca-close" aria-label="关闭详情">关闭</button></div></header>
+ <main id="ca-dialog-content"></main>
+</dialog>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='js/code_analysis.js') }}"></script>{% endblock %}

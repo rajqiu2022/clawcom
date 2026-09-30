@@ -519,6 +519,11 @@ def workflows_page():
         'workflows.html', shift_left_enabled=_shift_left_enabled())
 
 
+@views_bp.route('/code-analysis')
+def code_analysis_page():
+    return render_template('code_analysis.html')
+
+
 def _shift_left_enabled():
     value = current_app.config.get('SHIFT_LEFT_ENABLED', False)
     if isinstance(value, str):
