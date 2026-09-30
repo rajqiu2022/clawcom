@@ -586,7 +586,7 @@ function renderSkills() {
             <div class="skill-desc">${s.description || ''}</div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px" onclick="event.stopPropagation()">
                 <button class="btn btn-ghost btn-sm" onclick="previewSkill(${s.id})">详情</button>
-                <a class="btn btn-ghost btn-sm" href="/api/v1/skills/${s.id}/pack">下载文档包</a>
+                ${renderSkillPackDownload(s, true)}
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
                 <div class="skill-users">
@@ -769,6 +769,11 @@ async function uploadSkillAttachment(skillId, file) {
     if (!response.ok) throw new Error(data.error || '附件上传失败');
     return data;
 }
+function renderSkillPackDownload(skill, compact = false) {
+    const count = Array.isArray(skill.attachments) ? skill.attachments.length : Number(skill.attachment_count || 0);
+    if (count <= 0 || !Number.isFinite(count)) return '';
+    return `<a class="btn btn-ghost${compact ? ' btn-sm' : ''}" href="/api/v1/skills/${skill.id}/pack">${compact ? '下载文档包' : '下载完整文档包'}</a>`;
+}
 function renderSkillAttachments(skill, editable = false) {
     const rows = skill.attachments || [];
     return `<div style="margin:12px 0"><strong>附件（${rows.length}）</strong>${rows.length ? rows.map(file => `
@@ -786,6 +791,7 @@ async function removeSkillAttachment(skillId, attachmentId) {
         await API.request('DELETE', `/skills/${skillId}/attachments/${attachmentId}`);
         const skill = await loadFullSkill(skillId);
         if (skill) $('#skill-edit-attachments').innerHTML = renderSkillAttachments(skill, true);
+        loadSkills();
         showToast('附件已删除', 'success');
     } catch (error) { showToast(error.message, 'error'); }
 }
@@ -998,7 +1004,7 @@ async function previewSkill(id) {
     const canReview = _isAdmin() && (s.review_status === 'pending' || s.review_status === 'revise');
     window._previewSkillData = s;
     $('#preview-actions').innerHTML = `
-        <a class="btn btn-ghost" href="/api/v1/skills/${s.id}/pack">下载完整文档包</a>
+        ${renderSkillPackDownload(s)}
         <button class="btn btn-ghost" onclick="showFullSkill()">全屏查看</button>
         <button class="btn btn-ghost" onclick="closePreviewModal()">关闭</button>
         ${canReview ? `<button class="btn" style="background:#22c55e;color:#fff" onclick="closePreviewModal();reviewSkill(${s.id},'approved')">通过</button><button class="btn" style="background:#f97316;color:#fff" onclick="closePreviewModal();reviewSkill(${s.id},'revise')">打回</button><button class="btn" style="background:#6b7280;color:#fff" onclick="closePreviewModal();reviewSkill(${s.id},'rejected')">废弃</button>` : ''}

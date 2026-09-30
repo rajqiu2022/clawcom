@@ -2,9 +2,9 @@
 import deploy_agent_teams as release
 
 
-release.BASE = '41f3275'
-release.FILES = ('app/models.py', 'app/api/skills.py', 'templates/skills.html')
-release.MIGRATIONS = ('20260930_skill_attachments.sql',)
+release.BASE = 'f51961f'
+release.FILES = ('app/api/skills.py', 'templates/skills.html')
+release.MIGRATIONS = ()
 release.SCHEMA = r'''
 from app import create_app, db
 from sqlalchemy import inspect, text
@@ -32,7 +32,7 @@ with app.app_context():
     assert os.access(root, os.W_OK)
     print('TEAM_RELEASE ' + json.dumps({
         'schema_verified': True, 'attachment_root': str(root),
-        'migrations_applied': 1, 'business_rows_modified': 0, 'backup': backup,
+        'migrations_applied': len(migrations), 'business_rows_modified': 0, 'backup': backup,
     }))
 '''
 release.SMOKE = r'''
@@ -82,6 +82,17 @@ with app.app_context():
         page = get('/skills')
         assert page.status_code == 200
         assert b'skill-attachment-files' in body(page) and b'showSkillAttachment' in body(page)
+        assert b'renderSkillPackDownload(s, true)' in body(page)
+        assert b'renderSkillPackDownload(s)' in body(page)
+        def count():
+            summary = get('/api/v1/skills?summary=true')
+            assert summary.status_code == 200
+            item = next(item for item in payload(summary) if item['id'] == skill_id)
+            detail = get('/api/v1/skills/%s' % skill_id)
+            assert detail.status_code == 200
+            assert item['attachment_count'] == payload(detail)['attachment_count']
+            return item['attachment_count']
+        assert count() == 0
         data = b'# attachment smoke\nprint("not executed")\n'
         path = '/api/v1/skills/%s/attachments' % skill_id
         if live:
@@ -90,6 +101,7 @@ with app.app_context():
         else:
             upload = client.post(path, data={'file': (io.BytesIO(data), 'smoke.py')})
         assert upload.status_code == 201, upload.status_code
+        assert count() == 1
         attachment = payload(upload)
         assert attachment['sha256'] == hashlib.sha256(data).hexdigest()
         detail = get(path + '/' + str(attachment['id']))
@@ -102,10 +114,18 @@ with app.app_context():
         with zipfile.ZipFile(io.BytesIO(body(pack))) as archive:
             assert archive.read(skill.name + '/attachments/smoke.py') == data
             assert archive.read(skill.name + '/SKILL.md') == b'# Smoke'
+        if live:
+            deleted = requests.delete('http://127.0.0.1:18800' + attachment['detail_url'],
+                                      headers=headers, timeout=20)
+        else:
+            deleted = client.delete(attachment['detail_url'])
+        assert deleted.status_code == 200
+        assert count() == 0
         anonymous = app.test_client().get(path)
         assert anonymous.status_code == 401
         print('TEAM_RELEASE ' + json.dumps({
             'smoke': 'passed', 'live_http': live, 'upload_preview_download_pack': True,
+            'attachment_counts_0_1_0': True, 'conditional_download_markup': True,
             'workflow_runs_started': 0, 'workers_modified': False,
         }))
     except Exception as exc:

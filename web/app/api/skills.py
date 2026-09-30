@@ -294,6 +294,10 @@ def list_skills():
     if not summary_only:
         record_skill_content_accesses([skill.id for skill in skills], 'list_full')
     usage_counts = recent_skill_usage_counts([skill.id for skill in skills])
+    attachment_counts = dict(db.session.query(
+        SkillAttachment.skill_id, db.func.count(SkillAttachment.id)
+    ).filter(SkillAttachment.skill_id.in_([skill.id for skill in skills]))
+      .group_by(SkillAttachment.skill_id).all()) if skills else {}
     result = []
     for s in skills:
         d = s.to_dict()
@@ -304,6 +308,7 @@ def list_skills():
             d.pop('content_history', None)
         d['market_status'] = _skill_market_status(s)
         d['recent_usage_count'] = usage_counts.get(s.id, 0)
+        d['attachment_count'] = attachment_counts.get(s.id, 0)
         # 查出正在使用的 OpenClaw 名单 + 区分 fresh / stale
         # 分配时间不是安装证据：仅有效回执匹配当前内容才算 fresh。
         rows = (db.session.query(OpenClawInstance.name,
@@ -426,6 +431,7 @@ def get_skill(skill_id):
     data = skill.to_dict()
     data['can_edit'] = _can_edit(user, skill)
     data['attachments'] = [a.to_dict() for a in skill.attachment_entries.order_by(SkillAttachment.id).all()]
+    data['attachment_count'] = len(data['attachments'])
     data['attachment_max_bytes'] = MAX_SKILL_ATTACHMENT_SIZE
     data['market_status'] = _skill_market_status(skill)
     from app.services.skill_usage import (

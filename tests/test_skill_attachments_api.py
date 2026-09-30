@@ -1,6 +1,8 @@
 import hashlib
 import io
 import sys
+import shutil
+import subprocess
 import tempfile
 import types
 import unittest
@@ -99,6 +101,19 @@ class SkillAttachmentsApiTest(unittest.TestCase):
             self.assertEqual(archive.read('attachments-demo/attachments/测试文件.bin'), raw)
             self.assertEqual(archive.read('attachments-demo/SKILL.md'), b'# Skill')
 
+    def test_attachment_counts_follow_upload_and_delete_in_summary_and_detail(self):
+        def counts():
+            items = self.client.get('/api/v1/skills?summary=true').get_json()
+            item = next(item for item in items if item['id'] == self.skill.id)
+            self.assertNotIn('attachments', item)
+            detail = self.client.get(f'/api/v1/skills/{self.skill.id}').get_json()
+            return item['attachment_count'], detail['attachment_count']
+        self.assertEqual(counts(), (0, 0))
+        metadata = self.upload('script.py', b'print("ok")').get_json()
+        self.assertEqual(counts(), (1, 1))
+        self.assertEqual(self.client.delete(metadata['detail_url']).status_code, 200)
+        self.assertEqual(counts(), (0, 0))
+
     def test_script_and_zip_details_do_not_execute_or_extract(self):
         script = b'print("never execute")\n'
         metadata = self.upload('probe.py', script).get_json()
@@ -164,3 +179,24 @@ class SkillAttachmentsApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.get_json()['uploaded_by'], 'script-agent')
         self.assertEqual(self.skill.review_status, 'pending')
+
+
+class SkillAttachmentDownloadUiTest(unittest.TestCase):
+    def test_download_buttons_only_render_with_attachments(self):
+        if not shutil.which('node'):
+            self.skipTest('Node.js required for frontend rendering test')
+        page = (Path(__file__).resolve().parents[1] / 'web/templates/skills.html').read_text(encoding='utf-8')
+        function = page.split('function renderSkillPackDownload', 1)[1].split('function renderSkillAttachments', 1)[0]
+        script = 'function renderSkillPackDownload' + function + '''
+const assert = require('node:assert/strict');
+for (const skill of [{id:1}, {id:1,attachment_count:0}, {id:1,attachments:[]},
+                     {id:1,attachment_count:3,attachments:[]}]) {
+    assert.equal(renderSkillPackDownload(skill), '');
+    assert.equal(renderSkillPackDownload(skill,true), '');
+}
+assert.match(renderSkillPackDownload({id:1,attachment_count:1},true), /下载文档包/);
+assert.match(renderSkillPackDownload({id:1,attachments:[{id:2}]}), /下载完整文档包/);
+'''
+        subprocess.run(['node', '-e', script], check=True, capture_output=True)
+        self.assertIn('${renderSkillPackDownload(s, true)}', page)
+        self.assertIn('${renderSkillPackDownload(s)}', page)
