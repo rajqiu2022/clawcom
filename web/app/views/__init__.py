@@ -55,7 +55,7 @@ def _consume_woa_ticket():
     session['user_id'] = user.id
     logger.warning('[WOA-SSO] 用户 %s (id=%d) SSO 登录成功，跳转首页',
                    username, user.id)
-    return redirect('/')
+    return redirect(session.pop('post_login_redirect', '/'))
 
 
 # 允许的 WOA SSO 回调路径（passport 会把 ticket 拼回这里）
@@ -245,6 +245,8 @@ def check_login():
 
     uid = session.get('user_id')
     if not uid:
+        if request.path == '/mobile':
+            session['post_login_redirect'] = '/mobile'
         return redirect('/login')
     from app.models import User
     user = User.query.get(uid)
@@ -597,6 +599,13 @@ def agent_eval_page():
 def agent_teams_page():
     """Project teams: each team owns its manager and multi-agent roster."""
     return render_template('agent_teams.html')
+
+
+@views_bp.route('/mobile')
+def mobile_page():
+    """Small-screen Hub client shared by Android WebView and Harmony ArkWeb."""
+    session.pop('post_login_redirect', None)
+    return render_template('mobile.html')
 
 
 @views_bp.route('/engineering')

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#172b32">
+  <title>ClawTeam · 移动工作台</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/mobile.css') }}?v={{ cache_bust }}">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">C<span>✳</span></span><span><strong>CLAWTEAM</strong><small>MOBILE HUB</small></span></div>
+      <button id="refresh" class="icon-button" type="button" aria-label="刷新当前页面">↻</button>
+    </header>
+    <div class="context-bar">
+      <label><span>项目</span><select id="project" aria-label="选择项目"></select></label>
+      <label id="team-picker"><span>团队</span><select id="team" aria-label="选择团队"></select></label>
+    </div>
+    <main id="content" tabindex="-1" aria-live="polite"></main>
+    <nav class="bottom-nav" aria-label="主要功能">
+      <button type="button" data-tab="team" class="active"><span>◉</span><small>团队</small></button>
+      <button type="button" data-tab="tasks"><span>☷</span><small>任务</small></button>
+      <button type="button" data-tab="reports"><span>▤</span><small>报告</small></button>
+      <button type="button" data-tab="knowledge"><span>◇</span><small>知识</small></button>
+      <button type="button" data-tab="claws"><span>⌘</span><small>Claw</small></button>
+    </nav>
+  </div>
+  <dialog id="detail"><div class="dialog-head"><h2 id="detail-title"></h2><button id="detail-close" type="button" aria-label="关闭">×</button></div><div id="detail-body"></div></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="{{ url_for('static', filename='js/mobile.js') }}?v={{ cache_bust }}" defer></script>
+</body>
+</html>

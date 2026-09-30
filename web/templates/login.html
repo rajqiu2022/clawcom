@@ -232,7 +232,7 @@ document.getElementById('auth-form').addEventListener('submit', async e => {
         const data = await resp.json();
 
         if (resp.ok) {
-            window.location.href = '/';
+            window.location.href = {{ ('/mobile' if session.get('post_login_redirect') == '/mobile' else '/')|tojson }};
         } else {
             errEl.textContent = data.error || '操作失败';
             errEl.style.display = '';

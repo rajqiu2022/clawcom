@@ -17,5 +17,6 @@ services:
       - SECRET_KEY=${SECRET_KEY:-clawteam-prod-secret}
       - MEMOS_URL=${MEMOS_URL:-http://your-hub-host:5230}
       - MEMOS_API_KEY=${MEMOS_API_KEY:-}
+      - TAI_MOBILE_GATEWAY_TOKEN=${TAI_MOBILE_GATEWAY_TOKEN:-}
     restart: unless-stopped
     network_mode: host

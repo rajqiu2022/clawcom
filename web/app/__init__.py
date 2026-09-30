@@ -61,6 +61,42 @@ def create_app(config_name=None):
     from app.views import views_bp
     app.register_blueprint(views_bp)
 
+    @app.before_request
+    def _authenticate_mobile_gateway():
+        """Accept only signed mobile-gateway identity for H5 and its API."""
+        from flask import request, session, jsonify
+        if request.path != '/mobile' and not request.path.startswith('/api/v1/'):
+            return None
+        from app.mobile_gateway_identity import verify_mobile_gateway_headers
+        state, identity = verify_mobile_gateway_headers(
+            request.headers, os.getenv('TAI_MOBILE_GATEWAY_TOKEN', ''))
+        if state == 'absent':
+            return None
+        if state != 'valid':
+            return jsonify({'error': '移动站点身份校验失败',
+                            'code': 'MOBILE_GATEWAY_' + state.upper()}), (
+                                503 if state == 'unconfigured' else 403)
+        if (session.get('user_id') and
+                session.get('mobile_staff_id') == identity['staff_id']):
+            return None
+        from app.models import User
+        from datetime import datetime
+        import secrets
+        username = identity['staff_name']
+        user = User.query.filter_by(username=username).first()
+        if not user:
+            user = User(username=username, display_name=username,
+                        role='super_admin' if username == 'rajqiu' else 'user')
+            user.set_password(secrets.token_hex(16))
+            db.session.add(user)
+        user.last_login_at = datetime.now()
+        db.session.commit()
+        session.permanent = True
+        session['user_id'] = user.id
+        session['mobile_staff_id'] = identity['staff_id']
+        session.pop('bypass_ngn', None)
+        return None
+
     # 全局注入 hub_public_url 给所有模板使用。
     # 历史教训 #126b/#127：前端不能信 location.origin（浏览器可能从 https://clawteam.woa.com
     # 进，撞 lampp Apache 必 404；唯一对 claw 可达的真身入口是 http://your-hub-host:18800）。
