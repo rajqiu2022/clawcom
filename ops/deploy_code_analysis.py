@@ -1,5 +1,6 @@
 """Immutable, additive Code Analysis release; preserve unrelated live hotfixes."""
 import argparse
+import ast
 import io
 import os
 from pathlib import Path
@@ -25,6 +26,38 @@ release.FILES = (
 release.MIGRATIONS = ('20260930_code_analysis_specialty.sql',)
 
 
+def merge_api_registration(live):
+    """Keep all live blueprint wiring; apply the two reviewed additive edits."""
+    source = live.decode('utf-8')
+    tree = ast.parse(source)
+    auth = next(node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == 'require_auth')
+    loops = [node for node in ast.walk(auth) if isinstance(node, ast.For)
+             and isinstance(node.target, ast.Name) and node.target.id == 'cache_key'
+             and isinstance(node.iter, ast.Tuple)]
+    if len(loops) != 1:
+        raise RuntimeError('Live auth cache reset needs review')
+    values = ast.literal_eval(loops[0].iter)
+    if not {'_collaboration_session', '_chat_guest_session', '_auth_claw',
+            '_auth_user', '_auth_user_super'} <= set(values):
+        raise RuntimeError('Live auth cache baseline needs review')
+    if '_resource_share_policies' not in values:
+        node = loops[0].iter
+        lines = source.splitlines(True)
+        line = lines[node.end_lineno - 1]
+        offset = node.end_col_offset - 1
+        if line[offset] != ')':
+            raise RuntimeError('Unexpected auth cache tuple layout')
+        lines[node.end_lineno - 1] = line[:offset] + ", '_resource_share_policies'" + line[offset:]
+        source = ''.join(lines)
+    if not any(isinstance(node, ast.ImportFrom) and node.module == 'app.api'
+               and any(alias.name == 'code_analysis' for alias in node.names)
+               for node in ast.walk(tree)):
+        source = source.rstrip() + '\n\nfrom app.api import code_analysis  # noqa: F401\n'
+    ast.parse(source)
+    return source.encode('utf-8')
+
+
 def candidate(path, live):
     """Merge ONLY committed deltas, never the caller's dirty workspace."""
     local = (release.ROOT / 'web' / path).read_bytes().replace(b'\r\n', b'\n')
@@ -40,6 +73,8 @@ def candidate(path, live):
         return local
     if base is None:
         raise RuntimeError('Unexpected existing new file: ' + path)
+    if path == 'app/api/__init__.py':
+        return merge_api_registration(live)
     with tempfile.TemporaryDirectory(prefix='code-analysis-merge-') as folder:
         paths = [Path(folder) / name for name in ('live', 'base', 'local')]
         for target, data in zip(paths, (live, base, local)):
