@@ -112,7 +112,9 @@ with app.app_context():
         print('TEAM_RELEASE ' + json.dumps({'smoke_error_type': type(exc).__name__}))
         raise
     finally:
-        db.session.expire_all()
+        # HTTP writes use a separate connection. End the repeatable-read snapshot
+        # before cleaning rows created by the live Gunicorn process.
+        db.session.rollback()
         SkillUsageEvent.query.filter_by(skill_id=skill_id).delete(synchronize_session=False)
         for attachment in SkillAttachment.query.filter_by(skill_id=skill_id).all():
             _remove_skill_attachment_file(_skill_attachment_path(attachment))
