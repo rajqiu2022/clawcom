@@ -140,6 +140,12 @@
                 <label class="form-label">模板内容</label>
                 <textarea class="form-textarea" name="template_content" style="min-height:300px;font-family:monospace" placeholder="Skill 模板内容..."></textarea>
             </div>
+            <div class="form-group">
+                <label class="form-label">附件</label>
+                <div id="skill-edit-attachments"></div>
+                <input type="file" class="form-input" id="skill-attachment-files" multiple onchange="selectSkillAttachments(this.files)">
+                <div id="skill-attachment-hint" style="margin-top:6px;font-size:.82rem;color:var(--text-muted)">支持文件、脚本、压缩包，每个文件最多 20MB，随 Skill 保存上传。</div>
+            </div>
             <div class="modal-actions">
                 <button type="button" class="btn btn-ghost" onclick="closeCreateModal()">取消</button>
                 <button type="submit" class="btn btn-primary" id="skill-submit-btn">创建</button>
@@ -230,8 +236,10 @@
 let allSkills = [];
 let allProjects = [];
 let allModules = [];
+let pendingSkillAttachments = [];
 
 function _canEditSkill(s) {
+    if (typeof s.can_edit === 'boolean') return s.can_edit;
     if (!currentUser) return false;
     if (currentUser.role === 'super_admin' || currentUser.role === 'admin') return true;
     if (s.created_by === currentUser.username) return true;
@@ -576,6 +584,10 @@ function renderSkills() {
             <div style="margin-top:4px">${scopeLabel(s)}</div>
             <div style="margin-top:4px">${renderStars(s.rating, s.id, _isAdmin())}</div>
             <div class="skill-desc">${s.description || ''}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px" onclick="event.stopPropagation()">
+                <button class="btn btn-ghost btn-sm" onclick="previewSkill(${s.id})">详情</button>
+                <a class="btn btn-ghost btn-sm" href="/api/v1/skills/${s.id}/pack">下载文档包</a>
+            </div>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
                 <div class="skill-users">
                     ${usedByHtml}
@@ -617,6 +629,9 @@ function renderSkills() {
 async function openCreateModal() {
     await loadProjectsAndModules();
     $('#create-form').reset();
+    pendingSkillAttachments = [];
+    $('#skill-edit-attachments').innerHTML = '';
+    selectSkillAttachments([]);
     $('#skill-edit-id').value = '';
     $('#skill-modal-title').textContent = '创建新 Skill';
     $('#skill-name').disabled = false;
@@ -631,6 +646,10 @@ async function editSkill(id) {
     const s = await loadFullSkill(id);
     if (!s) return;
     await loadProjectsAndModules();
+    pendingSkillAttachments = [];
+    $('#skill-attachment-files').value = '';
+    selectSkillAttachments([]);
+    $('#skill-edit-attachments').innerHTML = renderSkillAttachments(s, true);
 
     $('#skill-edit-id').value = id;
     $('#skill-modal-title').textContent = '编辑 Skill';
@@ -703,20 +722,94 @@ $('#create-form').addEventListener('submit', async e => {
 
     data.is_standard = $('#skill-is-standard').checked;
 
+    let savedId = Number(editId) || null;
+    let saved = false;
+    $('#skill-submit-btn').disabled = true;
     try {
         if (editId) {
             await API.request('PUT', `/skills/${editId}`, data);
-            showToast('Skill 更新成功！', 'success');
         } else {
-            await API.createSkill(data);
-            showToast('Skill 创建成功！', 'success');
+            const created = await API.createSkill(data);
+            savedId = created.id;
+            // Keep the created ID if an attachment fails so retry cannot create another Skill.
+            $('#skill-edit-id').value = savedId;
+            $('#skill-name').disabled = true;
+            $('#skill-submit-btn').textContent = '保存';
         }
+        saved = true;
+        while (pendingSkillAttachments.length) {
+            await uploadSkillAttachment(savedId, pendingSkillAttachments[0]);
+            pendingSkillAttachments.shift();
+        }
+        showToast(editId ? 'Skill 更新成功！' : 'Skill 创建成功！', 'success');
         closeCreateModal();
         loadSkills();
     } catch (err) {
-        showToast((editId ? '更新' : '创建') + '失败: ' + err.message, 'error');
+        showToast((saved ? 'Skill 已保存，附件上传失败：' : '保存失败：') + err.message, 'error');
+    } finally {
+        $('#skill-submit-btn').disabled = false;
     }
 });
+
+function skillAttachmentSize(bytes) {
+    return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
+}
+function selectSkillAttachments(files) {
+    pendingSkillAttachments = Array.from(files);
+    $('#skill-attachment-hint').textContent = pendingSkillAttachments.length
+        ? '待上传：' + pendingSkillAttachments.map(file => `${file.name}（${skillAttachmentSize(file.size)}）`).join('、')
+        : '支持文件、脚本、压缩包，每个文件最多 20MB，随 Skill 保存上传。';
+}
+async function uploadSkillAttachment(skillId, file) {
+    if (file.size > 20 * 1024 * 1024) throw new Error(`${file.name} 超过 20MB`);
+    const body = new FormData();
+    body.append('file', file);
+    const response = await fetch(`/api/v1/skills/${skillId}/attachments`, {method:'POST', body});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '附件上传失败');
+    return data;
+}
+function renderSkillAttachments(skill, editable = false) {
+    const rows = skill.attachments || [];
+    return `<div style="margin:12px 0"><strong>附件（${rows.length}）</strong>${rows.length ? rows.map(file => `
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--border)">
+            <div style="flex:1;min-width:120px;overflow-wrap:anywhere"><div>${escapeHtml(file.filename)}</div>
+            <small style="color:var(--text-muted)">${skillAttachmentSize(file.size_bytes)} · ${escapeHtml(file.uploaded_by || '')} · ${escapeHtml(file.uploaded_at || '')}</small></div>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="showSkillAttachment(${skill.id},${file.id})">详情</button>
+            <a class="btn btn-ghost btn-sm" href="/api/v1/skills/${skill.id}/attachments/${file.id}/download">下载</a>
+            ${editable ? `<button type="button" class="btn btn-danger btn-sm" onclick="removeSkillAttachment(${skill.id},${file.id})">删除</button>` : ''}
+        </div>`).join('') : '<div style="margin-top:6px;color:var(--text-muted);font-size:.85rem">暂无附件</div>'}</div>`;
+}
+async function removeSkillAttachment(skillId, attachmentId) {
+    if (!await customConfirm('确定删除此附件？')) return;
+    try {
+        await API.request('DELETE', `/skills/${skillId}/attachments/${attachmentId}`);
+        const skill = await loadFullSkill(skillId);
+        if (skill) $('#skill-edit-attachments').innerHTML = renderSkillAttachments(skill, true);
+        showToast('附件已删除', 'success');
+    } catch (error) { showToast(error.message, 'error'); }
+}
+async function showSkillAttachment(skillId, attachmentId) {
+    try {
+        const file = await API.request('GET', `/skills/${skillId}/attachments/${attachmentId}`);
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay active';
+        overlay.style.zIndex = '10001';
+        overlay.innerHTML = `<div class="modal" style="max-width:900px;width:90vw">
+            <h3 class="modal-title" style="overflow-wrap:anywhere">${escapeHtml(file.filename)}</h3>
+            <div style="font-size:.85rem;color:var(--text-muted);margin-bottom:12px">${skillAttachmentSize(file.size_bytes)} · ${escapeHtml(file.uploaded_by || '')} · ${escapeHtml(file.uploaded_at || '')}</div>
+            <div style="max-height:60vh;overflow:auto">
+                ${file.text_preview !== undefined ? `<pre style="white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg-secondary);padding:12px">${escapeHtml(file.text_preview)}</pre>`
+                : file.archive_entries ? `<div>压缩包共 ${file.archive_count} 项${file.archive_count > 100 ? '，展示前 100 项' : ''}</div>${file.archive_entries.map(entry => `<div style="padding:6px 0;overflow-wrap:anywhere">${escapeHtml(entry.name)} <small style="color:var(--text-muted)">${skillAttachmentSize(entry.size_bytes)}</small></div>`).join('')}`
+                : `<p style="color:var(--text-muted)">${escapeHtml(file.preview_message || '此文件可下载后查看。文本及脚本支持 UTF-8 预览，预览上限为 512KB。')}</p>`}
+            </div>
+            <div class="modal-actions"><a class="btn btn-primary" href="/api/v1/skills/${skillId}/attachments/${attachmentId}/download">下载</a><button type="button" class="btn btn-ghost" data-close>关闭</button></div>
+        </div>`;
+        overlay.querySelector('[data-close]').onclick = () => overlay.remove();
+        overlay.onclick = event => { if (event.target === overlay) overlay.remove(); };
+        document.body.appendChild(overlay);
+    } catch (error) { showToast(error.message, 'error'); }
+}
 
 async function deleteSkill(id) {
     const s = allSkills.find(x => x.id === id);
@@ -891,6 +984,7 @@ async function previewSkill(id) {
         ${s.trigger_phrase ? `<div style="margin-bottom:12px;font-size:0.85rem"><strong>触发短语：</strong>${escapeHtml(s.trigger_phrase)}</div>` : ''}
         <div style="margin-bottom:8px;font-size:0.85rem;font-weight:600">模板内容</div>
         ${contentHtml}
+        ${renderSkillAttachments(s)}
         ${mirrorHtml}
         ${historyHtml}
         <div style="margin-top:12px;font-size:0.78rem;color:var(--text-muted)">
@@ -904,6 +998,7 @@ async function previewSkill(id) {
     const canReview = _isAdmin() && (s.review_status === 'pending' || s.review_status === 'revise');
     window._previewSkillData = s;
     $('#preview-actions').innerHTML = `
+        <a class="btn btn-ghost" href="/api/v1/skills/${s.id}/pack">下载完整文档包</a>
         <button class="btn btn-ghost" onclick="showFullSkill()">全屏查看</button>
         <button class="btn btn-ghost" onclick="closePreviewModal()">关闭</button>
         ${canReview ? `<button class="btn" style="background:#22c55e;color:#fff" onclick="closePreviewModal();reviewSkill(${s.id},'approved')">通过</button><button class="btn" style="background:#f97316;color:#fff" onclick="closePreviewModal();reviewSkill(${s.id},'revise')">打回</button><button class="btn" style="background:#6b7280;color:#fff" onclick="closePreviewModal();reviewSkill(${s.id},'rejected')">废弃</button>` : ''}
@@ -974,6 +1069,7 @@ function showFullSkill() {
         ${s.trigger_phrase ? `<div style="margin-bottom:16px;font-size:0.9rem"><strong>触发短语：</strong>${escapeHtml(s.trigger_phrase)}</div>` : ''}
         <div style="margin-bottom:10px;font-size:0.9rem;font-weight:600">模板内容</div>
         <div style="background:var(--bg-secondary);padding:18px 20px;border-radius:var(--radius-sm);font-family:monospace;font-size:0.88rem;white-space:pre-wrap;line-height:1.8">${s.template_content ? escapeHtml(s.template_content) : '暂无模板内容'}</div>
+        ${renderSkillAttachments(s)}
         <div style="margin-top:16px;font-size:0.82rem;color:var(--text-muted)">
             最近修改: ${s.mirror_updated_at || s.updated_at || '-'}
         </div>

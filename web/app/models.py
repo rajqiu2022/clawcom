@@ -552,6 +552,33 @@ class SkillFile(db.Model):
         }
 
 
+class SkillAttachment(db.Model):
+    """Original attachment bytes live in Hub storage; metadata follows Skill ACL."""
+    __tablename__ = 'skill_attachments'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    skill_id = db.Column(db.Integer, db.ForeignKey('skills.id'), nullable=False, index=True)
+    filename = db.Column(db.String(180), nullable=False)
+    stored_name = db.Column(db.String(64), nullable=False)
+    size_bytes = db.Column(db.Integer, nullable=False)
+    content_type = db.Column(db.String(120), nullable=False)
+    sha256 = db.Column(db.String(64), nullable=False)
+    uploaded_by = db.Column(db.String(100), nullable=False)
+    uploaded_at = db.Column(db.DateTime, default=_now, nullable=False)
+    skill = db.relationship('Skill', backref=db.backref(
+        'attachment_entries', lazy='dynamic', cascade='all, delete-orphan'))
+
+    def to_dict(self):
+        base = f'/api/v1/skills/{self.skill_id}/attachments/{self.id}'
+        return {
+            'id': self.id, 'skill_id': self.skill_id, 'filename': self.filename,
+            'size_bytes': self.size_bytes, 'content_type': self.content_type,
+            'sha256': self.sha256, 'uploaded_by': self.uploaded_by,
+            'uploaded_at': str(self.uploaded_at),
+            'detail_url': base, 'download_url': base + '/download',
+        }
+
+
 class OpenClawSkill(db.Model):
     """OpenClaw 技能关联表"""
     __tablename__ = 'openclaw_skills'

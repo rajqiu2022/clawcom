@@ -418,9 +418,15 @@ def get_skill(skill_id):
     """获取指定 Skill 详情"""
     skill = Skill.query.get_or_404(skill_id)
     user = _get_current_user()
+    error = _skill_access_error(skill)
+    if error:
+        return error
     if _is_off_shelf_skill(skill) and not (user and user.role in ('super_admin', 'admin')):
         return jsonify({'error': 'Skill 不存在'}), 404
     data = skill.to_dict()
+    data['can_edit'] = _can_edit(user, skill)
+    data['attachments'] = [a.to_dict() for a in skill.attachment_entries.order_by(SkillAttachment.id).all()]
+    data['attachment_max_bytes'] = MAX_SKILL_ATTACHMENT_SIZE
     data['market_status'] = _skill_market_status(skill)
     from app.services.skill_usage import (
         recent_skill_usage_counts,
@@ -1677,10 +1683,150 @@ def get_rule_raw(rule_id):
 
 # ==================== Skill 文档包 API（MySQL 存储） ====================
 
-from app.models import SkillFile
+from app.models import SkillFile, SkillAttachment
 import os
+import hashlib
+import uuid
+from pathlib import Path, PurePosixPath
+from flask import send_file
 
 HUB_STORE_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'hub-store')
+MAX_SKILL_ATTACHMENT_SIZE = 20 * 1024 * 1024
+TEXT_ATTACHMENT_SUFFIXES = {'.md', '.txt', '.py', '.js', '.ts', '.sh', '.ps1', '.bat',
+                           '.json', '.yaml', '.yml', '.toml', '.ini', '.csv', '.sql', '.log'}
+
+
+def _skill_access_error(skill, write=False):
+    from app.api.auth_utils import get_current_claw
+    user = _get_current_user()
+    if not user and not get_current_claw():
+        return jsonify({'error': '未认证'}), 401
+    can_edit = _can_edit(user, skill)
+    if write:
+        if not can_edit or skill.is_deleted:
+            return jsonify({'error': '无权修改此 Skill 的附件'}), 403
+    elif (_is_off_shelf_skill(skill) or skill.visibility == 'private'
+          or skill.scope == 'admin' or skill.review_status != 'approved') and not can_edit:
+        return jsonify({'error': '无权查看此 Skill'}), 403
+    return None
+
+
+def _skill_attachment_path(attachment):
+    root = Path(current_app.config.get('SKILL_ATTACHMENT_ROOT') or
+                os.environ.get('SKILL_ATTACHMENT_ROOT') or
+                os.path.join(HUB_STORE_ROOT, 'skill-attachments')).resolve()
+    path = root / str(attachment.skill_id) / attachment.stored_name
+    if path.resolve().parent != root / str(attachment.skill_id):
+        raise ValueError('Invalid attachment storage path')
+    return path
+
+
+def _touch_skill_attachment(skill):
+    from app.api.auth_utils import get_current_claw
+    user = _get_current_user()
+    claw = get_current_claw()
+    skill.last_modified_by = claw.name if claw else user.username
+    skill.last_modified_at = _now()
+    skill.updated_at = _now()
+    skill.last_modified_source = 'openclaw' if claw else 'web'
+    admin = claw.role == 'admin' if claw else user.role in ('super_admin', 'admin')
+    if skill.visibility != 'private' and not admin:
+        skill.review_status = 'pending'
+        skill.review_comment = None
+
+
+@api_bp.route('/skills/<int:skill_id>/attachments', methods=['GET', 'POST'])
+def skill_attachments(skill_id):
+    skill = Skill.query.get_or_404(skill_id)
+    error = _skill_access_error(skill, write=request.method == 'POST')
+    if error:
+        return error
+    if request.method == 'GET':
+        return jsonify({'items': [a.to_dict() for a in skill.attachment_entries.order_by(SkillAttachment.id).all()],
+                        'max_bytes': MAX_SKILL_ATTACHMENT_SIZE})
+    if (request.content_length or 0) > MAX_SKILL_ATTACHMENT_SIZE + 64 * 1024:
+        return jsonify({'error': '附件不能超过 20MB'}), 413
+    file = request.files.get('file')
+    name = file.filename if file else ''
+    if (not name or len(name) > 180 or '/' in name or '\\' in name
+            or name in ('.', '..') or any(ord(c) < 32 for c in name)):
+        return jsonify({'error': '附件文件名无效'}), 400
+    if skill.attachment_entries.filter_by(filename=name).first():
+        return jsonify({'error': '同名附件已存在，请先删除旧附件或修改文件名'}), 409
+    content = file.stream.read(MAX_SKILL_ATTACHMENT_SIZE + 1)
+    if len(content) > MAX_SKILL_ATTACHMENT_SIZE:
+        return jsonify({'error': '附件不能超过 20MB'}), 413
+    from app.api.auth_utils import get_current_claw
+    claw = get_current_claw()
+    attachment = SkillAttachment(
+        skill_id=skill.id, filename=name, stored_name=uuid.uuid4().hex,
+        size_bytes=len(content), content_type=(file.mimetype or 'application/octet-stream')[:120],
+        sha256=hashlib.sha256(content).hexdigest(),
+        uploaded_by=claw.name if claw else _get_current_user().username)
+    path = _skill_attachment_path(attachment)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_bytes(content)
+        db.session.add(attachment)
+        _touch_skill_attachment(skill)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        path.unlink(missing_ok=True)
+        raise
+    return jsonify(attachment.to_dict()), 201
+
+
+@api_bp.route('/skills/<int:skill_id>/attachments/<int:attachment_id>', methods=['GET', 'DELETE'])
+def skill_attachment_detail(skill_id, attachment_id):
+    skill = Skill.query.get_or_404(skill_id)
+    error = _skill_access_error(skill, write=request.method == 'DELETE')
+    if error:
+        return error
+    attachment = SkillAttachment.query.filter_by(id=attachment_id, skill_id=skill_id).first_or_404()
+    path = _skill_attachment_path(attachment)
+    if request.method == 'DELETE':
+        db.session.delete(attachment)
+        _touch_skill_attachment(skill)
+        db.session.commit()
+        path.unlink(missing_ok=True)
+        return jsonify({'message': '附件已删除'})
+    data = attachment.to_dict()
+    if not path.is_file():
+        return jsonify({'error': '附件文件已丢失'}), 410
+    suffix = Path(attachment.filename).suffix.lower()
+    if suffix in TEXT_ATTACHMENT_SUFFIXES and attachment.size_bytes <= 512 * 1024:
+        try:
+            data['text_preview'] = path.read_bytes().decode('utf-8-sig')
+        except UnicodeDecodeError:
+            pass
+    elif suffix == '.zip':
+        import zipfile
+        try:
+            with zipfile.ZipFile(path) as archive:
+                entries = archive.infolist()
+                data['archive_count'] = len(entries)
+                data['archive_entries'] = [{'name': entry.filename, 'size_bytes': entry.file_size}
+                                           for entry in entries[:100]]
+        except (zipfile.BadZipFile, OSError):
+            data['preview_message'] = '无法预览此压缩包，可下载原文件查看'
+    return jsonify(data)
+
+
+@api_bp.route('/skills/<int:skill_id>/attachments/<int:attachment_id>/download', methods=['GET'])
+def download_skill_attachment(skill_id, attachment_id):
+    skill = Skill.query.get_or_404(skill_id)
+    error = _skill_access_error(skill)
+    if error:
+        return error
+    attachment = SkillAttachment.query.filter_by(id=attachment_id, skill_id=skill_id).first_or_404()
+    path = _skill_attachment_path(attachment)
+    if not path.is_file():
+        return jsonify({'error': '附件文件已丢失'}), 410
+    response = send_file(path, as_attachment=True, download_name=attachment.filename,
+                         mimetype='application/octet-stream')
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
 
 
 def _sync_to_disk(skill, filename, content):
@@ -1708,6 +1854,9 @@ def _remove_from_disk(skill, filename):
 def list_skill_files(skill_id):
     """列出 Skill 文档包所有文件"""
     skill = Skill.query.get_or_404(skill_id)
+    error = _skill_access_error(skill)
+    if error:
+        return error
     files = SkillFile.query.filter_by(skill_id=skill_id).order_by(SkillFile.filename).all()
     from app.services.skill_usage import record_skill_content_access
     record_skill_content_access(skill.id, 'file_list')
@@ -1715,13 +1864,17 @@ def list_skill_files(skill_id):
         'skill_id': skill_id,
         'skill_name': skill.name,
         'files': [f.to_dict() for f in files],
+        'attachments': [a.to_dict() for a in skill.attachment_entries.order_by(SkillAttachment.id).all()],
     })
 
 
 @api_bp.route('/skills/<int:skill_id>/files/<path:filename>', methods=['GET'])
 def get_skill_file(skill_id, filename):
     """获取文档包某个文件内容"""
-    Skill.query.get_or_404(skill_id)
+    skill = Skill.query.get_or_404(skill_id)
+    error = _skill_access_error(skill)
+    if error:
+        return error
     sf = SkillFile.query.filter_by(skill_id=skill_id, filename=filename).first()
     if not sf:
         return jsonify({'error': f'文件 {filename} 不存在'}), 404
@@ -1864,19 +2017,42 @@ def delete_skill_file(skill_id, filename):
 
 @api_bp.route('/skills/<int:skill_id>/pack', methods=['GET'])
 def download_skill_pack(skill_id):
-    """打包下载整个文档包（ZIP，从 MySQL 读取）"""
-    import zipfile, io
+    """Download the Skill text files and original attachment bytes together."""
+    import zipfile
+    import tempfile
     skill = Skill.query.get_or_404(skill_id)
+    error = _skill_access_error(skill)
+    if error:
+        return error
     files = SkillFile.query.filter_by(skill_id=skill_id).all()
+    attachments = skill.attachment_entries.order_by(SkillAttachment.id).all()
+    from werkzeug.utils import secure_filename
+    root_name = secure_filename(skill.name) or f'skill-{skill.id}'
 
-    buf = io.BytesIO()
+    for attachment in attachments:
+        if not _skill_attachment_path(attachment).is_file():
+            return jsonify({'error': f'附件文件已丢失：{attachment.filename}'}), 410
+    for f in files:
+        name = PurePosixPath(f.filename.replace('\\', '/'))
+        if name.is_absolute() or '..' in name.parts:
+            return jsonify({'error': '文档包包含非法文件路径'}), 400
+    # Large multi-file packs spill to disk instead of occupying worker RAM.
+    buf = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         for f in files:
-            zf.writestr(f'{skill.name}/{f.filename}', f.content or '')
+            name = PurePosixPath(f.filename.replace('\\', '/'))
+            zf.writestr(f'{root_name}/{name}', f.content or '')
+        if not any(f.filename == 'SKILL.md' for f in files):
+            zf.writestr(f'{root_name}/SKILL.md', skill.template_content or '')
+        for attachment in attachments:
+            path = _skill_attachment_path(attachment)
+            zf.write(path, f'{root_name}/attachments/{attachment.filename}')
 
     buf.seek(0)
     from app.services.skill_usage import record_skill_content_access
     record_skill_content_access(skill.id, 'pack')
-    return Response(buf.getvalue(),
-                    mimetype='application/zip',
-                    headers={'Content-Disposition': f'attachment; filename="{skill.name}.zip"'})
+    response = send_file(buf, mimetype='application/zip', as_attachment=True,
+                         download_name=f'{root_name}.zip')
+    response.call_on_close(buf.close)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
