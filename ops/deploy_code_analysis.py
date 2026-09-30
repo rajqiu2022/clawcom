@@ -128,7 +128,7 @@ with app.app_context():
             stream.write('[client]\nhost='+quote(url.host or 'localhost')+'\nport='+str(url.port or 3306)+'\nuser='+quote(url.username)+'\npassword='+quote(url.password)+'\n')
         output = backup + '/database-before.sql'
         with open(output,'wb') as stream:
-            subprocess.run(['mysqldump','--defaults-extra-file='+defaults,'--single-transaction',
+            subprocess.run(['mysqldump','--defaults-extra-file='+defaults,'--max-allowed-packet=1G','--single-transaction',
                 '--quick','--skip-lock-tables',url.database],stdout=stream,stderr=subprocess.PIPE,check=True)
         assert os.path.getsize(output) > 0
     finally:
