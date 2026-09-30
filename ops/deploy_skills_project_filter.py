@@ -34,9 +34,8 @@ with app.app_context():
                'const sorted = filterSkillsForProject(filtered)',
                'filterSkillsForProject(results).length === 0')
     assert all(marker in page.get_data(as_text=True) for marker in markers)
-    shared_script = client.get('/static/js/api.js')
-    assert shared_script.status_code == 200
-    assert 'function initProjectIdFilter(' in shared_script.get_data(as_text=True)
+    with open('/opt/openclaw-web/static/js/api.js') as stream:
+        assert 'function initProjectIdFilter(' in stream.read()
     assert client.get('/api/v1/projects').status_code == 200
     assert client.get('/api/v1/skills?summary=true').status_code == 200
     live = os.getcwd() == '/opt/openclaw-web'
@@ -54,6 +53,9 @@ with app.app_context():
         else:
             raise RuntimeError('HTTP service unavailable')
         assert all(marker in response.text for marker in markers)
+        shared_script = requests.get('http://127.0.0.1:18800/static/js/api.js', timeout=10)
+        assert shared_script.status_code == 200
+        assert 'function initProjectIdFilter(' in shared_script.text
     print('TEAM_RELEASE ' + json.dumps({
         'smoke':'passed', 'live_http':live, 'project_selector':True,
         'business_rows_modified':0, 'workflow_runs_started':0, 'workers_modified':False,
