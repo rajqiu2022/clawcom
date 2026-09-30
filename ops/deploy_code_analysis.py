@@ -75,6 +75,24 @@ def candidate(path, live):
         raise RuntimeError('Unexpected existing new file: ' + path)
     if path == 'app/api/__init__.py':
         return merge_api_registration(live)
+    if path == 'app/views/__init__.py':
+        source = local.decode('utf-8')
+        functions = [node for node in ast.parse(source).body
+                     if isinstance(node, ast.FunctionDef) and node.name == 'code_analysis_page']
+        if len(functions) != 1:
+            raise RuntimeError('Unexpected committed code analysis route')
+        existing = [node for node in ast.parse(live).body
+                    if isinstance(node, ast.FunctionDef) and
+                    (node.name == 'code_analysis_page' or any('/code-analysis' in ast.dump(d)
+                                                             for d in node.decorator_list))]
+        if existing:
+            if len(existing) == 1 and ast.dump(existing[0]) == ast.dump(functions[0]):
+                return live
+            raise RuntimeError('Unexpected live code analysis route needs review')
+        node = functions[0]
+        first = min(decorator.lineno for decorator in node.decorator_list)
+        addition = '\n'.join(source.splitlines()[first - 1:node.end_lineno])
+        return live.rstrip() + b'\n\n' + addition.encode('utf-8') + b'\n'
     with tempfile.TemporaryDirectory(prefix='code-analysis-merge-') as folder:
         paths = [Path(folder) / name for name in ('live', 'base', 'local')]
         for target, data in zip(paths, (live, base, local)):

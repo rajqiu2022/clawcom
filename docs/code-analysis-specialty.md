@@ -4,7 +4,9 @@
 
 ## 启用和使用
 
-先备份数据库，执行 `ops/migrations/20260930_code_analysis_specialty.sql`。它只新增四张表，依赖现有左移分析、纪要版本和 Workflow 表；MariaDB 使用 LONGTEXT 保存 JSON。然后设置 `CODE_ANALYSIS_ENABLED=true` 并重启 Hub。默认关闭；关闭后保留数据，不执行删除回滚。本轮编码未执行生产迁移、提交或部署。
+先备份数据库，执行 `ops/migrations/20260930_code_analysis_specialty.sql`。它只新增四张表，依赖现有左移分析、纪要版本和 Workflow 表；MariaDB 使用 LONGTEXT 保存 JSON。然后设置 `CODE_ANALYSIS_ENABLED=true` 并重启 Hub。默认关闭；关闭后保留数据，不执行删除回滚。
+
+公司 systemd Hub 使用 `python ops/deploy_code_analysis.py --key <SSH私钥路径>` 做只读预检，加 `--apply` 执行部署。脚本仅发布已提交的专项文件，保留线上独立热修；先备份文件与完整数据库、验证增量迁移和暂存应用，再短暂停机切换，并以真实 HTTP 回读验收。失败恢复旧代码和开关，新增表保留。备份和部署文件哈希记录在服务目录 `backups/` 中。部署不会启动分析 Run、修改 Worker 或创建 TAPD Bug。
 
 打开 `/code-analysis`，选择项目并初始化，创建空白通用经验库和该项目经验库。初始化不会覆盖已有内容。选择本项目执行 Agent、初始 Skill、只读代码仓库 URL、源分支和主项目经验库；可额外选择最多 30 篇可读知识，包括跨项目共享知识。
 
