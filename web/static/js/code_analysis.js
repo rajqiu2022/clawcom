@@ -2,7 +2,8 @@
 const CA = {project: '', tab: 'runs', options: null, page: 1, job: null, loadEpoch:0, detailEpoch:0};
 const caEl = id => document.getElementById(id);
 const caEsc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const caKey = () => 'ca-' + crypto.randomUUID();
+// HTTP intranet entry points don't expose randomUUID; getRandomValues still works.
+const caKey = () => 'ca-' + (typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, '0')).join(''));
 const caWrite = (method, path, data) => API.request(method, path, data, {'Idempotency-Key': caKey()});
 function caError(error) { const message=error?.message || String(error);caEl('ca-error').textContent=message;if(caEl('ca-dialog').open&&caEl('ca-modal-error'))caEl('ca-modal-error').textContent=message; }
 function caDialog(title, content) {

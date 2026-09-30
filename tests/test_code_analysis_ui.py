@@ -30,6 +30,12 @@ class CodeAnalysisUiTest(unittest.TestCase):
         js="const document={addEventListener(){}};"+script+"\nif(caEsc('<img onerror=alert(1)>').includes('<'))throw Error('unescaped');if(caStatus('learned')!=='已学习')throw Error('status');"
         subprocess.run(['node','-e',js],check=True,capture_output=True)
 
+    @unittest.skipUnless(shutil.which('node'),'Node required for JS execution')
+    def test_idempotency_key_supports_http_intranet(self):
+        script=(ROOT/'web/static/js/code_analysis.js').read_text(encoding='utf-8')
+        js="const document={addEventListener(){}};const crypto={getRandomValues:v=>require('crypto').randomFillSync(v)};"+script+"\nconst a=caKey(),b=caKey();if(!/^ca-[a-f0-9]{32}$/.test(a)||a===b)throw Error('HTTP idempotency nonce');"
+        subprocess.run(['node','-e',js],check=True,capture_output=True)
+
     def test_feedback_version_and_sharing_controls_are_wired(self):
         js=(ROOT/'web/static/js/code_analysis.js').read_text(encoding='utf-8')
         for marker in ('ca-extra-knowledge','/publish-general','/submit-bug','/reconcile-bug',

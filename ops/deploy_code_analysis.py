@@ -160,7 +160,7 @@ with app.app_context():
     assert admin and project and app.config['CODE_ANALYSIS_ENABLED']
     client = app.test_client()
     with client.session_transaction() as session: session['user_id']=admin.id
-    paths = ['/code-analysis','/agent-teams','/test-plans','/skills','/knowledge','/workflows',
+    paths = ['/code-analysis','/agent-teams','/testplans','/skills','/knowledge','/workflows',
         '/api/v1/code-analysis/options?project_id='+str(project.id),
         '/api/v1/code-analysis/runs?project_id='+str(project.id),
         '/api/v1/skills?summary=true']
