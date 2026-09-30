@@ -39,7 +39,7 @@ release.SMOKE = r'''
 import io, hashlib, time, zipfile, requests
 from app import create_app, db
 from app.models import User, Skill, SkillAttachment, SkillUsageEvent
-from app.api.skills import _skill_attachment_path
+from app.api.skills import _skill_attachment_path, _remove_skill_attachment_file
 app = create_app('production')
 with app.app_context():
     admin = User.query.filter_by(role='super_admin').first()
@@ -108,11 +108,14 @@ with app.app_context():
             'smoke': 'passed', 'live_http': live, 'upload_preview_download_pack': True,
             'workflow_runs_started': 0, 'workers_modified': False,
         }))
+    except Exception as exc:
+        print('TEAM_RELEASE ' + json.dumps({'smoke_error_type': type(exc).__name__}))
+        raise
     finally:
         db.session.expire_all()
         SkillUsageEvent.query.filter_by(skill_id=skill_id).delete(synchronize_session=False)
         for attachment in SkillAttachment.query.filter_by(skill_id=skill_id).all():
-            _skill_attachment_path(attachment).unlink(missing_ok=True)
+            _remove_skill_attachment_file(_skill_attachment_path(attachment))
             db.session.delete(attachment)
         db.session.flush()
         db.session.delete(db.session.get(Skill, skill_id))

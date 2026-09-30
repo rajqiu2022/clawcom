@@ -1721,6 +1721,14 @@ def _skill_attachment_path(attachment):
     return path
 
 
+def _remove_skill_attachment_file(path):
+    # The production Hub still runs Python 3.7 (no Path.unlink(missing_ok)).
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def _touch_skill_attachment(skill):
     from app.api.auth_utils import get_current_claw
     user = _get_current_user()
@@ -1772,7 +1780,7 @@ def skill_attachments(skill_id):
         db.session.commit()
     except Exception:
         db.session.rollback()
-        path.unlink(missing_ok=True)
+        _remove_skill_attachment_file(path)
         raise
     return jsonify(attachment.to_dict()), 201
 
@@ -1789,7 +1797,7 @@ def skill_attachment_detail(skill_id, attachment_id):
         db.session.delete(attachment)
         _touch_skill_attachment(skill)
         db.session.commit()
-        path.unlink(missing_ok=True)
+        _remove_skill_attachment_file(path)
         return jsonify({'message': '附件已删除'})
     data = attachment.to_dict()
     if not path.is_file():
