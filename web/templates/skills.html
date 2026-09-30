@@ -39,6 +39,9 @@
 
 {% block top_actions %}
 <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <select class="form-select" id="filter-project" aria-label="筛选项目" style="width:auto;min-width:160px;max-width:240px" onchange="onSkillProjectChange()">
+        <option value="">全部项目</option>
+    </select>
     <div style="position:relative;flex:1;min-width:200px;max-width:400px">
         <input class="form-input" id="skill-search" placeholder="搜索 Skill..." style="padding-left:32px;padding-right:28px;width:100%" onkeydown="if(event.key==='Enter')doSearch()" oninput="onSearchInput()">
         <span style="position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--text-muted);font-size:0.9rem">&#x1F50D;</span>
@@ -335,14 +338,37 @@ function scopeLabel(s) {
 async function loadSkills() {
     try {
         if (searchKeyword) {
-            // 如果有搜索关键词，先按标题搜索
-            allSkills = await API.request('GET', `/skills?summary=true&search=${encodeURIComponent(searchKeyword)}`);
+            await doSearch();
+            return;
         } else {
             allSkills = await API.listSkills();
         }
         renderSkills();
     }
     catch (err) { showToast('加载失败: ' + err.message, 'error'); }
+}
+
+function filterSkillsForProject(skills, projectId = $('#filter-project').value) {
+    if (!projectId) return skills;
+    return skills.filter(skill => {
+        const projects = skill.applicable_projects || [];
+        return skill.scope === 'global' || projects.length === 0
+            || projects.some(id => String(id) === String(projectId));
+    });
+}
+
+function onSkillProjectChange() {
+    if (searchKeyword) doSearch();
+    else renderSkills();
+}
+
+async function initializeSkillMarket() {
+    await loadProjectsAndModules();
+    const select = $('#filter-project');
+    select.replaceChildren(new Option('全部项目', ''));
+    allProjects.forEach(project => select.add(new Option(project.name, String(project.id))));
+    initProjectIdFilter(select, allProjects, renderSkills);
+    await loadSkills();
 }
 
 async function loadProjectsAndModules() {
@@ -524,16 +550,17 @@ async function doSearch() {
         allSkills = results;
         renderSkills();
         // 标题无结果时，自动触发语义搜索
-        if (results.length === 0) {
+        if (filterSkillsForProject(results).length === 0) {
             isSemanticSearch = true;
             showToast('标题无匹配，正在语义搜索...', 'info');
             const semanticResults = await API.request('GET', `/skills?summary=true&semantic_search=${encodeURIComponent(q)}`);
             allSkills = semanticResults;
             renderSkills();
-            if (semanticResults.length === 0) {
+            const matchingResults = filterSkillsForProject(semanticResults);
+            if (matchingResults.length === 0) {
                 showToast('语义搜索也未找到相关 Skill', 'error');
             } else {
-                showToast(`语义搜索找到 ${semanticResults.length} 个相关 Skill`, 'success');
+                showToast(`语义搜索找到 ${matchingResults.length} 个相关 Skill`, 'success');
             }
         }
     } catch (err) {
@@ -554,7 +581,7 @@ function renderSkills() {
     } else {
         filtered = allSkills.filter(s => s.category === currentFilter && s.visibility !== 'private');
     }
-    const sorted = filtered;
+    const sorted = filterSkillsForProject(filtered);
     const grid = $('#skills-grid');
     if (sorted.length === 0) {
         grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1"><div class="empty-state-icon">&#x1F9E9;</div><div class="empty-state-text">暂无 Skills</div></div>`;
@@ -844,8 +871,7 @@ if (_isAdmin()) {
     if (tabPending) tabPending.style.display = '';
     if (tabRevise) tabRevise.style.display = '';
 }
-loadProjectsAndModules();
-loadSkills();
+initializeSkillMarket();
 
 // 审核操作（调用专用审核接口，支持通过/打回/废弃+审核意见）
 async function reviewSkill(id, status) {
